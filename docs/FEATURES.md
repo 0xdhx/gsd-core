@@ -97,7 +97,7 @@
   - [Anti-Pattern Severity Levels](#78-anti-pattern-severity-levels)
   - [Methodology Artifact Type](#79-methodology-artifact-type)
   - [Planner Reachability Check](#80-planner-reachability-check)
-  - [Playwright-MCP UI Verification](#81-playwright-mcp-ui-verification)
+  - [Browser MCP UI Verification](#81-browser-mcp-ui-verification)
   - [Pause-Work Expansion](#82-pause-work-expansion)
   - [Response Language Config](#83-response-language-config)
   - [Manual Update Procedure](#84-manual-update-procedure)
@@ -1879,14 +1879,14 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 
 ---
 
-### 81. Playwright-MCP UI Verification
+### 81. Browser MCP UI Verification
 
 **Part of:** `/gsd-verify-work` (optional)
 
-**Purpose:** Automated visual verification using Playwright-MCP during verify-phase.
+**Purpose:** Automated visual verification using a browser MCP server during verify-phase. New Open GSD setups should prefer `gsd-browser` (`gsd-browser mcp`) for versioned refs, assertions, recordings, visual diffs, console/network context, and human takeover; existing Playwright-MCP setups remain supported.
 
 **Requirements:**
-- REQ-PLAY-01: System MUST support optional Playwright-MCP visual verification during verify-phase
+- REQ-PLAY-01: System MUST support optional browser MCP visual verification during verify-phase
 - REQ-PLAY-02: Visual verification MUST be opt-in, not mandatory
 - REQ-PLAY-03: System MUST capture and compare visual state against UI-SPEC.md expectations
 

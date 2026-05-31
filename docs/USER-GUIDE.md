@@ -576,7 +576,7 @@ Controlled by `workflow.ui_safety_gate` config toggle.
 
 ### Screenshot Storage
 
-`/gsd-ui-review` captures screenshots via Playwright CLI to `.planning/ui-reviews/`. A `.gitignore` is created automatically to prevent binary files from reaching git. Screenshots are cleaned up during `/gsd-complete-milestone`.
+`/gsd-ui-review` captures screenshots via the configured browser automation surface to `.planning/ui-reviews/`. For new Open GSD setups, prefer the `gsd-browser` companion (`gsd-browser mcp`) because it adds versioned refs, assertions, recordings, visual diffs, console/network context, and human takeover. Existing Playwright CLI/MCP setups still work. A `.gitignore` is created automatically to prevent binary files from reaching git. Screenshots are cleaned up during `/gsd-complete-milestone`.
 
 ---
 
@@ -1223,7 +1223,7 @@ For the full agent → tier mapping and resolution-precedence rules, see [Dynami
 
 ### Trim MCP servers to reduce per-turn cost (the biggest lever GSD doesn't own)
 
-Before tuning `model_profile` or `models.<phase_type>`, audit which **MCP servers** your harness has enabled. Every enabled MCP server injects its tool schema into every turn — heavyweight servers like browser/playwright tools or platform-specific helpers can cost 20k+ tokens each, often dwarfing whatever GSD's resolver can save.
+Before tuning `model_profile` or `models.<phase_type>`, audit which **MCP servers** your harness has enabled. Every enabled MCP server injects its tool schema into every turn — heavyweight servers like browser automation tools (`gsd-browser`, Playwright MCP, and similar) or platform-specific helpers can cost 20k+ tokens each, often dwarfing whatever GSD's resolver can save.
 
 This is a **harness setting**, not a GSD setting. The toggle lives in `.claude/settings.json`:
 
@@ -1236,7 +1236,7 @@ This is a **harness setting**, not a GSD setting. The toggle lives in `.claude/s
 
 Quick audit before a long phase:
 
-- Are any browser / playwright tools enabled when this phase has no UI work?
+- Are any browser automation tools enabled when this phase has no UI work?
 - Are any platform-specific tools (Mac-tools, Windows-tools, OS-specific) enabled when not needed?
 - Are any project-specific MCPs from a different project still enabled here?
 
