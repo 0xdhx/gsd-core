@@ -78,11 +78,20 @@ function normalizeKimiPayload(data) {
       // reached each guard's outer `catch { process.exit(0) }` and silently
       // downgraded a should-BLOCK call into an allow. (A string/number entry
       // never threw — `('x').old` is a legal read yielding undefined.)
+      //
+      // The String() coercion is guarded for the same reason: `{"toString":
+      // null}` is valid JSON that throws "Cannot convert object to primitive
+      // value", which is the identical crash-to-allow with a different
+      // trigger. Degrading only the non-coercible entry to '' keeps
+      // stringification intact for every value that CAN coerce (numbers,
+      // arrays, plain objects), so nothing downstream — including
+      // gsd-prompt-guard's scan of new_string — loses content it saw before.
+      const editText = (v) => { try { return String(v ?? ''); } catch { return ''; } };
       if (input.old_string === undefined) {
-        input.old_string = edits.map((e) => String(e?.old ?? '')).join('\n');
+        input.old_string = edits.map((e) => editText(e?.old)).join('\n');
       }
       if (input.new_string === undefined) {
-        input.new_string = edits.map((e) => String(e?.new ?? '')).join('\n');
+        input.new_string = edits.map((e) => editText(e?.new)).join('\n');
       }
     }
   }

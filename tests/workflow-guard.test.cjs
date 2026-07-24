@@ -155,6 +155,11 @@ describe('#2304: Kimi tool vocabulary engages the workflow guard', () => {
   describe('#2547: a spurious malformed edit field does not disarm the force-add block', () => {
     for (const [label, edit] of [
       ['null entry (the #2547 bypass)', [null]],
+      // `{"toString": null}` is valid JSON whose coercion throws "Cannot
+      // convert object to primitive value" — the same crash-to-allow reached
+      // through String() rather than through the property read.
+      ['non-coercible old (the #2547 String() bypass)', [{ old: { toString: null }, new: 'x' }]],
+      ['non-coercible new (the #2547 String() bypass)', [{ old: 'x', new: { toString: null } }]],
       ['string entry (control — never threw)', ['nope']],
       ['bare null, not a list (control — normalizes to no edits)', null],
     ]) {

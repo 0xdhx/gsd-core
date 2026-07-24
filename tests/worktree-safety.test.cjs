@@ -3695,6 +3695,11 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
     for (const [label, edit] of [
       ['null entry (the #2547 bypass)', [null]],
       ['null alongside a well-formed entry (the #2547 bypass)', [{ old: 'a', new: 'b' }, null]],
+      // `{"toString": null}` is valid JSON whose coercion throws "Cannot
+      // convert object to primitive value" — the same crash-to-allow reached
+      // through String() rather than through the property read.
+      ['non-coercible old (the #2547 String() bypass)', [{ old: { toString: null }, new: 'x' }]],
+      ['non-coercible new (the #2547 String() bypass)', [{ old: 'x', new: { toString: null } }]],
       ['string entry (control — never threw)', ['nope']],
       ['number entry (control — never threw)', [7]],
     ]) {
