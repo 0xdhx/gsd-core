@@ -110,7 +110,18 @@ function isExcludedPath(filePath) {
 // tool_name arrives as 'ReadFile' (possibly module-qualified) and tool_input
 // carries `path` (kimi-cli src/kimi_cli/tools/file/read.py Params), not
 // `file_path`. Without normalization the SCANNED_TOOLS check below never
-// matches on Kimi and the scanner is silently dormant (#2304). This block is
+// matches on Kimi and the scanner is silently dormant (#2304).
+//
+// SCOPE ON KIMI (#2547): normalization makes this scanner's CHECKS run on
+// Kimi. It does NOT make its block effective there. This is a PostToolUse
+// hook, and kimi-cli's dispatch never inspects PostToolUse hook results —
+// src/kimi_cli/soul/toolset.py fires them via asyncio.create_task() and
+// returns the ToolResult without awaiting, whereas PreToolUse results are
+// awaited and honoured. So `security.injection_blocking` cannot take effect
+// on Kimi regardless of the shape emitted below; reshaping the output would
+// not change that. Blocking prompt injection on Kimi needs a PreToolUse
+// mechanism, or an upstream kimi-cli change. Do not describe this hook as
+// "engaged" or "blocking" on Kimi. This block is
 // kept byte-identical with the copies in gsd-prompt-guard.js,
 // gsd-read-guard.js, and gsd-worktree-path-guard.js — a parity test binds
 // them (tests/kimi-guard-normalization-parity.test.cjs). Inlined per guard
