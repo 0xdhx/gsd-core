@@ -89,7 +89,7 @@
   "agents/subagents/gsd-roadmapper.yaml": "679772cb14f3a015",
   "agents/subagents/gsd-security-auditor.md": "c6108af63b5f481d",
   "agents/subagents/gsd-security-auditor.yaml": "924783f1da6777b4",
-  "agents/subagents/gsd-ui-auditor.md": "e4a319070959ebbc",
+  "agents/subagents/gsd-ui-auditor.md": "93735fbe1435349d",
   "agents/subagents/gsd-ui-auditor.yaml": "3fc98c1d9e8f10fd",
   "agents/subagents/gsd-ui-checker.md": "07cd4e382ca55994",
   "agents/subagents/gsd-ui-checker.yaml": "c42316006654fae3",
