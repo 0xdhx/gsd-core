@@ -1,0 +1,5 @@
+---
+type: Security
+pr: 2547
+---
+**A malformed Kimi edit list no longer disarms the guards that block** — `normalizeKimiPayload` (inlined in all five PreToolUse/PostToolUse guard hooks) rebuilt `old_string`/`new_string` with `String(e.old ?? '')`. `??` guards the value, not the dereference, so a nullish entry in a Kimi `edit` list threw a `TypeError` at the top of the handler, before any tool dispatch. Each guard's outer `catch { process.exit(0) }` swallowed that crash and returned the same exit code as "nothing to report" — turning a should-**block** call into a silent **allow**. Two hard blocks were bypassable: `gsd-worktree-path-guard`'s cross-git-root write block (`StrReplaceFile` with `edit: [null]` — the same write is correctly blocked with a well-formed edit list), and `gsd-workflow-guard`'s force-add block on `agent-*` branches (a `Shell` payload carrying a spurious `edit: [null]` field, which the Bash path never even reads). Fixed with `e?.old` / `e?.new` across all five copies, with regression coverage that fails against the pre-fix guards. `next`-only — released versions carry no Kimi normalization at all. (#2547)

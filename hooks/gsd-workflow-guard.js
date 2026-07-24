@@ -113,11 +113,17 @@ function normalizeKimiPayload(data) {
     const edits = Array.isArray(input.edit) ? input.edit
       : (input.edit && typeof input.edit === 'object') ? [input.edit] : [];
     if (edits.length) {
+      // #2547: `e?.old`, not `e.old` — `??` guards the value, not the
+      // dereference, so a NULLISH entry (`edit: [null]`) threw a TypeError
+      // here. normalizeKimiPayload runs before any tool dispatch, so that throw
+      // reached each guard's outer `catch { process.exit(0) }` and silently
+      // downgraded a should-BLOCK call into an allow. (A string/number entry
+      // never threw — `('x').old` is a legal read yielding undefined.)
       if (input.old_string === undefined) {
-        input.old_string = edits.map((e) => String(e.old ?? '')).join('\n');
+        input.old_string = edits.map((e) => String(e?.old ?? '')).join('\n');
       }
       if (input.new_string === undefined) {
-        input.new_string = edits.map((e) => String(e.new ?? '')).join('\n');
+        input.new_string = edits.map((e) => String(e?.new ?? '')).join('\n');
       }
     }
   }

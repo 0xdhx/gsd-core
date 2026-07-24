@@ -3666,6 +3666,63 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
     });
   });
 
+  // 5b. #2547 — a malformed Kimi edit list must not downgrade the block to an allow
+  describe('#2547: malformed Kimi edit list does not bypass the cross-root block', () => {
+    // normalizeKimiPayload rebuilt old_string/new_string with `String(e.old ?? '')`.
+    // `??` guards the value, not the dereference, so a NULLISH entry threw a
+    // TypeError before any tool dispatch — and the guard's outer
+    // `catch { process.exit(0) }` turned that crash into a silent ALLOW on the one
+    // path this guard exists to BLOCK (#260).
+    //
+    // The boundary is nullish specifically, not "non-object": `('x').old` and
+    // `(7).old` are legal property reads that yield undefined, so string/number
+    // entries never threw. They are kept below as controls proving `e?.old` did
+    // not change their behaviour; the nullish cases are the actual regression and
+    // are the ones that exit 0 (bypass) against pre-fix code.
+    const crossRootTarget = () => path.join(mainRepo, 'src', 'index.ts');
+
+    test('well-formed Kimi edit list blocks the cross-root write (positive control)', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'StrReplaceFile',
+        tool_input: { path: crossRootTarget(), edit: [{ old: 'orig', new: 'pwned' }] },
+      });
+      assert.strictEqual(result.status, 2,
+        `expected exit 2 (block), got ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+    });
+
+    for (const [label, edit] of [
+      ['null entry (the #2547 bypass)', [null]],
+      ['null alongside a well-formed entry (the #2547 bypass)', [{ old: 'a', new: 'b' }, null]],
+      ['string entry (control — never threw)', ['nope']],
+      ['number entry (control — never threw)', [7]],
+    ]) {
+      test(`${label} in the edit list still blocks the cross-root write`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'StrReplaceFile',
+          tool_input: { path: crossRootTarget(), edit },
+        });
+        assert.strictEqual(result.status, 2,
+          `a malformed edit list (${label}) must not downgrade the #260 block to a silent ` +
+          `allow. Got exit ${result.status}. stderr: ${result.stderr}`);
+        assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+      });
+    }
+
+    test('malformed edit list inside the worktree still exits 0 (no over-block)', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'StrReplaceFile',
+        tool_input: { path: path.join(worktreeDir, 'src', 'index.ts'), edit: [null] },
+      });
+      assert.strictEqual(result.status, 0,
+        `an in-worktree write must stay allowed. Got exit ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(result.stdout, '');
+    });
+  });
+
   // 6. Sibling directory path is BLOCKED (validates the '/' boundary check AND prefix-overlap)
   describe('sibling path is blocked', () => {
     test('path that shares prefix with worktree root but is a sibling exits 2', () => {
