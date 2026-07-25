@@ -1330,6 +1330,77 @@ describe('cmdWorktreeCreate', () => {
     assert.match(out.join(''), /"ok": true/);
   });
 
+  // #2627 Phase 3: --root confines the created worktree. Absent the flag the
+  // behavior is exactly Phase 2's (every test above passes unchanged); the
+  // orchestrator-worktree scheduler path always passes it, because Phase 3 is
+  // what starts SPAWNING processes into these directories.
+  describe('--root confinement', () => {
+    const rootedArgs = (wtPath, root) => [
+      '--manifest', 'manifest.json',
+      '--agent-id', 'a1',
+      '--path', wtPath,
+      '--branch', 'worktree-agent-a1',
+      '--base', 'abc123',
+      '--root', root,
+    ];
+
+    function run(args) {
+      const out = [];
+      let gitCalled = false;
+      const result = withExitCode(() => cmdWorktreeCreate('/repo/main', args, {
+        readFile: () => '{"orchestrator_root":"/repo/main","worktrees":[]}',
+        writeFile: () => {},
+        write: (s) => out.push(s),
+        writeErr: () => {},
+        execGit: () => { gitCalled = true; return { exitCode: 0, stdout: '', stderr: '', timedOut: false }; },
+      }));
+      return { result, out: out.join(''), gitCalled };
+    }
+
+    test('a path inside --root is accepted', () => {
+      const { result } = run(rootedArgs('/repo/main/.claude/worktrees/agent-a1', '/repo/main'));
+      assert.equal(result.ok, true);
+      assert.equal(result.reason, 'created');
+    });
+
+    test('a sibling path OUTSIDE --root is rejected before any git runs', () => {
+      const { result, gitCalled } = run(rootedArgs('/repo/.claude/worktrees/agent-a1', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+      assert.equal(gitCalled, false, 'confinement must reject BEFORE the git side effect');
+    });
+
+    test('an arbitrary absolute path is rejected (the hole a ".."-segment check cannot see)', () => {
+      const { result } = run(rootedArgs('/etc/gsd-evil', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+    });
+
+    test('a path EQUAL to --root is rejected (would clobber the checkout)', () => {
+      const { result } = run(rootedArgs('/repo/main', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+    });
+
+    test('a sibling whose name merely PREFIXES the root is rejected (not a substring check)', () => {
+      // '/repo/main-evil' starts with '/repo/main' textually but is not inside it.
+      const { result } = run(rootedArgs('/repo/main-evil/wt', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+    });
+
+    test('omitting --root preserves Phase-2 behavior (no confinement)', () => {
+      const { result } = run([
+        '--manifest', 'manifest.json',
+        '--agent-id', 'a1',
+        '--path', '/repo/.claude/worktrees/agent-a1',
+        '--branch', 'worktree-agent-a1',
+        '--base', 'abc123',
+      ]);
+      assert.equal(result.ok, true, 'no --root → unchanged Phase-2 acceptance');
+    });
+  });
+
   test('boundary: appending to a manifest with 1 existing entry yields 2', () => {
     let writtenContent = null;
     const result = cmdWorktreeCreate('/repo/main', okArgs, {
@@ -2841,16 +2912,27 @@ describe('bug-3707: startup orphan sweep is wired into workflow entry points', (
     );
   });
 
-  test('execute-phase.md calls worktree.reap-orphans at startup when USE_WORKTREES is not false', () => {
-    const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf8');
+  test('execute-phase.md calls worktree.reap-orphans at startup, guarded by the isolation decision', () => {
+    // #2584 Phase 3 (#2627): the startup sweep moved into the isolation-dispatch
+    // fragment alongside the ISOLATION resolution it is guarded by (the host
+    // workflow keeps only a pointer, per the ADR-857 byte budget). The guard is
+    // now `ISOLATION != none`, which USE_WORKTREES=false forces — so the #3707
+    // protection is unchanged, just keyed one level up.
+    const ISOLATION_FRAGMENT_PATH = path.join(
+      __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'executor-isolation-dispatch.md',
+    );
+    const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf8')
+      + fs.readFileSync(ISOLATION_FRAGMENT_PATH, 'utf8');
     assert.ok(
       content.includes('worktree.reap-orphans'),
-      'execute-phase.md must call gsd-sdk query worktree.reap-orphans at startup'
+      'execute-phase must call gsd-sdk query worktree.reap-orphans at startup'
     );
     assert.ok(
       /USE_WORKTREES.*!=.*false[\s\S]{0,200}worktree\.reap-orphans/m.test(content) ||
-      /worktree\.reap-orphans[\s\S]{0,200}USE_WORKTREES.*!=.*false/m.test(content),
-      'execute-phase.md startup sweep must be guarded by USE_WORKTREES != false'
+      /worktree\.reap-orphans[\s\S]{0,200}USE_WORKTREES.*!=.*false/m.test(content) ||
+      /ISOLATION.*!=.*none[\s\S]{0,200}worktree\.reap-orphans/m.test(content) ||
+      /worktree\.reap-orphans[\s\S]{0,200}ISOLATION.*!=.*none/m.test(content),
+      'execute-phase startup sweep must be guarded by USE_WORKTREES != false or ISOLATION != none'
     );
   });
 

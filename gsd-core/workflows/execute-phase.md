@@ -100,24 +100,14 @@ USE_WORKTREES=$(gsd_run query config-get workflow.use_worktrees --raw 2>/dev/nul
 EXECUTOR_STALL_INTERVAL_MINUTES=$(gsd_run query config-get executor.stall_detect_interval_minutes 2>/dev/null || echo "5")
 EXECUTOR_STALL_THRESHOLD_MINUTES=$(gsd_run query config-get executor.stall_threshold_minutes 2>/dev/null || echo "10")
 
-if [ "$RUNTIME" != "claude" ] && [ "$USE_WORKTREES" != "false" ]; then
-  echo "FATAL: git worktree isolation (isolation=\"worktree\") is unsupported on runtime '$RUNTIME' — it would run executor agents unisolated against the main checkout. Set workflow.use_worktrees=false." >&2
-  exit 1
-fi
-# Sweep orphaned locked worktrees from prior crashed sessions before spawning executors (#3707).
-[ "$USE_WORKTREES" != "false" ] && gsd_run query worktree.reap-orphans 2>/dev/null || true
-# Auto-degrade to sequential if HEAD has diverged from the worktree fork base (#683).
-# Only applies to Claude Code (isolation="worktree" is Claude-Code-specific).
-if [ "$RUNTIME" = "claude" ] && [ "$USE_WORKTREES" != "false" ]; then
-  _SHOULD_DEGRADE=$(gsd_run query worktree.base-check --pick shouldDegrade 2>/dev/null || true)
-  if [ "$_SHOULD_DEGRADE" = "true" ]; then
-    _DEGRADE_MSG=$(gsd_run query worktree.base-check --pick message 2>/dev/null || true)
-    [ -n "$_DEGRADE_MSG" ] && printf '%s\n' "$_DEGRADE_MSG" >&2
-    USE_WORKTREES=false
-  fi
-fi
+# Resolve ISOLATION + apply its guards: read and execute the "Resolve ISOLATION"
+# section of execute-phase/steps/executor-isolation-dispatch.md. It sets
+# ISOLATION (harness-worktree|orchestrator-worktree|none), forces none when
+# USE_WORKTREES=false, fails closed when a host has no primitive, sweeps orphans,
+# and applies the #683 fork-base auto-degrade.
 ```
-`isolation="worktree"` is a Claude-Code-specific agent primitive; no other runtime can honor it (Codex maps subagents to `spawn_agent`, others prohibit or omit worktree binding). Failing closed prevents main-checkout edits while the workflow believes agents are isolated.
+
+`ISOLATION` — not `RUNTIME` — is the ONLY fan-out branch point; **never add a `RUNTIME = "codex"` test here.** Per-host dispatch detail lives in `execute-phase/steps/executor-isolation-dispatch.md` (read from step 3).
 
 If the project uses git submodules, worktree isolation is unsafe **only when a plan touches a submodule path** — the executor commit protocol cannot correctly handle submodule commits inside isolated worktrees. Compute submodule paths once and intersect them per-plan with the plan's declared `files_modified` frontmatter.
 
@@ -133,9 +123,9 @@ fi
 
 `SUBMODULE_PATHS` is exported to the `execute_waves` step, where the per-plan decision happens (see "Per-plan worktree decision" sub-step inside `execute_waves`). The decision is per-plan because different plans in the same wave can touch different files — only plans whose paths intersect a submodule must drop worktree isolation; plans nowhere near a submodule keep parallel isolation.
 
-When `USE_WORKTREES` (project-level) is `false`, all executor agents run without `isolation="worktree"` — they execute sequentially on the main working tree instead of in parallel worktrees. The per-plan decision below has no effect when worktrees are project-disabled.
+When `USE_WORKTREES` is `false`, `ISOLATION` is forced to `none`: executors run sequentially on the main working tree. The per-plan decision below has no effect when worktrees are project-disabled.
 
-`USE_WORKTREES` is also automatically set to `false` for the duration of a run when `worktree base-check` detects that the orchestrator HEAD has diverged from the worktree fork base (the #683 condition — e.g. an unmerged milestone or feature branch). This check runs only when `RUNTIME=claude` because `isolation="worktree"` is a Claude Code-specific feature; other runtimes do not use it. The auto-degrade prints a one-line warning to stderr and falls through to the sequential path so executors do not hit the exit-42 worktree-branch-check halt. To restore parallel worktree execution, set `worktree.baseRef:"head"` in `.claude/settings.local.json` (or run `gsd-tools worktree set-baseref`) — this makes the fork base track the live HEAD instead of a fixed remote ref. The `worktree-branch-check` exit-42 guard inside each executor remains in place as a backstop.
+`USE_WORKTREES` and `ISOLATION` are also reset for the run when `worktree base-check` detects the orchestrator HEAD has diverged from the worktree fork base (#683 — e.g. an unmerged milestone branch). This runs for **any** isolated run, not only Claude: fork-base divergence is a property of the repository, so it degrades a GSD-created worktree exactly as a harness-created one. The auto-degrade prints a one-line warning to stderr and falls through to the sequential path so executors do not hit the exit-42 worktree-branch-check halt. To restore parallel worktree execution, set `worktree.baseRef:"head"` in `.claude/settings.local.json` (or run `gsd-tools worktree set-baseref`) — this makes the fork base track the live HEAD instead of a fixed remote ref. The `worktree-branch-check` exit-42 guard inside each executor remains in place as a backstop.
 
 Read context window size for adaptive prompt enrichment:
 
@@ -595,6 +585,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
    fi
    ```
 
+   **Isolation model.** The block below is the **`harness-worktree`** path. For `orchestrator-worktree` use the dispatch below it; for `none` use sequential mode. Both are detailed in `execute-phase/steps/executor-isolation-dispatch.md`.
+
    **Sequential dispatch for parallel execution (waves with 2+ agents):**
    Dispatch each `Agent()` call **one at a time with `run_in_background: true`**. Do NOT
    send all Agent calls in a single message: simultaneous `git worktree add` calls race
@@ -613,7 +605,10 @@ increases monotonically across waves. `{status}` is `complete` (success),
      # When executor_model is "inherit", omit this parameter entirely so
      # Claude Code inherits the orchestrator model automatically.
      model="{executor_model}",  # omit this line when executor_model == "inherit"
-     isolation="worktree",
+     # The host's OWN declared isolation flag (`harnessFlag` from
+     # `dispatch-isolation --json`; see the isolation-dispatch fragment).
+     # Emit the declared token — do NOT hardcode a runtime's flag.
+     {harnessFlag},
      prompt="
        <objective>
        Execute plan {plan_number} of phase {phase_number}-{phase_name}.
@@ -696,6 +691,8 @@ increases monotonically across waves. `{status}` is `complete` (success),
    > **Worktree recovery policy (#48 + #1292):** See `execute-phase/steps/worktree-recovery-policy.md` — FAIL-CLOSED rule for base/HEAD-namespace mismatches AND isolated-run fail-safe recovery.
 
    > **ORCHESTRATOR RULE — CODEX RUNTIME**: After calling Agent() above to spawn executor agent(s), stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
+
+   **Orchestrator-managed worktree dispatch** (`ISOLATION=orchestrator-worktree`): read and execute `execute-phase/steps/executor-isolation-dispatch.md`. GSD creates each worktree (`worktree create`) and spawns the executor into it; the orchestrator performs every git operation. Merge-back and cleanup are the existing manifest-scoped gauntlet, unchanged.
 
    **Sequential mode** (`USE_WORKTREES_FOR_PLAN` is `false` — either project-level `USE_WORKTREES=false`, or per-plan submodule intersection forced it false in step 2.5):
 
