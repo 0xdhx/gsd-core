@@ -21,7 +21,7 @@ import coreUtilsMod = require('./core-utils.cjs');
 const { toPosixPath, generateSlugInternal, extractOneLinerFromBody } = coreUtilsMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
-const { normalizePhaseName, comparePhaseNum, extractPhaseToken } = phaseIdMod;
+const { normalizePhaseName, comparePhaseNum, extractPhaseToken, PHASE_NUMBER_TOKEN_SOURCE } = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
 const { getArchivedPhaseDirs, findPhaseInternal } = phaseLocatorMod;
@@ -736,6 +736,58 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
   output({ synced, skipped, changes, dry_run: dryRun, agents_dir: agentsDir }, raw, synced > 0 ? 'changed' : 'ok');
 }
 
+/**
+ * Detect the phase number for a commit from its `--files` path list.
+ *
+ * #2539: the extraction is anchored to the directory segment immediately under
+ * `.planning/phases/` or `.planning/milestones/<version>-phases/`, then run
+ * through the project-code-aware `extractPhaseToken` helper. The prior
+ * unanchored `match(/(\d+(?:\.\d+)*)-/)` returned the leftmost digit-run-then-
+ * hyphen anywhere in the joined path, so a project_code ending in a digit
+ * (e.g. PROJECT_V2) made `…/PROJECT_V2-07-name/…` match the `2-` inside `V2-`
+ * before the real `07-` phase token — resolving phase "2" instead of "7".
+ *
+ * Returns the phase number string (e.g. '07', '45.14'), or null when no phase
+ * directory segment is present in any of the file paths (e.g. a commit of
+ * `.planning/ROADMAP.md` has no phase segment, so no branch is resolved —
+ * matching the prior regex-no-match behaviour).
+ */
+function detectPhaseNumberFromFiles(files: string[] | undefined): string | null {
+  if (!files || files.length === 0) return null;
+  // A phase directory lives one segment below a `phases` parent segment:
+  //   .planning/phases/<phase-dir>/…
+  //   .planning/milestones/v1.0-phases/<phase-dir>/…
+  // The segment immediately after the `…phases` segment is the phase directory
+  // name. extractPhaseToken owns the project-code-aware token read.
+  for (const file of files) {
+    const norm = String(file).replace(/\\/g, '/').replace(/^\.\//, '');
+    const segments = norm.split('/');
+    for (let i = 0; i < segments.length - 1; i++) {
+      if (segments[i] === 'phases' || segments[i].endsWith('-phases')) {
+        const phaseDir = segments[i + 1];
+        if (!phaseDir) continue;
+        const token = extractPhaseToken(phaseDir);
+        // extractPhaseToken falls back to returning dirName unchanged when no
+        // numeric token is found. normalizePhaseName is the canonical arbiter
+        // of "is this a real phase token": it strips the project-code prefix
+        // and returns a zero-padded numeric form for a genuine phase token, or
+        // the input unchanged otherwise. Accept the token only when it
+        // normalizes to a numeric phase form (the single-owner rule shared by
+        // every other phase-token reader — see #2528).
+        const normalized = normalizePhaseName(token);
+        // Built from the single-owner PHASE_NUMBER_TOKEN_SOURCE (the canonical
+        // phase-number grammar — #2128 anti-divergence guard) so this read-side
+        // acceptance check cannot drift from every other phase-token reader.
+        const phaseTokenShape = new RegExp(`^${PHASE_NUMBER_TOKEN_SOURCE}$`, 'i');
+        if (token !== phaseDir && phaseTokenShape.test(normalized)) {
+          return token;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function cmdCommit(cwd: string, message: string | undefined, files: string[] | undefined, raw: boolean, amend: boolean, noVerify: boolean): void {
   if (!message && !amend) {
     error('commit message required');
@@ -776,10 +828,21 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   if (branchingStrategy && branchingStrategy !== 'none') {
     let branchName: string | null = null;
     if (branchingStrategy === 'phase') {
-      // Determine which phase we're committing for from the file paths
-      const phaseMatch = (files || []).join(' ').match(/(\d+(?:\.\d+)*)-/);
-      if (phaseMatch) {
-        const phaseNum = phaseMatch[1];
+      // Determine which phase we're committing for from the file paths.
+      // #2539: the extraction is anchored to the directory SEGMENT immediately
+      // under `.planning/phases/` (or `.planning/milestones/<v>-phases/`) and
+      // runs through the project-code-aware extractPhaseToken helper, NOT a
+      // free unanchored regex. The prior `match(/(\d+(?:\.\d+)*)-/)` returned
+      // the leftmost digit-run-then-hyphen anywhere in the joined path, so a
+      // project_code ending in a digit (PROJECT_V2) made `.../PROJECT_V2-07-…`
+      // match the `2-` inside `V2-` before the real `07-` phase token —
+      // resolving phase "2" instead of phase "7" and silently checking out the
+      // wrong branch. extractPhaseToken already owns project-code-aware phase-
+      // token parsing (it is the single owner shared by the other 6 call sites
+      // — see #2528 for the parallel drift problem in phase-locator/phase),
+      // so this is the canonical path-segment-bound read, not a fourth copy.
+      const phaseNum = detectPhaseNumberFromFiles(files);
+      if (phaseNum) {
         const phaseInfo = findPhaseInternal(cwd, phaseNum) as Record<string, unknown> | null;
         if (phaseInfo) {
           branchName = (config['phase_branch_template'] as string)
@@ -798,10 +861,25 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     if (branchName) {
       const currentBranch = execGit(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd });
       if (currentBranch.exitCode === 0 && currentBranch.stdout.trim() !== branchName) {
-        // Create branch if it doesn't exist, or switch to it if it does
+        // #2539: the #1278 intent is to CREATE the phase/milestone branch
+        // before the FIRST commit on it — not to force-switch an already-
+        // checked-out working branch onto a DIFFERENT existing branch. The
+        // prior fallback to a bare `git checkout <branch>` silently switched
+        // the whole working tree onto an existing unrelated branch in the same
+        // call that then committed (the only trace was a reflog entry). So:
+        // create-if-absent only. If the resolved branch already exists and the
+        // tree is on some other branch, do NOT switch — but never silently: log
+        // the resolution so the operator sees that the phase branch was
+        // resolved and deliberately not switched to (#2539 AC2: an auto-
+        // checkout mid-commit must never happen silently).
         const create = execGit(['checkout', '-b', branchName], { cwd });
         if (create.exitCode !== 0) {
-          execGit(['checkout', branchName], { cwd });
+          // `git checkout -b` fails (non-zero) when the branch already exists.
+          // The operator is on the branch they intend to be on; commit there.
+          process.stderr.write(
+            `Warning: resolved ${branchingStrategy} branch "${branchName}" already exists; ` +
+            `committing on the current branch "${currentBranch.stdout.trim()}" instead of switching.\n`
+          );
         }
       }
     }
