@@ -66,7 +66,24 @@ function normalizeKimiPayload(data) {
   }
   const input = data.tool_input;
   if (input && typeof input === 'object') {
-    if (input.file_path === undefined && typeof input.path === 'string') {
+    // #2547 (review): Kimi's `path` is AUTHORITATIVE — it must win outright,
+    // not merely fill in when `file_path` happens to be absent. kimi-cli's file
+    // tools carry no `file_path` field at all (src/kimi_cli/tools/file/write.py,
+    // replace.py), and soul/toolset.py hands the model's raw json-parsed
+    // arguments to PreToolUse verbatim, doing typed validation only later inside
+    // tool.call() — after the hook has already decided. So a `file_path` in a
+    // Kimi payload is ALWAYS model-supplied, and under the old `=== undefined`
+    // condition it SHADOWED the field kimi-cli actually executes on. A payload
+    // pairing a cross-root `path` with a spurious `file_path: ""` left every
+    // guard reading an empty string and exiting 0, while the identical write
+    // without the extra key blocked — a bypass needing no crash at all. The same
+    // shadowing also preserved a NON-STRING `file_path` (`[]`), which threw
+    // inside gsd-worktree-path-guard's path.isAbsolute() and reached its outer
+    // `catch { process.exit(0) }`: the same crash-to-allow this fix closes
+    // elsewhere, reached through the guard's own read rather than through
+    // normalization. Overwriting can only ever narrow what a guard inspects to
+    // the path that will actually be written, so it cannot under-block.
+    if (typeof input.path === 'string') {
       input.file_path = input.path;
     }
     const edits = Array.isArray(input.edit) ? input.edit
