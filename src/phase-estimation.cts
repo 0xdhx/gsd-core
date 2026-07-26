@@ -56,6 +56,19 @@ export interface PhaseEstimate {
   tokens: number;
   tasks: number;
   confidence: Confidence;
+  /**
+   * The planner's UNCALIBRATED projection, before the correction factor was
+   * applied. Optional for backward compatibility with plans written before
+   * #2632.
+   *
+   * Calibration MUST measure actual/raw, not actual/calibrated. Measuring
+   * against the already-corrected figure makes the loop self-defeating: once
+   * the correction works, the observed ratio approaches 1, which drags the
+   * median back toward 1, which un-corrects the next estimate. Simulated over
+   * 10 phases with a true 2x underestimate, that oscillates and settles at
+   * ~1.41 instead of converging on 2.0.
+   */
+  rawTokens?: number;
 }
 
 export interface PhaseActuals {
@@ -230,6 +243,46 @@ export function applyCalibration(rawTokens: unknown, factor: unknown): number {
   return Math.min(Number.MAX_SAFE_INTEGER, Math.max(1, scaled));
 }
 
+/**
+ * Extract a two-space-indented scalar block (`estimate:` / `actuals:`) out of a
+ * document's leading YAML frontmatter.
+ *
+ * Hand-rolled because gsd-core ships no external dependencies (CONTRIBUTING.md
+ * "No external dependencies in core") — js-yaml is a devDependency and is not
+ * available at runtime. Scope is deliberately narrow: the leading `---` block
+ * only, so a `estimate:` line inside a fenced code block in the body cannot be
+ * mistaken for frontmatter (the DEFECT.FRONTMATTER-SCALAR-BROAD-GREP class).
+ *
+ * Numeric-looking values are returned as numbers so parseEstimate/parseActuals
+ * see the types they validate; everything else stays a string.
+ */
+export function extractFrontmatterBlock(text: unknown, key: string): Record<string, unknown> | null {
+  if (typeof text !== 'string') return null;
+
+  // Anchor at byte 0 — CRLF-tolerant.
+  const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?(?:\n|$)/.exec(text);
+  if (fm === null) return null;
+
+  const lines = fm[1].split(/\r?\n/);
+  const startIdx = lines.findIndex((l) => l === `${key}:` || l.startsWith(`${key}:`));
+  if (startIdx === -1) return null;
+
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (let i = startIdx + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!/^\s/.test(line)) break;            // dedent ends the block
+    const m = /^\s+([A-Za-z_][\w-]*):\s*(.*)$/.exec(line);
+    if (m === null) continue;
+    const rawValue = m[2].replace(/\s+#.*$/, '').trim();
+    if (rawValue === '') continue;
+    const asNumber = Number(rawValue);
+    out[m[1]] = /^-?\d+(?:\.\d+)?$/.test(rawValue) && Number.isFinite(asNumber)
+      ? asNumber
+      : rawValue.replace(/^['"]|['"]$/g, '');
+  }
+  return Object.keys(out).length > 0 ? { ...out } : null;
+}
+
 /** Pull the `estimate:` mapping out of an already-parsed frontmatter object. */
 function estimateBlockOf(input: unknown): unknown {
   if (input === null || typeof input !== 'object') return null;
@@ -256,7 +309,10 @@ export function parseEstimate(input: unknown): PhaseEstimate | null {
 
   if (!isPositiveInt(tokens) || !isPositiveInt(tasks) || !isConfidence(confidence)) return null;
 
-  return { tokens, tasks, confidence };
+  const rawTokens = record['raw_tokens'];
+  return isPositiveInt(rawTokens)
+    ? { tokens, tasks, confidence, rawTokens }
+    : { tokens, tasks, confidence };
 }
 
 /** Pull the `actuals:` mapping out of an already-parsed frontmatter object. */
@@ -292,12 +348,22 @@ export function parseActuals(input: unknown): PhaseActuals | null {
  * property test pins.
  */
 export function renderEstimate(estimate: PhaseEstimate): string {
-  return [
+  const lines = [
     'estimate:',
     `  tokens: ${estimate.tokens}`,
-    `  tasks: ${estimate.tasks}`,
-    `  confidence: ${estimate.confidence}`,
-  ].join('\n');
+  ];
+  if (isPositiveInt(estimate.rawTokens)) lines.push(`  raw_tokens: ${estimate.rawTokens}`);
+  lines.push(`  tasks: ${estimate.tasks}`, `  confidence: ${estimate.confidence}`);
+  return lines.join('\n');
+}
+
+/**
+ * The figure calibration must measure against: the uncalibrated projection when
+ * the plan recorded one, else the stored value (pre-#2632 plans, where the two
+ * were the same because no factor had yet been applied).
+ */
+export function calibrationBasis(estimate: PhaseEstimate): number {
+  return isPositiveInt(estimate.rawTokens) ? estimate.rawTokens : estimate.tokens;
 }
 
 /** Render an actuals block for SUMMARY.md frontmatter. Inverse of parseActuals. */

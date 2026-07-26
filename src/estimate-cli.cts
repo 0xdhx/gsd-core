@@ -33,6 +33,35 @@ const { output, error, ERROR_REASON } = io;
 const { planningDir } = planningWorkspace;
 const { CONFIG_DEFAULTS } = configLoader;
 
+// WIN-1 parity (DEFECT.WINDOWS-FS-OPS): on Windows a concurrent reader, indexer,
+// or AV scanner can transiently hold the rename target open. Retry the transient
+// errnos with backoff, matching the writeLedger / writeConsentStore idiom.
+const RENAME_RETRY_ERRNOS = new Set(['EPERM', 'EBUSY', 'EACCES']);
+const RENAME_MAX_ATTEMPTS = 3;
+const RENAME_RETRY_BACKOFF_MS = 50;
+let _renameSleepBuf: Int32Array | null = null;
+function renameBackoff(): void {
+  if (_renameSleepBuf === null) _renameSleepBuf = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(_renameSleepBuf, 0, 0, RENAME_RETRY_BACKOFF_MS);
+}
+
+/** Rename with a bounded retry on the transient Windows errnos. Rethrows anything else. */
+function renameWithRetry(from: string, to: string): void {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code ?? '';
+      if (attempt < RENAME_MAX_ATTEMPTS && RENAME_RETRY_ERRNOS.has(code)) {
+        renameBackoff();
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 /** Filename of the persisted calibration document, written by extract-learnings (Phase 3). */
 export const CALIBRATION_FILENAME = 'estimation-calibration.json';
 
@@ -148,6 +177,130 @@ export function cmdEstimateCheck(cwd: string, args: string[], raw: boolean): voi
     calibration_applied: calibration.applied,
     calibration_factor: calibration.factor,
     sample_count: calibration.sampleCount,
+  }, raw);
+}
+
+/**
+ * Pair each completed phase's PLAN estimate with its SUMMARY actuals.
+ *
+ * A phase contributes a sample only when BOTH sides are present and well-formed.
+ * A plan with no `estimate` block, a summary with no `actuals`, or a malformed
+ * value is skipped rather than guessed — a fabricated sample would silently
+ * steer every future estimate.
+ */
+export function collectCalibrationSamples(cwd: string): estimation.CalibrationSample[] {
+  const phasesRoot = path.join(planningDir(cwd), 'phases');
+  let phases: string[];
+  try {
+    phases = fs.readdirSync(phasesRoot, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    return [];
+  }
+
+  const readBlock = (file: string, key: string): Record<string, unknown> | null => {
+    let text: string;
+    try {
+      text = fs.readFileSync(file, 'utf-8');
+    } catch {
+      return null;
+    }
+    return estimation.extractFrontmatterBlock(text, key);
+  };
+
+  const samples: estimation.CalibrationSample[] = [];
+  for (const phase of phases) {
+    const dir = path.join(phasesRoot, phase);
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).sort();
+    } catch {
+      continue;
+    }
+
+    // Pair PER PLAN, keyed on the `<NN>-<PP>` stem, NOT per phase directory.
+    // A phase routinely holds several plans (docs/reference/planning-artifacts.md:
+    // "one file per plan"). Taking the first plan with an estimate and the first
+    // summary with actuals independently cross-pairs one plan's projection with
+    // another's cost — a fabricated sample — and discards every later plan.
+    const stems = new Map<string, { plan?: string; summary?: string }>();
+    for (const f of files) {
+      const m = /^(.*?)-(PLAN|SUMMARY)\.md$/.exec(f);
+      if (m === null) continue;
+      const stem = m[1];
+      const entry = stems.get(stem) ?? {};
+      if (m[2] === 'PLAN') entry.plan = path.join(dir, f);
+      else entry.summary = path.join(dir, f);
+      stems.set(stem, entry);
+    }
+
+    for (const stem of [...stems.keys()].sort()) {
+      const { plan, summary } = stems.get(stem) as { plan?: string; summary?: string };
+      if (plan === undefined || summary === undefined) continue;
+
+      const estimate = estimation.parseEstimate(readBlock(plan, 'estimate'));
+      const actuals = estimation.parseActuals(readBlock(summary, 'actuals'));
+      if (estimate === null || actuals === null) continue;
+
+      // Measure against the RAW projection — see PhaseEstimate.rawTokens for why
+      // measuring against the calibrated figure makes the loop self-defeating.
+      samples.push({
+        estimateTokens: estimation.calibrationBasis(estimate),
+        actualTokens: actuals.tokens,
+      });
+    }
+  }
+  return samples;
+}
+
+/**
+ * `estimate-calibrate` — rebuild the calibration document from completed phases.
+ *
+ * Rebuilds from scratch every run rather than appending, so it is idempotent and
+ * a corrupt prior document is replaced rather than merged. This is the verb that
+ * closes the loop (#1952 AC4): extract-learnings invokes it, and the planner's
+ * next estimate reads the result.
+ */
+export function cmdEstimateCalibrate(cwd: string, _args: string[], raw: boolean): void {
+  const samples = collectCalibrationSamples(cwd);
+  const calibration = estimation.computeCalibration(samples);
+
+  const target = path.join(planningDir(cwd), CALIBRATION_FILENAME);
+  let written = true;
+  let writeError: string | null = null;
+  try {
+    // Write-then-rename: a direct writeFileSync can leave a truncated file if
+    // interrupted, and parseCalibrationDocument treats malformed JSON exactly
+    // like "no history yet" — so a torn write would silently erase the
+    // calibration instead of surfacing.
+    const tmp = `${target}.tmp-${String(process.pid)}`;
+    try {
+      fs.writeFileSync(tmp, estimation.renderCalibrationDocument(samples), 'utf-8');
+      renameWithRetry(tmp, target);
+    } catch (err) {
+      // Never leave the temp behind for a later run to trip over.
+      try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+      throw err;
+    }
+  } catch (err) {
+    // Persisting is best-effort: a read-only .planning must not fail the phase.
+    // But report WHY — a genuine bug and a benign permission issue are otherwise
+    // indistinguishable to both the caller and the workflow.
+    written = false;
+    writeError = err instanceof Error ? (err.message || String(err)) : String(err);
+  }
+
+  output({
+    factor: calibration.factor,
+    applied: calibration.applied,
+    sample_count: calibration.sampleCount,
+    confidence: calibration.confidence,
+    clamped: calibration.clamped,
+    min_samples: estimation.MIN_CALIBRATION_SAMPLES,
+    written,
+    write_error: writeError,
   }, raw);
 }
 
