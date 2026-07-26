@@ -15,9 +15,14 @@
  * different for the claude leg than for the other two.
  *
  * The fix guards both dispatch lines with a per-invocation
- * `env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1`. `env`, never `export`: the flag
- * must not leak into the orchestrating session (which may itself be Claude
- * Code on the SELF_CLI="auto" path) or into any later spawn.
+ * `env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
+ * Two flags because these are two independently-toggled mechanisms:
+ * CLAUDE_CODE_DISABLE_CLAUDE_MDS suppresses CLAUDE.md file loading and
+ * CLAUDE_CODE_DISABLE_AUTO_MEMORY suppresses the auto-memory system — one
+ * without the other leaves half the injection in place. `env`, never
+ * `export`: the flags must not leak into the orchestrating session (which
+ * may itself be Claude Code on the SELF_CLI="auto" path) or into any later
+ * spawn.
  *
  * review.md IS the product the runtime loads (an AI agent reads and executes
  * these workflow instructions verbatim), so this is a static-content
@@ -37,12 +42,15 @@ describe('#2483 the claude reviewer leg suppresses CLAUDE.md + auto-memory injec
   const content = fs.readFileSync(REVIEW_MD, 'utf-8');
 
   test('both claude dispatch lines are guarded, and the guard sits between the pipe and the CLI', () => {
-    const guarded = content.match(/\|\s*env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 claude\s/g) || [];
+    const guarded = content.match(
+      /\|\s*env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude\s/g
+    ) || [];
     assert.equal(
       guarded.length, 2,
       'review.md must dispatch the claude reviewer exactly twice (the --model branch and the ' +
-      'bare-model branch), each through `env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1` — the guard must ' +
-      'immediately precede the `claude` binary so it applies to that invocation only'
+      'bare-model branch), each through `env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 ' +
+      'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` — the guard pair must immediately precede the ' +
+      '`claude` binary so it applies to that invocation only'
     );
   });
 
@@ -73,23 +81,27 @@ describe('#2483 the claude reviewer leg suppresses CLAUDE.md + auto-memory injec
     );
 
     const unguarded = invocations.filter(
-      (line) => !line.includes('CLAUDE_CODE_DISABLE_CLAUDE_MDS=1')
+      (line) =>
+        !line.includes('CLAUDE_CODE_DISABLE_CLAUDE_MDS=1') ||
+        !line.includes('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1')
     );
     assert.deepEqual(
       unguarded, [],
-      'every line invoking the claude CLI in review.md must carry ' +
-      'CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 — an unguarded leg re-inherits global CLAUDE.md, ' +
-      'project CLAUDE.md and auto-memory, reintroducing the asymmetry against the prompt-fed ' +
-      'gemini and codex legs'
+      'every line invoking the claude CLI in review.md must carry BOTH ' +
+      'CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 — CLAUDE.md ' +
+      'loading and auto-memory are independently-toggled mechanisms, and a leg missing either ' +
+      'flag re-inherits that half of the context, reintroducing the asymmetry against the ' +
+      'prompt-fed gemini and codex legs'
     );
   });
 
   test('the guard is per-invocation, never exported into the orchestrating session', () => {
     assert.ok(
-      !/export\s+CLAUDE_CODE_DISABLE_CLAUDE_MDS/.test(content),
-      'review.md must not `export` CLAUDE_CODE_DISABLE_CLAUDE_MDS — exporting leaks the flag ' +
-      'into the orchestrating session (which may itself be Claude Code on the SELF_CLI="auto" ' +
-      'path) and into every subsequent spawn, suppressing CLAUDE.md far outside the review'
+      !/export\s+CLAUDE_CODE_DISABLE_(CLAUDE_MDS|AUTO_MEMORY)/.test(content),
+      'review.md must not `export` CLAUDE_CODE_DISABLE_CLAUDE_MDS or ' +
+      'CLAUDE_CODE_DISABLE_AUTO_MEMORY — exporting leaks the flag into the orchestrating ' +
+      'session (which may itself be Claude Code on the SELF_CLI="auto" path) and into every ' +
+      'subsequent spawn, suppressing memory far outside the review'
     );
   });
 
@@ -100,10 +112,11 @@ describe('#2483 the claude reviewer leg suppresses CLAUDE.md + auto-memory injec
       'expected the gemini reviewer dispatch to still be present in review.md'
     );
     assert.ok(
-      !/CLAUDE_CODE_DISABLE_CLAUDE_MDS=1\s+(gemini|codex)/.test(content),
-      'the CLAUDE_CODE_DISABLE_CLAUDE_MDS guard is Claude-Code-specific and must not be applied ' +
-      'to the gemini or codex dispatch — neither CLI reads CLAUDE.md, and codex already scopes ' +
-      'its own context with --ephemeral'
+      !/CLAUDE_CODE_DISABLE_(?:CLAUDE_MDS|AUTO_MEMORY)=1\s+(gemini|codex)/.test(content),
+      'the CLAUDE_CODE_DISABLE_CLAUDE_MDS / CLAUDE_CODE_DISABLE_AUTO_MEMORY guards are ' +
+      'Claude-Code-specific and must not be applied to the gemini or codex dispatch — neither ' +
+      'CLI reads CLAUDE.md or auto-memory, and codex already scopes its own context with ' +
+      '--ephemeral'
     );
   });
 });
