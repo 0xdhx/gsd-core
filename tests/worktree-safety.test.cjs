@@ -3728,6 +3728,86 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
     });
   });
 
+  // 5c. #2547 (review BLOCKER) — a model-supplied `file_path` must not shadow
+  // Kimi's authoritative `path`. This vector needs NO crash: normalizeKimiPayload
+  // copied `path` into `file_path` only when `file_path === undefined`, so any
+  // `file_path` the model chose to include won, and this guard's block logic
+  // reads `file_path` alone. kimi-cli executes on `path`, so the guard inspected
+  // one file while the write landed on another.
+  //
+  // Reachability is not speculative: soul/toolset.py json-parses the model's raw
+  // tool arguments and passes that dict verbatim as tool_input to PreToolUse,
+  // performing typed validation only later inside tool.call() — so the model
+  // controls extra keys in tool_input at the moment the hook decides.
+  describe('#2547: a spurious file_path does not shadow Kimi\'s authoritative path', () => {
+    const crossRootTarget = () => path.join(mainRepo, 'src', 'index.ts');
+    const inWorktreeTarget = () => path.join(worktreeDir, 'src', 'index.ts');
+
+    // Each case pairs a cross-root `path` with a `file_path` the model supplied.
+    // All three exited 0 (bypass) before the fix.
+    for (const [label, filePath] of [
+      ['empty-string file_path (the #2547 review BLOCKER)', ''],
+      ['in-worktree decoy file_path', null], // resolved below — needs worktreeDir
+      // A NON-STRING file_path additionally threw inside path.isAbsolute() and
+      // reached the outer `catch { process.exit(0) }` — crash-to-allow through
+      // the guard's own read rather than through normalization.
+      ['non-string file_path (array)', []],
+      ['non-string file_path (object)', {}],
+    ]) {
+      test(`${label} still blocks the cross-root write`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'StrReplaceFile',
+          tool_input: {
+            path: crossRootTarget(),
+            file_path: filePath === null ? inWorktreeTarget() : filePath,
+            edit: [{ old: 'orig', new: 'pwned' }],
+          },
+        });
+        assert.strictEqual(result.status, 2,
+          `a model-supplied file_path (${label}) must not shadow Kimi's authoritative ` +
+          `path and downgrade the #260 block to a silent allow. Got exit ${result.status}. ` +
+          `stderr: ${result.stderr}`);
+        assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+      });
+    }
+
+    // Negative control: the same shadowing shape pointed INSIDE the worktree must
+    // still be allowed, so the fix narrows what the guard inspects without
+    // over-blocking.
+    test('a spurious file_path on an in-worktree write still exits 0 (no over-block)', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'StrReplaceFile',
+        tool_input: {
+          path: inWorktreeTarget(),
+          file_path: crossRootTarget(),
+          edit: [{ old: 'orig', new: 'ok' }],
+        },
+      });
+      assert.strictEqual(result.status, 0,
+        `an in-worktree write must stay allowed even when a decoy file_path points ` +
+        `cross-root — the guard follows the path kimi-cli executes on. ` +
+        `Got exit ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(result.stdout, '');
+    });
+
+    // Control: a NATIVE Claude payload has no `path` field, so the overwrite must
+    // not fire and file_path must keep governing. Guards against a fix that
+    // silently changed the non-Kimi contract.
+    test('native Claude payload (no path field) still blocks on file_path alone', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'Edit',
+        tool_input: { file_path: crossRootTarget() },
+      });
+      assert.strictEqual(result.status, 2,
+        `a native Claude Edit must still block on file_path. Got exit ${result.status}. ` +
+        `stderr: ${result.stderr}`);
+      assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+    });
+  });
+
   // 6. Sibling directory path is BLOCKED (validates the '/' boundary check AND prefix-overlap)
   describe('sibling path is blocked', () => {
     test('path that shares prefix with worktree root but is a sibling exits 2', () => {
