@@ -125,6 +125,11 @@ describe('gsd-write-guard.js: catastrophic shrink of curated artifacts', () => {
     // A directory at the curated path makes readFileSync throw EISDIR (or the
     // platform's equivalent) — any non-ENOENT read error must block, not wave
     // the Write through on a transient failure.
+    // Injected via a directory-at-path collision rather than the usual
+    // fs.readFileSync monkeypatch: runHook spawns the hook as a child process
+    // (spawnSync), so an in-process fs patch can never reach the code under
+    // test — the on-disk collision is the only injection that crosses the
+    // process boundary, and it reproduces on all 3 CI platforms.
     const dirAsRoadmap = path.join(planningDir, 'milestones', 'vX-ROADMAP.md');
     fs.mkdirSync(dirAsRoadmap, { recursive: true });
     const r = runHook(writePayload(dirAsRoadmap, lines(300)));
