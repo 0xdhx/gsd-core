@@ -389,6 +389,15 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
         []);
     });
 
+    // The metavariable exclusion is length===1 exactly: two characters is the
+    // shortest server id that must still be recognized as a real reference.
+    test('a two-character server id is a reference, not a metavariable', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read'],
+          ['mcp__ab__foo()'])),
+        ['ab']);
+    });
+
     test('an agent with no tools: key inherits everything', () => {
       assert.deepStrictEqual(
         ungrantedServers(agent(['name: a'], ['mcp__playwright__navigate()'])),
