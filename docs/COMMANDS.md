@@ -216,6 +216,8 @@ Research, plan, and verify a phase.
 | `--tdd` | TDD mode — planner applies `type: tdd` to eligible behavior-adding tasks so each begins with a failing test. Composable with `--mvp`: `--mvp --tdd` produces vertical slices where every behavior-adding task starts red-green. The leading `tracer` task also starts red under `--tdd`. |
 | `--granularity <coarse\|standard\|fine>` | Override the planning granularity for this invocation, ignoring config. Valid values: `coarse`, `standard`, `fine`. Takes precedence over `granularities.planning`, top-level `granularity`, and `planning.granularity` config. |
 
+**Smart-zone estimate report (#2631).** Every generated PLAN.md carries an optional `estimate` block (`{tokens, tasks, confidence}`). During the plan-check pass, `gsd-plan-checker` runs each plan's `estimate.tokens` through `estimate-check` against the configurable `workflow.smart_zone_tokens` budget (default `100000`) and reports the result; a plan above budget gets a concrete split recommendation. The report is **advisory and never blocks planning**, and it is skipped with `--skip-verify` since it runs inside the verification pass. `confidence` is derived from how many completed phases carry recorded actuals — `low` means fewer than three, so the figure is not yet calibrated for your project. See [ADR-2629](adr/2629-phase-effort-estimation-calibration.md).
+
 **Prerequisites:** `.planning/ROADMAP.md` exists
 **Produces:** `{phase}-RESEARCH.md`, `{phase}-{N}-PLAN.md`, `{phase}-VALIDATION.md`; `{phase}/SKELETON.md` when Walking Skeleton mode fires
 
