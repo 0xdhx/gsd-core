@@ -2108,12 +2108,24 @@ describe('regressions: --runtime override bypasses persisted runtime (#2003)', (
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cap-rt-cli-'));
     try {
       writePersistedRuntime(tmpDir, 'codex');
-      const result = runGsdTools('capability state --runtime claude --raw', tmpDir);
+      // #2665: redirect both runtime homes into the sandbox so the expectation is
+      // built from values this test controls. Comparing the child's answer against
+      // the PARENT process's getGlobalConfigDir() compared two different
+      // environments -- it agreed only because the child inherited the developer's
+      // ambient CLAUDE_CONFIG_DIR, which is the leak this test's helper now blocks.
+      const claudeConfigDir = path.join(tmpDir, 'claude-config');
+      const codexHome = path.join(tmpDir, 'codex-home');
+      const result = runGsdTools('capability state --runtime claude --raw', tmpDir, {
+        HOME: tmpDir,
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        CODEX_HOME: codexHome,
+      });
       assert.ok(result.success, `capability state --runtime should succeed: ${result.error || ''}`);
       const parsed = JSON.parse(result.output);
-      const runtimeHomes = require('../gsd-core/bin/lib/runtime-homes.cjs');
-      assert.strictEqual(parsed.runtimeConfigDir, runtimeHomes.getGlobalConfigDir('claude'),
+      assert.strictEqual(parsed.runtimeConfigDir, claudeConfigDir,
         '`capability state --runtime claude` must resolve to the Claude config dir, not the persisted codex dir');
+      assert.notStrictEqual(parsed.runtimeConfigDir, codexHome,
+        'must NOT resolve to the codex config dir when --runtime claude is explicit');
     } finally {
       cleanup(tmpDir);
     }

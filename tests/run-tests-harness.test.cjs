@@ -1416,6 +1416,12 @@ describe('bug #969 B — runGsdTools kill-signal discrimination', () => {
       GSD_SESSION_KEY: '',
       CODEX_THREAD_ID: '',
       CLAUDE_SESSION_ID: '',
+      // Config-LOCATION vars. Distinct in kind from the session-identity vars
+      // above: these decide WHERE a child writes, so leaving them ambient lets a
+      // test that sandboxes HOME still escape into the developer's real config dir.
+      CLAUDE_CONFIG_DIR: '',
+      GSD_RUNTIME: '',
+      CODEX_HOME: '',
     };
     try {
       let result;
