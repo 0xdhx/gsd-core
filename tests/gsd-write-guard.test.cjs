@@ -436,4 +436,19 @@ describe('guard <-> complete-milestone workflow binding (the escape hatch is WIR
     assert.equal(allowed.status, 0,
       'the identical catastrophic payload must pass under the sentinel the workflow step arms');
   });
+
+  test('the sentinel-armed reorganize step is the ONLY ROADMAP-collapsing step in the workflow', () => {
+    // #2255 round 8 Blocker: a second, hatch-less `reorganize_roadmap` step —
+    // a vestige of the pre-archive-then-reorganize design, sitting BEFORE
+    // archive_milestone, so running it would collapse ROADMAP.md before the
+    // archive snapshots the full detail — was removed rather than wired. This
+    // binding fails if any reorganize step other than the sentinel-armed one
+    // is (re)introduced without hatch wiring of its own.
+    const src = fs.readFileSync(workflowPath, 'utf8');
+    const names = [...src.matchAll(/<step name="([^"]*reorganize[^"]*)">/g)].map((m) => m[1]);
+    assert.deepEqual(names, ['reorganize_roadmap_and_delete_originals'],
+      'complete-milestone.md must contain exactly one ROADMAP-reorganize step — the ' +
+      'sentinel-armed reorganize_roadmap_and_delete_originals; any additional reorganize ' +
+      'step is an unguarded catastrophic-shrink Write (#2255 round 8 Blocker)');
+  });
 });

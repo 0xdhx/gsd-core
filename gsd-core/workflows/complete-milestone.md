@@ -392,50 +392,6 @@ Initial user testing showed demand for shape tools.
 
 </step>
 
-<step name="reorganize_roadmap">
-
-Update `.planning/ROADMAP.md` — group completed milestone phases:
-
-```markdown
-# Roadmap: [Project Name]
-
-## Milestones
-
-- ✅ **v1.0 MVP** — Phases 1-4 (shipped YYYY-MM-DD)
-- 🚧 **v1.1 Security** — Phases 5-6 (in progress)
-- 📋 **v2.0 Redesign** — Phases 7-10 (planned)
-
-## Phases
-
-<details>
-<summary>✅ v1.0 MVP (Phases 1-4) — SHIPPED YYYY-MM-DD</summary>
-
-- [x] Phase 1: Foundation (2/2 plans) — completed YYYY-MM-DD
-- [x] Phase 2: Authentication (2/2 plans) — completed YYYY-MM-DD
-- [x] Phase 3: Core Features (3/3 plans) — completed YYYY-MM-DD
-- [x] Phase 4: Polish (1/1 plan) — completed YYYY-MM-DD
-
-</details>
-
-### 🚧 v[Next] [Name] (In Progress / Planned)
-
-- [ ] Phase 5: [Name] ([N] plans)
-- [ ] Phase 6: [Name] ([N] plans)
-
-## Progress
-
-| Phase             | Milestone | Plans Complete | Status      | Completed  |
-| ----------------- | --------- | -------------- | ----------- | ---------- |
-| 1. Foundation     | v1.0      | 2/2            | Complete    | YYYY-MM-DD |
-| 2. Authentication | v1.0      | 2/2            | Complete    | YYYY-MM-DD |
-| 3. Core Features  | v1.0      | 3/3            | Complete    | YYYY-MM-DD |
-| 4. Polish         | v1.0      | 1/1            | Complete    | YYYY-MM-DD |
-| 5. Security Audit | v1.1      | 0/1            | Not started | -          |
-| 6. Hardening      | v1.1      | 0/2            | Not started | -          |
-```
-
-</step>
-
 <step name="archive_milestone">
 
 **Delegate archival to `gsd-tools.cjs query milestone.complete`:**
