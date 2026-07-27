@@ -114,6 +114,15 @@ export function readCalibrationSamples(cwd: string): ReturnType<typeof estimatio
  * digit match rather than Number()/parseInt so that "1; touch x", "1e5",
  * "0x10", and " 1 " are all refused — the value reaches us as argv, is never
  * shell-interpolated, and must not be coerced into looking valid.
+ *
+ * Returns a PLAIN number, deliberately (#2671). This function validates the
+ * magnitude of `--tokens`; it cannot know the figure's basis, because that is
+ * decided by a DIFFERENT flag (`--calibrated`). Branding here would force it to
+ * pick RawTokens or CalibratedTokens for every caller, and it would be wrong
+ * half the time — a type that lies is worse than no type. The basis assertion
+ * therefore belongs to the caller that reads both flags; today that is
+ * `cmdEstimateCheck`, which is this function's only caller. A future second
+ * caller must make the same assertion explicitly rather than inherit a guess.
  */
 export function parseTokensFlag(args: string[]): number {
   const idx = args.indexOf('--tokens');
@@ -159,9 +168,15 @@ export function cmdEstimateCheck(cwd: string, args: string[], raw: boolean): voi
   // factor === 1, and 1^2 === 1). A plan's recorded `estimate.tokens` is
   // calibrated at emission time per ADR-2629 Decision 1, so the plan-checker
   // MUST pass this flag.
+  //
+  // `--calibrated` is the whole basis question, and argv cannot answer it for
+  // the type system — so this is where the caller's claim is turned into a type
+  // (#2671). Past this expression the basis is carried by RawTokens /
+  // CalibratedTokens and the wrong composition stops compiling; the ambiguity
+  // is confined to these two lines instead of running the length of the seam.
   const calibratedTokens = preCalibrated
-    ? inputTokens
-    : estimation.applyCalibration(inputTokens, calibration.factor);
+    ? estimation.asCalibratedTokens(inputTokens)
+    : estimation.applyCalibration(estimation.asRawTokens(inputTokens), calibration.factor);
   const classification = estimation.classifyAgainstBudget(calibratedTokens, budget);
 
   output({

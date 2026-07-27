@@ -15,7 +15,7 @@
  *      limit-1 / limit / limit+1 per RULESET.TESTS.boundary-coverage.fixtures.
  */
 
-const { describe, test } = require('node:test');
+const { describe, test, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -732,4 +732,157 @@ describe('estimate-check --calibrated', () => {
     assert.equal(raw.over_budget, true, 'double-applied correction reports a false over-budget');
     assert.equal(pre.over_budget, false, 'the honest figure is under budget');
   });
+});
+
+// ─── branded raw-vs-calibrated basis (#2671) ───────────────────────────────
+
+describe('RawTokens / CalibratedTokens brands', () => {
+  // The behavioural guards above pin the two shipped defects (#2631 factor^2,
+  // #2632 self-defeating loop) at the CLI surface. Both were composition errors
+  // between individually-correct functions, and ~26,800 unit/boundary/property
+  // tests were green for both. This block asserts the stronger property: with
+  // the brands in place the wrong composition is not merely wrong, it is
+  // UNREPRESENTABLE — `npm run build:lib` refuses it.
+  //
+  // The oracle is the TypeScript compiler, driven in-process through its API
+  // (no subprocess, so no timeout and no spawn flake) against the repo's REAL
+  // tsconfig.build.json options — the same strictness the publish build uses.
+  // Assertions are on the returned diagnostic OBJECTS (`code`, `file`), never
+  // on rendered compiler prose.
+  const ts = require('typescript');
+
+  const REPO_ROOT = path.join(__dirname, '..');
+  const FIXTURE_DIR = path.join(__dirname, 'fixtures', 'brand-typing');
+
+  /** TS "argument of type X is not assignable to parameter of type Y". */
+  const TS_ARG_NOT_ASSIGNABLE = 2345;
+  /** TS "type X is not assignable to type Y" (object-literal property). */
+  const TS_TYPE_NOT_ASSIGNABLE = 2322;
+
+  const CASES = [
+    { fixture: 'ok-correct-composition.cts', expected: null },
+    { fixture: 'bad-double-calibration.cts', expected: TS_ARG_NOT_ASSIGNABLE },
+    { fixture: 'bad-raw-against-budget.cts', expected: TS_ARG_NOT_ASSIGNABLE },
+    { fixture: 'bad-calibrated-as-sample-basis.cts', expected: TS_TYPE_NOT_ASSIGNABLE },
+    { fixture: 'bad-rebrand-calibrated-as-raw.cts', expected: TS_ARG_NOT_ASSIGNABLE },
+    { fixture: 'bad-unbranded-number-as-raw.cts', expected: TS_ARG_NOT_ASSIGNABLE },
+  ];
+
+  /**
+   * Every `bad-*` fixture routes its violating value through a const with this
+   * name, and the test asserts the diagnostic lands ON that node.
+   *
+   * Code-and-count alone is NOT enough: a fixture that stops exercising its
+   * brand violation but acquires an unrelated error of the same code still
+   * yields "exactly one TS2345" and would report green while testing nothing.
+   * That was demonstrated against an earlier version of this block, so the
+   * position check is a regression guard, not a precaution.
+   */
+  const OFFENDING = 'OFFENDING';
+
+  /**
+   * Spans a diagnostic is allowed to occupy: any occurrence of the marker
+   * identifier, plus — because TypeScript reports an object-literal property
+   * mismatch on the property NAME rather than its initializer — the name of any
+   * property initialized from the marker. Located through the AST, so this
+   * survives reformatting and never pattern-matches source text.
+   */
+  const markerSpans = (sourceFile) => {
+    const spans = [];
+    const visit = (node) => {
+      if (ts.isIdentifier(node) && node.text === OFFENDING) {
+        spans.push([node.getStart(sourceFile), node.getEnd()]);
+      } else if (ts.isPropertyAssignment(node)
+        && ts.isIdentifier(node.initializer)
+        && node.initializer.text === OFFENDING) {
+        spans.push([node.name.getStart(sourceFile), node.name.getEnd()]);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return spans;
+  };
+
+  /**
+   * Compile every fixture in ONE program and bucket the diagnostics by source
+   * file. The program covers `phase-estimation.cts` and its transitive
+   * dependencies — not all of `src/`, which `npm run build:lib` gates
+   * separately — which is what makes the "no foreign diagnostics" assertion
+   * below meaningful: anything outside the fixture directory is a real compile
+   * error in the module under test.
+   */
+  let byFixture;
+  let foreign;
+  let sourceFileOf;
+
+  before(() => {
+    const configPath = path.join(REPO_ROOT, 'tsconfig.build.json');
+    const readConfig = ts.readConfigFile(configPath, ts.sys.readFile);
+    assert.equal(readConfig.error, undefined, 'tsconfig.build.json must parse');
+
+    const parsed = ts.parseJsonConfigFileContent(readConfig.config, ts.sys, REPO_ROOT);
+    assert.deepEqual(parsed.errors, [], 'tsconfig.build.json must yield usable compiler options');
+
+    const options = {
+      ...parsed.options,
+      // The fixtures live outside `src/`, so the emit-shaped settings have to go.
+      // Everything that governs STRICTNESS is inherited untouched — that is the
+      // whole point of reading the real config instead of hand-rolling options.
+      noEmit: true,
+      rootDir: undefined,
+      outDir: undefined,
+      incremental: false,
+      tsBuildInfoFile: undefined,
+    };
+
+    const roots = CASES.map((c) => path.join(FIXTURE_DIR, c.fixture));
+    const program = ts.createProgram(roots, options);
+
+    byFixture = new Map(CASES.map((c) => [c.fixture, []]));
+    foreign = [];
+    sourceFileOf = new Map(
+      CASES.map((c) => [c.fixture, program.getSourceFile(path.join(FIXTURE_DIR, c.fixture))]),
+    );
+    for (const diagnostic of ts.getPreEmitDiagnostics(program)) {
+      const name = diagnostic.file === undefined ? null : path.basename(diagnostic.file.fileName);
+      if (name !== null && byFixture.has(name)) byFixture.get(name).push(diagnostic);
+      else foreign.push(diagnostic);
+    }
+  });
+
+  test('the module and its real build options compile clean', () => {
+    // A diagnostic outside the fixture directory means `src/` itself is broken,
+    // or the harness picked up the wrong options. Either way the negative cases
+    // below would be passing for the wrong reason.
+    assert.deepEqual(foreign.map((d) => d.code), [],
+      'no diagnostic may originate outside tests/fixtures/brand-typing/');
+  });
+
+  test('the correct composition compiles — the positive control', () => {
+    // This is what makes every "must not compile" case non-vacuous: it proves
+    // the fixture imports resolve and the option set is usable, so a diagnostic
+    // in a bad-* fixture is the brand rejecting rather than a broken harness.
+    assert.deepEqual(byFixture.get('ok-correct-composition.cts').map((d) => d.code), []);
+  });
+
+  for (const { fixture, expected } of CASES.filter((c) => c.expected !== null)) {
+    test(`${fixture} is a compile error on its ${OFFENDING} marker`, () => {
+      const diagnostics = byFixture.get(fixture);
+      assert.equal(diagnostics.length, 1,
+        `${fixture} must produce exactly one diagnostic — see the fixture README`);
+      assert.equal(diagnostics[0].code, expected);
+
+      // The diagnostic must land on the marker. Without this a fixture that
+      // stopped exercising its brand violation, but gained an unrelated error
+      // of the same code, would still pass.
+      const spans = markerSpans(sourceFileOf.get(fixture));
+      assert.ok(spans.length > 0, `${fixture} must declare a ${OFFENDING} marker`);
+      const start = diagnostics[0].start;
+      assert.ok(
+        spans.some(([from, to]) => start >= from && start < to),
+        `${fixture}: diagnostic at offset ${start} is not on the ${OFFENDING} marker `
+        + `(marker spans: ${JSON.stringify(spans)}) — the fixture is failing for the wrong reason`,
+      );
+    });
+  }
 });
