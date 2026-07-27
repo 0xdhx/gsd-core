@@ -69,9 +69,24 @@ describe('#2483 the claude reviewer leg suppresses CLAUDE.md + auto-memory injec
     // dispatch to `claude $CLAUDE_EFFORT_ARGS -p -`, which the dash-first form
     // of this matcher could no longer see (the count assertion below caught
     // exactly that — a reshaped dispatch — as designed).
-    const invocations = content
-      .split(/\r?\n/)
-      .filter((line) => /(?:^|[|;&(]|\s)claude\s+(?:\$\{?\w+\}?\s+)*-{1,2}\w/.test(line));
+    // Tokenised rather than positional, so that `claude` in *argument* position
+    // is not counted as a dispatch: a binary name directly after a flag is that
+    // flag's value, never a command. #2589 reshaped the effort-args lookup from
+    // `--host claude 2>/dev/null | jq …` to `--host claude --pick …`, which put a
+    // flag immediately after `claude` and made a purely positional matcher read
+    // that config query as a third claude invocation. The same shape is already
+    // latent one line away in `command -v claude` — both are excluded by the
+    // preceding-token rule rather than by enumerating either call site.
+    const invocations = content.split(/\r?\n/).filter((line) => {
+      const tokens = line.trim().split(/\s+/);
+      return tokens.some((token, i) => {
+        // Shell operators may abut the binary (`cat x |claude -p -`).
+        if (token.replace(/^[|;&(]+/, '') !== 'claude') return false;
+        if (/^-{1,2}[A-Za-z]/.test(tokens[i - 1] || '')) return false;
+        const [firstLiteral] = tokens.slice(i + 1).filter((t) => !/^\$\{?\w+\}?$/.test(t));
+        return /^-{1,2}\w/.test(firstLiteral || '');
+      });
+    });
 
     assert.equal(
       invocations.length, 2,
