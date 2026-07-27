@@ -621,7 +621,8 @@ function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
     const planId = planFile.replace('-PLAN.md', '').replace('PLAN.md', '');
     const planPath = path.join(phaseDir, planFile);
     const content = fs.readFileSync(planPath, 'utf-8');
-    const fm = extractFrontmatter(content);
+    // Pass planPath so a truncated PLAN.md names the file in the #1882 diagnostic.
+    const fm = extractFrontmatter(content, planPath);
 
     const xmlTasks = content.match(/<task[\s>]/gi) || [];
     const mdTasks = content.match(/##\s*Task\s*\d+/gi) || [];
@@ -1735,13 +1736,14 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
     for (const file of phaseFiles.filter(
       (f) => f.includes('-VERIFICATION') && f.endsWith('.md'),
     )) {
-      const content = fs.readFileSync(path.join(phaseFullDir, file), 'utf-8');
+      const verificationFilePath = path.join(phaseFullDir, file);
+      const content = fs.readFileSync(verificationFilePath, 'utf-8');
       // #1159 (Defect A): read ONLY the frontmatter `status` key to avoid false positives
       // from historical metadata in the file body (e.g. `previous_status: gaps_found`).
       // A full-text regex like /status: gaps_found/ matches the substring inside
       // `previous_status: gaps_found`, producing spurious warnings even when the
       // current frontmatter status is `passed`.
-      const verFm = extractFrontmatter(content) as Record<string, unknown>;
+      const verFm = extractFrontmatter(content, verificationFilePath) as Record<string, unknown>;
       // Normalise to lower-case so `status: Passed` (title-case) is not missed.
       const verStatus = typeof verFm['status'] === 'string' ? verFm['status'].trim().toLowerCase() : '';
       if (verStatus === 'human_needed') warnings.push(`${file}: needs human verification`);
@@ -2393,6 +2395,7 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
             clock: realClock,
             progressProvider: () => null, // completePhase derives progress from the roadmap, not disk
             roadmapProvider: () => roadmapContent,
+            sourcePath: statePath,
           },
         );
         stateContent = completeResult.content;
