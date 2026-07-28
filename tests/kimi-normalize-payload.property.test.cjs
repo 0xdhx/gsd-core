@@ -100,13 +100,48 @@ describe('normalizeKimiPayload — properties', () => {
   // live). So the generator is biased onto the keys normalization actually
   // reads, each drawn from the full JSON domain, and unioned with genuinely
   // arbitrary input so the unbiased space is still covered.
+  // #2595 (review Major 1): the bias above stopped one level too high. The
+  // ENTRIES of the edit array were bare fc.anything(), which essentially never
+  // invents an `old`/`new` key — so `e?.old` was always undefined, and
+  // `String(undefined ?? '')` never coerced anything. Reverting editText to the
+  // unguarded `String(v ?? '')` therefore left every property green: the
+  // coercion mutant this file was added to kill SURVIVED it.
+  //
+  // Biasing the entry onto {old, new} is necessary but NOT sufficient, and this
+  // is the part worth stating: measured over 20,000 draws, bare fc.anything()
+  // yields a NON-COERCIBLE value 3 times — 0.015%. At numRuns:200, an `old` key
+  // holding a hostile value essentially never co-occurs, so the mutant survives
+  // the entry bias too (verified against all four mutants). Both levels have to
+  // be biased: the entry onto the keys normalization reads, and the VALUE onto
+  // the shape that actually throws.
+  //
+  // `{"toString": <non-function>}` is that shape, and it is squarely inside the
+  // "JSON-expressible" domain this file's claim names — JSON.parse produces it
+  // verbatim, and it is the exact class adversarial review found after the
+  // first #2547 commit shipped. Union it in rather than reaching for
+  // fc.anything({withNullPrototype:true}), whose null-prototype objects JSON
+  // cannot express and so would widen the claim past what the PR asserts.
+  const jsonNonCoercible = fc.record(
+    {
+      toString: fc.oneof(fc.constant(null), fc.integer(), fc.string(), fc.boolean()),
+      valueOf: fc.oneof(fc.constant(null), fc.integer()),
+    },
+    { requiredKeys: ['toString'] }
+  );
+  const editValue = fc.oneof(fc.anything(), jsonNonCoercible);
+  const editEntry = fc.oneof(
+    fc.anything(),
+    fc.record({ old: editValue, new: editValue }, { requiredKeys: [] })
+  );
+  const editList = fc.oneof(fc.anything(), fc.array(editEntry));
+
   const guardRelevantInput = fc.oneof(
     fc.anything(),
     fc.record(
       {
         path: fc.anything(),
         file_path: fc.anything(),
-        edit: fc.oneof(fc.anything(), fc.array(fc.anything())),
+        edit: editList,
         old_string: fc.anything(),
         new_string: fc.anything(),
       },
@@ -128,7 +163,7 @@ describe('normalizeKimiPayload — properties', () => {
     fc.assert(
       fc.property(
         kimiToolName,
-        fc.oneof(fc.anything(), fc.array(fc.anything())),
+        editList,
         fc.anything(),
         (toolName, edit, extra) => {
           assert.doesNotThrow(() =>
@@ -161,6 +196,57 @@ describe('normalizeKimiPayload — properties', () => {
           );
         }
       )
+    );
+  });
+
+  // #2595 (review nit): three surfaces the first version of this file never
+  // reached — the PostToolUse field mapping, the empty edit list, and a payload
+  // that is not an object at all.
+  test('(e) is total over ANY JSON value as the whole payload, not just tool_input', () => {
+    fc.assert(
+      fc.property(fc.anything(), (payload) => {
+        assert.doesNotThrow(() => normalizeKimiPayload(payload));
+      })
+    );
+  });
+
+  test('(f) tool_output is mapped to tool_response, and never clobbers an existing one', () => {
+    fc.assert(
+      // `existing` must be DEFINED: the mapping's condition is
+      // `tool_response === undefined`, and an explicit `tool_response: undefined`
+      // is indistinguishable from an absent key — so mapping over it is correct,
+      // not a clobber. fc.anything() does generate undefined, and the first run
+      // of this property duly found it.
+      fc.property(kimiToolName, fc.anything(), fc.anything().filter((v) => v !== undefined),
+        (toolName, out, existing) => {
+        const mapped = normalizeKimiPayload({ tool_name: toolName, tool_output: out });
+        assert.deepEqual(mapped.tool_response, out,
+          'PostToolUse consumers read tool_response; kimi-cli emits tool_output');
+
+        // An already-present tool_response wins — the mapping fills a gap, it
+        // does not overwrite. (Unlike the tool_input fields, tool_response is a
+        // top-level payload field the hook bus supplies, not a key the model
+        // controls, so the authoritative-overwrite argument does not apply.)
+        const both = normalizeKimiPayload({
+          tool_name: toolName, tool_output: out, tool_response: existing,
+        });
+        assert.deepEqual(both.tool_response, existing);
+      })
+    );
+  });
+
+  test('(g) an empty edit list reconstructs nothing', () => {
+    fc.assert(
+      fc.property(kimiToolName, fc.string(), (toolName, p) => {
+        const out = normalizeKimiPayload({
+          tool_name: toolName, tool_input: { path: p, edit: [] },
+        });
+        // `edits.length` is 0, so the reconstruction block never runs and the
+        // fields stay absent rather than becoming ''. A guard reading
+        // new_string must see "no content supplied", not "empty content".
+        assert.strictEqual(out.tool_input.old_string, undefined);
+        assert.strictEqual(out.tool_input.new_string, undefined);
+      })
     );
   });
 

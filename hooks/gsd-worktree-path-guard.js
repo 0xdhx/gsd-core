@@ -56,6 +56,13 @@ function nearestExistingDir(start) {
 // shape as canonicalizeRuntimeName in src/runtime-name-policy.cts).
 const KIMI_TOOL_NAMES = new Map([['WriteFile', 'Write'], ['StrReplaceFile', 'Edit'], ['ReadFile', 'Read'], ['Shell', 'Bash']]);
 function normalizeKimiPayload(data) {
+  // #2595 (review nit): `JSON.parse('null')` is null, and null/primitive
+  // payloads reached the `data.tool_name` read below and threw — falsifying
+  // this function's own "total over the inputs JSON can express" claim, which
+  // property (e) now tests directly. Harmless in practice (a null payload has
+  // nothing to guard, and the throw landed in the same fail-open catch as the
+  // exit-0 it now takes deliberately) but the claim should be true as stated.
+  if (data === null || typeof data !== 'object') return data;
   const raw = data.tool_name;
   if (typeof raw !== 'string') return data;
   const mapped = KIMI_TOOL_NAMES.get(raw.slice(raw.lastIndexOf(':') + 1));
