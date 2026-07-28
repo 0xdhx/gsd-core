@@ -372,10 +372,11 @@ describe('agent-classification-parity: AGENTS.md section structure is the single
    * Same defect class as #2526 itself, one layer out: there, an agent's body
    * documented a capability its `tools:` allowlist withheld; here, the role
    * card documents a tool set its frontmatter disagrees with. When the review
-   * that found it was written, 26 of 34 rows had drifted — 21 omitting `Skill`,
-   * 6 omitting `Edit`, 8 abbreviating up to eight MCP grants as
-   * "mcp (context7)", and one still naming `Task`, a tool that no longer
-   * exists. Nothing asserted the two agreed, so the drift was free.
+   * that found it was written, 26 of 34 rows had drifted: 22 omitted `Skill`
+   * and 7 omitted `Edit`; 8 omitted MCP grants entirely (7 of them writing
+   * "mcp (context7)" for what was up to eight distinct servers, and
+   * gsd-executor naming none at all); and one still read `Task`, a tool that
+   * no longer exists. Nothing asserted the two agreed, so the drift was free.
    *
    * The row must equal the frontmatter value verbatim rather than as a set:
    * a set comparison would accept the "mcp (context7)" shorthand class of
