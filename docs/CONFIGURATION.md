@@ -140,6 +140,28 @@ GSD stores project settings in `.planning/config.json`. Created during `/gsd-new
 
 ---
 
+## When your config file cannot be read
+
+GSD distinguishes a config file that is **absent** from one that is **present but unusable**. The
+two used to be indistinguishable: a single trailing comma in `.planning/config.json` silently
+replaced your entire configuration with built-in defaults, and nothing said so (#1880).
+
+| Situation | What GSD does | Diagnostic |
+|---|---|---|
+| No `.planning/config.json` | Uses built-in defaults. This is normal. | none |
+| File present, valid, has settings | Uses your settings. | none |
+| File present, valid, but empty (`{}`) | Uses built-in defaults. | none |
+| **File present but not valid JSON** | Uses built-in defaults — **your settings are not applied** | `warning: <path> is not valid JSON — its settings were NOT applied` |
+| **File present but unreadable** (e.g. permissions) | Uses built-in defaults — **your settings are not applied** | `warning: <path> could not be read (EACCES) — its settings were NOT applied` |
+
+The warning is printed once per file per run, so a repeated command will not spam it.
+
+The same applies to the global `~/.gsd/defaults.json`. If the project config is also unusable, the
+project one is reported, since that is the file you are most likely able to fix.
+
+**If you see this warning:** your config was not applied. Validate the file, for example with
+`node -e "JSON.parse(require('fs').readFileSync('.planning/config.json','utf8'))"`, then re-run.
+
 ## Core Settings
 
 | Setting | Type | Options | Default | Description |
@@ -301,6 +323,7 @@ All workflow toggles follow the **absent = enabled** pattern. If a key is missin
 | `workflow.ui_review` | boolean | `true` | Run visual quality audit (`/gsd-ui-review`) after phase execution in autonomous mode. When `false`, the UI audit step is skipped. |
 | `workflow.node_repair` | boolean | `true` | Autonomous task repair on verification failure |
 | `workflow.node_repair_budget` | number | `2` | Max repair attempts per failed task |
+| `workflow.smart_zone_tokens` | number | `100000` | Smart-zone token budget for phase-effort estimation (#2630, [ADR-2629](adr/2629-phase-effort-estimation-calibration.md)). A phase whose estimate exceeds this is flagged with a split recommendation — **advisory only, never a block**. This is a *policy default, not a benchmark constant*: LLM output quality degrades before the advertised context window is full, but the effective ceiling is model-, task-, and distractor-dependent, so no universal number exists. Lower it for models that degrade early; the estimate-vs-actual calibration loop corrects the figure per project over time. Must be a positive integer. |
 | `workflow.research_before_questions` | boolean | `false` | Run research before discussion questions instead of after |
 | `workflow.discuss_mode` | string | `'discuss'` | Controls how `/gsd-discuss-phase` gathers context. `'discuss'` (default) asks questions one-by-one. `'assumptions'` reads the codebase first, generates structured assumptions with confidence levels, and only asks you to correct what's wrong. Added in v1.28 |
 | `workflow.max_discuss_passes` | number | `3` | Maximum number of question rounds in discuss-phase before the workflow stops asking. Useful in headless/auto mode to prevent infinite discussion loops. |
@@ -1019,7 +1042,7 @@ Configure per-step flags that `/gsd-manager` appends to each dispatched command.
 |---------|------|---------|-------------|
 | `manager.flags.discuss` | string | (none) | Flags appended to discuss-phase commands (e.g., `"--auto"`) |
 | `manager.flags.plan` | string | (none) | Flags appended to plan-phase commands (e.g., `"--skip-research"`) |
-| `manager.flags.execute` | string | (none) | Flags appended to execute-phase commands (e.g., `"--validate"`) |
+| `manager.flags.execute` | string | (none) | Flags appended to execute-phase commands (e.g., `"--cross-ai"`) |
 
 **Example:**
 
@@ -1029,7 +1052,7 @@ Configure per-step flags that `/gsd-manager` appends to each dispatched command.
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }

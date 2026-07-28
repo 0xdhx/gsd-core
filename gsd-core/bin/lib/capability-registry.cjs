@@ -176,7 +176,8 @@ const capabilities = {
           "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -374,7 +375,8 @@ const capabilities = {
           "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -505,7 +507,8 @@ const capabilities = {
           "maxDepth": 5,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "harness-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -514,6 +517,7 @@ const capabilities = {
         "runtime": "node",
         "effortSurface": "argv"
       },
+      "harnessIsolationFlag": "isolation=\"worktree\"",
       "hostBehaviors": {
         "attributionSource": "settings-json-commit",
         "authorsCanonicalWorkflow": true,
@@ -599,7 +603,7 @@ const capabilities = {
         "into": "executor",
         "fragment": {
           "path": "fragments/execute-wave-pre.md",
-          "inline": "# Claude orchestration — Workflow execution backend (BETA)\n\n> Injected at `execute:wave:pre` `into: executor` only when\n> `claude_orchestration.enabled` is true. Default-off; `onError: skip`.\n\n## When this contribution is active\n\nThe Claude orchestration capability is **default-off and BETA**. It activates only\nwhen ALL of the following hold:\n\n1. `claude_orchestration.enabled` is `true` in `.planning/config.json`, AND\n2. the active runtime is **Claude Code** (the Workflow tool is Claude / Agent\n   SDK-specific), AND\n3. `claude_orchestration.execution_backend` resolves to `workflow` — either\n   explicitly, or via `auto` — **and** the Agent SDK version is\n   `>= claude_orchestration.min_agent_sdk_version` (default `0.3.149`). The SDK\n   floor applies in both `auto` and `workflow` modes (fail-closed: a pre-release\n   or older SDK never activates the preview backend).\n\nDetection is fail-closed: any miss degrades to **inline, manual, one-agent-per-\nmessage dispatch** — exactly today's behaviour. On a non-Claude runtime this\ncontribution is a no-op.\n\n## Why `execute:wave:pre` (not `execute:wave:post`)\n\nThis is a **dispatch-backend selector** — it decides HOW a wave's executor agents\nare spawned. That decision has to be made BEFORE the wave's `Agent()` calls in\n`execute-phase.md` step 3, not after the wave has already finished (#2285). The\ncapability previously registered at `execute:wave:post`, which fires only after\nworktree merge/post-merge tests/tracking updates — by then the wave was already\ndispatched inline, so the contribution was structurally unable to change how\ndispatch happened. This fragment is injected at the point that actually precedes\ndispatch.\n\n## What the orchestrator does when the Workflow backend is active\n\nBefore spawning executor agents for the current wave (execute-phase.md step 3),\nresolve the dispatch backend through the single composed CLI seam:\n\n```bash\ngsd-tools claude-orchestration resolve-wave-dispatch \\\n  --waves \"$WAVE_MANIFEST_PATH\" --run-id \"$PHASE_RUN_ID\" \\\n  --runtime \"$RUNTIME\" \\\n  ${AGENT_SDK_VERSION:+--agent-sdk-version \"$AGENT_SDK_VERSION\"} \\\n  --phase-dir \"$PHASE_DIR\" --raw\n```\n\nThis composes `detectWorkflowBackend` (the gate ladder above) with\n`emitWorkflowScript` (the wave→plan mapping below) in ONE call — the pure\nfunction backing it is `resolveWaveDispatch` in\n`gsd-core/bin/lib/claude-orchestration.cjs`. Response shape:\n`{ backend: 'inline'|'workflow', reason, script?, summary? }`.\n\n### Manifest construction (`$WAVE_MANIFEST_PATH`, `$PHASE_RUN_ID`, `$PHASE_DIR`, `$AGENT_SDK_VERSION`)\n\nThese are NOT pre-existing execute-phase.md variables — the orchestrator builds\nthem at this step, from data it already has in-context from `discover_and_group_plans`\n(the `PLAN_INDEX` JSON) and step 2.5 (the per-plan `USE_WORKTREES_FOR_PLAN` decision):\n\n1. **`$PHASE_DIR`** — reuse `{phase_dir}` from the `INIT` bundle (already loaded\n   in the `initialize` step). No new value needed.\n\n2. **`$PHASE_RUN_ID`** — a stable identifier for THIS phase-execution attempt, so\n   `resumeFromRunId` can resume an interrupted run without re-dispatching plans\n   the Workflow tool already completed. Construct it deterministically —\n   `execute-{phase_number}-{phase_slug}` — from `INIT`'s `phase_number`/`phase_slug`\n   (both are already validated identifiers used elsewhere in this workflow, so\n   they satisfy `emitWorkflowScript`'s `isScriptableIdentifier` check). Do NOT\n   mint a new random id per wave — the SAME `$PHASE_RUN_ID` is reused for every\n   wave in the phase so the Workflow tool can correctly track cross-wave resume\n   state.\n\n3. **`$WAVE_MANIFEST_PATH`** — a fresh temp file for THIS wave's manifest (one\n   wave = one `waves` array with a single entry, matching the wave-by-wave\n   dispatch loop; do not batch multiple waves into one manifest — waves are\n   dispatched in wave order, not all at once):\n\n   ```bash\n   WAVE_MANIFEST_PATH=$(mktemp \"${TMPDIR:-/tmp}/gsd-wave-dispatch-XXXXXX\") && mv \"$WAVE_MANIFEST_PATH\" \"$WAVE_MANIFEST_PATH.json\" && WAVE_MANIFEST_PATH=\"$WAVE_MANIFEST_PATH.json\"\n   ```\n\n   Then **use the Write tool** (not a bash/jq pipeline — the orchestrator already\n   has every field parsed in-context) to write the manifest JSON to\n   `$WAVE_MANIFEST_PATH`:\n\n   ```json\n   {\n     \"waves\": [\n       {\n         \"id\": \"wave-{N}\",\n         \"plans\": [\n           {\n             \"id\": \"{plan_id}\",\n             \"brief\": \"{the SAME <objective>...<success_criteria> prompt block step 3 builds for this plan's inline Agent() call}\",\n             \"files_modified\": [\"{from PLAN_INDEX.plans[].files_modified for this plan}\"],\n             \"use_worktree\": {true unless step 2.5 set USE_WORKTREES_FOR_PLAN=false for this plan}\n           }\n         ]\n       }\n     ]\n   }\n   ```\n\n   - **`id`** — the plan id from `PLAN_INDEX`, e.g. `\"01-01\"`.\n   - **`brief`** — MUST carry the same task content as step 3's inline `Agent()`\n     prompt (the `<objective>`/`<execution_context>`/`<files_to_read>`/\n     `<success_criteria>` block, with `{plan_number}`/`{phase_number}`/\n     `{phase_name}` substituted) — a short summary here would NOT reproduce\n     step 3's behavior and would violate the \"identical artifacts\" contract.\n   - **`files_modified`** — copy verbatim from the plan's `PLAN_INDEX` entry.\n   - **`use_worktree`** — `true` for every plan UNLESS step 2.5's per-plan\n     worktree gate (`execute-phase/steps/per-plan-worktree-gate.md`) set\n     `USE_WORKTREES_FOR_PLAN=false` for that plan (submodule-touching plan, or\n     project-level `USE_WORKTREES=false`) — in which case pass `false` here so\n     `emitWorkflowScript` omits `isolation: \"worktree\"` for that plan (#2772 /\n     #2285 finding 1). **Never** hardcode `true` — that would force worktree\n     isolation on a plan the inline path explicitly keeps out of worktrees.\n\n4. **`$AGENT_SDK_VERSION`** — see below; OMIT when unknown (fails closed).\n\n**Agent SDK version:** the orchestrator has no scriptable (bash-computable) way\nto introspect the live Agent SDK version. When it can determine the version\n(e.g. from a host-exposed value it can read directly), pass\n`--agent-sdk-version`. When it cannot, OMIT the flag — `resolveWaveDispatch`'s\ngate 5 (`agent_sdk_version_unknown`) then fails closed to `inline` by design;\nthis is not a bug, it is the same fail-closed posture documented above applied\nto a real absence of information.\n\n**If `backend == \"workflow\"`:** run the emitted `script` via the Workflow tool\nfor THIS wave instead of the per-message `Agent()` loop in step 3. The script\ncomposes the SAME `gsd-executor` agent type the inline path uses, with\nworktree isolation applied PER PLAN from the manifest's `use_worktree` field\n(see `emitWorkflowScript`):\n\n- **waves → one or more sequential `parallel()` barriers** — each wave is a\n  barrier group; when plans within a wave share `files_modified`, they are split\n  into separate sequential stages within that wave's barrier.\n- **plans → `agent(brief, { agentType: 'gsd-executor', isolation: 'worktree' })`**\n  when `use_worktree` is not `false`, or `agent(brief, { agentType: 'gsd-executor' })`\n  (no isolation) when it is — so the produced `SUMMARY.md` and commits are\n  identical to inline dispatch, INCLUDING the inline path's submodule safety\n  gate (#2772 / #2285 finding 1).\n- **`files_modified` overlap → separate sequential stages** — the same overlap\n  rule execute-phase already applies inline (step 1 of the wave loop).\n- **`resumeFromRunId`** — wired to the phase run id, so an interrupted phase\n  resumes without re-running completed plans.\n\nThe orchestrator still runs steps 4–5.8 (wait for completion, worktree cleanup,\npost-merge gate, tracking update) exactly as it does for inline dispatch — the\nWorkflow backend only replaces HOW agents are spawned for this wave, not what\nhappens after they return.\n\n**If `backend == \"inline\"`** (any gate miss, or `resolve-wave-dispatch` itself\nunavailable/erroring): proceed to step 3's standard per-message `Agent()`\ndispatch — the default, byte-identical-to-today path. `onError: skip` on this\ncontribution means a `resolve-wave-dispatch` command failure is treated exactly\nlike an `inline` result, never as a fatal wave error.\n\n## Fallback contract\n\nDetection is fail-closed end-to-end: capability disabled, non-Claude runtime,\n`execution_backend:\"inline\"`, missing/incapable host descriptor, unknown or\nbelow-floor Agent SDK version, or an `emitWorkflowScript` failure on a malformed\nwave manifest — ANY of these degrades to `backend:\"inline\"` and execute-phase's\nstandard inline dispatch (step 3) runs unmodified. The Workflow backend never\npartially activates; the executor MUST NOT assume parallelism, a shared budget,\nor resume-from-run-id semantics when `backend == \"inline\"`.\n"
+          "inline": "# Claude orchestration — Workflow execution backend (BETA)\n\n> Injected at `execute:wave:pre` `into: executor` only when\n> `claude_orchestration.enabled` is true. Default-off; `onError: skip`.\n\n## When this contribution is active\n\nThe Claude orchestration capability is **default-off and BETA**. It activates only\nwhen ALL of the following hold:\n\n1. `claude_orchestration.enabled` is `true` in `.planning/config.json`, AND\n2. the active runtime is **Claude Code** (the Workflow tool is Claude / Agent\n   SDK-specific), AND\n3. `claude_orchestration.execution_backend` resolves to `workflow` — either\n   explicitly, or via `auto` — **and** the Agent SDK version is\n   `>= claude_orchestration.min_agent_sdk_version` (default `0.3.149`). The SDK\n   floor applies in both `auto` and `workflow` modes (fail-closed: a pre-release\n   or older SDK never activates the preview backend).\n\nDetection is fail-closed: any miss degrades to **inline, manual, one-agent-per-\nmessage dispatch** — exactly today's behaviour. On a non-Claude runtime this\ncontribution is a no-op.\n\n## Why `execute:wave:pre` (not `execute:wave:post`)\n\nThis is a **dispatch-backend selector** — it decides HOW a wave's executor agents\nare spawned. That decision has to be made BEFORE the wave's `Agent()` calls in\n`execute-phase.md` step 3, not after the wave has already finished (#2285). The\ncapability previously registered at `execute:wave:post`, which fires only after\nworktree merge/post-merge tests/tracking updates — by then the wave was already\ndispatched inline, so the contribution was structurally unable to change how\ndispatch happened. This fragment is injected at the point that actually precedes\ndispatch.\n\n## What the orchestrator does when the Workflow backend is active\n\nBefore spawning executor agents for the current wave (execute-phase.md step 3),\nresolve the dispatch backend through the single composed CLI seam:\n\n```bash\ngsd-tools claude-orchestration resolve-wave-dispatch \\\n  --waves \"$WAVE_MANIFEST_PATH\" --run-id \"$PHASE_RUN_ID\" \\\n  --runtime \"$RUNTIME\" \\\n  --phase-dir \"$PHASE_DIR\" --raw\n```\n\n`--agent-sdk-version` is no longer passed here (#2590). The router resolves the\ninstalled Agent SDK version itself; see **Agent SDK version** below. The former\n`${AGENT_SDK_VERSION:+--agent-sdk-version \"$AGENT_SDK_VERSION\"}` line was also\n**shell-dependent**: zsh does not word-split unquoted parameter expansions, so it\ncollapsed to a SINGLE argv element there, `argValue()` never matched, and the run\nfailed into `agent_sdk_version_unknown` — indistinguishable from genuinely\nunknown. Pass `--agent-sdk-version <ver>` explicitly only to pin a version.\n\nThis composes `detectWorkflowBackend` (the gate ladder above) with\n`emitWorkflowScript` (the wave→plan mapping below) in ONE call — the pure\nfunction backing it is `resolveWaveDispatch` in\n`gsd-core/bin/lib/claude-orchestration.cjs`. Response shape:\n`{ backend: 'inline'|'workflow', reason, script?, summary? }`.\n\n### Manifest construction (`$WAVE_MANIFEST_PATH`, `$PHASE_RUN_ID`, `$PHASE_DIR`)\n\nThese are NOT pre-existing execute-phase.md variables — the orchestrator builds\nthem at this step, from data it already has in-context from `discover_and_group_plans`\n(the `PLAN_INDEX` JSON) and step 2.5 (the per-plan `USE_WORKTREES_FOR_PLAN` decision):\n\n1. **`$PHASE_DIR`** — reuse `{phase_dir}` from the `INIT` bundle (already loaded\n   in the `initialize` step). No new value needed.\n\n2. **`$PHASE_RUN_ID`** — a stable identifier for THIS phase-execution attempt, so\n   `resumeFromRunId` can resume an interrupted run without re-dispatching plans\n   the Workflow tool already completed. Construct it deterministically —\n   `execute-{phase_number}-{phase_slug}` — from `INIT`'s `phase_number`/`phase_slug`\n   (both are already validated identifiers used elsewhere in this workflow, so\n   they satisfy `emitWorkflowScript`'s `isScriptableIdentifier` check). Do NOT\n   mint a new random id per wave — the SAME `$PHASE_RUN_ID` is reused for every\n   wave in the phase so the Workflow tool can correctly track cross-wave resume\n   state.\n\n3. **`$WAVE_MANIFEST_PATH`** — a fresh temp file for THIS wave's manifest (one\n   wave = one `waves` array with a single entry, matching the wave-by-wave\n   dispatch loop; do not batch multiple waves into one manifest — waves are\n   dispatched in wave order, not all at once):\n\n   ```bash\n   WAVE_MANIFEST_PATH=$(mktemp \"${TMPDIR:-/tmp}/gsd-wave-dispatch-XXXXXX\") && mv \"$WAVE_MANIFEST_PATH\" \"$WAVE_MANIFEST_PATH.json\" && WAVE_MANIFEST_PATH=\"$WAVE_MANIFEST_PATH.json\"\n   ```\n\n   Then **use the Write tool** (not a bash/jq pipeline — the orchestrator already\n   has every field parsed in-context) to write the manifest JSON to\n   `$WAVE_MANIFEST_PATH`:\n\n   ```json\n   {\n     \"waves\": [\n       {\n         \"id\": \"wave-{N}\",\n         \"plans\": [\n           {\n             \"id\": \"{plan_id}\",\n             \"brief\": \"{the SAME <objective>...<success_criteria> prompt block step 3 builds for this plan's inline Agent() call}\",\n             \"files_modified\": [\"{from PLAN_INDEX.plans[].files_modified for this plan}\"],\n             \"use_worktree\": {true unless step 2.5 set USE_WORKTREES_FOR_PLAN=false for this plan}\n           }\n         ]\n       }\n     ]\n   }\n   ```\n\n   - **`id`** — the plan id from `PLAN_INDEX`, e.g. `\"01-01\"`.\n   - **`brief`** — MUST carry the same task content as step 3's inline `Agent()`\n     prompt (the `<objective>`/`<execution_context>`/`<files_to_read>`/\n     `<success_criteria>` block, with `{plan_number}`/`{phase_number}`/\n     `{phase_name}` substituted) — a short summary here would NOT reproduce\n     step 3's behavior and would violate the \"identical artifacts\" contract.\n   - **`files_modified`** — copy verbatim from the plan's `PLAN_INDEX` entry.\n   - **`use_worktree`** — `true` for every plan UNLESS step 2.5's per-plan\n     worktree gate (`execute-phase/steps/per-plan-worktree-gate.md`) set\n     `USE_WORKTREES_FOR_PLAN=false` for that plan (submodule-touching plan, or\n     project-level `USE_WORKTREES=false`) — in which case pass `false` here so\n     `emitWorkflowScript` omits `isolation: \"worktree\"` for that plan (#2772 /\n     #2285 finding 1). **Never** hardcode `true` — that would force worktree\n     isolation on a plan the inline path explicitly keeps out of worktrees.\n\n4. **`$AGENT_SDK_VERSION`** — no longer built here; the router resolves it.\n\n**Agent SDK version:** the orchestrator has no *bash-computable* way to\nintrospect the live Agent SDK version — but the router runs in Node, so it\nresolves the version itself (#2590), in this order:\n\n1. an explicit `--agent-sdk-version <ver>` (pin a version),\n2. `GSD_AGENT_SDK_VERSION`,\n3. the **installed** `@anthropic-ai/claude-agent-sdk` package version, read from\n   its `package.json` on disk by walking `node_modules` up the tree. (Read\n   directly rather than via `require.resolve`: the SDK's `exports` map does not\n   expose `./package.json`, so `require.resolve` throws\n   `ERR_PACKAGE_PATH_NOT_EXPORTED`.)\n\nPreviously nothing computed this at all, so gate 5 returned\n`agent_sdk_version_unknown` on **every** automated run and the Workflow backend\ncould never activate — while `gsd-tools capability state` still reported the\ncapability `active: true`. Fail-closed is preserved: when no version can be\nresolved, gate 5 still declines to `inline`. What changed is that a resolvable\nversion is now actually found, so a genuinely-too-old SDK reports\n`agent_sdk_version_below_floor` — the truthful reason — instead of `unknown`.\n\n**If `backend == \"workflow\"`:** run the emitted `script` via the Workflow tool\nfor THIS wave instead of the per-message `Agent()` loop in step 3. The script\ncomposes the SAME `gsd-executor` agent type the inline path uses, with\nworktree isolation applied PER PLAN from the manifest's `use_worktree` field\n(see `emitWorkflowScript`):\n\n- **waves → one or more sequential `parallel()` barriers** — each wave is a\n  barrier group; when plans within a wave share `files_modified`, they are split\n  into separate sequential stages within that wave's barrier.\n- **plans → `agent(brief, { agentType: 'gsd-executor', isolation: 'worktree' })`**\n  when `use_worktree` is not `false`, or `agent(brief, { agentType: 'gsd-executor' })`\n  (no isolation) when it is — so the produced `SUMMARY.md` and commits are\n  identical to inline dispatch, INCLUDING the inline path's submodule safety\n  gate (#2772 / #2285 finding 1).\n- **`files_modified` overlap → separate sequential stages** — the same overlap\n  rule execute-phase already applies inline (step 1 of the wave loop).\n- **`resumeFromRunId`** — **pass `summary.resumeRunId` as the Workflow tool's\n  `resumeFromRunId` INPUT when you invoke the tool.** It is a tool parameter,\n  not a script function; the script deliberately does not call it (#2590 — doing\n  so threw \"resumeFromRunId is not defined\" and rejected the entire script).\n  Omitting it from the tool invocation silently regresses phase-resume to a\n  no-op: an interrupted phase re-runs completed plans.\n\nThe orchestrator still runs steps 4–5.8 (wait for completion, worktree cleanup,\npost-merge gate, tracking update) exactly as it does for inline dispatch — the\nWorkflow backend only replaces HOW agents are spawned for this wave, not what\nhappens after they return.\n\n**If `backend == \"inline\"`** (any gate miss, or `resolve-wave-dispatch` itself\nunavailable/erroring): proceed to step 3's standard per-message `Agent()`\ndispatch — the default, byte-identical-to-today path. `onError: skip` on this\ncontribution means a `resolve-wave-dispatch` command failure is treated exactly\nlike an `inline` result, never as a fatal wave error.\n\n## Fallback contract\n\nDetection is fail-closed end-to-end: capability disabled, non-Claude runtime,\n`execution_backend:\"inline\"`, missing/incapable host descriptor, unknown or\nbelow-floor Agent SDK version, or an `emitWorkflowScript` failure on a malformed\nwave manifest — ANY of these degrades to `backend:\"inline\"` and execute-phase's\nstandard inline dispatch (step 3) runs unmodified. The Workflow backend never\npartially activates; the executor MUST NOT assume parallelism, a shared budget,\nor resume-from-run-id semantics when `backend == \"inline\"`.\n"
         },
         "produces": [],
         "consumes": [
@@ -676,7 +680,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "read-only",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -854,7 +859,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -935,7 +941,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": true
+          "backgroundDispatch": true,
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -943,6 +950,14 @@ const capabilities = {
         "transport": "mcp",
         "runtime": "node",
         "effortSurface": "argv"
+      },
+      "orchestratorExec": {
+        "command": "codex",
+        "args": [
+          "exec"
+        ],
+        "cwdFlag": "--cd",
+        "promptFlag": null
       },
       "hostBehaviors": {
         "reapplyCommand": "$gsd-update --reapply",
@@ -1031,7 +1046,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -1141,7 +1157,8 @@ const capabilities = {
           "maxDepth": 2,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": true
+          "backgroundDispatch": true,
+          "isolation": "harness-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -1150,6 +1167,7 @@ const capabilities = {
         "runtime": "node",
         "effortSurface": "undocumented"
       },
+      "harnessIsolationFlag": "--worktree",
       "hostBehaviors": {
         "reapplyCommand": "gsd-update --reapply (mention the skill name)",
         "frontmatterDialect": "cursor",
@@ -1492,7 +1510,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "read-only",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -1639,7 +1658,8 @@ const capabilities = {
           "maxDepth": -1,
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -1733,7 +1753,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": true
+          "backgroundDispatch": true,
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -1741,6 +1762,14 @@ const capabilities = {
         "transport": "mcp",
         "runtime": "python",
         "effortSurface": "undocumented"
+      },
+      "orchestratorExec": {
+        "command": "kimi",
+        "args": [
+          "--print"
+        ],
+        "cwdFlag": "--work-dir",
+        "promptFlag": "--prompt"
       },
       "hostBehaviors": {
         "reapplyCommand": "/skill:gsd-update --reapply",
@@ -1805,12 +1834,12 @@ const capabilities = {
         "SubagentStart"
       ],
       "hostIntegration": {
-        "embeddingMode": "imperative",
+        "embeddingMode": "declarative",
         "commandSurface": "slash-file",
         "dispatch": {
           "namedDispatch": false,
-          "nested": false,
-          "maxDepth": 1,
+          "nested": true,
+          "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "built-in-only",
           "backgroundDispatch": true,
@@ -1818,13 +1847,20 @@ const capabilities = {
             "coder",
             "explore",
             "plan"
-          ]
+          ],
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
         "stateIO": "filesystem",
         "transport": "mcp",
         "runtime": "node"
+      },
+      "orchestratorExec": {
+        "command": "kimi",
+        "args": [],
+        "cwdFlag": null,
+        "promptFlag": "--prompt"
       },
       "hostBehaviors": {
         "reapplyCommand": "/skill:gsd-update --reapply",
@@ -2138,9 +2174,10 @@ const capabilities = {
           "namedDispatch": true,
           "nested": "undocumented",
           "maxDepth": "undocumented",
-          "background": true,
+          "background": false,
           "subagentToolkit": "full",
-          "backgroundDispatch": true
+          "backgroundDispatch": false,
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -2148,6 +2185,14 @@ const capabilities = {
         "transport": "mcp",
         "runtime": "bun",
         "effortSurface": "argv"
+      },
+      "orchestratorExec": {
+        "command": "opencode",
+        "args": [
+          "run"
+        ],
+        "cwdFlag": "--dir",
+        "promptFlag": null
       },
       "hostBehaviors": {
         "reapplyCommand": "/gsd-update --reapply",
@@ -2264,7 +2309,8 @@ const capabilities = {
           "maxDepth": 0,
           "background": false,
           "backgroundDispatch": false,
-          "subagentToolkit": "undocumented"
+          "subagentToolkit": "undocumented",
+          "isolation": "none"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -2442,7 +2488,8 @@ const capabilities = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -2792,7 +2839,8 @@ const capabilities = {
           "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "engine",
@@ -2943,7 +2991,8 @@ const capabilities = {
           "maxDepth": 5,
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "engine",
@@ -3023,7 +3072,8 @@ const capabilities = {
           "maxDepth": "undocumented",
           "background": "undocumented",
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "none"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -3132,7 +3182,8 @@ const capabilities = {
           "maxDepth": "undocumented",
           "background": false,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "none"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -3490,7 +3541,7 @@ const byLoopPoint = {
         "into": "executor",
         "fragment": {
           "path": "fragments/execute-wave-pre.md",
-          "inline": "# Claude orchestration — Workflow execution backend (BETA)\n\n> Injected at `execute:wave:pre` `into: executor` only when\n> `claude_orchestration.enabled` is true. Default-off; `onError: skip`.\n\n## When this contribution is active\n\nThe Claude orchestration capability is **default-off and BETA**. It activates only\nwhen ALL of the following hold:\n\n1. `claude_orchestration.enabled` is `true` in `.planning/config.json`, AND\n2. the active runtime is **Claude Code** (the Workflow tool is Claude / Agent\n   SDK-specific), AND\n3. `claude_orchestration.execution_backend` resolves to `workflow` — either\n   explicitly, or via `auto` — **and** the Agent SDK version is\n   `>= claude_orchestration.min_agent_sdk_version` (default `0.3.149`). The SDK\n   floor applies in both `auto` and `workflow` modes (fail-closed: a pre-release\n   or older SDK never activates the preview backend).\n\nDetection is fail-closed: any miss degrades to **inline, manual, one-agent-per-\nmessage dispatch** — exactly today's behaviour. On a non-Claude runtime this\ncontribution is a no-op.\n\n## Why `execute:wave:pre` (not `execute:wave:post`)\n\nThis is a **dispatch-backend selector** — it decides HOW a wave's executor agents\nare spawned. That decision has to be made BEFORE the wave's `Agent()` calls in\n`execute-phase.md` step 3, not after the wave has already finished (#2285). The\ncapability previously registered at `execute:wave:post`, which fires only after\nworktree merge/post-merge tests/tracking updates — by then the wave was already\ndispatched inline, so the contribution was structurally unable to change how\ndispatch happened. This fragment is injected at the point that actually precedes\ndispatch.\n\n## What the orchestrator does when the Workflow backend is active\n\nBefore spawning executor agents for the current wave (execute-phase.md step 3),\nresolve the dispatch backend through the single composed CLI seam:\n\n```bash\ngsd-tools claude-orchestration resolve-wave-dispatch \\\n  --waves \"$WAVE_MANIFEST_PATH\" --run-id \"$PHASE_RUN_ID\" \\\n  --runtime \"$RUNTIME\" \\\n  ${AGENT_SDK_VERSION:+--agent-sdk-version \"$AGENT_SDK_VERSION\"} \\\n  --phase-dir \"$PHASE_DIR\" --raw\n```\n\nThis composes `detectWorkflowBackend` (the gate ladder above) with\n`emitWorkflowScript` (the wave→plan mapping below) in ONE call — the pure\nfunction backing it is `resolveWaveDispatch` in\n`gsd-core/bin/lib/claude-orchestration.cjs`. Response shape:\n`{ backend: 'inline'|'workflow', reason, script?, summary? }`.\n\n### Manifest construction (`$WAVE_MANIFEST_PATH`, `$PHASE_RUN_ID`, `$PHASE_DIR`, `$AGENT_SDK_VERSION`)\n\nThese are NOT pre-existing execute-phase.md variables — the orchestrator builds\nthem at this step, from data it already has in-context from `discover_and_group_plans`\n(the `PLAN_INDEX` JSON) and step 2.5 (the per-plan `USE_WORKTREES_FOR_PLAN` decision):\n\n1. **`$PHASE_DIR`** — reuse `{phase_dir}` from the `INIT` bundle (already loaded\n   in the `initialize` step). No new value needed.\n\n2. **`$PHASE_RUN_ID`** — a stable identifier for THIS phase-execution attempt, so\n   `resumeFromRunId` can resume an interrupted run without re-dispatching plans\n   the Workflow tool already completed. Construct it deterministically —\n   `execute-{phase_number}-{phase_slug}` — from `INIT`'s `phase_number`/`phase_slug`\n   (both are already validated identifiers used elsewhere in this workflow, so\n   they satisfy `emitWorkflowScript`'s `isScriptableIdentifier` check). Do NOT\n   mint a new random id per wave — the SAME `$PHASE_RUN_ID` is reused for every\n   wave in the phase so the Workflow tool can correctly track cross-wave resume\n   state.\n\n3. **`$WAVE_MANIFEST_PATH`** — a fresh temp file for THIS wave's manifest (one\n   wave = one `waves` array with a single entry, matching the wave-by-wave\n   dispatch loop; do not batch multiple waves into one manifest — waves are\n   dispatched in wave order, not all at once):\n\n   ```bash\n   WAVE_MANIFEST_PATH=$(mktemp \"${TMPDIR:-/tmp}/gsd-wave-dispatch-XXXXXX\") && mv \"$WAVE_MANIFEST_PATH\" \"$WAVE_MANIFEST_PATH.json\" && WAVE_MANIFEST_PATH=\"$WAVE_MANIFEST_PATH.json\"\n   ```\n\n   Then **use the Write tool** (not a bash/jq pipeline — the orchestrator already\n   has every field parsed in-context) to write the manifest JSON to\n   `$WAVE_MANIFEST_PATH`:\n\n   ```json\n   {\n     \"waves\": [\n       {\n         \"id\": \"wave-{N}\",\n         \"plans\": [\n           {\n             \"id\": \"{plan_id}\",\n             \"brief\": \"{the SAME <objective>...<success_criteria> prompt block step 3 builds for this plan's inline Agent() call}\",\n             \"files_modified\": [\"{from PLAN_INDEX.plans[].files_modified for this plan}\"],\n             \"use_worktree\": {true unless step 2.5 set USE_WORKTREES_FOR_PLAN=false for this plan}\n           }\n         ]\n       }\n     ]\n   }\n   ```\n\n   - **`id`** — the plan id from `PLAN_INDEX`, e.g. `\"01-01\"`.\n   - **`brief`** — MUST carry the same task content as step 3's inline `Agent()`\n     prompt (the `<objective>`/`<execution_context>`/`<files_to_read>`/\n     `<success_criteria>` block, with `{plan_number}`/`{phase_number}`/\n     `{phase_name}` substituted) — a short summary here would NOT reproduce\n     step 3's behavior and would violate the \"identical artifacts\" contract.\n   - **`files_modified`** — copy verbatim from the plan's `PLAN_INDEX` entry.\n   - **`use_worktree`** — `true` for every plan UNLESS step 2.5's per-plan\n     worktree gate (`execute-phase/steps/per-plan-worktree-gate.md`) set\n     `USE_WORKTREES_FOR_PLAN=false` for that plan (submodule-touching plan, or\n     project-level `USE_WORKTREES=false`) — in which case pass `false` here so\n     `emitWorkflowScript` omits `isolation: \"worktree\"` for that plan (#2772 /\n     #2285 finding 1). **Never** hardcode `true` — that would force worktree\n     isolation on a plan the inline path explicitly keeps out of worktrees.\n\n4. **`$AGENT_SDK_VERSION`** — see below; OMIT when unknown (fails closed).\n\n**Agent SDK version:** the orchestrator has no scriptable (bash-computable) way\nto introspect the live Agent SDK version. When it can determine the version\n(e.g. from a host-exposed value it can read directly), pass\n`--agent-sdk-version`. When it cannot, OMIT the flag — `resolveWaveDispatch`'s\ngate 5 (`agent_sdk_version_unknown`) then fails closed to `inline` by design;\nthis is not a bug, it is the same fail-closed posture documented above applied\nto a real absence of information.\n\n**If `backend == \"workflow\"`:** run the emitted `script` via the Workflow tool\nfor THIS wave instead of the per-message `Agent()` loop in step 3. The script\ncomposes the SAME `gsd-executor` agent type the inline path uses, with\nworktree isolation applied PER PLAN from the manifest's `use_worktree` field\n(see `emitWorkflowScript`):\n\n- **waves → one or more sequential `parallel()` barriers** — each wave is a\n  barrier group; when plans within a wave share `files_modified`, they are split\n  into separate sequential stages within that wave's barrier.\n- **plans → `agent(brief, { agentType: 'gsd-executor', isolation: 'worktree' })`**\n  when `use_worktree` is not `false`, or `agent(brief, { agentType: 'gsd-executor' })`\n  (no isolation) when it is — so the produced `SUMMARY.md` and commits are\n  identical to inline dispatch, INCLUDING the inline path's submodule safety\n  gate (#2772 / #2285 finding 1).\n- **`files_modified` overlap → separate sequential stages** — the same overlap\n  rule execute-phase already applies inline (step 1 of the wave loop).\n- **`resumeFromRunId`** — wired to the phase run id, so an interrupted phase\n  resumes without re-running completed plans.\n\nThe orchestrator still runs steps 4–5.8 (wait for completion, worktree cleanup,\npost-merge gate, tracking update) exactly as it does for inline dispatch — the\nWorkflow backend only replaces HOW agents are spawned for this wave, not what\nhappens after they return.\n\n**If `backend == \"inline\"`** (any gate miss, or `resolve-wave-dispatch` itself\nunavailable/erroring): proceed to step 3's standard per-message `Agent()`\ndispatch — the default, byte-identical-to-today path. `onError: skip` on this\ncontribution means a `resolve-wave-dispatch` command failure is treated exactly\nlike an `inline` result, never as a fatal wave error.\n\n## Fallback contract\n\nDetection is fail-closed end-to-end: capability disabled, non-Claude runtime,\n`execution_backend:\"inline\"`, missing/incapable host descriptor, unknown or\nbelow-floor Agent SDK version, or an `emitWorkflowScript` failure on a malformed\nwave manifest — ANY of these degrades to `backend:\"inline\"` and execute-phase's\nstandard inline dispatch (step 3) runs unmodified. The Workflow backend never\npartially activates; the executor MUST NOT assume parallelism, a shared budget,\nor resume-from-run-id semantics when `backend == \"inline\"`.\n"
+          "inline": "# Claude orchestration — Workflow execution backend (BETA)\n\n> Injected at `execute:wave:pre` `into: executor` only when\n> `claude_orchestration.enabled` is true. Default-off; `onError: skip`.\n\n## When this contribution is active\n\nThe Claude orchestration capability is **default-off and BETA**. It activates only\nwhen ALL of the following hold:\n\n1. `claude_orchestration.enabled` is `true` in `.planning/config.json`, AND\n2. the active runtime is **Claude Code** (the Workflow tool is Claude / Agent\n   SDK-specific), AND\n3. `claude_orchestration.execution_backend` resolves to `workflow` — either\n   explicitly, or via `auto` — **and** the Agent SDK version is\n   `>= claude_orchestration.min_agent_sdk_version` (default `0.3.149`). The SDK\n   floor applies in both `auto` and `workflow` modes (fail-closed: a pre-release\n   or older SDK never activates the preview backend).\n\nDetection is fail-closed: any miss degrades to **inline, manual, one-agent-per-\nmessage dispatch** — exactly today's behaviour. On a non-Claude runtime this\ncontribution is a no-op.\n\n## Why `execute:wave:pre` (not `execute:wave:post`)\n\nThis is a **dispatch-backend selector** — it decides HOW a wave's executor agents\nare spawned. That decision has to be made BEFORE the wave's `Agent()` calls in\n`execute-phase.md` step 3, not after the wave has already finished (#2285). The\ncapability previously registered at `execute:wave:post`, which fires only after\nworktree merge/post-merge tests/tracking updates — by then the wave was already\ndispatched inline, so the contribution was structurally unable to change how\ndispatch happened. This fragment is injected at the point that actually precedes\ndispatch.\n\n## What the orchestrator does when the Workflow backend is active\n\nBefore spawning executor agents for the current wave (execute-phase.md step 3),\nresolve the dispatch backend through the single composed CLI seam:\n\n```bash\ngsd-tools claude-orchestration resolve-wave-dispatch \\\n  --waves \"$WAVE_MANIFEST_PATH\" --run-id \"$PHASE_RUN_ID\" \\\n  --runtime \"$RUNTIME\" \\\n  --phase-dir \"$PHASE_DIR\" --raw\n```\n\n`--agent-sdk-version` is no longer passed here (#2590). The router resolves the\ninstalled Agent SDK version itself; see **Agent SDK version** below. The former\n`${AGENT_SDK_VERSION:+--agent-sdk-version \"$AGENT_SDK_VERSION\"}` line was also\n**shell-dependent**: zsh does not word-split unquoted parameter expansions, so it\ncollapsed to a SINGLE argv element there, `argValue()` never matched, and the run\nfailed into `agent_sdk_version_unknown` — indistinguishable from genuinely\nunknown. Pass `--agent-sdk-version <ver>` explicitly only to pin a version.\n\nThis composes `detectWorkflowBackend` (the gate ladder above) with\n`emitWorkflowScript` (the wave→plan mapping below) in ONE call — the pure\nfunction backing it is `resolveWaveDispatch` in\n`gsd-core/bin/lib/claude-orchestration.cjs`. Response shape:\n`{ backend: 'inline'|'workflow', reason, script?, summary? }`.\n\n### Manifest construction (`$WAVE_MANIFEST_PATH`, `$PHASE_RUN_ID`, `$PHASE_DIR`)\n\nThese are NOT pre-existing execute-phase.md variables — the orchestrator builds\nthem at this step, from data it already has in-context from `discover_and_group_plans`\n(the `PLAN_INDEX` JSON) and step 2.5 (the per-plan `USE_WORKTREES_FOR_PLAN` decision):\n\n1. **`$PHASE_DIR`** — reuse `{phase_dir}` from the `INIT` bundle (already loaded\n   in the `initialize` step). No new value needed.\n\n2. **`$PHASE_RUN_ID`** — a stable identifier for THIS phase-execution attempt, so\n   `resumeFromRunId` can resume an interrupted run without re-dispatching plans\n   the Workflow tool already completed. Construct it deterministically —\n   `execute-{phase_number}-{phase_slug}` — from `INIT`'s `phase_number`/`phase_slug`\n   (both are already validated identifiers used elsewhere in this workflow, so\n   they satisfy `emitWorkflowScript`'s `isScriptableIdentifier` check). Do NOT\n   mint a new random id per wave — the SAME `$PHASE_RUN_ID` is reused for every\n   wave in the phase so the Workflow tool can correctly track cross-wave resume\n   state.\n\n3. **`$WAVE_MANIFEST_PATH`** — a fresh temp file for THIS wave's manifest (one\n   wave = one `waves` array with a single entry, matching the wave-by-wave\n   dispatch loop; do not batch multiple waves into one manifest — waves are\n   dispatched in wave order, not all at once):\n\n   ```bash\n   WAVE_MANIFEST_PATH=$(mktemp \"${TMPDIR:-/tmp}/gsd-wave-dispatch-XXXXXX\") && mv \"$WAVE_MANIFEST_PATH\" \"$WAVE_MANIFEST_PATH.json\" && WAVE_MANIFEST_PATH=\"$WAVE_MANIFEST_PATH.json\"\n   ```\n\n   Then **use the Write tool** (not a bash/jq pipeline — the orchestrator already\n   has every field parsed in-context) to write the manifest JSON to\n   `$WAVE_MANIFEST_PATH`:\n\n   ```json\n   {\n     \"waves\": [\n       {\n         \"id\": \"wave-{N}\",\n         \"plans\": [\n           {\n             \"id\": \"{plan_id}\",\n             \"brief\": \"{the SAME <objective>...<success_criteria> prompt block step 3 builds for this plan's inline Agent() call}\",\n             \"files_modified\": [\"{from PLAN_INDEX.plans[].files_modified for this plan}\"],\n             \"use_worktree\": {true unless step 2.5 set USE_WORKTREES_FOR_PLAN=false for this plan}\n           }\n         ]\n       }\n     ]\n   }\n   ```\n\n   - **`id`** — the plan id from `PLAN_INDEX`, e.g. `\"01-01\"`.\n   - **`brief`** — MUST carry the same task content as step 3's inline `Agent()`\n     prompt (the `<objective>`/`<execution_context>`/`<files_to_read>`/\n     `<success_criteria>` block, with `{plan_number}`/`{phase_number}`/\n     `{phase_name}` substituted) — a short summary here would NOT reproduce\n     step 3's behavior and would violate the \"identical artifacts\" contract.\n   - **`files_modified`** — copy verbatim from the plan's `PLAN_INDEX` entry.\n   - **`use_worktree`** — `true` for every plan UNLESS step 2.5's per-plan\n     worktree gate (`execute-phase/steps/per-plan-worktree-gate.md`) set\n     `USE_WORKTREES_FOR_PLAN=false` for that plan (submodule-touching plan, or\n     project-level `USE_WORKTREES=false`) — in which case pass `false` here so\n     `emitWorkflowScript` omits `isolation: \"worktree\"` for that plan (#2772 /\n     #2285 finding 1). **Never** hardcode `true` — that would force worktree\n     isolation on a plan the inline path explicitly keeps out of worktrees.\n\n4. **`$AGENT_SDK_VERSION`** — no longer built here; the router resolves it.\n\n**Agent SDK version:** the orchestrator has no *bash-computable* way to\nintrospect the live Agent SDK version — but the router runs in Node, so it\nresolves the version itself (#2590), in this order:\n\n1. an explicit `--agent-sdk-version <ver>` (pin a version),\n2. `GSD_AGENT_SDK_VERSION`,\n3. the **installed** `@anthropic-ai/claude-agent-sdk` package version, read from\n   its `package.json` on disk by walking `node_modules` up the tree. (Read\n   directly rather than via `require.resolve`: the SDK's `exports` map does not\n   expose `./package.json`, so `require.resolve` throws\n   `ERR_PACKAGE_PATH_NOT_EXPORTED`.)\n\nPreviously nothing computed this at all, so gate 5 returned\n`agent_sdk_version_unknown` on **every** automated run and the Workflow backend\ncould never activate — while `gsd-tools capability state` still reported the\ncapability `active: true`. Fail-closed is preserved: when no version can be\nresolved, gate 5 still declines to `inline`. What changed is that a resolvable\nversion is now actually found, so a genuinely-too-old SDK reports\n`agent_sdk_version_below_floor` — the truthful reason — instead of `unknown`.\n\n**If `backend == \"workflow\"`:** run the emitted `script` via the Workflow tool\nfor THIS wave instead of the per-message `Agent()` loop in step 3. The script\ncomposes the SAME `gsd-executor` agent type the inline path uses, with\nworktree isolation applied PER PLAN from the manifest's `use_worktree` field\n(see `emitWorkflowScript`):\n\n- **waves → one or more sequential `parallel()` barriers** — each wave is a\n  barrier group; when plans within a wave share `files_modified`, they are split\n  into separate sequential stages within that wave's barrier.\n- **plans → `agent(brief, { agentType: 'gsd-executor', isolation: 'worktree' })`**\n  when `use_worktree` is not `false`, or `agent(brief, { agentType: 'gsd-executor' })`\n  (no isolation) when it is — so the produced `SUMMARY.md` and commits are\n  identical to inline dispatch, INCLUDING the inline path's submodule safety\n  gate (#2772 / #2285 finding 1).\n- **`files_modified` overlap → separate sequential stages** — the same overlap\n  rule execute-phase already applies inline (step 1 of the wave loop).\n- **`resumeFromRunId`** — **pass `summary.resumeRunId` as the Workflow tool's\n  `resumeFromRunId` INPUT when you invoke the tool.** It is a tool parameter,\n  not a script function; the script deliberately does not call it (#2590 — doing\n  so threw \"resumeFromRunId is not defined\" and rejected the entire script).\n  Omitting it from the tool invocation silently regresses phase-resume to a\n  no-op: an interrupted phase re-runs completed plans.\n\nThe orchestrator still runs steps 4–5.8 (wait for completion, worktree cleanup,\npost-merge gate, tracking update) exactly as it does for inline dispatch — the\nWorkflow backend only replaces HOW agents are spawned for this wave, not what\nhappens after they return.\n\n**If `backend == \"inline\"`** (any gate miss, or `resolve-wave-dispatch` itself\nunavailable/erroring): proceed to step 3's standard per-message `Agent()`\ndispatch — the default, byte-identical-to-today path. `onError: skip` on this\ncontribution means a `resolve-wave-dispatch` command failure is treated exactly\nlike an `inline` result, never as a fatal wave error.\n\n## Fallback contract\n\nDetection is fail-closed end-to-end: capability disabled, non-Claude runtime,\n`execution_backend:\"inline\"`, missing/incapable host descriptor, unknown or\nbelow-floor Agent SDK version, or an `emitWorkflowScript` failure on a malformed\nwave manifest — ANY of these degrades to `backend:\"inline\"` and execute-phase's\nstandard inline dispatch (step 3) runs unmodified. The Workflow backend never\npartially activates; the executor MUST NOT assume parallelism, a shared budget,\nor resume-from-run-id semantics when `backend == \"inline\"`.\n"
         },
         "produces": [],
         "consumes": [
@@ -4159,7 +4210,8 @@ const runtimes = {
           "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4274,7 +4326,8 @@ const runtimes = {
           "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4359,7 +4412,8 @@ const runtimes = {
           "maxDepth": 5,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "harness-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4368,6 +4422,7 @@ const runtimes = {
         "runtime": "node",
         "effortSurface": "argv"
       },
+      "harnessIsolationFlag": "isolation=\"worktree\"",
       "hostBehaviors": {
         "attributionSource": "settings-json-commit",
         "authorsCanonicalWorkflow": true,
@@ -4442,7 +4497,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "read-only",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -4559,7 +4615,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4640,7 +4697,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": true
+          "backgroundDispatch": true,
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4648,6 +4706,14 @@ const runtimes = {
         "transport": "mcp",
         "runtime": "node",
         "effortSurface": "argv"
+      },
+      "orchestratorExec": {
+        "command": "codex",
+        "args": [
+          "exec"
+        ],
+        "cwdFlag": "--cd",
+        "promptFlag": null
       },
       "hostBehaviors": {
         "reapplyCommand": "$gsd-update --reapply",
@@ -4736,7 +4802,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4846,7 +4913,8 @@ const runtimes = {
           "maxDepth": 2,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": true
+          "backgroundDispatch": true,
+          "isolation": "harness-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -4855,6 +4923,7 @@ const runtimes = {
         "runtime": "node",
         "effortSurface": "undocumented"
       },
+      "harnessIsolationFlag": "--worktree",
       "hostBehaviors": {
         "reapplyCommand": "gsd-update --reapply (mention the skill name)",
         "frontmatterDialect": "cursor",
@@ -4954,7 +5023,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "read-only",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -5049,7 +5119,8 @@ const runtimes = {
           "maxDepth": -1,
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -5143,7 +5214,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": true
+          "backgroundDispatch": true,
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -5151,6 +5223,14 @@ const runtimes = {
         "transport": "mcp",
         "runtime": "python",
         "effortSurface": "undocumented"
+      },
+      "orchestratorExec": {
+        "command": "kimi",
+        "args": [
+          "--print"
+        ],
+        "cwdFlag": "--work-dir",
+        "promptFlag": "--prompt"
       },
       "hostBehaviors": {
         "reapplyCommand": "/skill:gsd-update --reapply",
@@ -5215,12 +5295,12 @@ const runtimes = {
         "SubagentStart"
       ],
       "hostIntegration": {
-        "embeddingMode": "imperative",
+        "embeddingMode": "declarative",
         "commandSurface": "slash-file",
         "dispatch": {
           "namedDispatch": false,
-          "nested": false,
-          "maxDepth": 1,
+          "nested": true,
+          "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "built-in-only",
           "backgroundDispatch": true,
@@ -5228,13 +5308,20 @@ const runtimes = {
             "coder",
             "explore",
             "plan"
-          ]
+          ],
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "passive",
         "hookBus": "host",
         "stateIO": "filesystem",
         "transport": "mcp",
         "runtime": "node"
+      },
+      "orchestratorExec": {
+        "command": "kimi",
+        "args": [],
+        "cwdFlag": null,
+        "promptFlag": "--prompt"
       },
       "hostBehaviors": {
         "reapplyCommand": "/skill:gsd-update --reapply",
@@ -5324,9 +5411,10 @@ const runtimes = {
           "namedDispatch": true,
           "nested": "undocumented",
           "maxDepth": "undocumented",
-          "background": true,
+          "background": false,
           "subagentToolkit": "full",
-          "backgroundDispatch": true
+          "backgroundDispatch": false,
+          "isolation": "orchestrator-worktree"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -5334,6 +5422,14 @@ const runtimes = {
         "transport": "mcp",
         "runtime": "bun",
         "effortSurface": "argv"
+      },
+      "orchestratorExec": {
+        "command": "opencode",
+        "args": [
+          "run"
+        ],
+        "cwdFlag": "--dir",
+        "promptFlag": null
       },
       "hostBehaviors": {
         "reapplyCommand": "/gsd-update --reapply",
@@ -5396,7 +5492,8 @@ const runtimes = {
           "maxDepth": 0,
           "background": false,
           "backgroundDispatch": false,
-          "subagentToolkit": "undocumented"
+          "subagentToolkit": "undocumented",
+          "isolation": "none"
         },
         "modelMode": "active",
         "hookBus": "host",
@@ -5497,7 +5594,8 @@ const runtimes = {
           "maxDepth": 1,
           "background": true,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -5597,7 +5695,8 @@ const runtimes = {
           "maxDepth": "undocumented",
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "passive",
         "hookBus": "engine",
@@ -5653,7 +5752,8 @@ const runtimes = {
           "maxDepth": 5,
           "background": true,
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "undocumented"
         },
         "modelMode": "active",
         "hookBus": "engine",
@@ -5733,7 +5833,8 @@ const runtimes = {
           "maxDepth": "undocumented",
           "background": "undocumented",
           "subagentToolkit": "undocumented",
-          "backgroundDispatch": "undocumented"
+          "backgroundDispatch": "undocumented",
+          "isolation": "none"
         },
         "modelMode": "passive",
         "hookBus": "host",
@@ -5842,7 +5943,8 @@ const runtimes = {
           "maxDepth": "undocumented",
           "background": false,
           "subagentToolkit": "full",
-          "backgroundDispatch": false
+          "backgroundDispatch": false,
+          "isolation": "none"
         },
         "modelMode": "passive",
         "hookBus": "host",
