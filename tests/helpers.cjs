@@ -10,28 +10,91 @@ const { createFixture } = require('./fixtures/index.cjs');
 const processSeam = require('./helpers/process-seam.cjs');
 
 const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  TTY: '',
-  SSH_TTY: '',
-  // Config-LOCATION vars. Distinct in kind from the session-identity vars
-  // above: these decide WHERE a child writes, so leaving them ambient lets a
-  // test that sandboxes HOME still escape into the developer's real config dir.
-  CLAUDE_CONFIG_DIR: '',
-  GSD_RUNTIME: '',
-  CODEX_HOME: '',
-};
+
+// Session-IDENTITY vars. Blanked so a child cannot inherit the developer's
+// terminal/agent session and key shared state off it.
+const SESSION_IDENTITY_ENV_KEYS = [
+  'GSD_SESSION_KEY',
+  'CODEX_THREAD_ID',
+  'CLAUDE_SESSION_ID',
+  'CLAUDE_CODE_SSE_PORT',
+  'OPENCODE_SESSION_ID',
+  'GEMINI_SESSION_ID',
+  'CURSOR_SESSION_ID',
+  'WINDSURF_SESSION_ID',
+  'TERM_SESSION_ID',
+  'WT_SESSION',
+  'TMUX_PANE',
+  'ZELLIJ_SESSION_NAME',
+  'TTY',
+  'SSH_TTY',
+];
+
+// Config-LOCATION vars — distinct in kind from the session-identity vars above:
+// these decide WHERE a child writes, so leaving one ambient lets a test that
+// sandboxes HOME still escape into the developer's real config dir.
+//
+// #2665: this list is DERIVED, not hand-maintained. A hand-written list is
+// exactly what reopened this bug twice — it can only ever be as complete as the
+// author's recall, and every resolver in `runtime-homes.cts` is env-FIRST, so a
+// key missing here is a live escape hatch rather than a cosmetic gap. Sourcing
+// it from the same registry the resolver reads makes the scrub list structurally
+// incapable of being narrower than the surface it guards: adding a capability
+// that declares a new configHome env var extends this set in the same commit.
+const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
+
+// Config-location vars the registry does NOT carry, each with its reader:
+//   GROK_AGENTS_HOME — hardcoded `grok` branch in getGlobalConfigDir (src/runtime-homes.cts)
+//   GSD_RUNTIME      — selects WHICH runtime home resolves (src/model-resolver.cts)
+//   GSD_PROJECT      — planningDir() project segment (src/planning-workspace.cts)
+//   GSD_WORKSTREAM   — planningDir() workstream segment (src/planning-workspace.cts)
+const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
+  'GROK_AGENTS_HOME',
+  'GSD_RUNTIME',
+  'GSD_PROJECT',
+  'GSD_WORKSTREAM',
+];
+
+const CONFIG_LOCATION_ENV_KEYS = [
+  ...new Set([
+    ...Object.values(runtimes).flatMap((r) => r?.runtime?.configHome?.env ?? []),
+    ...NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS,
+  ]),
+].sort();
+
+const TEST_ENV_BASE = Object.fromEntries(
+  [...SESSION_IDENTITY_ENV_KEYS, ...CONFIG_LOCATION_ENV_KEYS].map((k) => [k, '']),
+);
+
+/**
+ * Save + clear every config-LOCATION env var on THIS process; returns a restorer.
+ *
+ * #2665: TEST_ENV_BASE only reaches CHILD processes. A test that calls the real
+ * installer IN-PROCESS — `install(true, 'claude')` — resolves through the same
+ * env-first `getGlobalConfigDir`, so an ambient CLAUDE_CONFIG_DIR beats a
+ * sandboxed `process.env.HOME` and a complete global install (agents/, commands/,
+ * skills/, gsd-core/, manifest, settings) lands in the developer's live config
+ * dir. No child-env scrub can reach that call; only clearing the parent's env can.
+ *
+ * Pair with a HOME sandbox, not instead of one: HOME covers the home-derived
+ * fallback, this covers the env-first branch that overrides it.
+ *
+ * @returns {() => void} restorer — call in afterEach to put the env back exactly
+ *   as it was (deleting keys that were previously unset, rather than setting '').
+ */
+function scrubConfigLocationEnv() {
+  const saved = {};
+  for (const key of CONFIG_LOCATION_ENV_KEYS) {
+    saved[key] = process.env[key];
+    delete process.env[key];
+  }
+  return function restoreConfigLocationEnv() {
+    for (const key of CONFIG_LOCATION_ENV_KEYS) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  };
+}
 
 /**
  * Run gsd-tools command.
@@ -762,4 +825,4 @@ function clearSessionEnv() {
   for (const k of SESSION_ENV_KEYS) delete process.env[k];
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH };
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH, TEST_ENV_BASE, SESSION_IDENTITY_ENV_KEYS, CONFIG_LOCATION_ENV_KEYS, scrubConfigLocationEnv };
