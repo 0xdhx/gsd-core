@@ -26,7 +26,7 @@ const { resolveRuntimeArtifactLayout, findInstallSourceRoot } = require('../gsd-
 const capabilityRegistry = require('../gsd-core/bin/lib/capability-registry.cjs');
 const installProfiles = require('../gsd-core/bin/lib/install-profiles.cjs');
 const { install } = require('../bin/install.js');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
@@ -687,6 +687,7 @@ describe('#1477 .gsd-source marker provisioning', () => {
   let savedUserProfile;
   let savedExplicitConfigDir;
   let savedTestMode;
+  let restoreConfigLocationEnv;
 
   function silenceConsole(fn) {
     const orig = { log: console.log, warn: console.warn, error: console.error };
@@ -732,6 +733,12 @@ describe('#1477 .gsd-source marker provisioning', () => {
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
     savedTestMode = process.env.GSD_TEST_MODE;
     process.env.GSD_TEST_MODE = '1';
+    // #2665: this block calls install(true, 'claude') IN-PROCESS. Redirecting
+    // HOME/USERPROFILE is not enough, because getGlobalConfigDir is env-FIRST:
+    // an ambient CLAUDE_CONFIG_DIR wins over the fixture and a full global
+    // install lands in the developer's live config dir. Found by the post-suite
+    // hermeticity guard (scripts/live-config-guard.cjs), not by inspection.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -743,6 +750,7 @@ describe('#1477 .gsd-source marker provisioning', () => {
     else process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     if (savedTestMode === undefined) delete process.env.GSD_TEST_MODE;
     else process.env.GSD_TEST_MODE = savedTestMode;
+    restoreConfigLocationEnv();
     cleanup(tmpRoot);
   });
 

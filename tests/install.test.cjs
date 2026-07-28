@@ -3825,7 +3825,7 @@ const SHARED_DIR = path.join(REPO_ROOT, 'gsd-core', 'bin', 'shared');
 
 const { install } = require('../bin/install.js');
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 const makeTmpDir = () => createTempDir('gsd-3571-');
 
 function silenceConsole(fn) {
@@ -3851,6 +3851,7 @@ describe('bug #3571: configuration generated manifests resolve in install layout
   let savedHome;
   let savedUserProfile;
   let savedExplicitConfigDir;
+  let restoreConfigLocationEnv;
 
   beforeEach(() => {
     tmpRoot = makeTmpDir();
@@ -3859,6 +3860,12 @@ describe('bug #3571: configuration generated manifests resolve in install layout
     savedUserProfile = process.env.USERPROFILE;
     savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    // #2665: this block calls the real installer IN-PROCESS with only HOME
+    // sandboxed. getGlobalConfigDir is env-FIRST, so an ambient CLAUDE_CONFIG_DIR
+    // (or CODEX_HOME, or any other runtime's config-location var) overrides that
+    // sandbox and a complete global install lands in the developer's live config
+    // dir. TEST_ENV_BASE cannot reach this — it only scrubs CHILD process env.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -3870,6 +3877,7 @@ describe('bug #3571: configuration generated manifests resolve in install layout
     } else {
       process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     }
+    restoreConfigLocationEnv();
     cleanup(tmpRoot);
   });
 
@@ -3982,7 +3990,7 @@ const { install } = require('../bin/install.js');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 const makeTmpDir = createTempDir;
 
 const rmTmpDir = cleanup;
@@ -4024,6 +4032,7 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
   let savedHome;
   let savedUserProfile;
   let savedExplicitConfigDir;
+  let restoreConfigLocationEnv;
 
   beforeEach(() => {
     tmpRoot = makeTmpDir('gsd-3288-');
@@ -4038,6 +4047,12 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
     // and target a different directory than tmpRoot (CR finding, PR #3293).
     savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    // #2665: this block calls the real installer IN-PROCESS with only HOME
+    // sandboxed. getGlobalConfigDir is env-FIRST, so an ambient CLAUDE_CONFIG_DIR
+    // (or CODEX_HOME, or any other runtime's config-location var) overrides that
+    // sandbox and a complete global install lands in the developer's live config
+    // dir. TEST_ENV_BASE cannot reach this — it only scrubs CHILD process env.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -4049,6 +4064,7 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
     } else {
       process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     }
+    restoreConfigLocationEnv();
     rmTmpDir(tmpRoot);
   });
 
@@ -7871,7 +7887,7 @@ const SHARED_DIR = path.join(REPO_ROOT, 'gsd-core', 'bin', 'shared');
 
 const { install } = require('../bin/install.js');
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 const makeTmpDir = () => createTempDir('gsd-3571-');
 
 function silenceConsole(fn) {
@@ -7897,6 +7913,7 @@ describe('bug #3571: configuration generated manifests resolve in install layout
   let savedHome;
   let savedUserProfile;
   let savedExplicitConfigDir;
+  let restoreConfigLocationEnv;
 
   beforeEach(() => {
     tmpRoot = makeTmpDir();
@@ -7905,6 +7922,12 @@ describe('bug #3571: configuration generated manifests resolve in install layout
     savedUserProfile = process.env.USERPROFILE;
     savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    // #2665: this block calls the real installer IN-PROCESS with only HOME
+    // sandboxed. getGlobalConfigDir is env-FIRST, so an ambient CLAUDE_CONFIG_DIR
+    // (or CODEX_HOME, or any other runtime's config-location var) overrides that
+    // sandbox and a complete global install lands in the developer's live config
+    // dir. TEST_ENV_BASE cannot reach this — it only scrubs CHILD process env.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -7916,6 +7939,7 @@ describe('bug #3571: configuration generated manifests resolve in install layout
     } else {
       process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     }
+    restoreConfigLocationEnv();
     cleanup(tmpRoot);
   });
 
@@ -8028,7 +8052,7 @@ const { install } = require('../bin/install.js');
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup, scrubConfigLocationEnv } = require('./helpers.cjs');
 const makeTmpDir = createTempDir;
 
 const rmTmpDir = cleanup;
@@ -8070,6 +8094,7 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
   let savedHome;
   let savedUserProfile;
   let savedExplicitConfigDir;
+  let restoreConfigLocationEnv;
 
   beforeEach(() => {
     tmpRoot = makeTmpDir('gsd-3288-');
@@ -8084,6 +8109,12 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
     // and target a different directory than tmpRoot (CR finding, PR #3293).
     savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    // #2665: this block calls the real installer IN-PROCESS with only HOME
+    // sandboxed. getGlobalConfigDir is env-FIRST, so an ambient CLAUDE_CONFIG_DIR
+    // (or CODEX_HOME, or any other runtime's config-location var) overrides that
+    // sandbox and a complete global install lands in the developer's live config
+    // dir. TEST_ENV_BASE cannot reach this — it only scrubs CHILD process env.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -8095,6 +8126,7 @@ describe('bug #3288: model-catalog.cjs install-layout resolution', () => {
     } else {
       process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     }
+    restoreConfigLocationEnv();
     rmTmpDir(tmpRoot);
   });
 
