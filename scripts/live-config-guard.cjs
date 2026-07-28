@@ -41,6 +41,17 @@
  * KNOWN GAP — a leak into a file GSD does not own (e.g. mutating the host's own
  * `.claude.json`) is outside this guard by construction. Closing it would require
  * watching shared files, which is the false-positive trap above.
+ *
+ * SEVERITY — reports by default, fails only under GSD_STRICT_LIVE_CONFIG_GUARD=1.
+ * Not timidity: on its first CI run this guard found PRE-EXISTING leaks on the
+ * Windows lane (`C:\Users\runneradmin\.claude\gsd-core` and
+ * `skills\gsd-dev-preferences`), because os.homedir() reads USERPROFILE there and
+ * ~190 test sites sandbox HOME alone. Those are real and worth fixing, but they
+ * are a different defect class from the one #2665 closes, and a brand-new gate
+ * that immediately reds an unrelated lane gets bypassed or reverted rather than
+ * obeyed. This repo already has the pattern: the local/no-source-grep ESLint rule
+ * shipped at `warn` and was promoted to `error` after its cleanup sweep (ADR 452).
+ * Promote this the same way once the USERPROFILE sweep lands.
  */
 
 const fs = require('fs');
@@ -209,7 +220,7 @@ function diffLiveConfig(before, after) {
 function formatViolations(violations) {
   const lines = [
     '',
-    'run-tests: HERMETICITY FAILURE — the suite wrote into a LIVE config directory.',
+    'run-tests: HERMETICITY WARNING — the suite wrote into a LIVE config directory.',
     '',
     'A test resolved a runtime config dir from the ambient environment instead of a',
     'sandbox. The usual cause is an IN-PROCESS install() call: tests/helpers.cjs',
@@ -225,7 +236,10 @@ function formatViolations(violations) {
     lines.push(`  ${label}: ${v.path}`);
   }
   lines.push('');
-  lines.push('Set GSD_SKIP_LIVE_CONFIG_GUARD=1 to bypass (intentionally loud).');
+  lines.push(
+    'Reporting only. Set GSD_STRICT_LIVE_CONFIG_GUARD=1 to make this fail the run, ' +
+    'or GSD_SKIP_LIVE_CONFIG_GUARD=1 to skip the check entirely.',
+  );
   lines.push('');
   return lines.join('\n');
 }

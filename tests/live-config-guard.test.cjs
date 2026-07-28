@@ -152,9 +152,10 @@ describe('#2665: live-config hermeticity guard', () => {
 
   test('the report names the path and the remedy', () => {
     const out = formatViolations([{ path: '/live/.claude/gsd-core', kind: 'created' }]);
-    assert.match(out, /HERMETICITY FAILURE/);
+    assert.match(out, /HERMETICITY WARNING/);
     assert.match(out, /\/live\/\.claude\/gsd-core/);
     assert.match(out, /scrubConfigLocationEnv/);
     assert.match(out, /GSD_SKIP_LIVE_CONFIG_GUARD/);
+    assert.match(out, /GSD_STRICT_LIVE_CONFIG_GUARD/);
   });
 });

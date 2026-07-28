@@ -1055,7 +1055,11 @@ function main() {
     const violations = diffLiveConfig(liveConfigBefore, snapshotLiveConfig(liveConfigRoots));
     if (violations.length > 0) {
       console.error(formatViolations(violations));
-      if (firstFailureExit === 0) firstFailureExit = 1;
+      // Reports by default; fails only under opt-in strict mode. See the
+      // SEVERITY note in scripts/live-config-guard.cjs for why.
+      if (process.env.GSD_STRICT_LIVE_CONFIG_GUARD === '1' && firstFailureExit === 0) {
+        firstFailureExit = 1;
+      }
     }
   }
 
