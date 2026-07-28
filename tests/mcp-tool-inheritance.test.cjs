@@ -200,6 +200,14 @@ describe('researcher Step-C dispatch ↔ tools frontmatter parity (#1284)', () =
 //     gsd-phase-researcher legitimately writes "for any other provider id `X`
 //     ... use `mcp__X__*`". Real server ids are longer. (Same false-positive
 //     hazard #1284 avoids by scoping to table rows.)
+//     A MULTI-character placeholder is spelled `mcp__<SERVER>__*` — the
+//     angle-bracket form is the sanctioned convention, and it is exempt by
+//     construction because `<` lies outside REFERENCE_RE's character class.
+//     `mcp__SERVER__*` is deliberately NOT exempt: an all-caps escape hatch
+//     would be a false NEGATIVE for any real server that happens to be spelled
+//     in caps, and a guard that misses a dead reference fails in the direction
+//     this whole check exists to prevent. Failing loudly on the bare-caps form
+//     costs one author one message, which names the convention.
 //   * MCP namespaces only. Built-in tool names (Read, Bash, Skill) are ordinary
 //     English words that appear throughout agent prose and would be pure noise.
 // ---
@@ -301,9 +309,10 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
       const ungranted = ungrantedServers(fs.readFileSync(path.join(AGENTS_DIR, file), 'utf8'));
       assert.deepStrictEqual(ungranted, [],
         `${file} documents mcp__${ungranted.join('__*, mcp__')}__* but its tools: allowlist ` +
-        'grants neither — those calls can never dispatch, so the instruction is dead and ' +
-        'invites the agent to claim a path it cannot take (#2526). Either grant the ' +
-        'namespace or drop the block.');
+        'grants none of them — those calls can never dispatch, so the instruction is dead ' +
+        'and invites the agent to claim a path it cannot take (#2526). Either grant the ' +
+        'namespace, drop the block, or — if this is a prose placeholder rather than a real ' +
+        'server — spell it `mcp__<SERVER>__*`, the angle-bracket form this check ignores.');
     });
   }
 
@@ -427,6 +436,26 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
         ungrantedServers(agent(['name: a', 'tools: Read, mcp__exa__*'],
           ['For any other provider id `X`: use `mcp__X__*` if available, else WebSearch.'])),
         []);
+    });
+
+    // The sanctioned spelling for a MULTI-character placeholder. Exempt by
+    // construction — `<` is outside REFERENCE_RE's character class — so this
+    // pins an existing property rather than adding a special case.
+    test('the angle-bracket placeholder form is not a reference', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read'],
+          ['For any provider: use `mcp__<SERVER>__*` when it is configured.'])),
+        []);
+    });
+
+    // The deliberate other half: a bare all-caps id still fires. Exempting it
+    // would be a false negative for any real server spelled in caps, and the
+    // failure message names the angle-bracket form instead.
+    test('a bare all-caps placeholder is still flagged, and fails closed', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read'],
+          ['For any provider `SERVER`: use `mcp__SERVER__*` when configured.'])),
+        ['server']);
     });
 
     // The metavariable exclusion is length===1 exactly: two characters is the
