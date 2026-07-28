@@ -154,6 +154,129 @@ describe('commonjs-marker: ownership predicate', () => {
   });
 });
 
+/**
+ * Fault injection (CONTRIBUTING.md:514-531, mandatory for install/uninstall
+ * flows). Every branch below is one whose doc comment claims it as the module's
+ * safety posture, and none of them is reachable from a happy-path test.
+ *
+ * These override fs methods and restore in `finally` rather than using
+ * `chmod 0o000`: chmod does not fault under root, so a permissions-based test
+ * passes vacuously with zero coverage in root Docker and CI containers.
+ */
+describe('commonjs-marker: fault injection', () => {
+  /** Swap one fs method for the duration of `fn`, restoring even on throw. */
+  function withPatched(key, impl, fn) {
+    const original = fs[key];
+    fs[key] = impl;
+    try {
+      return fn();
+    } finally {
+      fs[key] = original;
+    }
+  }
+
+  const errWith = (code) => Object.assign(new Error(`synthetic ${code}`), { code });
+
+  test('classifyMarker: a non-ENOENT lstat error fails CLOSED to foreign', (t) => {
+    const dir = mkTmp('cjs-marker-lstat-fault-');
+    t.after(() => cleanup(dir));
+    fs.writeFileSync(path.join(dir, 'package.json'), `${COMMONJS_MARKER}\n`);
+
+    // EACCES on the stat itself. Reporting `absent` here would license the
+    // overwrite this module exists to prevent, so the answer must be `foreign`.
+    const result = withPatched('lstatSync', () => { throw errWith('EACCES'); },
+      () => classifyMarker(dir));
+    assert.equal(result, 'foreign');
+  });
+
+  test('classifyMarker: ENOENT from lstat still reports absent', (t) => {
+    const dir = mkTmp('cjs-marker-enoent-');
+    t.after(() => cleanup(dir));
+    // The discriminating control for the test above: only ENOENT means absent.
+    const result = withPatched('lstatSync', () => { throw errWith('ENOENT'); },
+      () => classifyMarker(dir));
+    assert.equal(result, 'absent');
+  });
+
+  test('classifyMarker: an unreadable file fails CLOSED to foreign', (t) => {
+    const dir = mkTmp('cjs-marker-read-fault-');
+    t.after(() => cleanup(dir));
+    fs.writeFileSync(path.join(dir, 'package.json'), `${COMMONJS_MARKER}\n`);
+
+    // Present-but-unreadable never downgrades to the permissive answer — the
+    // file's bytes are exactly GSD's marker, and it must STILL classify foreign
+    // because we could not prove it.
+    const result = withPatched('readFileSync', () => { throw errWith('EACCES'); },
+      () => classifyMarker(dir));
+    assert.equal(result, 'foreign');
+  });
+
+  test('classifyMarker: a DIRECTORY at the marker path is foreign', (t) => {
+    const dir = mkTmp('cjs-marker-dir-');
+    t.after(() => cleanup(dir));
+    // CONTRIBUTING.md:521 names this case explicitly. The symlink case is
+    // covered above with a real symlink; the directory case needs no fault
+    // injection at all, just a real directory.
+    fs.mkdirSync(path.join(dir, 'package.json'));
+
+    assert.equal(classifyMarker(dir), 'foreign');
+    assert.equal(ensureCommonJsMarker(dir), 'preserved-foreign');
+    assert.equal(removeCommonJsMarker(dir), false);
+    assert.ok(fs.statSync(path.join(dir, 'package.json')).isDirectory(),
+      'the directory must survive untouched');
+  });
+
+  test('ensureCommonJsMarker: the TOCTOU EEXIST branch returns preserved-foreign', (t) => {
+    const dir = mkTmp('cjs-marker-toctou-');
+    t.after(() => cleanup(dir));
+
+    // classifyMarker says `absent`, then something appears at the path before
+    // the write lands. `flag:'wx'` turns that race into EEXIST instead of a
+    // follow-or-overwrite — this branch is the entire reason for `wx`.
+    const result = withPatched('writeFileSync', () => { throw errWith('EEXIST'); },
+      () => ensureCommonJsMarker(dir));
+    assert.equal(result, 'preserved-foreign');
+  });
+
+  test('ensureCommonJsMarker: a write error is reported, never thrown', (t) => {
+    const dir = mkTmp('cjs-marker-write-fault-');
+    t.after(() => cleanup(dir));
+
+    // EACCES on a read-only hooks/, EROFS, ENOSPC. Every other marker
+    // interaction is best-effort; this one used to be fatal and abort the whole
+    // install with a raw stack trace.
+    for (const code of ['EACCES', 'EROFS', 'ENOSPC']) {
+      const result = withPatched('writeFileSync', () => { throw errWith(code); },
+        () => ensureCommonJsMarker(dir));
+      assert.equal(result, 'failed', `${code} must report failed, not throw`);
+    }
+  });
+
+  test('ensureCommonJsMarker: a mkdir error is reported, never thrown', (t) => {
+    const dir = mkTmp('cjs-marker-mkdir-fault-');
+    t.after(() => cleanup(dir));
+
+    // Creating the directory is the same environmental hazard as writing into
+    // it, so it lives inside the same guard. This sat OUTSIDE the try until
+    // #2544 review round 2.
+    const result = withPatched('mkdirSync', () => { throw errWith('EROFS'); },
+      () => ensureCommonJsMarker(path.join(dir, 'nested')));
+    assert.equal(result, 'failed');
+  });
+
+  test('removeCommonJsMarker: an unlink failure returns false, never throws', (t) => {
+    const dir = mkTmp('cjs-marker-unlink-fault-');
+    t.after(() => cleanup(dir));
+    const target = path.join(dir, 'package.json');
+    fs.writeFileSync(target, `${COMMONJS_MARKER}\n`);
+
+    const result = withPatched('unlinkSync', () => { throw errWith('EACCES'); },
+      () => removeCommonJsMarker(dir));
+    assert.equal(result, false);
+    assert.ok(fs.existsSync(target), 'the file is still there — the report must say so');
+  });
+});
+
 describe('#2544 regression: install must not clobber the config-root package.json', () => {
   // hooks/dist is gitignored and built; scoped CI lanes do not run build:hooks,
   // so build it idempotently before driving a real install.
@@ -275,6 +398,30 @@ describe('#2544 regression: install must not clobber the config-root package.jso
     );
   });
 
+  test('uninstall does not prune a plugin dir GSD removed nothing from', (t) => {
+    const root = mkTmp('gsd-2544-rmdir-');
+    t.after(() => cleanup(root));
+    runInstall(root, 'opencode');
+
+    // Strip GSD's own artifacts by hand, leaving an EMPTY plugins/ directory
+    // that — from uninstall's point of view — GSD never filled. Hoisting the
+    // rmdir out of the adapter-exists guard (so the marker-only case could
+    // prune) must not widen it into deleting a user-created empty plugin dir:
+    // that is the same "don't touch territory GSD didn't fill" principle this
+    // issue is about, inverted.
+    const pluginsDir = path.join(root, 'plugins');
+    fs.unlinkSync(path.join(pluginsDir, 'gsd-core.js'));
+    fs.unlinkSync(path.join(pluginsDir, 'package.json'));
+    assert.deepEqual(fs.readdirSync(pluginsDir), [], 'precondition: the dir is empty');
+
+    runInstall(root, 'opencode', ['--uninstall']);
+
+    assert.ok(
+      fs.existsSync(pluginsDir),
+      'an empty plugin dir GSD removed nothing from must survive uninstall',
+    );
+  });
+
   test('uninstall reclaims the plugin-dir marker even if the adapter is already gone', (t) => {
     const root = mkTmp('gsd-2544-partial-');
     t.after(() => cleanup(root));
@@ -289,6 +436,123 @@ describe('#2544 regression: install must not clobber the config-root package.jso
     assert.ok(
       !fs.existsSync(path.join(root, 'plugins', 'package.json')),
       'the plugin-dir marker must be reclaimed even without the adapter',
+    );
+  });
+
+  test('a pre-existing hooks/ dir GSD never fills stays marker-free', (t) => {
+    const root = mkTmp('gsd-2544-stagedhooks-');
+    t.after(() => cleanup(root));
+
+    // The stated reason for gating the marker on `stagedHooks` rather than a
+    // plain existence check: hooks/ is shared space, and dropping a GSD marker
+    // into a directory the user created and GSD never wrote to is the same
+    // write-into-someone-else's-territory this issue is about. Windsurf declares
+    // hostBehaviors.skipSharedHooksInstall, so GSD never stages hooks for it.
+    const userHooks = path.join(root, 'hooks');
+    fs.mkdirSync(userHooks, { recursive: true });
+    fs.writeFileSync(path.join(userHooks, 'my-hook.js'), '// user-authored\n');
+
+    runInstall(root, 'windsurf');
+
+    assert.ok(
+      !fs.existsSync(path.join(userHooks, 'package.json')),
+      'GSD must not mark a hooks/ directory it never staged into',
+    );
+    assert.ok(
+      fs.existsSync(path.join(userHooks, 'my-hook.js')),
+      "the user's own hooks/ contents must be untouched",
+    );
+  });
+
+  test('pi: the extensions/ marker is installed and reclaimed on uninstall', (t) => {
+    const root = mkTmp('gsd-2544-pi-');
+    t.after(() => cleanup(root));
+
+    runInstall(root, 'pi');
+    const marker = path.join(root, 'extensions', 'package.json');
+    assert.ok(fs.existsSync(marker), 'pi extensions/package.json marker must be staged');
+    assert.equal(JSON.parse(fs.readFileSync(marker, 'utf8')).type, 'commonjs');
+
+    runInstall(root, 'pi', ['--uninstall']);
+    assert.ok(!fs.existsSync(marker), 'uninstall must remove the extensions/ marker it wrote');
+  });
+
+  test('pi: a user-authored extensions/package.json survives install and uninstall', (t) => {
+    const root = mkTmp('gsd-2544-pi-user-');
+    t.after(() => cleanup(root));
+
+    const extDir = path.join(root, 'extensions');
+    fs.mkdirSync(extDir, { recursive: true });
+    const userPkg = path.join(extDir, 'package.json');
+    fs.writeFileSync(userPkg, USER_PACKAGE_JSON);
+    const before = sha256(fs.readFileSync(userPkg));
+
+    runInstall(root, 'pi');
+    assert.equal(sha256(fs.readFileSync(userPkg)), before,
+      'install must not overwrite a user-authored extensions/package.json');
+
+    runInstall(root, 'pi', ['--uninstall']);
+    assert.ok(fs.existsSync(userPkg), 'uninstall must not remove it either');
+    assert.equal(sha256(fs.readFileSync(userPkg)), before);
+  });
+
+  test('kimi: the marker lives under hooks/, and the legacy root marker is retired', (t) => {
+    const root = mkTmp('gsd-2544-kimi-');
+    t.after(() => cleanup(root));
+
+    // HOME is redirected to `root`, so kimi's native hook root
+    // (resolveKimiHooksTomlDir → the `.kimi` dot-home) resolves inside the
+    // temp tree. That root is OUTSIDE kimi's configDir, which is why migration
+    // 007 cannot reach it and bin/install.js retires it directly.
+    const kimiRoot = path.join(root, '.kimi');
+
+    runInstall(root, 'kimi');
+    assert.ok(
+      fs.existsSync(path.join(kimiRoot, 'hooks', 'package.json')),
+      'kimi marker must be staged inside .kimi/hooks/',
+    );
+    assert.ok(
+      !fs.existsSync(path.join(kimiRoot, 'package.json')),
+      'kimi must not carry a marker at its native hook root',
+    );
+
+    // Model a pre-#2544 install, which left the marker at the .kimi root, then
+    // upgrade. The stale marker must be retired by the install itself.
+    fs.writeFileSync(path.join(kimiRoot, 'package.json'), `${COMMONJS_MARKER}\n`);
+    runInstall(root, 'kimi');
+    assert.ok(
+      !fs.existsSync(path.join(kimiRoot, 'package.json')),
+      'upgrading must retire the pre-#2544 marker at kimi\'s root',
+    );
+  });
+
+  test('kimi: a user-authored package.json at the .kimi root is never retired', (t) => {
+    const root = mkTmp('gsd-2544-kimi-user-');
+    t.after(() => cleanup(root));
+    const kimiRoot = path.join(root, '.kimi');
+    fs.mkdirSync(kimiRoot, { recursive: true });
+    const userPkg = path.join(kimiRoot, 'package.json');
+    fs.writeFileSync(userPkg, USER_PACKAGE_JSON);
+    const before = sha256(fs.readFileSync(userPkg));
+
+    runInstall(root, 'kimi');
+
+    assert.ok(fs.existsSync(userPkg), 'a user file at the .kimi root must survive');
+    assert.equal(sha256(fs.readFileSync(userPkg)), before);
+  });
+
+  test('kimi: uninstall reclaims the hooks/ marker', (t) => {
+    const root = mkTmp('gsd-2544-kimi-uninstall-');
+    t.after(() => cleanup(root));
+    const kimiRoot = path.join(root, '.kimi');
+
+    runInstall(root, 'kimi');
+    assert.ok(fs.existsSync(path.join(kimiRoot, 'hooks', 'package.json')));
+
+    runInstall(root, 'kimi', ['--uninstall']);
+    assert.ok(
+      !fs.existsSync(path.join(kimiRoot, 'hooks', 'package.json')),
+      'uninstall must remove the kimi hooks/ marker it wrote',
     );
   });
 
