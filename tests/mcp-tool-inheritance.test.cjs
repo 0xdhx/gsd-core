@@ -186,7 +186,10 @@ describe('researcher Step-C dispatch ↔ tools frontmatter parity (#1284)', () =
 // is handled by construction rather than by accumulating regex special cases.
 //
 // Deliberate scope boundaries (each keeps the check honest rather than merely
-// broad; all four are exercised by the negative controls below):
+// broad; every one is exercised by the negative controls below):
+//   * The scanned surface is the BODY plus the frontmatter `description`, which
+//     ships and is read by the dispatcher. The rest of the frontmatter is not
+//     scanned: `tools:` is the grant list itself and would self-reference.
 //   * SERVER-level, not exact-tool. A `mcp__playwright__navigate` grant counts
 //     as granting the `playwright` server. The bug class here is a server with
 //     ZERO grants; asserting exact tool names is a stricter, separate invariant.
@@ -261,11 +264,18 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
 
   /** MCP servers an agent documents but does not grant. Empty = consistent. */
   function ungrantedServers(content) {
-    const tokens = toolTokens((parseFrontmatter(content) || {}).tools);
+    const fm = parseFrontmatter(content) || {};
+    const tokens = toolTokens(fm.tools);
     if (tokens === null) return [];
     const granted = grantedServers(tokens);
     if (granted.has(GRANT_ALL)) return [];
-    return [...referencedServers(stripFrontmatter(content))]
+    // `description` ships with the agent and the dispatcher reads it, so an
+    // mcp__ reference there is exactly as dead as one in the body. Only that
+    // one field is scanned, never the whole frontmatter: `tools:` legitimately
+    // contains the grants themselves and would self-reference into a
+    // guaranteed pass.
+    const documented = `${String(fm.description ?? '')}\n${stripFrontmatter(content)}`;
+    return [...referencedServers(documented)]
       .filter((s) => !granted.has(s))
       .sort();
   }
@@ -426,6 +436,26 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
         ungrantedServers(agent(['name: a', 'tools: Read'],
           ['mcp__ab__foo()'])),
         ['ab']);
+    });
+
+    // The description ships and is read by the dispatcher, so it is part of
+    // what the agent "documents" — scanning only the body left it exempt.
+    test('an ungranted namespace in the description is flagged', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(
+          ['name: a', 'description: Captures screens via mcp__playwright__navigate.',
+            'tools: Read'],
+          ['The body names no MCP tool at all.'])),
+        ['playwright']);
+    });
+
+    // The `tools:` line is a grant list, not documentation of a call — scanning
+    // the whole frontmatter would let every allowlist satisfy itself.
+    test('the tools: line itself is never read as a body reference', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read, mcp__context7__*'],
+          ['No MCP call appears in this body.'])),
+        []);
     });
 
     test('an agent with no tools: key inherits everything', () => {
