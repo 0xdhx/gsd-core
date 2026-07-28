@@ -391,7 +391,9 @@ describe('agent-classification-parity: AGENTS.md section structure is the single
     const TOOLS_ROW = /^\|\s*\*\*Tools\*\*\s*\|\s*(.*?)\s*\|\s*$/;
     const H3 = /^###\s+(gsd-[\w-]+)\s*$/;
 
-    const lines = rawAgentsMd.split('\n');
+    // /\r?\n/, not '\n': Windows autocrlf yields CRLF, and a trailing \r would
+    // survive into the row's last cell and fail every comparison (local/no-crlf-fragile-split).
+    const lines = rawAgentsMd.split(/\r?\n/);
     const sections = [];
     lines.forEach((line, i) => {
       const m = H3.exec(line);
