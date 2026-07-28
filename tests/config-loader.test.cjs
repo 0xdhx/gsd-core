@@ -740,32 +740,9 @@ const { describe, test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createTempProject, cleanup, TOOLS_PATH } = require('./helpers.cjs');
+const { createTempProject, cleanup, TOOLS_PATH, TEST_ENV_BASE } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  TTY: '',
-  SSH_TTY: '',
-  // Config-LOCATION vars. Distinct in kind from the session-identity vars
-  // above: these decide WHERE a child writes, so leaving them ambient lets a
-  // test that sandboxes HOME still escape into the developer's real config dir.
-  CLAUDE_CONFIG_DIR: '',
-  GSD_RUNTIME: '',
-  CODEX_HOME: '',
-};
 
 /**
  * Run gsd-tools and return { stdout, stderr, status }.

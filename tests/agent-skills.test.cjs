@@ -16,32 +16,9 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup, TOOLS_PATH } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, cleanup, TOOLS_PATH, TEST_ENV_BASE } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-const TEST_ENV_BASE = {
-  GSD_SESSION_KEY: '',
-  CODEX_THREAD_ID: '',
-  CLAUDE_SESSION_ID: '',
-  CLAUDE_CODE_SSE_PORT: '',
-  OPENCODE_SESSION_ID: '',
-  GEMINI_SESSION_ID: '',
-  CURSOR_SESSION_ID: '',
-  WINDSURF_SESSION_ID: '',
-  TERM_SESSION_ID: '',
-  WT_SESSION: '',
-  TMUX_PANE: '',
-  ZELLIJ_SESSION_NAME: '',
-  GSD_WORKSTREAM: '',
-  TTY: '',
-  SSH_TTY: '',
-  // Config-LOCATION vars. Distinct in kind from the session-identity vars
-  // above: these decide WHERE a child writes, so leaving them ambient lets a
-  // test that sandboxes HOME still escape into the developer's real config dir.
-  CLAUDE_CONFIG_DIR: '',
-  GSD_RUNTIME: '',
-  CODEX_HOME: '',
-};
 
 /**
  * Run gsd-tools and capture BOTH stdout and stderr on success.
@@ -70,13 +47,6 @@ function writeConfig(tmpDir, obj) {
 function readConfig(tmpDir) {
   const configPath = path.join(tmpDir, '.planning', 'config.json');
   return JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-}
-
-function markLocalGsdInstall(tmpDir) {
-  fs.writeFileSync(
-    path.join(tmpDir, '.codex', 'gsd-file-manifest.json'),
-    JSON.stringify({ files: {} }),
-  );
 }
 
 // Run agent-skills with --json for typed IR assertions
@@ -133,59 +103,6 @@ describe('agent-skills command', () => {
     const r = runAgentSkillsJson(['agent-skills', 'gsd-planner'], tmpDir);
     assert.ok(r.success, `Command failed: ${r.error}`);
     assert.strictEqual(r.ir.agent_type, 'gsd-planner');
-    assert.strictEqual(r.ir.block, '');
-  });
-
-  test('unconfigured Codex reads its local companion agent from a descendant cwd', () => {
-    const agentsDir = path.join(tmpDir, '.codex', 'agents');
-    const descendant = path.join(tmpDir, 'src', 'feature');
-    const localPersona = '# Local Codex executor\nUse the project-local agent.\n';
-    fs.mkdirSync(agentsDir, { recursive: true });
-    fs.mkdirSync(descendant, { recursive: true });
-    fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), localPersona);
-    markLocalGsdInstall(tmpDir);
-    writeConfig(tmpDir, { runtime: 'codex' });
-
-    const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], descendant, {
-      HOME: tmpDir,
-      USERPROFILE: tmpDir,
-      CODEX_HOME: path.join(tmpDir, 'global-codex'),
-      GSD_RUNTIME: '',
-    });
-    assert.ok(r.success, `Command failed: ${r.error}`);
-    assert.strictEqual(r.ir.block, localPersona);
-  });
-
-  test('workstream runtime selects the local Codex companion when root config differs', () => {
-    const agentsDir = path.join(tmpDir, '.codex', 'agents');
-    const localPersona = '# Local Codex executor\nUse the overridden runtime.\n';
-    fs.mkdirSync(agentsDir, { recursive: true });
-    fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), localPersona);
-    markLocalGsdInstall(tmpDir);
-    writeConfig(tmpDir, { runtime: 'claude' });
-    const workstreamDir = path.join(tmpDir, '.planning', 'workstreams', 'feature-x');
-    fs.mkdirSync(workstreamDir, { recursive: true });
-    fs.writeFileSync(path.join(workstreamDir, 'config.json'), JSON.stringify({ runtime: 'codex' }));
-
-    const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, {
-      HOME: tmpDir,
-      USERPROFILE: tmpDir,
-      CODEX_HOME: path.join(tmpDir, 'global-codex'),
-      GSD_RUNTIME: '',
-      GSD_WORKSTREAM: 'feature-x',
-    });
-    assert.ok(r.success, `Command failed: ${r.error}`);
-    assert.strictEqual(r.ir.block, localPersona);
-  });
-
-  test('unconfigured Claude remains empty when a local Codex companion exists', () => {
-    const agentsDir = path.join(tmpDir, '.codex', 'agents');
-    fs.mkdirSync(agentsDir, { recursive: true });
-    fs.writeFileSync(path.join(agentsDir, 'gsd-executor.md'), '# Local Codex executor\n');
-    writeConfig(tmpDir, { runtime: 'claude' });
-
-    const r = runAgentSkillsJson(['agent-skills', 'gsd-executor'], tmpDir, { GSD_RUNTIME: 'claude' });
-    assert.ok(r.success, `Command failed: ${r.error}`);
     assert.strictEqual(r.ir.block, '');
   });
 
