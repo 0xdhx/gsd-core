@@ -47,8 +47,14 @@ export const COMMONJS_MARKER_CONTENT = `${COMMONJS_MARKER}\n`;
  */
 export type MarkerOwnership = 'absent' | 'gsd-owned' | 'foreign';
 
-/** Outcome of an `ensureCommonJsMarker` call, for caller-side reporting. */
-export type MarkerWriteOutcome = 'written' | 'unchanged' | 'preserved-foreign';
+/**
+ * Outcome of an `ensureCommonJsMarker` call, for caller-side reporting.
+ *
+ * `failed` is the best-effort outcome: the marker could not be written for an
+ * environmental reason (`EACCES` on a read-only `hooks/`, `EROFS`, `ENOSPC`).
+ * It is reported, never thrown — see `ensureCommonJsMarker`.
+ */
+export type MarkerWriteOutcome = 'written' | 'unchanged' | 'preserved-foreign' | 'failed';
 
 /** The marker path for a directory. */
 export function markerPathFor(dir: string): string {
@@ -93,13 +99,23 @@ export function classifyMarker(dir: string): MarkerOwnership {
  *
  * Creates `dir` when needed. Returns what happened so the caller can report
  * it; a `preserved-foreign` result is not an error — it is the guard working.
+ *
+ * NEVER THROWS. Every other marker interaction in this module is best-effort —
+ * `removeCommonJsMarker` swallows unlink failures, `classifyMarker` swallows
+ * read failures — and the write path is the one most likely to fail on a
+ * locked-down config dir (`EACCES` on a read-only `hooks/`, `EROFS`, `ENOSPC`).
+ * Letting it throw made an unwritable marker abort the entire install with a
+ * raw stack trace, which is a strictly worse outcome than hooks that resolve as
+ * ESM: the caller can warn and continue, and does. Both the `mkdir` and the
+ * write are inside the guard — creating the directory is the same environmental
+ * hazard as writing into it.
  */
 export function ensureCommonJsMarker(dir: string): MarkerWriteOutcome {
   const ownership = classifyMarker(dir);
   if (ownership === 'foreign') return 'preserved-foreign';
   if (ownership === 'gsd-owned') return 'unchanged';
-  fs.mkdirSync(dir, { recursive: true });
   try {
+    fs.mkdirSync(dir, { recursive: true });
     // Exclusive create closes the gap between classifying and writing: if
     // anything at all appeared at the path in between — including a symlink —
     // this fails with EEXIST instead of following or overwriting it.
@@ -107,7 +123,7 @@ export function ensureCommonJsMarker(dir: string): MarkerWriteOutcome {
     return 'written';
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'EEXIST') return 'preserved-foreign';
-    throw err;
+    return 'failed';
   }
 }
 

@@ -8575,10 +8575,18 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   if (_np) {
     const pluginsDir = path.join(targetDir, _np.dir);
     const pluginPath = path.join(pluginsDir, _np.file);
+    // Tracks whether GSD actually removed anything from pluginsDir. The rmdir
+    // below is gated on it: pruning a directory GSD never wrote to is the same
+    // "don't touch territory GSD didn't fill" violation this issue is about,
+    // just inverted — a user-created but empty plugin/ or extensions/ dir is
+    // theirs, and an uninstall that never removed anything has no business
+    // deleting it.
+    let removedFromPluginsDir = false;
     if (fs.existsSync(pluginPath)) {
       try {
         fs.unlinkSync(pluginPath);
         removedCount++;
+        removedFromPluginsDir = true;
         console.log(`  ${green}✓${reset} Removed native plugin adapter (${runtime})`);
       } catch (_) { /* best-effort */ }
     }
@@ -8591,9 +8599,16 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
     // still leaves any user-authored package.json in place.
     if (!fs.existsSync(pluginPath) && removeCommonJsMarker(pluginsDir)) {
       removedCount++;
+      removedFromPluginsDir = true;
       console.log(`  ${green}✓${reset} Removed GSD package.json from ${_np.dir}/`);
     }
-    try { fs.rmdirSync(pluginsDir); } catch (_) { /* not empty — user plugins present */ }
+    // Only prune a dir GSD emptied. Pre-fix this rmdir sat inside the
+    // adapter-exists guard, so it could never fire on a dir GSD had not
+    // written to; hoisting it out to catch the marker-only case must not
+    // silently widen it to "any empty plugin dir".
+    if (removedFromPluginsDir) {
+      try { fs.rmdirSync(pluginsDir); } catch (_) { /* not empty — user plugins present */ }
+    }
   }
 
   // 4a. Remove scripts/changeset/ and scripts/lib/ (#935)
@@ -11251,14 +11266,26 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // hooks/ directory the user created and GSD never wrote to — the same
     // write-into-someone-else's-territory this issue is about. And never
     // written over a package.json GSD does not own.
+    //
+    // ALSO gated on `hooksOk`: `stagedHooks` is computed from the SOURCE
+    // listing before the copy loop, so it stays true when the copies land but
+    // `verifyInstalled` then fails. Marking a hooks/ GSD did not successfully
+    // populate as CommonJS claims an ownership the install did not earn — the
+    // two flags answer different questions ("did we intend to fill it" vs "is
+    // it actually filled"), and the marker needs both.
     const hooksMarkerDir = path.join(destRootDir, 'hooks');
-    if (stagedHooks) {
+    if (stagedHooks && hooksOk) {
       switch (ensureCommonJsMarker(hooksMarkerDir)) {
         case 'written':
           console.log(`  ${green}✓${reset} Wrote hooks/package.json (CommonJS mode)`);
           break;
         case 'preserved-foreign':
           console.warn(`  ${yellow}⚠${reset}  Left existing hooks/package.json untouched (not GSD's marker) — GSD hooks may not resolve as CommonJS`);
+          break;
+        case 'failed':
+          // Best-effort: a read-only or full config dir must not abort the
+          // install with a raw stack trace. The hooks themselves are staged.
+          console.warn(`  ${yellow}⚠${reset}  Could not write hooks/package.json (CommonJS mode) — install continued; GSD hooks may not resolve as CommonJS`);
           break;
         default:
           break;
@@ -12006,6 +12033,20 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // leaves kimi's skills/agents artifacts installed correctly.
       if (!installSharedHooksBundle(kimiHooksRoot)) {
         console.warn(`  ${yellow}⚠${reset}  Kimi hook bundle did not verify at ${path.join(kimiHooksRoot, 'hooks')} — GSD lifecycle hooks may be incomplete`);
+      }
+      // #2544: retire the pre-fix marker at kimi's root. installSharedHooksBundle
+      // used to write {"type":"commonjs"} at destRootDir itself; it now writes it
+      // under destRootDir/hooks/, so on an upgrade the old root file is stale and
+      // would keep ~/.kimi pinned to CommonJS.
+      //
+      // Done HERE rather than in installer-migration 007 (which retires the same
+      // stale marker for every other runtime) because kimi's hook root is
+      // ~/.kimi — resolved by resolveKimiHooksTomlDir, OUTSIDE kimi's configDir.
+      // Migration relPaths are structurally confined to configDir, so the
+      // framework cannot address this path at all. Same exact-content predicate
+      // either way, so a user-authored ~/.kimi/package.json is never touched.
+      if (removeCommonJsMarker(kimiHooksRoot)) {
+        console.log(`  ${green}✓${reset} Removed stale package.json from ${kimiHooksRoot} (pre-#2544 marker)`);
       }
       const kimiHookOpts = { portableHooks: hasPortableHooks, runtime };
       const kimiHooksTomlPath = path.join(kimiHooksRoot, 'config.toml');

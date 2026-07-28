@@ -1134,10 +1134,19 @@ function _installNativePluginIfDeclared(
       // there, say so: the adapter is CommonJS and will not load under a
       // foreign `"type": "module"`, and a silent no-op would leave every guard
       // the adapter spawns dead with no diagnostic (the #2305 failure shape).
-      if (ensureCommonJsMarker(path.dirname(destPath)) === 'preserved-foreign') {
+      const markerOutcome = ensureCommonJsMarker(path.dirname(destPath));
+      if (markerOutcome === 'preserved-foreign') {
         console.warn(
           `  ⚠  ${np.dir}/package.json is not GSD's CommonJS marker — left untouched. `
           + `If it declares "type": "module", ${np.file} will not load.`,
+        );
+      } else if (markerOutcome === 'failed') {
+        // Best-effort, never fatal: an unwritable plugin dir must not abort the
+        // install. Same warn-and-continue posture as the foreign-marker branch —
+        // the adapter is staged either way, it just may not resolve as CommonJS.
+        console.warn(
+          `  ⚠  Could not write ${np.dir}/package.json (CommonJS marker) — install continued. `
+          + `If the config root declares "type": "module", ${np.file} will not load.`,
         );
       }
     }
