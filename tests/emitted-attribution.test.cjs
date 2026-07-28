@@ -36,7 +36,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const fc = require('fast-check');
 
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, createTempDir } = require('./helpers.cjs');
 const { BUILD_SCRIPT } = require('./helpers/install-shared.cjs');
 const {
   resolveChangedPaths,
@@ -47,9 +47,16 @@ const {
   currentManifests,
   currentSizes,
   readAckFile,
+  baselineFamilyNamesAtRef,
+  MANIFEST_FAMILIES,
+  MINIMUM_MANIFEST_FAMILIES,
+  REGISTRY_SIGNAL_PATHS,
+  FAMILY_REASON,
+  touchesRuntimeRegistry,
+  reconcileFamilies,
 } = require('./helpers/emitted-runtime.cjs');
 
-const { EXPECTED_MANIFEST_COUNT } = require('./helpers/emitted-provenance.cjs');
+const { EXPECTED_MANIFEST_COUNT, loadManifests } = require('./helpers/emitted-provenance.cjs');
 const {
   ACK_VERSION,
   sourceSatisfiedBy,
@@ -656,6 +663,416 @@ test('property: every moved key lands in exactly one bucket', () => {
   );
 });
 
+// ─── Family reconciliation (#2723 correction) ────────────────────────────────
+//
+// #2723 shipped `EXPECTED_MANIFEST_COUNT = 19` asserted against BOTH the baseline (built
+// at the base ref) and the current tree (built at PR HEAD). Those sides legitimately
+// differ by one family whenever a PR adds or removes a runtime, so no value satisfied
+// both: 19 rejected the current side, 20 rejected the baseline side. Every runtime-adding
+// PR was hard-blocked — found by tracing #2005 (Qoder) through the gate.
+//
+// Driven at PURE-FUNCTION altitude on purpose. The real-tree test below skips wherever no
+// base ref exists (the gsd-test runner shallow-clones, so `origin/*` is absent), so a
+// regression written at that altitude would silently skip on the very runner that has to
+// prove RED.
+
+const ALL_FAMILIES = MANIFEST_FAMILIES.map((f) => f.name);
+const REGISTRY_CHANGE = ['tests/helpers/install-shared.cjs'];
+// The shape a shipping caller passes: repo-relative POSIX paths from `git diff --name-only`.
+const CONTENT_ONLY_CHANGE = ['gsd-core/workflows/plan-phase.md'];
+
+const derivedOf = (names) => names.map((name) => ({ name, runtime: name, scope: 'global' }));
+const manifestsOf = (names) => Object.fromEntries(names.map((n) => [n, { 'some/emitted/path': 'hash' }]));
+
+/** Build a fully-consistent reconciliation input, then override one facet per test. */
+function reconcileWith({ derivedNames = ALL_FAMILIES, fixtureNames, baselineNames, currentNames, ...rest }) {
+  return reconcileFamilies({
+    derived: derivedOf(derivedNames),
+    fixtures: fixtureNames || derivedNames,
+    baseline: manifestsOf(baselineNames || derivedNames),
+    current: manifestsOf(currentNames || derivedNames),
+    changedPaths: CONTENT_ONLY_CHANGE,
+    ...rest,
+  });
+}
+
+const codesOf = (r) => r.errors.map((e) => e.code);
+
+test('reason codes are a frozen, locked set', () => {
+  assert.deepEqual(Object.keys(FAMILY_REASON).sort(), [
+    'ADDED_UNATTRIBUTED', 'BAD_CHANGED_PATHS', 'BASELINE_UNUSABLE', 'BELOW_FLOOR',
+    'CURRENT_UNUSABLE', 'DERIVED_UNUSABLE', 'DROPPED_UNATTRIBUTED',
+    'FIXTURES_UNUSABLE', 'FIXTURE_WITHOUT_RUNTIME', 'MISSING_CLAUDE_LOCAL',
+    'RUNTIME_WITHOUT_FIXTURE',
+  ]);
+  assert.ok(Object.isFrozen(FAMILY_REASON));
+});
+
+test('passes when every family signal agrees', () => {
+  assert.deepEqual(reconcileWith({}), { ok: true, errors: [] });
+});
+
+test('the count export agrees with the derived family set (divergence guard)', () => {
+  // The #2723 defect was two surfaces carrying independent notions of this number.
+  assert.equal(EXPECTED_MANIFEST_COUNT, MANIFEST_FAMILIES.length);
+  assert.ok(EXPECTED_MANIFEST_COUNT >= MINIMUM_MANIFEST_FAMILIES);
+});
+
+// ── The deadlock itself ──────────────────────────────────────────────────────
+
+test('permits an added family attributed to a runtime-registry change', () => {
+  const withQoder = [...ALL_FAMILIES, 'qoder'];
+  const r = reconcileWith({
+    derivedNames: withQoder,
+    baselineNames: ALL_FAMILIES,   // base ref predates the new runtime
+    currentNames: withQoder,
+    changedPaths: REGISTRY_CHANGE,
+  });
+  assert.deepEqual(r, { ok: true, errors: [] });
+});
+
+test('rejects an added family with no runtime-registry change, naming it', () => {
+  const withQoder = [...ALL_FAMILIES, 'qoder'];
+  const r = reconcileWith({
+    derivedNames: withQoder,
+    baselineNames: ALL_FAMILIES,
+    currentNames: withQoder,
+    changedPaths: CONTENT_ONLY_CHANGE,
+  });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.errors, [{ code: FAMILY_REASON.ADDED_UNATTRIBUTED, family: 'qoder' }]);
+});
+
+test('permits a dropped family attributed to a runtime-registry change', () => {
+  const without = ALL_FAMILIES.filter((n) => n !== 'trae');
+  const r = reconcileWith({
+    derivedNames: without,
+    baselineNames: ALL_FAMILIES,
+    currentNames: without,
+    changedPaths: REGISTRY_CHANGE,
+    minimum: 18,
+  });
+  assert.deepEqual(r, { ok: true, errors: [] });
+});
+
+test('rejects a silently dropped family, naming it', () => {
+  const without = ALL_FAMILIES.filter((n) => n !== 'trae');
+  const r = reconcileWith({
+    derivedNames: without,
+    baselineNames: ALL_FAMILIES,
+    currentNames: without,
+    changedPaths: CONTENT_ONLY_CHANGE,
+    minimum: 18,
+  });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.errors, [{ code: FAMILY_REASON.DROPPED_UNATTRIBUTED, family: 'trae' }]);
+});
+
+test('attribution is the ONLY permission path, symmetrically', () => {
+  // No ack-style bypass on either side: a one-sided escape hatch would make removals
+  // easier to wave through than additions, and the drift-ack file covers unattributable
+  // emitted-PATH deltas, not family churn.
+  const without = ALL_FAMILIES.filter((n) => n !== 'trae');
+  const added = [...ALL_FAMILIES, 'qoder'];
+  for (const [names, baselineNames, code, family] of [
+    [without, ALL_FAMILIES, FAMILY_REASON.DROPPED_UNATTRIBUTED, 'trae'],
+    [added, ALL_FAMILIES, FAMILY_REASON.ADDED_UNATTRIBUTED, 'qoder'],
+  ]) {
+    const r = reconcileWith({
+      derivedNames: names, baselineNames, currentNames: names,
+      changedPaths: CONTENT_ONLY_CHANGE, minimum: 18,
+    });
+    assert.equal(r.ok, false);
+    assert.deepEqual(r.errors, [{ code, family }]);
+  }
+});
+
+test('an add and a drop together are permitted when attributed', () => {
+  const swapped = [...ALL_FAMILIES.filter((n) => n !== 'trae'), 'qoder'];
+  const r = reconcileWith({
+    derivedNames: swapped,
+    baselineNames: ALL_FAMILIES,
+    currentNames: swapped,
+    changedPaths: REGISTRY_CHANGE,
+  });
+  assert.deepEqual(r, { ok: true, errors: [] });
+});
+
+test('an EQUAL-COUNT membership swap is caught in both directions', () => {
+  // 19 in, 19 out — invisible to any count-based check. This is why the contract is
+  // set-based rather than numeric.
+  const swapped = [...ALL_FAMILIES.filter((n) => n !== 'trae'), 'qoder'];
+  const r = reconcileWith({
+    derivedNames: swapped,
+    baselineNames: ALL_FAMILIES,
+    currentNames: swapped,
+    changedPaths: CONTENT_ONLY_CHANGE,
+  });
+  assert.equal(swapped.length, ALL_FAMILIES.length, 'the swap must leave the totals equal');
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.errors.slice().sort((a, b) => a.code.localeCompare(b.code)), [
+    { code: FAMILY_REASON.ADDED_UNATTRIBUTED, family: 'qoder' },
+    { code: FAMILY_REASON.DROPPED_UNATTRIBUTED, family: 'trae' },
+  ]);
+});
+
+// ── Single-tree drift ────────────────────────────────────────────────────────
+
+test('rejects a fixture with no registered runtime, naming it', () => {
+  const r = reconcileWith({ fixtureNames: [...ALL_FAMILIES, 'ghost'] });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.errors, [{ code: FAMILY_REASON.FIXTURE_WITHOUT_RUNTIME, family: 'ghost' }]);
+});
+
+test('rejects a registered runtime with no fixture, naming it', () => {
+  const r = reconcileWith({
+    derivedNames: [...ALL_FAMILIES, 'qoder'],
+    fixtureNames: ALL_FAMILIES,
+    baselineNames: [...ALL_FAMILIES, 'qoder'],
+    currentNames: [...ALL_FAMILIES, 'qoder'],
+    changedPaths: REGISTRY_CHANGE,
+  });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.errors, [{ code: FAMILY_REASON.RUNTIME_WITHOUT_FIXTURE, family: 'qoder' }]);
+});
+
+// ── The absolute floor: limit-1 / limit / limit+1 ────────────────────────────
+
+test('floor is enforced at limit-1 / limit / limit+1', () => {
+  const eighteen = ALL_FAMILIES.filter((n) => n !== 'trae');          // limit-1
+  const twenty = [...ALL_FAMILIES, 'qoder'];                          // limit+1
+
+  const below = reconcileWith({
+    derivedNames: eighteen, baselineNames: eighteen, currentNames: eighteen,
+  });
+  assert.equal(below.ok, false);
+  assert.ok(codesOf(below).includes(FAMILY_REASON.BELOW_FLOOR));
+
+  assert.deepEqual(reconcileWith({}), { ok: true, errors: [] });      // limit == 19
+
+  const above = reconcileWith({
+    derivedNames: twenty, baselineNames: twenty, currentNames: twenty,
+  });
+  assert.deepEqual(above, { ok: true, errors: [] });
+});
+
+test('a uniformly shrunken universe fails on the floor', () => {
+  // The Goodhart move the old literal permitted: drop a runtime AND its fixture together
+  // and lower the constant, and 18 === 18 passes over a smaller world.
+  const eighteen = ALL_FAMILIES.filter((n) => n !== 'trae');
+  const r = reconcileWith({
+    derivedNames: eighteen, fixtureNames: eighteen,
+    baselineNames: eighteen, currentNames: eighteen,
+    changedPaths: REGISTRY_CHANGE,
+  });
+  assert.equal(r.ok, false);
+  assert.deepEqual(codesOf(r), [FAMILY_REASON.BELOW_FLOOR]);
+});
+
+// ── #2086: claude-local is pinned by name on both sides ──────────────────────
+
+test('a missing claude-local family is named on either side', () => {
+  const noLocal = ALL_FAMILIES.filter((n) => n !== 'claude-local');
+  const missingCurrent = reconcileWith({
+    currentNames: noLocal, changedPaths: REGISTRY_CHANGE,
+  });
+  assert.ok(codesOf(missingCurrent).includes(FAMILY_REASON.MISSING_CLAUDE_LOCAL));
+
+  const missingBaseline = reconcileWith({
+    baselineNames: noLocal, changedPaths: REGISTRY_CHANGE,
+  });
+  assert.ok(codesOf(missingBaseline).includes(FAMILY_REASON.MISSING_CLAUDE_LOCAL));
+});
+
+// ── Hostile / malformed input: explicit failure, never a quiet ok ────────────
+
+test('unusable baseline and current are rejected explicitly, not read as empty', () => {
+  for (const bad of [null, undefined, [], 'nope', 0]) {
+    const r = reconcileFamilies({
+      derived: derivedOf(ALL_FAMILIES), fixtures: ALL_FAMILIES,
+      baseline: bad, current: manifestsOf(ALL_FAMILIES), changedPaths: [],
+    });
+    assert.deepEqual(r, { ok: false, errors: [{ code: FAMILY_REASON.BASELINE_UNUSABLE }] });
+  }
+  for (const bad of [null, undefined, [], 'nope', 0]) {
+    const r = reconcileFamilies({
+      derived: derivedOf(ALL_FAMILIES), fixtures: ALL_FAMILIES,
+      baseline: manifestsOf(ALL_FAMILIES), current: bad, changedPaths: [],
+    });
+    assert.deepEqual(r, { ok: false, errors: [{ code: FAMILY_REASON.CURRENT_UNUSABLE }] });
+  }
+});
+
+test('a non-array changedPaths is an explicit error, never a silent "no registry change"', () => {
+  for (const bad of [null, undefined, 'tests/helpers/install-shared.cjs', {}, 7]) {
+    const r = reconcileWith({ changedPaths: bad });
+    assert.deepEqual(r, { ok: false, errors: [{ code: FAMILY_REASON.BAD_CHANGED_PATHS }] });
+  }
+});
+
+test('malformed derived and fixtures inputs fail with a verdict, not a TypeError', () => {
+  // Every input is gated. An unhandled throw here would read as an infrastructure fault
+  // rather than a gate verdict, which is how a propagation check goes quiet.
+  for (const bad of [null, undefined, 'nope', {}, [{ nope: 1 }], [null]]) {
+    const r = reconcileFamilies({
+      derived: bad, fixtures: ALL_FAMILIES,
+      baseline: manifestsOf(ALL_FAMILIES), current: manifestsOf(ALL_FAMILIES),
+      changedPaths: [],
+    });
+    assert.deepEqual(r, { ok: false, errors: [{ code: FAMILY_REASON.DERIVED_UNUSABLE }] });
+  }
+  for (const bad of [null, undefined, 'nope', {}, [1], [null]]) {
+    const r = reconcileFamilies({
+      derived: derivedOf(ALL_FAMILIES), fixtures: bad,
+      baseline: manifestsOf(ALL_FAMILIES), current: manifestsOf(ALL_FAMILIES),
+      changedPaths: [],
+    });
+    assert.deepEqual(r, { ok: false, errors: [{ code: FAMILY_REASON.FIXTURES_UNUSABLE }] });
+  }
+});
+
+// ── Registry attribution ─────────────────────────────────────────────────────
+
+test('each registry-signal path independently attributes a family change', () => {
+  for (const p of [...REGISTRY_SIGNAL_PATHS, 'capabilities/qoder/capability.json']) {
+    assert.equal(touchesRuntimeRegistry([p]), true, `${p} should attribute`);
+  }
+  // Narrow on purpose: surfaces that merely accompany a runtime addition must NOT
+  // excuse an unattributed family delta.
+  for (const p of ['src/runtime-name-policy.cts', 'gsd-core/bin/lib/capability-registry.cjs']) {
+    assert.equal(touchesRuntimeRegistry([p]), false, `${p} must NOT attribute on its own`);
+  }
+});
+
+test('backslash-separated registry paths normalize unconditionally', () => {
+  // Path separators normalize on every platform — backslash paths arrive on Linux too.
+  assert.equal(touchesRuntimeRegistry(['tests\\helpers\\install-shared.cjs']), true);
+  assert.equal(touchesRuntimeRegistry(['capabilities\\qoder\\capability.json']), true);
+});
+
+test('near-miss paths do not attribute a family change', () => {
+  for (const p of [
+    'capabilities/qoder/other.json',
+    'capabilities/capability.json',
+    'tests/helpers/install-shared.cjs.bak',
+    'docs/tests/helpers/install-shared.cjs',
+    'gsd-core/workflows/plan-phase.md',
+  ]) {
+    assert.equal(touchesRuntimeRegistry([p]), false, `${p} should NOT attribute`);
+  }
+  assert.equal(touchesRuntimeRegistry([]), false);
+});
+
+// ── The baseline must come from the REF, not from HEAD's registry ────────────
+
+test('baseline families are enumerated from the ref, not from the current registry', (t) => {
+  // Regression: enumerating the baseline from MANIFEST_FAMILIES (imported at module load,
+  // so it describes PR HEAD) makes a REMOVED runtime invisible — the name is already gone
+  // from the current registry, so the base ref is never asked for it, and the dropped-
+  // family check can never fire in production even though its unit tests pass.
+  //
+  // Built as its own git repo rather than reaching for this repo's history. The gsd-test
+  // runner shallow-clones base+head, so `rev-list --max-parents=0` there returns the
+  // GRAFTED boundary commit — a recent one carrying every fixture — not a true root. (This
+  // repo also has two root commits locally.) A history-dependent assertion passes on a full
+  // clone and fails in the runner, which is exactly what it did.
+  const repo = createTempDir('emitted-baseline-ref');
+  t.after(() => cleanup(repo));
+  const run = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 30_000 });
+
+  run('init', '--quiet', '-b', 'main');
+  run('config', 'user.email', 'test@example.invalid');
+  run('config', 'user.name', 'Test');
+  const fixtureDir = path.join(repo, ...'tests/fixtures/golden-install-parity'.split('/'));
+  fs.mkdirSync(fixtureDir, { recursive: true });
+
+  // Deliberately includes a family that is NOT in today's registry. This is the real
+  // discriminator: a registry-derived implementation can never report it, because the name
+  // does not exist in MANIFEST_FAMILIES — which is precisely how a REMOVED runtime went
+  // invisible and made the dropped-family check unreachable in production.
+  const atRefOnly = 'zzz-retired-runtime';
+  const committed = ['claude', 'claude-local', atRefOnly];
+  for (const name of committed) {
+    fs.writeFileSync(path.join(fixtureDir, `${name}.json`), JSON.stringify({ 'a/b': 'hash' }));
+  }
+  run('add', '-A');
+  run('commit', '--quiet', '-m', 'fixtures');
+
+  assert.ok(
+    !ALL_FAMILIES.includes(atRefOnly),
+    'the probe family must be absent from the current registry for this test to discriminate',
+  );
+  assert.deepEqual(
+    baselineFamilyNamesAtRef('HEAD', { cwd: repo }).slice().sort(),
+    committed.slice().sort(),
+    'the baseline must report what the REF carries, including a family the current registry lacks',
+  );
+
+  // A ref that cannot be resolved yields nothing rather than throwing, which is the
+  // post-cutover signal to fall back to resolveBaseline's cache path.
+  assert.deepEqual(baselineFamilyNamesAtRef('refs/heads/no-such-ref-2723', { cwd: repo }), []);
+
+  // Deliberately NOT asserted against the ambient checkout. Reading this repo's own HEAD is
+  // not guaranteed inside the runner container — it returned [] there, which is this
+  // function's documented behavior when git cannot read the ref, not a defect. Asserting on
+  // it tests the checkout rather than the code, and the temp repo above already proves the
+  // property that matters: the family set follows the REF. The ambient path is covered by
+  // the real-tree test, which skips explicitly when no base ref is resolvable.
+  //
+  // A git failure is never silently permissive downstream: baselineManifestsAtRef returns
+  // null on an empty family set, and the real-tree test asserts the baseline is non-empty.
+});
+
+// ── Independence / purity ────────────────────────────────────────────────────
+
+test('reconciliation is pure across repeated calls', () => {
+  const args = {
+    derivedNames: [...ALL_FAMILIES, 'qoder'],
+    baselineNames: ALL_FAMILIES,
+    currentNames: [...ALL_FAMILIES, 'qoder'],
+    changedPaths: CONTENT_ONLY_CHANGE,
+  };
+  assert.deepEqual(reconcileWith(args), reconcileWith(args));
+});
+
+// ── Property: the reported delta is exactly the set difference ───────────────
+
+test('property: reported added/dropped are exactly the set differences', () => {
+  fc.assert(
+    fc.property(
+      fc.uniqueArray(fc.string({ minLength: 1, maxLength: 6 }).filter((s) => !/^\s*$/.test(s)), { minLength: 0, maxLength: 5 }),
+      fc.uniqueArray(fc.integer({ min: 0, max: ALL_FAMILIES.length - 2 }), { minLength: 0, maxLength: 4 }),
+      (rawAdds, dropIdx) => {
+        const added = rawAdds.filter((s) => !ALL_FAMILIES.includes(s));
+        // never drop claude-local: it has its own dedicated assertion
+        const dropped = dropIdx
+          .map((i) => ALL_FAMILIES[i])
+          .filter((n) => n !== 'claude-local');
+        const current = [...ALL_FAMILIES.filter((n) => !dropped.includes(n)), ...added];
+
+        const r = reconcileFamilies({
+          derived: derivedOf(current),
+          fixtures: current,
+          baseline: manifestsOf(ALL_FAMILIES),
+          current: manifestsOf(current),
+          changedPaths: CONTENT_ONLY_CHANGE,
+          minimum: 0,
+        });
+
+        const reportedAdded = r.errors
+          .filter((e) => e.code === FAMILY_REASON.ADDED_UNATTRIBUTED).map((e) => e.family).sort();
+        const reportedDropped = r.errors
+          .filter((e) => e.code === FAMILY_REASON.DROPPED_UNATTRIBUTED).map((e) => e.family).sort();
+
+        assert.deepEqual(reportedAdded, [...new Set(added)].sort());
+        assert.deepEqual(reportedDropped, [...new Set(dropped)].sort());
+        return true;
+      },
+    ),
+    { numRuns: 200, seed: 2723 },
+  );
+});
+
 // ─── The real thing: the law, run against the actual tree ───────────────────
 //
 // Everything above exercises the pure law against synthetic input, which is what makes
@@ -719,22 +1136,25 @@ test('differential attribution over the real tree', { timeout: 900_000 }, async 
   const ack = readAckFile();
   const current = currentManifests();
 
-  // Assert against the INDEPENDENT expected count, not just baseline-vs-current.
-  // Comparing the two sides to each other cannot catch a family dropped from BOTH —
-  // which is exactly what happened with claude-local: 18 === 18 passed vacuously while
-  // the 19th family went unchecked.
-  assert.equal(
-    Object.keys(baseline).length,
-    EXPECTED_MANIFEST_COUNT,
-    `baseline must cover all ${EXPECTED_MANIFEST_COUNT} emitted manifest families`,
+  // Reconcile the family SET across three independent signals, rather than asserting one
+  // count against both sides. The baseline is built at the base ref and the current tree
+  // at PR HEAD, so the two legitimately differ by a family whenever a PR adds or removes
+  // a runtime — a single shared literal could satisfy neither side at once (#2723), and
+  // a count cannot see a membership swap that leaves the total unchanged either way.
+  const familyVerdict = reconcileFamilies({
+    derived: MANIFEST_FAMILIES,
+    fixtures: loadManifests().map((m) => m.file.replace(/\.json$/, '')),
+    baseline,
+    current,
+    changedPaths,
+  });
+  assert.ok(
+    familyVerdict.ok,
+    'emitted manifest family set is not reconciled:\n  ' +
+    familyVerdict.errors
+      .map((e) => (e.family ? `${e.code}: ${e.family}` : e.code))
+      .join('\n  '),
   );
-  assert.equal(
-    Object.keys(current).length,
-    EXPECTED_MANIFEST_COUNT,
-    `current must cover all ${EXPECTED_MANIFEST_COUNT} emitted manifest families`,
-  );
-  assert.ok(baseline['claude-local'], 'the claude local-scope layout (#2086) must be covered');
-  assert.ok(current['claude-local'], 'the claude local-scope layout (#2086) must be covered');
 
   const result = diffEmitted({
     baseline,

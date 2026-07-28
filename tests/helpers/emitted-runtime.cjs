@@ -36,7 +36,8 @@ const { execFileSync } = require('node:child_process');
 
 const { cleanup } = require('../helpers.cjs');
 const {
-  RUNTIME_META,
+  MANIFEST_FAMILIES,
+  MINIMUM_MANIFEST_FAMILIES,
   runMinimalInstall,
   buildParityManifest,
 } = require('./install-shared.cjs');
@@ -46,25 +47,180 @@ const ACK_PATH = path.join(REPO_ROOT, 'tests', 'emitted-drift-ack.json');
 const FIXTURE_SUBDIR = 'tests/fixtures/golden-install-parity';
 
 /**
- * The emitted manifest families, as (fixtureName -> install spec).
+ * Repo paths whose presence in a PR diff attributes a CHANGE TO THE FAMILY SET —
+ * a runtime being added or removed — as opposed to a change in emitted content.
  *
- * NOT simply `Object.keys(RUNTIME_META)`: that has 18 entries while the fixture set has
- * 19. The extra one is `claude-local` — claude is the reference host and the ONLY
- * runtime with a distinct LOCAL "legacy flat-commands" layout (`commands/gsd-*.md` +
- * `agents/gsd-*.md` at project scope), which `golden-install-parity.test.cjs` guards
- * with a hand-coded test outside its RUNTIME_META loop (#2086).
+ * Deliberately NARROW: only the two surfaces that actually define the family set —
+ * `RUNTIME_META`'s home, and a runtime's capability descriptor. Every extra path here
+ * widens what silently excuses an unattributed family delta, so adjacent surfaces that
+ * merely *accompany* a runtime addition (name-policy, capability registry) are left out
+ * on purpose. A PR that adds a runtime necessarily touches one of these two.
  *
- * Enumerating from RUNTIME_META alone dropped that family from BOTH sides of the
- * differential, so a same-count self-check (18 === 18) passed vacuously and a PR
- * changing Claude's local-scope output would fail the golden while this check reported
- * ok. That disagreement is exactly what the dual-run window is meant to surface as a
- * provenance-table hole — so a wiring omission masquerading as one is the worst
- * possible failure here. Derived explicitly, and asserted against the fixture count.
+ * Deliberately path-based rather than diff-hunk-parsing: asserting that a diff adds a
+ * specific `RUNTIME_META` key would be a source-grep test, which this repo prohibits.
+ * The residual — a PR touching one of these for an unrelated reason may permit an
+ * otherwise-unexplained family delta — is recorded in the ADR-2719 risk register and is
+ * one class weaker than the false-attribution risk already accepted there.
  */
-const MANIFEST_FAMILIES = [
-  ...Object.keys(RUNTIME_META).map((runtime) => ({ name: runtime, runtime, scope: 'global' })),
-  { name: 'claude-local', runtime: 'claude', scope: 'local' },
+const REGISTRY_SIGNAL_PATHS = [
+  'tests/helpers/install-shared.cjs',
 ];
+
+/**
+ * A capability descriptor: `capabilities/<runtime>/capability.json`, exactly one segment deep.
+ *
+ * Anchored, with `[^/]+` for the runtime segment. A prefix+suffix pair is NOT equivalent and
+ * was wrong: `capabilities/capability.json` satisfies both `startsWith('capabilities/')` and
+ * `endsWith('/capability.json')` with no runtime segment at all, and
+ * `capabilities/a/b/capability.json` satisfies them at the wrong depth. Both would have
+ * excused an unattributed family delta.
+ */
+const REGISTRY_SIGNAL_PATTERN = /^capabilities\/[^/]+\/capability\.json$/;
+
+/**
+ * Reason codes for family reconciliation.
+ *
+ * Frozen and asserted as a set, so adding a code is a coordinated three-part change
+ * (enum, emitter, the test that locks the key list). Tests assert on these codes, never
+ * on rendered prose — the repo prohibits raw text matching on produced output.
+ */
+const FAMILY_REASON = Object.freeze({
+  BELOW_FLOOR: 'below_floor',
+  FIXTURE_WITHOUT_RUNTIME: 'fixture_without_runtime',
+  RUNTIME_WITHOUT_FIXTURE: 'runtime_without_fixture',
+  ADDED_UNATTRIBUTED: 'added_unattributed',
+  DROPPED_UNATTRIBUTED: 'dropped_unattributed',
+  MISSING_CLAUDE_LOCAL: 'missing_claude_local',
+  BASELINE_UNUSABLE: 'baseline_unusable',
+  CURRENT_UNUSABLE: 'current_unusable',
+  DERIVED_UNUSABLE: 'derived_unusable',
+  FIXTURES_UNUSABLE: 'fixtures_unusable',
+  BAD_CHANGED_PATHS: 'bad_changed_paths',
+});
+
+/** Path separators normalize UNCONDITIONALLY — backslash paths arrive on Linux too. */
+function toPosix(p) {
+  return String(p).replace(/\\/g, '/');
+}
+
+/** True when `changedPaths` plausibly alters the runtime registry. */
+function touchesRuntimeRegistry(changedPaths) {
+  return changedPaths.some((raw) => {
+    const p = toPosix(raw);
+    return REGISTRY_SIGNAL_PATHS.includes(p) || REGISTRY_SIGNAL_PATTERN.test(p);
+  });
+}
+
+/**
+ * Reconcile the emitted manifest FAMILY SET across the three independent signals.
+ *
+ * ── Why this is not a count ──────────────────────────────────────────────────
+ * #2723 shipped a single literal (`EXPECTED_MANIFEST_COUNT = 19`) asserted against both
+ * the baseline (built at the base ref) and the current tree (built at PR HEAD). Those
+ * two legitimately differ by one family whenever a PR adds or removes a runtime, so no
+ * value of that literal could satisfy both: 19 rejected the current side, 20 rejected
+ * the baseline side. Every PR adding a runtime was hard-blocked.
+ *
+ * Equally important, a count cannot see a MEMBERSHIP SWAP — add one family and remove
+ * another and the totals still match while both changes go unexamined. The contract is
+ * therefore set-based in both directions.
+ *
+ * ── The three signals ────────────────────────────────────────────────────────
+ *   derived   what the runtime registry says this tree emits   (MANIFEST_FAMILIES)
+ *   fixtures  what this tree has recorded                      (the committed glob)
+ *   baseline  what existed before this PR                      (families at the base ref)
+ *
+ * derived-vs-fixtures catches drift on a single tree; baseline-vs-current catches an
+ * unexplained change to the set; and the floor catches the case neither can — a universe
+ * that shrank uniformly, which a same-count self-check passes vacuously.
+ *
+ * Pure and IO-free by construction: the real-tree caller skips wherever no base ref
+ * exists (the gsd-test runner shallow-clones, so `origin/*` is absent), which would make
+ * a regression written at that altitude silently skip instead of proving anything.
+ *
+ * @param {object} o
+ * @param {Array<{name:string}>} o.derived     families the registry implies
+ * @param {string[]}             o.fixtures    family names recorded on this tree
+ * @param {object|null}          o.baseline    manifests at the base ref (keyed by family)
+ * @param {object|null}          o.current     manifests at PR HEAD (keyed by family)
+ * @param {string[]}             o.changedPaths repo-relative paths this PR changed
+ * @param {number}               [o.minimum]   absolute floor
+ * @returns {{ok: boolean, errors: Array<{code: string, family?: string}>}}
+ */
+function reconcileFamilies({
+  derived,
+  fixtures,
+  baseline,
+  current,
+  changedPaths,
+  minimum = MINIMUM_MANIFEST_FAMILIES,
+} = {}) {
+  const errors = [];
+  const add = (code, family) => errors.push(family ? { code, family } : { code });
+
+  // Hostile-input gates first, and EVERY input gets one. Each returns an explicit code —
+  // never a quiet ok (indistinguishable from "the tree is clean" for a gate) and never an
+  // unhandled TypeError, which would read as an infrastructure fault rather than a verdict.
+  if (!Array.isArray(changedPaths)) {
+    add(FAMILY_REASON.BAD_CHANGED_PATHS);
+    return { ok: false, errors };
+  }
+  if (!Array.isArray(derived) || derived.some((f) => !f || typeof f.name !== 'string')) {
+    add(FAMILY_REASON.DERIVED_UNUSABLE);
+    return { ok: false, errors };
+  }
+  if (!Array.isArray(fixtures) || fixtures.some((n) => typeof n !== 'string')) {
+    add(FAMILY_REASON.FIXTURES_UNUSABLE);
+    return { ok: false, errors };
+  }
+  if (baseline === null || baseline === undefined || typeof baseline !== 'object' || Array.isArray(baseline)) {
+    add(FAMILY_REASON.BASELINE_UNUSABLE);
+    return { ok: false, errors };
+  }
+  if (current === null || current === undefined || typeof current !== 'object' || Array.isArray(current)) {
+    add(FAMILY_REASON.CURRENT_UNUSABLE);
+    return { ok: false, errors };
+  }
+
+  const derivedNames = new Set(derived.map((f) => f.name));
+  const fixtureNames = new Set(fixtures);
+  const baselineNames = new Set(Object.keys(baseline));
+  const currentNames = new Set(Object.keys(current));
+
+  // The floor. Independent of every derivation, so a uniformly shrunken universe cannot
+  // satisfy it by moving both sides together.
+  if (derivedNames.size < minimum) add(FAMILY_REASON.BELOW_FLOOR);
+
+  // Single-tree drift: the registry and the recorded fixtures must describe one world.
+  for (const name of fixtureNames) {
+    if (!derivedNames.has(name)) add(FAMILY_REASON.FIXTURE_WITHOUT_RUNTIME, name);
+  }
+  for (const name of derivedNames) {
+    if (!fixtureNames.has(name)) add(FAMILY_REASON.RUNTIME_WITHOUT_FIXTURE, name);
+  }
+
+  // #2086: claude's local-scope layout is a family in its own right and was once dropped
+  // from both sides at once. Pinned by name on both, never inferred from a total.
+  if (!currentNames.has('claude-local')) add(FAMILY_REASON.MISSING_CLAUDE_LOCAL, 'claude-local');
+  if (!baselineNames.has('claude-local')) add(FAMILY_REASON.MISSING_CLAUDE_LOCAL, 'claude-local');
+
+  // Cross-tree set difference, both directions, with ONE permission path: the PR
+  // plausibly touched the runtime registry. Symmetric on purpose — an ack-style bypass on
+  // only one side would make removals easier to wave through than additions, and the
+  // drift-ack file exists for unattributable emitted-PATH deltas, not for family churn.
+  const attributed = touchesRuntimeRegistry(changedPaths);
+
+  if (!attributed) {
+    for (const name of currentNames) {
+      if (!baselineNames.has(name)) add(FAMILY_REASON.ADDED_UNATTRIBUTED, name);
+    }
+    for (const name of baselineNames) {
+      if (!currentNames.has(name)) add(FAMILY_REASON.DROPPED_UNATTRIBUTED, name);
+    }
+  }
+
+  return { ok: errors.length === 0, errors };
+}
 
 /** Bounded git invocation. CLAUDE.md → KNOWN DEFECTS: every git subprocess needs a
  *  timeout (5-30s); an unbounded execFileSync is an indefinite hang, and it is how
@@ -152,6 +308,35 @@ function resolveBase(env = process.env) {
 }
 
 /**
+ * Family names present in the fixture directory AT `base`.
+ *
+ * Enumerated from the ref itself, NOT from `MANIFEST_FAMILIES` — that constant is
+ * imported at module load and therefore describes PR HEAD's registry. Deriving the
+ * baseline from it makes a REMOVED runtime invisible: the name is already gone from the
+ * current registry, so the loop never asks the base ref for it, `baseline` silently omits
+ * a family that genuinely existed, and the dropped-family check can never fire. Asking
+ * the ref what it actually contains is the only way the "before" side is really "before".
+ */
+function baselineFamilyNamesAtRef(base, { cwd = REPO_ROOT } = {}) {
+  let out;
+  try {
+    out = git(['ls-tree', '--name-only', base, `${FIXTURE_SUBDIR}/`], { cwd });
+  } catch {
+    return []; // fixtures absent at that ref (e.g. after Phase 4's cutover)
+  }
+  return out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.endsWith('.json'))
+    .map((line) => line.slice(line.lastIndexOf('/') + 1).replace(/\.json$/, ''))
+    // These names become object keys below. They now come from git output rather than a
+    // trusted constant, so a fixture committed as `__proto__.json` would turn
+    // `manifests[name] = parsed` into a prototype write. Compared inline (not via a Set)
+    // because that is the form the prototype-pollution analysis recognizes.
+    .filter((name) => name !== '__proto__' && name !== 'constructor' && name !== 'prototype');
+}
+
+/**
  * Emitted manifest set at `base`, read from the committed fixtures at that ref.
  * Returns null when the fixtures are absent at `base` (i.e. after Phase 4's cutover),
  * which is the signal to fall back to `resolveBaseline`'s cache path.
@@ -159,7 +344,7 @@ function resolveBase(env = process.env) {
 function baselineManifestsAtRef(base = 'origin/next') {
   const manifests = {};
   let found = 0;
-  for (const { name } of MANIFEST_FAMILIES) {
+  for (const name of baselineFamilyNamesAtRef(base)) {
     let raw;
     try {
       raw = git(['show', `${base}:${FIXTURE_SUBDIR}/${name}.json`]);
@@ -255,12 +440,18 @@ module.exports = {
   ACK_PATH,
   FIXTURE_SUBDIR,
   MANIFEST_FAMILIES,
+  MINIMUM_MANIFEST_FAMILIES,
+  REGISTRY_SIGNAL_PATHS,
+  FAMILY_REASON,
+  touchesRuntimeRegistry,
+  reconcileFamilies,
   GIT_TIMEOUT_MS,
   git,
   resolveChangedPaths,
   resolveBaseSha,
   baseRefCandidates,
   resolveBase,
+  baselineFamilyNamesAtRef,
   baselineManifestsAtRef,
   baselineSizesAtRef,
   currentManifests,
