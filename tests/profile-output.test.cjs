@@ -223,8 +223,13 @@ describe('write-profile command', () => {
       [],
       'a call site that sandboxes HOME must not write into an ambient CLAUDE_CONFIG_DIR'
     );
+    // Containment via path.relative, not startsWith: startsWith(ambientConfigDir)
+    // also matches a SIBLING like `<tmp>/ambient-live-config-2`, so it can report
+    // a false leak. A path is inside the dir iff the relative path neither escapes
+    // with '..' nor is absolute.
+    const rel = path.relative(ambientConfigDir, out.profile_path);
     assert.ok(
-      !out.profile_path.startsWith(ambientConfigDir),
+      rel.startsWith('..') || path.isAbsolute(rel),
       `profile must not resolve under the ambient config dir, got: ${out.profile_path}`
     );
   });
