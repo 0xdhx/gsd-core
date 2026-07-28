@@ -186,12 +186,37 @@ process.stdin.on('end', () => {
     }
     const wtTopRaw = wtTopResult.stdout.trim();
 
-    const rawFilePath = data.tool_input?.file_path || '';
+    // #2595 (review Major 3): read the field TYPED. `?.file_path || ''` let a
+    // non-string through — `[]` and `{}` are truthy, so they survived the
+    // `!rawFilePath` check and threw inside path.isAbsolute() below, landing in
+    // this script's outer `catch { process.exit(0) }`. That is the same
+    // crash-to-allow #2547 closes elsewhere, reached through the guard's own
+    // read rather than through normalization, and it is NOT closed by making
+    // `path` authoritative: normalization returns early for native Claude Code
+    // payloads (KIMI_TOOL_NAMES has no 'Edit' entry), so `{"tool_name":"Edit",
+    // "tool_input":{"file_path":[]}}` reached it untouched — this guard's
+    // original #260 surface. Same shape as hooks/gsd-windsurf-pre-write.js:75.
+    const rawFilePath = typeof data.tool_input?.file_path === 'string'
+      ? data.tool_input.file_path
+      : '';
     if (!rawFilePath) {
       process.exit(0);
     }
 
-    // Relative paths are always safe — they resolve relative to CWD inside the worktree
+    // Relative paths resolve against the tool's CWD, which is inside the worktree
+    // — so under the runtime this guard was written for they cannot leave it.
+    //
+    // #2595 (review Minor 5) — state the premise rather than leave it implicit,
+    // because THIS PR is what widened the guard's reach to Kimi. "Always safe"
+    // holds only while every runtime reaching here either rejects relative paths
+    // or resolves them against the worktree CWD. Claude Code's Edit/Write require
+    // an absolute file_path, so the original #260 surface satisfies it by
+    // construction. kimi-cli's StrReplaceFile takes `path` with no documented
+    // absoluteness guarantee, and its resolution behaviour is NOT verified here
+    // (no source available to this repo at 4a550ef beyond the schema). If it
+    // resolves relative paths against anything other than the tool CWD, a
+    // `../`-laden path exits 0 at this line and escapes the worktree. Stating a
+    // mechanism and an unverified premise — not asserting a live bypass.
     if (!path.isAbsolute(rawFilePath)) {
       process.exit(0);
     }

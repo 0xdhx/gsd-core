@@ -3808,6 +3808,72 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
     });
   });
 
+  // 5d. #2595 (review Major 3) — the non-string `file_path` crash-to-allow, read
+  // WITHOUT a string `path` to mask it.
+  //
+  // The 5c cases above pair a non-string file_path with a valid cross-root
+  // `path`, so they pass because the authoritative-path overwrite replaces the
+  // bad value before the read. That is real coverage of the SHADOWING fix, but
+  // the review was right that it is not coverage of the crash: drop the `path`
+  // key and the identical payload took `data.tool_input?.file_path || ''` ->
+  // `[]` (truthy, survives the `!rawFilePath` early-out) -> `path.isAbsolute([])`
+  // -> TypeError -> outer `catch { process.exit(0) }`.
+  //
+  // READ THE ASSERTION HONESTLY: these expect exit 0, and pre-fix code ALSO
+  // exits 0 — via the catch instead of via the early-out. There is no black-box
+  // signature that separates them, so these cases document the fail-open and
+  // guard against a future change that makes a malformed payload BLOCK; they do
+  // not detect a revert. The gate that fails on a revert is the source-level
+  // invariant in tests/kimi-guard-typed-payload-reads.test.cjs. Asserting exit 0
+  // here and calling it regression coverage would repeat, one level up, exactly
+  // the false-green the review flagged in 5c.
+  describe('#2595: a non-string file_path with no path key fails open explicitly', () => {
+    for (const [label, filePath] of [
+      ['array', []],
+      ['object', {}],
+      ['number', 42],
+      ['boolean', true],
+    ]) {
+      test(`native Claude Edit with a ${label} file_path exits 0 without crashing`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'Edit',
+          tool_input: { file_path: filePath },
+        });
+        assert.strictEqual(result.status, 0,
+          `a malformed file_path has no path to check and must fail open quietly, ` +
+          `not block. Got exit ${result.status}. stderr: ${result.stderr}`);
+        assert.strictEqual(result.stdout, '');
+      });
+
+      test(`Kimi payload with a ${label} file_path and no path key exits 0`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'StrReplaceFile',
+          tool_input: { file_path: filePath, edit: [{ old: 'orig', new: 'pwned' }] },
+        });
+        assert.strictEqual(result.status, 0,
+          `with no string path to normalize from, there is nothing to check. ` +
+          `Got exit ${result.status}. stderr: ${result.stderr}`);
+        assert.strictEqual(result.stdout, '');
+      });
+    }
+
+    // Control: the SAME payload shape with a string cross-root file_path must
+    // still block, proving the typed read did not narrow the guard's reach.
+    test('control: a string cross-root file_path with no path key still blocks', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'Edit',
+        tool_input: { file_path: path.join(mainRepo, 'src', 'index.ts') },
+      });
+      assert.strictEqual(result.status, 2,
+        `typing the read must not stop the guard seeing legitimate string paths. ` +
+        `Got exit ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+    });
+  });
+
   // 6. Sibling directory path is BLOCKED (validates the '/' boundary check AND prefix-overlap)
   describe('sibling path is blocked', () => {
     test('path that shares prefix with worktree root but is a sibling exits 2', () => {

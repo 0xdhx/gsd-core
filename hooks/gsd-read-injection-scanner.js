@@ -226,7 +226,11 @@ process.stdin.on('end', () => {
     // Source label + path-exclusion (path-exclusion applies to file reads only)
     let source;
     if (toolName === 'Read') {
-      source = data.tool_input?.file_path || '';
+      // #2595 (review Major 3, sibling sweep): typed read — a non-string
+      // threw inside isExcludedPath()'s .replace() into the outer catch.
+      source = typeof data.tool_input?.file_path === 'string'
+        ? data.tool_input.file_path
+        : '';
       if (!source) process.exit(0);
       if (isExcludedPath(source)) process.exit(0);
     } else if (toolName === 'WebFetch') {

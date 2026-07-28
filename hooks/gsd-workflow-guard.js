@@ -219,7 +219,14 @@ process.stdin.on('end', () => {
     }
 
     // Check the file being edited
-    const filePath = data.tool_input?.file_path || data.tool_input?.path || '';
+    // #2595 (review Major 3, sibling sweep): typed read on BOTH fields. The
+    // `&& value` keeps the original truthiness fallback intact — an empty
+    // file_path must still fall through to `path`, which a bare typeof test
+    // would have broken.
+    const filePath =
+      (typeof data.tool_input?.file_path === 'string' && data.tool_input.file_path) ||
+      (typeof data.tool_input?.path === 'string' && data.tool_input.path) ||
+      '';
 
     // Allow edits to .planning/ files (GSD state management)
     if (filePath.includes('.planning/') || filePath.includes('.planning\\')) {

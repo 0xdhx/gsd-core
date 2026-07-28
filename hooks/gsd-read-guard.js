@@ -154,7 +154,11 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
 
-    const filePath = data.tool_input?.file_path || '';
+    // #2595 (review Major 3, sibling sweep): typed read — same class as the
+    // worktree guard's, advisory-only here (no exit(2) path in this hook).
+    const filePath = typeof data.tool_input?.file_path === 'string'
+      ? data.tool_input.file_path
+      : '';
     if (!filePath) {
       process.exit(0);
     }

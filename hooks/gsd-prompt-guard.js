@@ -141,7 +141,12 @@ process.stdin.on('end', () => {
       process.exit(0);
     }
 
-    const filePath = data.tool_input?.file_path || '';
+    // #2595 (review Major 3, sibling sweep): typed read. A non-string
+    // file_path threw at the .includes() below into the outer catch,
+    // silencing this injection scan the same way a shadowed new_string did.
+    const filePath = typeof data.tool_input?.file_path === 'string'
+      ? data.tool_input.file_path
+      : '';
 
     // Only scan files going into .planning/ (agent context files)
     if (!filePath.includes('.planning/') && !filePath.includes('.planning\\')) {
