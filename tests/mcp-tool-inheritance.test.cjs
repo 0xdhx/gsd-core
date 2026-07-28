@@ -467,6 +467,16 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
         ['ab']);
     });
 
+    // Limit-1, completing the boundary triple (0 / 1 / 2). A zero-length id is
+    // unrepresentable by REFERENCE_RE — `+?` requires at least one character —
+    // so it is skipped by the pattern, never by the length===1 exclusion.
+    test('a zero-length server id is not representable, and not a reference', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read'],
+          ['mcp____foo()'])),
+        []);
+    });
+
     // The description ships and is read by the dispatcher, so it is part of
     // what the agent "documents" — scanning only the body left it exempt.
     test('an ungranted namespace in the description is flagged', () => {
