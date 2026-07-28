@@ -208,6 +208,11 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
   // and hyphens (mcp__plugin_context7_context7__, mcp__chrome-devtools__).
   const REFERENCE_RE = /mcp__([A-Za-z0-9_-]+?)__/g;
 
+  // Sentinel for "this allowlist grants every MCP server". Safe as a Set member
+  // alongside real server ids: `*` is outside REFERENCE_RE's character class, so
+  // no body reference can ever produce it and collide.
+  const GRANT_ALL = '*';
+
   // The frontmatter parser preserves an INLINE comment inside a scalar value
   // (`tools: Read # mcp__playwright__*` parses as the literal string
   // `Read # mcp__playwright__*`), so a commented-out grant would otherwise read
@@ -224,11 +229,18 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
       .filter(Boolean);
   }
 
-  /** Server ids granted, from any accepted grant spelling. */
+  /** Server ids granted, from any accepted grant spelling. `GRANT_ALL` = every server. */
   function grantedServers(tokens) {
     const servers = new Set();
     for (const token of tokens) {
       if (!token.startsWith('mcp__')) continue;
+      // A bare `mcp__*` is a wildcard over EVERY server, not a grant of the
+      // empty-string server id. Without this branch it strips to '' and is
+      // dropped by the `if (server)` guard below, so the one grant spelling
+      // that plainly covers any body would flag every reference in it —
+      // inverting the guard against a correct agent. A bare `mcp__` (no star)
+      // is a typo rather than a wildcard and keeps failing closed.
+      if (/^mcp__\*+$/.test(token)) { servers.add(GRANT_ALL); continue; }
       const rest = token.slice('mcp__'.length).replace(/\*+$/, '');
       // `mcp__srv__*` and `mcp__srv__tool` both grant `srv`; so does bare `mcp__srv`.
       const server = rest.includes('__') ? rest.slice(0, rest.indexOf('__')) : rest;
@@ -252,6 +264,7 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
     const tokens = toolTokens((parseFrontmatter(content) || {}).tools);
     if (tokens === null) return [];
     const granted = grantedServers(tokens);
+    if (granted.has(GRANT_ALL)) return [];
     return [...referencedServers(stripFrontmatter(content))]
       .filter((s) => !granted.has(s))
       .sort();
@@ -319,6 +332,23 @@ describe('agent tools: allowlist covers every documented MCP namespace (#2526)',
         ungrantedServers(agent(['name: a', 'tools: Read, mcp__playwright'],
           ['mcp__playwright__navigate()'])),
         []);
+    });
+
+    // `mcp__*` strips to the empty string; without the wildcard branch it is
+    // dropped as a grant of nothing, and the guard fires against an allowlist
+    // that plainly covers the body — the one input shape that inverts it.
+    test('a bare mcp__* wildcard grants every server', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read, mcp__*'],
+          ['mcp__playwright__navigate()', 'mcp__chrome-devtools__take_screenshot()'])),
+        []);
+    });
+
+    test('a bare mcp__ without a wildcard is a typo, not a grant', () => {
+      assert.deepStrictEqual(
+        ungrantedServers(agent(['name: a', 'tools: Read, mcp__'],
+          ['mcp__playwright__navigate()'])),
+        ['playwright']);
     });
 
     test('reads block-sequence tools:, not just the inline CSV form', () => {
