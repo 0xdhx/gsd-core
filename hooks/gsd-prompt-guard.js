@@ -71,7 +71,8 @@ function normalizeKimiPayload(data) {
     // #2547 (review): Kimi's `path` is AUTHORITATIVE — it must win outright,
     // not merely fill in when `file_path` happens to be absent. kimi-cli's file
     // tools carry no `file_path` field at all (src/kimi_cli/tools/file/write.py,
-    // replace.py), and soul/toolset.py hands the model's raw json-parsed
+    // replace.py, @ 4a550ef — the SHA #2547 pins), and soul/toolset.py hands the
+    // model's raw json-parsed
     // arguments to PreToolUse verbatim, doing typed validation only later inside
     // tool.call() — after the hook has already decided. So a `file_path` in a
     // Kimi payload is ALWAYS model-supplied, and under the old `=== undefined`
@@ -106,12 +107,20 @@ function normalizeKimiPayload(data) {
       // arrays, plain objects), so nothing downstream — including
       // gsd-prompt-guard's scan of new_string — loses content it saw before.
       const editText = (v) => { try { return String(v ?? ''); } catch { return ''; } };
-      if (input.old_string === undefined) {
-        input.old_string = edits.map((e) => editText(e?.old)).join('\n');
-      }
-      if (input.new_string === undefined) {
-        input.new_string = edits.map((e) => editText(e?.new)).join('\n');
-      }
+      // #2595 (review Major 2): reconstruct UNCONDITIONALLY, mirroring the
+      // `path` decision above rather than merely filling in when the field
+      // happens to be absent. kimi-cli's StrReplaceFile schema is `path` +
+      // `edit` only (src/kimi_cli/tools/file/replace.py @ 4a550ef) — it carries
+      // no `old_string`/`new_string` at all, so either field appearing in a
+      // Kimi payload is ALWAYS model-supplied, exactly like `file_path`. Under
+      // the old `=== undefined` condition a model-supplied `new_string: ""`
+      // SHADOWED the reconstruction, leaving gsd-prompt-guard's injection scan
+      // reading '' and exiting at its `if (!content)` before it ever saw the
+      // real `edit[].new` — a one-key bypass of the very scan this fix's
+      // guarded coercion exists to keep fed. A `typeof` test would NOT close
+      // it: a benign non-empty string shadows just as effectively as ''.
+      input.old_string = edits.map((e) => editText(e?.old)).join('\n');
+      input.new_string = edits.map((e) => editText(e?.new)).join('\n');
     }
   }
   return data;
