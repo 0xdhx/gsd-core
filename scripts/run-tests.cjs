@@ -39,6 +39,12 @@ const { readdirSync, readFileSync } = require('fs');
 const { join, basename } = require('path');
 const { execFileSync } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
+const {
+  resolveLiveConfigRoots,
+  snapshotLiveConfig,
+  diffLiveConfig,
+  formatViolations,
+} = require('./live-config-guard.cjs');
 
 const SUITES = ['all', 'unit', 'integration', 'install', 'security', 'slow', 'qa'];
 
@@ -965,6 +971,18 @@ function main() {
   // job cap. Operator/test override via RUN_TESTS_CHUNK_TIMEOUT_MS.
   const chunkTimeoutMs = positiveNumberEnv(process.env.RUN_TESTS_CHUNK_TIMEOUT_MS, 600000);
 
+  // #2665: snapshot GSD's install footprint in every LIVE runtime config dir
+  // before a single test runs. The suite must not write there; the check after
+  // the chunk loop is what makes a violation loud instead of silent. See
+  // scripts/lib/live-config-guard.cjs for why the scope is narrow.
+  const liveConfigGuardEnabled = process.env.GSD_SKIP_LIVE_CONFIG_GUARD !== '1';
+  let liveConfigRoots = [];
+  let liveConfigBefore = null;
+  if (liveConfigGuardEnabled) {
+    liveConfigRoots = resolveLiveConfigRoots();
+    if (liveConfigRoots.length > 0) liveConfigBefore = snapshotLiveConfig(liveConfigRoots);
+  }
+
   let firstFailureExit = 0;
   for (let i = 0; i < chunks.length; i++) {
     if (chunks.length > 1) {
@@ -1030,6 +1048,17 @@ function main() {
       // and the first non-zero exit is reported at the end.
     }
   }
+  // #2665: post-suite hermeticity check. Runs even when tests failed — a leaked
+  // global install is worth reporting alongside the failure that hid it, and
+  // suppressing it on red would hide it exactly when the suite is least trusted.
+  if (liveConfigBefore) {
+    const violations = diffLiveConfig(liveConfigBefore, snapshotLiveConfig(liveConfigRoots));
+    if (violations.length > 0) {
+      console.error(formatViolations(violations));
+      if (firstFailureExit === 0) firstFailureExit = 1;
+    }
+  }
+
   if (firstFailureExit !== 0) return firstFailureExit;
 }
 
