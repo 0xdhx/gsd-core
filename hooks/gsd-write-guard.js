@@ -47,13 +47,17 @@
 //     CONSUMES it and allows that one write. Path-bound + single-use +
 //     freshness is what keeps it from becoming a standing unlock left on disk.
 //
-// Known design limits (out of #2255's scope by review, disclosed here):
+// Known design limits (out of #2255's scope by review, disclosed here AND in
+// the changeset + USER-GUIDE — round 9 required the user-facing docs to match):
 //   - Stateless per-write: sequential shrinks (292→120→50) each clear the 40%
 //     floor against CURRENT disk state, so cumulative erosion is invisible.
-//   - The curated match is lexical on the resolved path: a Write to a
-//     non-curated path that symlinks into a curated file is not matched.
-// Both are low-relevance against the stated threat model (a confused agent,
-// not an adversary).
+//   - Unconditionally case-insensitive matching (required on the
+//     case-insensitive filesystems macOS/Windows default to): on
+//     case-sensitive Linux a genuinely distinct '.planning/roadmap.md' is
+//     also treated as curated. Narrow, accepted cost.
+// (A third limit — a symlinked path into a curated file escaping the lexical
+// match — was closed in round 9: the target is realpath-resolved before the
+// curated match.)
 //
 // Triggers on: Write tool calls
 // Action: BLOCK (decision: 'block', exit 2) on catastrophic shrink of a curated file
@@ -247,7 +251,15 @@ process.stdin.on('end', () => {
     // Resolve relative paths against the session cwd (the same base the
     // runtime uses), then normalize separators for the curated match.
     const cwd = data.cwd || process.cwd();
-    const filePath = path.resolve(cwd, rawFilePath);
+    let filePath = path.resolve(cwd, rawFilePath);
+    // Resolve symlinks before the curated match (round 9, Minor 1): a Write
+    // to a non-curated path that symlinks into a curated file was not
+    // matched, while writeFileSync follows the link and clobbers the real
+    // target. ENOENT (new file) keeps the lexical resolution; any other
+    // realpath error also keeps it, and the read below then fails closed.
+    try {
+      filePath = fs.realpathSync(filePath);
+    } catch { /* keep the lexical path */ }
     const normalized = filePath.replace(/\\/g, '/');
 
     if (!CURATED_PATTERNS.some(re => re.test(normalized))) {

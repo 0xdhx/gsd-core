@@ -174,6 +174,21 @@ describe('gsd-write-guard.js: catastrophic shrink of curated artifacts', () => {
 });
 
 describe('round 9: symlink resolution, CRLF counting, and denial-content pins', () => {
+  test('a Write to a non-curated SYMLINK into a curated file is guarded (realpath before the match)',
+    { skip: process.platform === 'win32' ? 'symlink creation needs privilege on Windows' : false }, () => {
+    fs.writeFileSync(roadmapPath, lines(292));
+    const linkPath = path.join(projectDir, 'innocent-notes.md');
+    fs.symlinkSync(roadmapPath, linkPath);
+    try {
+      const r = runHook(writePayload(linkPath, lines(16)));
+      assert.equal(r.status, 2,
+        `writeFileSync follows the link into ROADMAP.md, so the guard must too. Got ${r.status}; stdout: ${r.stdout}`);
+      assert.equal(JSON.parse(r.stdout).decision, 'block');
+    } finally {
+      cleanup(linkPath);
+    }
+  });
+
   test('the denial prose does NOT publish the sentinel recipe; the typed field still names it (round 9 Major 2)', () => {
     fs.writeFileSync(roadmapPath, lines(292));
     const r = runHook(writePayload(roadmapPath, lines(16)));
