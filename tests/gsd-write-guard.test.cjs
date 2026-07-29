@@ -332,6 +332,26 @@ describe('#2304: Kimi tool vocabulary engages the write guard', () => {
     assert.equal(r.status, 0);
     assert.equal(r.stdout, '');
   });
+
+  test("a spurious model-supplied file_path cannot shadow Kimi's authoritative path (#2595 class)", () => {
+    fs.writeFileSync(roadmapPath, lines(292));
+    const r = runHook({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'WriteFile',
+      tool_input: { path: roadmapPath, file_path: '', content: lines(16) },
+    });
+    assert.equal(r.status, 2,
+      `kimi-cli executes on \`path\`, so \`path\` must win outright — a spurious file_path:'' shadowed it pre-fix and the guard read '' and exited 0. Got ${r.status}; stdout: ${r.stdout}`);
+    assert.equal(JSON.parse(r.stdout).decision, 'block');
+  });
+
+  test('null and primitive payloads fall through deliberately (total normalization, #2595 class)', () => {
+    for (const payload of ['null', '42', '"write"']) {
+      const r = runHook(payload);
+      assert.equal(r.status, 0, `payload ${payload} has nothing to guard and must exit 0 without crashing`);
+      assert.equal(r.stdout, '');
+    }
+  });
 });
 
 describe('single-use sentinel exemption (.planning/.gsd-allow-shrink) — the mechanical hatch the workflow uses', () => {

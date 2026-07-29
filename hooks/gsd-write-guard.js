@@ -181,6 +181,11 @@ function emitBlock(output) {
 // shape as canonicalizeRuntimeName in src/runtime-name-policy.cts).
 const KIMI_TOOL_NAMES = new Map([['WriteFile', 'Write']]);
 function normalizeKimiPayload(data) {
+  // #2595: total over everything JSON can express — JSON.parse('null') is
+  // null, and reading .tool_name off a primitive would throw into the outer
+  // fail-open catch. A null payload has nothing to guard; pass it through
+  // deliberately rather than by crash.
+  if (data === null || typeof data !== 'object') return data;
   const raw = data.tool_name;
   if (typeof raw !== 'string') return data;
   const mapped = KIMI_TOOL_NAMES.get(raw.slice(raw.lastIndexOf(':') + 1));
@@ -188,7 +193,16 @@ function normalizeKimiPayload(data) {
   data.tool_name = mapped;
   const input = data.tool_input;
   if (input && typeof input === 'object') {
-    if (input.file_path === undefined && typeof input.path === 'string') {
+    // #2595 (review): Kimi's `path` is AUTHORITATIVE — it must win outright,
+    // not merely fill in when `file_path` happens to be absent. kimi-cli's
+    // WriteFile schema carries no `file_path` at all (src/kimi_cli/tools/
+    // file/write.py), so a `file_path` in a Kimi payload is ALWAYS
+    // model-supplied; under the old `=== undefined` condition a payload
+    // pairing a curated `path` with a spurious `file_path: ""` left this
+    // guard reading '' and exiting 0 while kimi-cli wrote to `path` — a
+    // one-key bypass needing no crash. Overwriting can only narrow what the
+    // guard inspects to the path that will actually be written.
+    if (typeof input.path === 'string') {
       input.file_path = input.path;
     }
   }
@@ -204,6 +218,12 @@ process.stdin.on('end', () => {
   try {
     const data = normalizeKimiPayload(JSON.parse(input));
 
+    // A null/primitive payload has nothing to guard — exit deliberately
+    // rather than throwing into the fail-open catch below (#2595 class).
+    if (data === null || typeof data !== 'object') {
+      process.exit(0);
+    }
+
     // Only whole-file Write is catastrophic-by-construction; Edit/MultiEdit
     // replace bounded spans and are out of scope by design (#2255).
     if (data.tool_name !== 'Write') {
@@ -214,8 +234,12 @@ process.stdin.on('end', () => {
       process.exit(0); // documented escape hatch — legitimate reset in progress
     }
 
-    const rawFilePath = data.tool_input?.file_path || '';
-    const content = data.tool_input?.content;
+    // Typed read (#2547 class): `[]`/`{}` are truthy, pass a `!value`
+    // early-out, then throw inside path.resolve() — crash-to-allow via the
+    // outer catch. A non-string path field degrades to '' and exits here.
+    const rawInput = data.tool_input;
+    const rawFilePath = typeof rawInput?.file_path === 'string' ? rawInput.file_path : '';
+    const content = rawInput?.content;
     if (!rawFilePath || typeof content !== 'string') {
       process.exit(0);
     }
