@@ -2368,7 +2368,7 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number, phaseName
     // the intent-first override must not fire — it would drift frontmatter
     // away from the preserved body value. Dropping it here is safe because
     // readModifyWriteStateMd consults options only after this callback returns.
-    if ((result.data as Record<string, unknown> | undefined)?.['resumed']) {
+    if (result.data?.['resumed']) {
       delete rmwOptions.authoritativeFm;
     }
     return result.content;
