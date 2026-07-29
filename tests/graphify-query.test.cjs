@@ -237,6 +237,60 @@ describe('query', () => {
       assert.ok(/\d+ edges omitted/.test(result.trimmed), 'trimmed contains edge count');
       assert.ok(/\d+ nodes unreachable/.test(result.trimmed), 'trimmed contains node count');
     });
+
+    // #2738: seeds are an unconditional floor, so an unmeetable budget must be
+    // reported as a miss instead of silently returning the seed-set payload.
+    test('reports budget_met=false and budget_estimate when the seed floor blocks the budget (#2738)', () => {
+      const input = { nodes: SAMPLE_GRAPH.nodes, edges: SAMPLE_GRAPH.edges, seeds: new Set(['n1']) };
+      const result = applyBudget(input, 1);
+      assert.strictEqual(result.budget_met, false, 'budget cannot be met below the seed floor');
+      assert.strictEqual(typeof result.budget_estimate, 'number');
+      assert.ok(result.budget_estimate > 1, 'estimate reflects the actual returned payload');
+    });
+
+    test('reports budget_met=true when the result fits the budget (#2738)', () => {
+      const input = { nodes: SAMPLE_GRAPH.nodes, edges: SAMPLE_GRAPH.edges, seeds: new Set(['n1']) };
+      const result = applyBudget(input, 100000);
+      assert.strictEqual(result.budget_met, true);
+      assert.ok(result.budget_estimate <= 100000);
+    });
+
+    // #2738 secondary defect: the tier loop estimated against the full pre-filter
+    // node set, so a tier removal that already satisfied the budget (once its
+    // orphaned nodes are excluded) still triggered the next, higher-confidence
+    // tier drop. The INFERRED edge here must survive: dropping AMBIGUOUS orphans
+    // the heavy nodes and the pruned result fits.
+    test('stops dropping tiers once the post-pruning result fits (#2738)', () => {
+      const heavy = 'x'.repeat(400);
+      const nodes = [
+        { id: 's', label: 'Seed', description: 'seed node', type: 'service' },
+        { id: 'k', label: 'Kept', description: 'small neighbor', type: 'service' },
+        ...Array.from({ length: 10 }, (_, i) => (
+          { id: `h${i}`, label: `Heavy${i}`, description: heavy, type: 'service' }
+        )),
+      ];
+      const edges = [
+        { source: 's', target: 'k', label: 'links', confidence: 'INFERRED' },
+        ...Array.from({ length: 10 }, (_, i) => (
+          { source: 's', target: `h${i}`, label: 'links', confidence: 'AMBIGUOUS' }
+        )),
+      ];
+      const result = applyBudget({ nodes, edges, seeds: new Set(['s']) }, 200);
+      assert.ok(
+        result.edges.some(e => e.confidence === 'INFERRED'),
+        'INFERRED edge survives: dropping AMBIGUOUS already satisfied the budget',
+      );
+      assert.strictEqual(result.budget_met, true);
+    });
+
+    // #2738: --budget 0 is a valid parsed budget the CLI forwards; truthiness
+    // treated it as "no budget" and silently returned the unbounded result.
+    test('honors a budget of 0 instead of treating it as no budget (#2738)', () => {
+      const input = { nodes: SAMPLE_GRAPH.nodes, edges: SAMPLE_GRAPH.edges, seeds: new Set(['n1']) };
+      const result = applyBudget(input, 0);
+      assert.ok('budget_met' in result, 'budget 0 goes through the budget path');
+      assert.strictEqual(result.budget_met, false, 'a zero budget is unmeetable and reported as such');
+    });
   });
 
   describe('graphifyQuery', () => {
@@ -306,6 +360,23 @@ describe('query', () => {
       const result = graphifyQuery(tmpDir, 'auth', { budget: 50 });
       // With a very small budget, trimming should occur
       assert.ok(result.trimmed !== null, 'trimmed should indicate budget was applied');
+    });
+
+    // #2738: budget outcome surfaces through the query response
+    test('surfaces budget_met and budget_estimate when a budget was requested (#2738)', () => {
+      enableGraphify(planningDir);
+      writeGraphJson(planningDir, SAMPLE_GRAPH);
+      const result = graphifyQuery(tmpDir, 'auth', { budget: 50 });
+      assert.strictEqual(typeof result.budget_met, 'boolean');
+      assert.strictEqual(typeof result.budget_estimate, 'number');
+    });
+
+    test('omits budget fields when no budget was requested (#2738)', () => {
+      enableGraphify(planningDir);
+      writeGraphJson(planningDir, SAMPLE_GRAPH);
+      const result = graphifyQuery(tmpDir, 'auth');
+      assert.ok(!('budget_met' in result), 'budget_met absent without --budget');
+      assert.ok(!('budget_estimate' in result), 'budget_estimate absent without --budget');
     });
 
     // QUERY-01: returns total_nodes and total_edges counts

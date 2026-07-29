@@ -295,6 +295,8 @@ interface BudgetResult {
   trimmed: string | null;
   total_nodes: number;
   total_edges: number;
+  budget_met: boolean;
+  budget_estimate: number;
 }
 
 /**
@@ -303,7 +305,10 @@ interface BudgetResult {
  * Drop order: AMBIGUOUS -> INFERRED -> EXTRACTED.
  */
 function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandResult | BudgetResult {
-  if (!budgetTokens) return result;
+  // == null (not truthiness): --budget 0 is a valid parsed budget the router
+  // forwards, and treating it as "no budget" silently returns the unbounded
+  // result — the same silent-non-application defect class as #974/#2738.
+  if (budgetTokens == null) return result;
 
   const CONFIDENCE_ORDER = ['AMBIGUOUS', 'INFERRED', 'EXTRACTED'];
   let edges = [...result.edges];
@@ -311,22 +316,32 @@ function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandR
 
   const estimateTokens = (obj: unknown) => Math.ceil(JSON.stringify(obj).length / 4);
 
+  // Nodes that survive a given edge set: edge-reachable, plus seeds (always kept)
+  const survivingNodes = (edgeSet: GraphEdge[]) => {
+    const reachableNodes = new Set<string>();
+    for (const edge of edgeSet) {
+      reachableNodes.add(edge.source);
+      reachableNodes.add(edge.target);
+    }
+    return result.nodes.filter(n => reachableNodes.has(n.id) || (result.seeds && result.seeds.has(n.id)));
+  };
+
+  // Estimate against the post-pruning node set after each tier removal, so a
+  // removal that already fits (once orphaned nodes are excluded) stops the loop
+  // instead of dropping the next, higher-confidence tier too (#2738).
+  let nodes = survivingNodes(edges);
+  let estimate = estimateTokens({ nodes, edges });
+
   for (const tier of CONFIDENCE_ORDER) {
-    if (estimateTokens({ nodes: result.nodes, edges }) <= budgetTokens) break;
+    if (estimate <= budgetTokens) break;
     const before = edges.length;
     // Check both confidence and confidence_score field names (Open Question 1)
     edges = edges.filter(e => (e.confidence || e.confidence_score) !== tier);
     omitted += before - edges.length;
+    nodes = survivingNodes(edges);
+    estimate = estimateTokens({ nodes, edges });
   }
 
-  // Find unreachable nodes after edge removal
-  const reachableNodes = new Set<string>();
-  for (const edge of edges) {
-    reachableNodes.add(edge.source);
-    reachableNodes.add(edge.target);
-  }
-  // Always keep seed nodes
-  const nodes = result.nodes.filter(n => reachableNodes.has(n.id) || (result.seeds && result.seeds.has(n.id)));
   const unreachable = result.nodes.length - nodes.length;
 
   return {
@@ -335,6 +350,10 @@ function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandR
     trimmed: omitted > 0 ? `[${omitted} edges omitted, ${unreachable} nodes unreachable]` : null,
     total_nodes: nodes.length,
     total_edges: edges.length,
+    // Seeds are retained unconditionally, so the seed set is a floor the
+    // reduction cannot go below — report the outcome instead of hiding a miss (#2738)
+    budget_met: estimate <= budgetTokens,
+    budget_estimate: estimate,
   };
 }
 
@@ -424,7 +443,7 @@ function graphifyQuery(cwd: string, term: string, options: { budget?: number | n
 
   let result: ExpandResult | BudgetResult = seedAndExpand(graph, term);
 
-  if (options.budget) {
+  if (options.budget != null) {
     result = applyBudget(result, options.budget);
   }
 
@@ -435,6 +454,10 @@ function graphifyQuery(cwd: string, term: string, options: { budget?: number | n
     total_nodes: result.nodes.length,
     total_edges: result.edges.length,
     trimmed: 'trimmed' in result ? (result.trimmed || null) : null,
+    // Budget outcome (#2738) — only present when a budget was requested
+    ...('budget_met' in result
+      ? { budget_met: result.budget_met, budget_estimate: result.budget_estimate }
+      : {}),
   };
 }
 
