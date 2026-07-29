@@ -309,17 +309,27 @@ process.stdin.on('end', () => {
       newLines,
       overrideEnvVar: 'GSD_ALLOW_PLANNING_SHRINK',
       overrideSentinel: SENTINEL_REL,
+      // Round 9 Major 2: the denial deliberately does NOT explain how to arm
+      // the sentinel — #973 was an agent reasoning past an advisory, and a
+      // block message that prints the bypass recipe hands that same agent a
+      // mechanical self-authorization at the moment it is blocked. The
+      // sentinel transport stays documented where humans and the workflow
+      // engine read (USER-GUIDE, complete-milestone.md); the typed
+      // overrideSentinel field above stays for the binding tests. The env
+      // var stays named per #2255's acceptance criterion ("the override must
+      // be real and its name must appear in the block message") — it cannot
+      // reach a hook from a per-step prefix, so naming it does not hand the
+      // blocked agent a same-tool bypass.
       reason:
         `Write guard: this Write would shrink '${filePath}' from ${oldLines} lines to ` +
         `${newLines} (${pct}% of current). '${path.basename(filePath)}' is a curated planning ` +
         `artifact; a whole-file Write this much smaller usually means the payload was built ` +
         `from a partial read of the file and would destroy the sections outside that window ` +
         `(#973: a planner collapsed ROADMAP.md 292 → 16 lines this way). To fix: use Edit for ` +
-        `a scoped change, or Read the full file and include every section in the Write. If ` +
-        `this shrink is intentional (milestone reset, large deletion), write the target's ` +
-        `path into '${SENTINEL_REL}' (single-use, consumed by the next allowed shrink of that ` +
-        `file) or — interactively — re-run with the environment variable ` +
-        `GSD_ALLOW_PLANNING_SHRINK=1 to bypass this guard once.`,
+        `a scoped change, or Read the full file and include every section in the Write. ` +
+        `Intentional milestone resets go through the workflow's documented escape hatch; ` +
+        `interactively, re-run with the environment variable GSD_ALLOW_PLANNING_SHRINK=1 ` +
+        `to bypass this guard once.`,
     });
   } catch {
     // Silent fail — never block valid tool calls due to hook errors

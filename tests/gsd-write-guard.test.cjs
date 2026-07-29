@@ -173,6 +173,21 @@ describe('gsd-write-guard.js: catastrophic shrink of curated artifacts', () => {
   });
 });
 
+describe('round 9: symlink resolution, CRLF counting, and denial-content pins', () => {
+  test('the denial prose does NOT publish the sentinel recipe; the typed field still names it (round 9 Major 2)', () => {
+    fs.writeFileSync(roadmapPath, lines(292));
+    const r = runHook(writePayload(roadmapPath, lines(16)));
+    assert.equal(r.status, 2);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.overrideSentinel, '.planning/.gsd-allow-shrink',
+      'the typed field stays — the binding tests and workflow consumers key on it');
+    assert.ok(!out.reason.includes(out.overrideSentinel),
+      '#973 was an agent reasoning past an advisory: the agent-facing denial must not print the sentinel recipe');
+    assert.ok(out.reason.includes(out.overrideEnvVar),
+      "#2255 acceptance criterion: the env override's name stays in the block message");
+  });
+});
+
 describe('gsd-write-guard.js: deliberately narrow trigger (no-op paths)', () => {
 
   test('wholesale rewrite of a NON-curated .md passes untouched (no override-fatigue)', () => {
