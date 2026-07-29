@@ -201,6 +201,18 @@ describe('round 9: symlink resolution, CRLF counting, and denial-content pins', 
     assert.ok(out.reason.includes(out.overrideEnvVar),
       "#2255 acceptance criterion: the env override's name stays in the block message");
   });
+
+  test('CRLF content counts lines correctly on both sides of the compare', () => {
+    const crlf = (n) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join('\r\n') + '\r\n';
+    fs.writeFileSync(roadmapPath, crlf(100));
+    const blocked = runHook(writePayload(roadmapPath, crlf(39)));
+    assert.equal(blocked.status, 2, `39/100 CRLF lines is under the 40% ratio and must block. Got ${blocked.status}`);
+    const out = JSON.parse(blocked.stdout);
+    assert.equal(out.oldLines, 100, 'CRLF on disk must not inflate or deflate the count');
+    assert.equal(out.newLines, 39, 'CRLF in the payload must not inflate or deflate the count');
+    const pass = runHook(writePayload(roadmapPath, crlf(40)));
+    assert.equal(pass.status, 0, '40/100 CRLF lines sits exactly on the tolerated boundary and must pass');
+  });
 });
 
 describe('gsd-write-guard.js: deliberately narrow trigger (no-op paths)', () => {
@@ -436,6 +448,16 @@ describe('single-use sentinel exemption (.planning/.gsd-allow-shrink) — the me
     assert.equal(r.status, 2, 'the sentinel is path-bound — a token for STATE.md must not exempt ROADMAP.md');
     assert.equal(fs.existsSync(sentinelPath), true,
       'a mismatched sentinel must survive — it still authorizes the write it was armed for');
+    disarm();
+  });
+
+  test('a within-tolerance Write does NOT consume a fresh sentinel (consulted only at the block point)', () => {
+    fs.writeFileSync(roadmapPath, lines(292));
+    armSentinel();
+    const r = runHook(writePayload(roadmapPath, lines(200), { cwd: projectDir }));
+    assert.equal(r.status, 0, `200/292 is within tolerance and must pass. Got ${r.status}; stdout: ${r.stdout}`);
+    assert.equal(fs.existsSync(sentinelPath), true,
+      'a passing Write must not burn the token the workflow armed for its collapse — true by construction, now asserted');
     disarm();
   });
 
