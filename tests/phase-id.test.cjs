@@ -538,10 +538,54 @@ describe('parsePhaseFromProse', () => {
     assert.equal(phaseId.parsePhaseFromProse('Phase 3A — Delta').phase, '3A');
   });
 
-  test('a status-word parenthetical is filtered from the name (preserved behavior)', () => {
-    // parenName wins over the em-dash tail; "executing" is a status word → name null.
-    assert.deepEqual(phaseId.parsePhaseFromProse('3A — Delta (executing)'), { phase: '3A', name: null });
+  test('a status-word parenthetical is filtered from the name', () => {
+    // #2736 precedence change (the #1695 AC #3 residual): the em-dash name now
+    // wins when it is a genuine name, so `3A — Delta (executing)` yields
+    // 'Delta' (previously null — paren-priority harvested the status aside and
+    // the status filter nulled it, losing the real name).
+    assert.deepEqual(phaseId.parsePhaseFromProse('3A — Delta (executing)'), { phase: '3A', name: 'Delta' });
     assert.equal(phaseId.parsePhaseFromProse('3 (complete)').name, null);
+  });
+
+  test('#2736: status-keyword-aware precedence across the first-party writer shapes', () => {
+    // completePhaseCore shape `N — Name (aside)`: the dash name wins; the
+    // name's own parenthetical is no longer harvested as the whole name.
+    assert.deepEqual(
+      phaseId.parsePhaseFromProse('48 — Closer-ruling measurement (D1a)'),
+      { phase: '48', name: 'Closer-ruling measurement' },
+    );
+    // beginPhaseCore shape `N (Name) — EXECUTING`: the dash tail is a status
+    // keyword, so the parenthetical name still wins.
+    assert.deepEqual(
+      phaseId.parsePhaseFromProse('16 (Native Global Hotkey) — EXECUTING'),
+      { phase: '16', name: 'Native Global Hotkey' },
+    );
+    // `N — COMPLETE` (state.cts phase-complete body line): status keyword on
+    // the dash, no paren → no name.
+    assert.deepEqual(phaseId.parsePhaseFromProse('5 — COMPLETE'), { phase: '5', name: null });
+    // gsd2-import shape `N (slug) — Milestone: Title`: the dash tail is a
+    // milestone label, not a name → the parenthetical still wins.
+    assert.deepEqual(
+      phaseId.parsePhaseFromProse('06 (setup) — Milestone: Foundation'),
+      { phase: '06', name: 'setup' },
+    );
+    // Cross-AI review round 1: an em-dash INSIDE a parenthetical name must not
+    // be mistaken for the name separator (the dash search runs on a
+    // paren-stripped copy).
+    assert.deepEqual(
+      phaseId.parsePhaseFromProse('16 (Native — Global Hotkey) — EXECUTING'),
+      { phase: '16', name: 'Native — Global Hotkey' },
+    );
+    // Cross-AI review round 1: status-LIKE dash tails beyond the canonical
+    // three lose to a parenthetical name (broader precedence vocabulary +
+    // the lone-ALL-CAPS-token heuristic), without changing which extracted
+    // names are nulled.
+    assert.equal(phaseId.parsePhaseFromProse('3 (Foundation) — COMPLETED').name, 'Foundation');
+    assert.equal(phaseId.parsePhaseFromProse('3 (Name) — In progress').name, 'Name');
+    assert.equal(phaseId.parsePhaseFromProse('3 (Name) — READY').name, 'Name');
+    assert.equal(phaseId.parsePhaseFromProse('3 (Name) — WIP').name, 'Name');
+    // With no parenthetical to prefer, an unknown dash tail stays the best guess.
+    assert.equal(phaseId.parsePhaseFromProse('3 — WIP').name, 'WIP');
   });
 
   test('#2124 review: name quantifiers are length-bounded (ReDoS guard)', () => {
