@@ -325,7 +325,13 @@ const GSD_WINDSURF_HOOK_SCRIPTS = [
 
 // GSD-managed files under hooks/lib/ (helpers required by gsd-*.sh hooks).
 // git-cmd.js does not start with "gsd-" (shared classifier for #3129), gsd-graphify-rebuild.sh does.
-const GSD_HOOK_LIB_FILES = ['git-cmd.js', 'gsd-graphify-rebuild.sh'];
+// cursor-workspace.js (#2587) is required by the Cursor lifecycle hooks. Those
+// are staged individually by writeCursorHooksJson (Cursor sets
+// hostBehaviors.skipSharedHooksInstall, so it never reaches the bulk hooks/lib
+// copy below) — that function stages this helper alongside them. Listing it
+// here keeps uninstall and the manifest managing it for every OTHER runtime
+// that does receive hooks/lib.
+const GSD_HOOK_LIB_FILES = ['git-cmd.js', 'gsd-graphify-rebuild.sh', 'cursor-workspace.js'];
 
 const CODEX_AGENT_SANDBOX = {
   'gsd-executor': 'workspace-write',
@@ -627,7 +633,7 @@ if (hasMinimal && _profileArgRaw) {
 
 function selectRuntimesFromArgs(runtimeArgs) {
   if (runtimeArgs.includes('--all')) {
-    return ['claude', 'kimi', 'kilo', 'opencode', 'pi', 'codex', 'copilot', 'antigravity', 'cursor', 'windsurf', 'augment', 'trae', 'qwen', 'hermes', 'codebuddy', 'cline', 'zcode'];
+    return ['claude', 'kimi', 'kimi-code', 'kilo', 'opencode', 'pi', 'codex', 'copilot', 'antigravity', 'cursor', 'windsurf', 'augment', 'trae', 'qwen', 'hermes', 'codebuddy', 'cline', 'zcode'];
   }
   if (runtimeArgs.includes('--both')) {
     return ['claude', 'opencode'];
@@ -648,6 +654,7 @@ function selectRuntimesFromArgs(runtimeArgs) {
   if (runtimeArgs.includes('--qwen')) selected.push('qwen');
   if (runtimeArgs.includes('--hermes')) selected.push('hermes');
   if (runtimeArgs.includes('--kimi')) selected.push('kimi');
+  if (runtimeArgs.includes('--kimi-code')) selected.push('kimi-code');
   if (runtimeArgs.includes('--codebuddy')) selected.push('codebuddy');
   if (runtimeArgs.includes('--cline')) selected.push('cline');
   if (runtimeArgs.includes('--zcode')) selected.push('zcode');
@@ -656,6 +663,62 @@ function selectRuntimesFromArgs(runtimeArgs) {
 
 // Runtime selection - can be set by flags or interactive prompt
 let selectedRuntimes = selectRuntimesFromArgs(args);
+
+// #2505 Phase 5: Kimi variant disambiguation (#2513). Kimi CLI (Python, ~/.kimi/)
+// and Kimi Code (Node, ~/.kimi-code/) are two distinct Moonshot products that
+// share the "kimi" brand. Probe for each product's config.toml and warn when
+// the selected runtime doesn't match the detected install — catches the common
+// "ran --kimi --global but actually on Kimi Code" mistake that produced inert
+// YAMLs and empty agent-skills before the Phase 1 descriptor split.
+function disambiguateKimiVariant(runtimes) {
+  const home = os.homedir();
+  const hasKimiCli = fs.existsSync(path.join(home, '.kimi', 'config.toml'));
+  const hasKimiCode = fs.existsSync(path.join(home, '.kimi-code', 'config.toml'));
+  const notices = [];
+  if (runtimes.includes('kimi') && hasKimiCode && !hasKimiCli) {
+    notices.push({
+      kind: 'wrong-variant',
+      selected: 'kimi',
+      detected: 'kimi-code',
+      message: `Detected ~/.kimi-code/config.toml (Kimi Code, Node CLI) but not ~/.kimi/config.toml (Kimi CLI, Python). You selected --kimi but appear to be on Kimi Code. Re-run with --kimi-code for a working install. (Kimi CLI = Python kimi-cli with named subagents; Kimi Code = Node CLI with coder/explore/plan built-ins only.)`,
+    });
+  }
+  if (runtimes.includes('kimi-code') && hasKimiCli && !hasKimiCode) {
+    notices.push({
+      kind: 'wrong-variant',
+      selected: 'kimi-code',
+      detected: 'kimi',
+      message: `Detected ~/.kimi/config.toml (Kimi CLI, Python) but not ~/.kimi-code/config.toml (Kimi Code, Node CLI). You selected --kimi-code but appear to be on Kimi CLI. Re-run with --kimi for a working install.`,
+    });
+  }
+  // Distinct-entry descriptions when either Kimi variant is selected.
+  if (runtimes.includes('kimi')) {
+    notices.push({
+      kind: 'description',
+      runtime: 'kimi',
+      message: 'Kimi CLI (Python kimi-cli): named subagents via YAML, config at ~/.kimi/, hooks via ~/.kimi/config.toml [[hooks]].',
+    });
+  }
+  if (runtimes.includes('kimi-code')) {
+    notices.push({
+      kind: 'description',
+      runtime: 'kimi-code',
+      message: 'Kimi Code (Node CLI): three built-in subagents (coder/explore/plan), Agent Skills at ~/.kimi-code/skills/, config at ~/.kimi-code/.',
+    });
+  }
+  return notices;
+}
+
+if (selectedRuntimes.includes('kimi') || selectedRuntimes.includes('kimi-code')) {
+  const kimiNotices = disambiguateKimiVariant(selectedRuntimes);
+  for (const notice of kimiNotices) {
+    if (notice.kind === 'wrong-variant') {
+      console.error(`${yellow}⚠ Kimi variant mismatch (${notice.selected} → ${notice.detected}).${reset} ${notice.message}`);
+    } else if (notice.kind === 'description') {
+      console.log(`${dim}  ${notice.runtime}: ${notice.message}${reset}`);
+    }
+  }
+}
 
 // #1928: Google sunset Gemini CLI on 2026-06-18; Antigravity CLI is its
 // official successor. `--gemini` is no longer a valid runtime selector —
@@ -3956,10 +4019,14 @@ Typed mapping (agent_type-capable schema only):
   inherited, or unsupported values; do not invent one-off effort literals in
   workflow prose.
 - \`fork_context: false\` by default — GSD agents load their own context via \`<files_to_read>\` blocks
-- \`Task(isolation="worktree")\` / \`Agent(isolation="worktree")\` → no direct Codex mapping.
-  Codex \`spawn_agent\` does not create or bind a git worktree automatically.
-  Workflows that require this isolation must fail closed or use an explicit
-  manual worktree protocol before spawning (#3360).
+- \`Task(isolation="worktree")\` / \`Agent(isolation="worktree")\` → no direct \`spawn_agent\` mapping,
+  but Codex declares \`dispatch.isolation: orchestrator-worktree\` (#2584). Codex
+  \`spawn_agent\` still does not create or bind a git worktree; instead GSD itself
+  creates the worktree and process-spawns the executor into it with
+  \`codex exec --cd <dir>\`, performing every git operation on the executor's behalf
+  (its \`workspace-write\` sandbox makes \`.git\` read-only). Workflows must therefore
+  never fabricate a manual worktree protocol — route through the negotiated
+  isolation adapter, which still fails closed for hosts declaring \`none\` (#3360).
 
 Generic-agent workaround (multi_agent_v1 schema — NO agent_type field):
 When only the generic \`multi_agent_v1\` schema is available, typed GSD agent dispatch
@@ -8434,6 +8501,17 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
         console.log(`  ${green}✓${reset} Removed ${removedLibFiles} hooks/lib/ helper(s)`);
       }
     }
+
+    // #2717: remove the CommonJS marker GSD wrote into hooks/ for runtimes that
+    // stage .js hooks via dedicated paths (cursor/windsurf/codex) — but ONLY if
+    // it still carries GSD's exact content (a user-authored package.json is
+    // never deleted). Safe no-op for runtimes whose marker lives at the config
+    // root (the shared-bundle path) or that never received one.
+    try {
+      if (hooksSurface.removeCommonJsMarkerIfGsdOwned(hooksDir)) {
+        console.log(`  ${green}✓${reset} Removed GSD hooks/package.json (CommonJS marker)`);
+      }
+    } catch { /* best-effort */ }
   }
 
   // 4z. Remove the native plugin adapter (#1914, extended to Kilo by #2093).
@@ -10339,6 +10417,45 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     return Array.isArray(scopeLayout) && scopeLayout.length > 0;
   })();
 
+  // #2624: write the .gsd-source marker. Extracted from its former late position so it can be
+  // called BEFORE staging reads the marker (see the call site below). Scoped to the Claude-global
+  // layout (issue #1477) — the only install path that ships the skills layout without a
+  // commands/gsd source tree, so findInstallSourceRoot's walk-up has nothing to find and
+  // /gsd-surface (list/status) throws without it. Points at the package's own commands/gsd
+  // source. Guarded on source presence so a half-published package never writes a dangling
+  // marker. Write failure is non-fatal (install proceeds; warn so /gsd-surface breakage is
+  // diagnosable) — the same contract the late write had.
+  function _writeGsdSourceMarker(runtime, targetDir, src, isGlobal) {
+    if (_hostBehaviors(runtime).sourceMarkerFile && isGlobal) {
+      const gsdSourceCommands = path.join(src, 'commands', 'gsd');
+      if (fs.existsSync(gsdSourceCommands)) {
+        try {
+          // ADR-1239 Phase B write-confinement: the descriptor-sourced marker filename
+          // must resolve under targetDir (parity with the other descriptor-driven writes).
+          const _markerPath = assertDestWithinConfigHome(targetDir, _hostBehaviors(runtime).sourceMarkerFile);
+          fs.writeFileSync(_markerPath, gsdSourceCommands + '\n', 'utf8');
+        } catch (err) {
+          // Non-fatal: install proceeds. But on the Claude-global layout walk-up
+          // also fails (no commands/gsd source tree), so a silent write failure
+          // still leaves /gsd-surface broken at runtime — warn so it's diagnosable.
+          console.warn(`  ${yellow}!${reset} Could not write .gsd-source marker (${err.message}); /gsd-surface list/status may fail`);
+        }
+      }
+    }
+  }
+
+  // #2624: write the .gsd-source marker BEFORE any staging reads it. The marker write
+  // formerly lived AFTER staging; on an upgrade the marker still held the PREVIOUS
+  // install's source path (e.g. an npx per-version cache dir that still exists on disk),
+  // so findInstallSourceRoot(configDir) — called inside installRuntimeArtifacts below —
+  // returned the stale path and every converted skill was generated from the OLD version's
+  // commands/gsd, silently installing prior-version content with a self-consistent manifest
+  // hash. Writing first closes the read-before-write hole for every findInstallSourceRoot
+  // consumer (skills, commands, /gsd-surface, capability-state). Placed here (before the
+  // _isSkillsRuntime branch) so it runs for every Claude-global install, matching the
+  // original write's sourceMarkerFile && isGlobal guard exactly.
+  _writeGsdSourceMarker(runtime, targetDir, src, isGlobal);
+
   if (_isSkillsRuntime) {
     // Layout-driven install for skills-based runtimes (full and minimal modes)
     const scope = isGlobal ? 'global' : 'local';
@@ -10627,35 +10744,11 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     failures.push('gsd-core');
   }
 
-  // Write the .gsd-source marker so runtime source resolution succeeds at
-  // runtime (#1477). The Claude-global skills layout ships gsd-core/{bin,
-  // contexts,references,templates,workflows} but NOT the commands/gsd source
-  // tree, and _runLegacyUninstallCleanup actively removes any commands/gsd/
-  // for that scope — so findInstallSourceRoot's walk-up has nothing to find
-  // and /gsd-surface (list/status) throws. This is the writer half of the
-  // marker that runtime-artifact-layout.cjs's finders already read (the reader
-  // landed in #1476). It points at the package's own commands/gsd source.
-  // Scoped to the Claude-global layout (issue #1477) — the only install path
-  // that ships the skills layout without a commands/gsd source tree; every
-  // other runtime/scope deploys commands/gsd, so its walk-up already resolves
-  // and needs no marker. Guarded on source presence so a half-published
-  // package never writes a dangling marker.
-  if (_hostBehaviors(runtime).sourceMarkerFile && isGlobal) {
-    const gsdSourceCommands = path.join(src, 'commands', 'gsd');
-    if (fs.existsSync(gsdSourceCommands)) {
-      try {
-        // ADR-1239 Phase B write-confinement: the descriptor-sourced marker filename
-        // must resolve under targetDir (parity with the other descriptor-driven writes).
-        const _markerPath = assertDestWithinConfigHome(targetDir, _hostBehaviors(runtime).sourceMarkerFile);
-        fs.writeFileSync(_markerPath, gsdSourceCommands + '\n', 'utf8');
-      } catch (err) {
-        // Non-fatal: install proceeds. But on the Claude-global layout walk-up
-        // also fails (no commands/gsd source tree), so a silent write failure
-        // still leaves /gsd-surface broken at runtime — warn so it's diagnosable.
-        console.warn(`  ${yellow}!${reset} Could not write .gsd-source marker (${err.message}); /gsd-surface list/status may fail`);
-      }
-    }
-  }
+  // #2624: the .gsd-source marker is now written by _writeGsdSourceMarker()
+  // BEFORE staging reads it (see the early call above the _isSkillsRuntime
+  // block). The former write lived here — AFTER staging — which on an upgrade
+  // let staging read a stale prior-version marker and silently install
+  // old-version skill content. Moved up; this site intentionally left empty.
 
   // #1629 critical fix: Windsurf workflow wrappers (convertClaudeCommandToWindsurfWorkflow)
   // delegate to command bodies at <targetDir>/gsd-core/commands/gsd/${stem}.md via a
@@ -11321,7 +11414,15 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     throw _earlyInstallErr;
   }
 
-  if (plan.installSurface === 'codex-toml' && !isMinimalMode(_effectiveInstallMode)) {
+  // #2695: this branch runs for BOTH `core` (minimal) and `full` profiles.
+  // Hooks are lightweight infrastructure (update-check + context monitor), not the
+  // "full agent surface" that `core` deliberately omits. The config.toml / agent
+  // generation below is still gated by its own inner `!isMinimalMode` guard, so
+  // `core` enters the branch to receive the hook-file copy + hooks.json wiring but
+  // does NOT get agent roles generated. Before #2695 the outer `!isMinimalMode`
+  // here skipped the whole branch for `core`, so the registered parent hook pointed
+  // at a worker/registry the same installer never delivered.
+  if (plan.installSurface === 'codex-toml') {
     // Capture pre-install snapshots before ANY GSD mutation
     // (#2760 fix 3). On post-write schema-validation failure OR any throw
     // during the mutation sequence (write failure, merge throw, etc.) we
@@ -11504,9 +11605,18 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
 
     // Copy only the hook files that Codex actually registers via its hook configuration (#2153).
     // #772: added gsd-context-monitor.js for the new SubagentStart/Stop/PostToolUse events.
+    // #2695: the parent gsd-check-update.js spawn()s gsd-check-update-worker.js, which
+    //   require()s managed-hooks-registry.cjs for MANAGED_HOOKS — so all four must be
+    //   installed/refreshed together for every profile, or Codex is wired to a dependency
+    //   chain the same installer never delivers.
     // We deliberately do *not* copy gsd-graphify-update.sh or hooks/lib/ for Codex
     // in this change (graphify auto-update support for Codex is out of scope for #3579).
-    const CODEX_HOOKS_TO_COPY = ['gsd-check-update.js', 'gsd-context-monitor.js'];
+    const CODEX_HOOKS_TO_COPY = [
+      'gsd-check-update.js',
+      'gsd-check-update-worker.js',
+      'managed-hooks-registry.cjs',
+      'gsd-context-monitor.js',
+    ];
     const codexHooksSrc = path.join(src, 'hooks', 'dist');
     if (fs.existsSync(codexHooksSrc)) {
       const codexHooksDest = path.join(targetDir, 'hooks');
@@ -11536,9 +11646,28 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
           content = content.replace(/\{\{GSD_VERSION\}\}/g, pkg.version);
           fs.writeFileSync(destFile, content);
           try { fs.chmodSync(destFile, 0o755); } catch (e) { /* Windows */ }
+        } else {
+          // #2695: raw byte-for-byte copy for allowlisted artifacts that carry
+          // no {{GSD_VERSION}} placeholder and no runtime path token (e.g.
+          // managed-hooks-registry.cjs, whose only `.claude` mention is inside a
+          // doc comment). Version/path transforms would be a no-op at best and a
+          // surprise at worst; the issue requires the registry copied verbatim.
+          fs.copyFileSync(srcFile, destFile);
+          try { fs.chmodSync(destFile, 0o755); } catch (e) { /* Windows */ }
         }
       }
       console.log(`  ${green}✓${reset} Installed hooks (Codex)`);
+      // #2717: write the CommonJS marker into hooks/ alongside the staged .js
+      // scripts. Codex is excluded from installSharedHooksBundle by the
+      // !isCodex gate, so it never received the marker the shared-bundle path
+      // writes for the other runtimes. Without it, a ~/.codex/package.json
+      // declaring {"type":"module"} makes Node load gsd-check-update.js /
+      // gsd-context-monitor.js as ESM and their require() calls fail silently.
+      // Reuses the same helper the Cursor/Windsurf writers call so the marker
+      // content + user-file-preservation contract is identical everywhere.
+      if (hooksSurface.ensureCommonJsMarker(codexHooksDest)) {
+        console.log(`  ${green}✓${reset} Wrote hooks/package.json (CommonJS mode)`);
+      }
     }
 
     // Add Codex hooks (SessionStart for update checking) — requires codex_hooks feature flag
@@ -12390,16 +12519,17 @@ const runtimeMap = {
   '8': 'cursor',
   '9': 'hermes',
   '10': 'kimi',
-  '11': 'kilo',
-  '12': 'opencode',
-  '13': 'pi',
-  '14': 'qwen',
-  '15': 'trae',
-  '16': 'windsurf',
-  '17': 'zcode'
+  '11': 'kimi-code',
+  '12': 'kilo',
+  '13': 'opencode',
+  '14': 'pi',
+  '15': 'qwen',
+  '16': 'trae',
+  '17': 'windsurf',
+  '18': 'zcode'
 };
-const allRuntimes = ['claude', 'antigravity', 'augment', 'cline', 'codebuddy', 'codex', 'copilot', 'cursor', 'hermes', 'kimi', 'kilo', 'opencode', 'pi', 'qwen', 'trae', 'windsurf', 'zcode'];
-const ALL_RUNTIMES_OPTION = '18';
+const allRuntimes = ['claude', 'antigravity', 'augment', 'cline', 'codebuddy', 'codex', 'copilot', 'cursor', 'hermes', 'kimi', 'kimi-code', 'kilo', 'opencode', 'pi', 'qwen', 'trae', 'windsurf', 'zcode'];
+const ALL_RUNTIMES_OPTION = '19';
 
 /**
  * Build the runtime-selection prompt text shown by the interactive installer.
@@ -12417,14 +12547,15 @@ function buildRuntimePromptText() {
   ${cyan}8${reset}) Cursor       ${dim}(~/.cursor)${reset}
   ${cyan}9${reset}) Hermes Agent ${dim}(~/.hermes)${reset}
   ${cyan}10${reset}) Kimi         ${dim}(~/.config/agents, then ~/.agents if existing)${reset}
-  ${cyan}11${reset}) Kilo         ${dim}(~/.config/kilo)${reset}
-  ${cyan}12${reset}) OpenCode     ${dim}(~/.config/opencode)${reset}
-  ${cyan}13${reset}) pi           ${dim}(~/.pi/agent)${reset}
-  ${cyan}14${reset}) Qwen Code    ${dim}(~/.qwen)${reset}
-  ${cyan}15${reset}) Trae         ${dim}(~/.trae)${reset}
-  ${cyan}16${reset}) Windsurf     ${dim}(~/.codeium/windsurf)${reset}
-  ${cyan}17${reset}) ZCode        ${dim}(~/.zcode)${reset}
-  ${cyan}18${reset}) All
+  ${cyan}11${reset}) Kimi Code    ${dim}(~/.kimi-code)${reset}
+  ${cyan}12${reset}) Kilo         ${dim}(~/.config/kilo)${reset}
+  ${cyan}13${reset}) OpenCode     ${dim}(~/.config/opencode)${reset}
+  ${cyan}14${reset}) pi           ${dim}(~/.pi/agent)${reset}
+  ${cyan}15${reset}) Qwen Code    ${dim}(~/.qwen)${reset}
+  ${cyan}16${reset}) Trae         ${dim}(~/.trae)${reset}
+  ${cyan}17${reset}) Windsurf     ${dim}(~/.codeium/windsurf)${reset}
+  ${cyan}18${reset}) ZCode        ${dim}(~/.zcode)${reset}
+  ${cyan}19${reset}) All
 
   ${dim}Select multiple: 1,2,6 or 1 2 6${reset}
 `;
@@ -12435,7 +12566,7 @@ function buildRuntimePromptText() {
  * Pure function — exported so tests can verify split/dedupe/fallback behavior.
  *  - Accepts comma- and/or whitespace-separated choices
  *  - Deduplicates while preserving order
- *  - Maps option 16 ("All") to every runtime
+ *  - Maps option 19 ("All") to every runtime
  *  - Falls back to ['claude'] when nothing valid is selected
  */
 function parseRuntimeInput(answer) {

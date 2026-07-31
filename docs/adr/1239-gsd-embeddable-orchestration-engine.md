@@ -96,9 +96,53 @@ Phase A is **implemented** and Phases B–E have landed, so this ADR is **Accept
 - **Overlap resolutions (explicit):** `commandStyle` (GSD emission style, retained) ⊥ `commandSurface` (host surface type); `hookEvents` dialect ⊥ `hookBus` ownership (a host with `hooksSurface:none` may still be `hookBus:host` — e.g. opencode); `runtimeCompat` (feature→host) stays an independent override, orthogonal to these runtime→engine axes.
 - **`extensionEvents` vocabulary (amendment, #1943).** The OpenCode extension-system event subset is a SEPARATE descriptor field + closed vocabulary, **not** a `hookEvents` value. `hookEvents` is the *managed-hook* dialect only (`claude`/`gemini`) — the event names GSD writes into a declarative host's settings.json. `extensionEvents` is the *plugin/extension-system* event surface an imperative host exposes: `{ opencode, pi, none }` (OpenCode ~25 plugin events; pi ~30 fine-grained events; `none` = the host exposes no extension surface and the engine owns the bus, e.g. VS Code). The former `opencode-subset` `hookEvents` value was this concept misfiled; it is now `extensionEvents: opencode`. Keeping them separate preserves the `hooksSurface:"none" ⇔ no-hookEvents` invariant (OpenCode declares `extensionEvents`, not `hookEvents`). Resolved by `extensionEventSurfaceFor` in `src/host-integration.cts`, validated by `VALID_EXTENSION_EVENTS` in `capability-validator.cjs`.
 
-**Every per-host axis value is documentation-sourced, with citations.** Each of the 8 axes for all 16 installed CLIs was determined from that CLI's authoritative documentation (Context7 + the official dev docs/source), never inferred. The full per-CLI, per-axis matrix — value, source, and an evidence quote — is recorded in [`docs/reference/host-integration-capability-matrix.md`](reference/host-integration-capability-matrix.md), the deployment source-of-truth that Phases B–E build on. Where a CLI's docs genuinely do not state an axis, the descriptor carries the explicit `undocumented` sentinel (which `negotiateHostCapabilities` fail-closes on) rather than a guessed value — 22 such markers exist today, each with its search trail in the matrix. Two findings corrected this ADR's original appendix matrix: (1) current OpenAI **Codex** docs document slash-commands, so its `commandSurface` is `slash-file`, not `prose-only`; (2) several hosts run non-Node runtimes (opencode & kilo on **bun**; hermes & kimi on **python**; antigravity on **go**), so the `runtime` axis vocabulary was widened to `node|bun|sandboxed-web|python|go|rust|electron|other`. The documented `embeddingMode` split (9 imperative / 7 declarative, above) likewise reflects each CLI's real plugin/extension API, not a profile assumption.
+**Every per-host axis value is documentation-sourced, with citations.** Each of the 8 axes for all 16 installed CLIs was determined from that CLI's authoritative documentation (Context7 + the official dev docs/source), never inferred. The full per-CLI, per-axis matrix — value, source, and an evidence quote — is recorded in [`docs/reference/host-integration-capability-matrix.md`](../reference/host-integration-capability-matrix.md), the deployment source-of-truth that Phases B–E build on. Where a CLI's docs genuinely do not state an axis, the descriptor carries the explicit `undocumented` sentinel (which `negotiateHostCapabilities` fail-closes on) rather than a guessed value — 22 such markers exist today, each with its search trail in the matrix. Two findings corrected this ADR's original appendix matrix: (1) current OpenAI **Codex** docs document slash-commands, so its `commandSurface` is `slash-file`, not `prose-only`; (2) several hosts run non-Node runtimes (opencode & kilo on **bun**; hermes & kimi on **python**; antigravity on **go**), so the `runtime` axis vocabulary was widened to `node|bun|sandboxed-web|python|go|rust|electron|other`. The documented `embeddingMode` split (9 imperative / 7 declarative, above) likewise reflects each CLI's real plugin/extension API, not a profile assumption.
 
 No consumer wires the negotiated result yet — Phase A is interface-definition only; the engine↔host boundary (Phase B) and the adapters (Phase C) are where it is consumed.
+
+## Amendment (2026-07-21): `effortSurface` axis (#2481)
+
+> Adds a **ninth negotiated axis** covering reasoning effort. Raised by #2475: reviewer CLIs invoked as subprocesses by the review workflow silently inherit whatever reasoning effort sits in the user's own global CLI config, producing 1–3 minute review cycles on one machine and 12–15+ minute cycles on another with no in-project way to influence it.
+
+**The gap.** Reasoning effort is a first-class, config-driven GSD concept that the negotiated schema does not describe. Three mechanisms exist and none of them meet:
+
+1. **A core effort vocabulary and cascade** ([ADR-443](443-opus48-unified-effort-and-fast-mode-routing.md)) — `resolveEffortInternal` (`src/model-resolver.cts`) resolves a *universal* effort string through invocation override → `effort.agent_overrides.<agent-id>` → `effort.routing_tier_defaults.<tier>` → `effort.default` → canonical defaults.
+2. **A core-owned per-runtime rendering table** — `EFFORT_RENDERING` / `renderEffortForRuntime` (`src/model-catalog.cts`), where each runtime declares `param`, `channel`, `supported` levels and a `clamp()` rule. It holds two entries (`claude`, `codex`) and its `channel` vocabulary is `frontmatter` | `api` — **both install-time artifact channels**. Its production callers are exactly those two channels: the static install-time renderer (`bin/install.js`, via `src/install-effort-resolver.cts`) and the manual `query resolve-execution` / effort-sync CLI surface (`src/commands.cts`). **No workflow or agent dispatch calls it**, so there is no invocation-time channel and no per-host declaration of one.
+3. **This negotiated schema** — eight axes under `capability.json` `runtime.hostIntegration`. Effort is not among them; `modelMode` covers only whether the host lets GSD drive model *selection*.
+
+`EFFORT_RENDERING` is performing this schema's job — declaring per-host support and degrading gracefully — but as a core table keyed by runtime name, at the wrong layer, predating this ADR. [ADR-443](443-opus48-unified-effort-and-fast-mode-routing.md) names the same gap in its own text: its dynamic paths *"exist only as CLI-callable resolver code… Nothing in the shipped orchestration actually calls them,"* and *"the only propagation channel actually wired into a real GSD flow is the static one (config → `install()` → frontmatter, baked once at install time)."*
+
+**The axis.** `effortSurface` declares **how reasoning effort reaches a host** — a two-value closed vocabulary consistent with the existing axes:
+
+- **`argv`** — effort is deliverable as an argument on the host's own invocation (claude `--effort`; opencode `--variant`; codex via the generic `-c model_reasoning_effort=` config override). This is the channel the schema was missing.
+- **`none`** — the host exposes no reasoning-effort mechanism.
+`undocumented` is **not** a value of this vocabulary. It is the corpus-wide sentinel (`UNDOCUMENTED` in `src/host-integration.cts`) that any axis may carry when a host's documentation does not state a value: it validates, but never propagates into effective axes — failing closed exactly like an unknown or missing value. A host whose effort mechanism is undocumented carries the sentinel and negotiates to the safe floor.
+
+Per-host `param` name, accepted level set, and clamp rule are carried **in the descriptor** rather than a core table, so `EFFORT_RENDERING` collapses into descriptor data rather than growing a parallel vocabulary.
+
+**Degradation ladder — interface point 3 (Model) gains an effort row:**
+
+| Interface point | Full | Degraded | Absent → fallback |
+|---|---|---|---|
+| 3 Model — effort | `argv`: universal effort rendered onto the invocation, clamped to the host's level set | *(no rung — see below)* | `none` / `undocumented`: effort is not propagated; host default stands |
+
+**Why there is no `config-file` member.** A config-file-only effort surface is a real shape — Gemini CLI exposed exactly that (`thinkingConfig.thinkingLevel` / `.thinkingBudget` under `modelConfig.generateContentConfig`, settable only in settings.json model presets). It is nonetheless **not** a vocabulary member, because no supported runtime has one:
+
+- **Gemini CLI was removed from this repo as a sunset runtime** — `capabilities/gemini/capability.json` was deleted by commit `8f2ebbe9b` (#1928, PR #1996), following Google's own transition notice (`developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/`).
+- **Antigravity CLI**, its documented successor, states no reasoning or thinking setting on its features/settings page (`antigravity.google/docs/cli/features`).
+- **ZCode**, the other declarative host with a rich config surface, states none either (`zcode.z.ai/en/docs/configuration`).
+
+A closed, first-party vocabulary with a member no host can claim is an invitation to guess. If a supported host later documents a config-file effort surface, adding the member is a small, evidence-backed change — and the degradation ladder already has the shape for it.
+
+**Boundary against #2313.** That epic (whose own Phase 0 records the Codex passive-model posture as a separate ADR, not yet written) owns the **static / install-time** effort channel for Codex — `model_reasoning_effort` in generated `~/.codex/agents/<agent>.toml` under the passive posture, plus a sync path — and explicitly places *"orchestrator effort-override drift"* outside its scope. This amendment covers the **invocation-time** channel only and does not change install-time emission. The two channels may share a descriptor once `EFFORT_RENDERING` folds in.
+
+**Evidence.** Per this ADR's own rule that axis values are documentation-sourced and never inferred: `claude --effort` and `opencode --variant` were verified against each CLI's `--help`; codex's `-c model_reasoning_effort=` and gemini's `thinkingConfig` were verified against first-party documentation. **The remaining installed hosts were not researched for this axis and must carry the explicit `undocumented` sentinel**, joining the 28 sentinels already carried across the 18 descriptors that declare `hostIntegration`, rather than inheriting a guessed value from a profile baseline.
+
+**Corrections to the Phase A amendment's counts** (recorded here rather than by editing that section, since ADRs are append-only). The Phase A text states "all 16 installed CLIs" and "22 such markers exist today". Both have drifted: **18** descriptors now declare `runtime.hostIntegration`, carrying **28** `undocumented` sentinels. The lists have since drifted in both directions, for different reasons: **`zcode`** carries a descriptor but is named in neither list, and **`gemini`** is named in the declarative list but its descriptor was **deliberately deleted** by `8f2ebbe9b` (#1928, PR #1996) when Google sunset Gemini CLI in favor of Antigravity CLI. Any per-host work on this axis must enumerate the descriptors from the tree, not from those lists.
+
+**Relationship to [ADR-443](443-opus48-unified-effort-and-fast-mode-routing.md).** That ADR is `Proposed`, blocked on its decided invocation-override and escalation paths having no live caller, and its own text recorded the choice of unblock path as a maintainer call it did not make. It is amended in the same change (#2481) to select path (a), to record that audit issue #1192's action-plan item 18 was never converted into a tracked follow-up, and to correct its own stale audit: the blocker's grep excluded `references/*.md`, which is `@`-included into workflows, and predates #2296's escalation caller. This axis does not by itself satisfy either of path (a)'s two mechanisms — see that ADR's amendment for the precise status. `effortSurface` is therefore the declaration layer for a decision ADR-443 already made; it does not restate ADR-443's cascade or enum.
+
+**Status:** delivered in #2481 — axis vocabulary, descriptor values, validator parity, fail-closed negotiation, the degradation row, and the consuming review-lane wiring all land together. `effortSurface` is a wired axis, not a declared-but-unconsumed one; it is the first negotiated axis whose consumer is an invocation-time argument rather than an install-time artifact.
 
 ## Host-capability profiles (negotiation baselines)
 
@@ -148,6 +192,117 @@ Because OpenCode consumes MCP, the **companion MCP server** (the MemPalace patte
 ### New open question (OpenCode-specific)
 
 - OpenCode installs plugins with **Bun**, but the engine matrix lists `runtime: node`. Decide whether the imperative plugin invokes the engine in-process (requires Bun-compatible engine entry) or shells out to a Node `gsd-tools.cjs` via `$` — and whether the companion MCP server makes that question moot for the first cut.
+
+## Codex binding (worked host-plugin)
+
+> **Amendment — Codex worked binding + `dispatch.isolation` capability (#2584, 2026-07-24).** Two things: (1) it introduces a **general, per-host-negotiated capability** — the `dispatch.isolation` sub-field, which declares how each host isolates concurrent same-wave executors (six hosts have confirmed support; see the support table below), enabling parallel `execute-phase` waves on hosts beyond Claude; and (2) it consolidates Codex's Phase-D-shipped six-point Host-Integration binding (#2088) into this ADR — the sibling of the OpenCode binding above — because Codex is the first *orchestrator-managed* consumer of the new capability. Per-axis values are the [capability matrix §codex](../reference/host-integration-capability-matrix.md#codex). Sequencing: the *code* builds on the worktree merge/cleanup gauntlet (open bug #2556) and lands after it; this design + the descriptor/matrix change do not.
+
+### What Codex integration actually is (the binding substrate)
+
+Codex is a **declarative-CLI** host (ADR-1239 profile `declarative-cli`). It exposes **no in-process programmatic API**; integration is entirely through files + external processes ([developers.openai.com/codex/plugins/build]): a `config.toml` under `$CODEX_HOME`, `hooks.json` lifecycle hooks (10 native events), MCP servers, and `SKILL.md`-based skills auto-discovered from `$HOME/.agents/skills`. GSD reaches Codex through the **declarative embedding adapter** (`createDeclarativeAdapter` → `installRuntimeArtifacts`), with the former hardcoded `isCodex` projection folded into descriptor-driven `runtime.hostBehaviors` (#2088). This is the entire adapter surface — there is nothing phase-aware in it; the engine owns loop sequencing and treats Codex's hook bus as a subset event surface.
+
+### Six interface points → Codex primitives
+
+Codex's full negotiated binding — the per-axis value, its documentation citation, and the evidence quote for all six interface points — is the **[capability matrix §codex](../reference/host-integration-capability-matrix.md#codex)**, the deployment source of truth. In summary: `embeddingMode: declarative` · `commandSurface: slash-file` · `modelMode: passive` · `hookBus: host` (10-event `hooks.json`) · `stateIO: filesystem` · `transport: mcp` · `runtime: node` · `effortSurface: argv`. Integration is **Phase-D-dogfood complete** (#2088): declarative embedding adapter, install/uninstall byte-parity-gated (`golden-install-parity/codex.json`), the `runtime === 'codex'` projection folded into `hostBehaviors`.
+
+The one interface point this amendment changes is **Dispatch** — specifically executor isolation for wave parallelism, below.
+
+> **Matrix update (Phase 0 deliverable).** The matrix gains a `dispatch.isolation` row for every host, carrying the value + citation, so this "see the matrix" pointer stays the single source of truth. That row is authored once the naming is locked (Open Question 2).
+
+---
+
+### Dispatch isolation — the one new mechanism (#2584)
+
+**The gap.** Codex's `dispatch` axis already describes agent *nesting* (`maxDepth:1` — a child agent may spawn, no deeper), and `degradationFor` correctly flattens **nested** dispatch. But `/gsd:execute-phase` wave parallelism is a **different** concern: running N *independent* plans from one wave *concurrently*. That needs **executor isolation** — two executors in one checkout race on files, git state, hooks, and `.planning/`. Claude Code provides isolation through its harness (`isolation="worktree"` on `Agent()`); Codex has no harness-native equivalent, so GSD keeps `workflow.use_worktrees=false` on Codex and same-wave plans run **sequentially** (correctly fail-closed per #2531/#2486). Nothing in the negotiated schema describes *how a host isolates concurrent executors* — it is an implicit "the Claude harness does it" assumption.
+
+**Decision — add `isolation` as a sub-field of the existing `dispatch` axis** (not a new top-level axis). It declares how a host isolates concurrent same-wave executors, negotiated by `dispatch`'s existing per-sub-field machinery. Closed vocabulary:
+
+| `dispatch.isolation` | Meaning | Declared by (confirmed — see support table) |
+|---|---|---|
+| `harness-worktree` | The host's harness creates + binds a git worktree per executor; GSD passes the host's own isolation flag and calls no git itself. | `claude`, `cursor` |
+| `orchestrator-worktree` | GSD process-spawns each executor with an explicit working directory (a headless-exec `--cd`/`--dir`/`--work-dir`) into a worktree GSD created, validates, and merges. | `codex`, `kimi`, `kimi-code`, `opencode` |
+| `none` | No isolation primitive; same-wave plans run inline/sequentially (the #853 flatten rule). | every other runtime until documented otherwise |
+
+`undocumented` remains the corpus-wide sentinel; it validates but fail-closes to `none`.
+
+#### Two dispatch models — the distinction the research surfaced
+
+`dispatch.isolation` selects **how** a wave fans out, and the two non-`none` values are two different execution models:
+
+- **`harness-worktree` — host-driven fan-out.** GSD asks the host's own harness to spawn concurrent subagents, each natively isolated in a worktree the host creates. Requires the host's *native concurrent subagent dispatch* **and** native per-agent worktrees. GSD passes a flag; the host does the rest.
+- **`orchestrator-worktree` — GSD-driven fan-out.** GSD itself process-spawns N independent headless CLI-exec runs, each bound to a GSD-created worktree via a working-directory flag. Concurrency is **OS-level** (GSD launches N processes); it does **not** use the host's native subagent tool and does **not** depend on the host's `dispatch.backgroundDispatch`. `backgroundDispatch` governs *harness* fan-out only; orchestrator fan-out needs only a headless exec + a cwd flag, so it is not a prerequisite for `orchestrator-worktree`.
+
+Implementation consequence: the **new backend (creation verb + GSD-managed worktree/merge) is built once and serves all `orchestrator-worktree` hosts**, parameterized by the host's exec invocation (descriptor data). `harness-worktree` hosts need only the scheduler to pass their native flag — no new backend.
+
+#### Confirmed per-host support (research #2584, cited to official docs)
+
+| Host | Value | Mechanism | Evidence | Conf. |
+|---|---|---|---|---|
+| `claude` | `harness-worktree` | `Agent(isolation="worktree")` harness primitive | Claude Code Agent tool | high |
+| `cursor` | `harness-worktree` | `cursor-agent -w/--worktree [name]` → `~/.cursor/worktrees/…`; native parallel agents | cursor.com/docs/cli/reference/parameters, /cli/using, /cli/changelog | high |
+| `codex` | `orchestrator-worktree` | `codex exec --cd/-C <dir>`; native worktrees are **desktop-app-only**, `spawn_agent` sets no cwd (open issue #23095) | learn.chatgpt.com/docs/environments/git-worktrees, codex `shared_options.rs`, TS SDK `exec.ts` | high |
+| `kimi` | `orchestrator-worktree` | `--work-dir` flag; concurrent "explore" subagents | github.com/moonshotai/kimi-cli/docs/en/faq.md, /agents.md | med-high |
+| `kimi-code` | `orchestrator-worktree` | honors process cwd (no flag); `AgentSwarm` ≤128 concurrent | github.com/moonshotai/kimi-code/docs/en/reference/tools.md, /getting-started.md | med-high |
+| `opencode` | `orchestrator-worktree` | `opencode run --dir <path>` (process-level); **native subagent is synchronous-only**, so harness fan-out is unavailable | opencode.ai/docs/cli, /plugins; opencode issues #14195/#29638/#5887 | med-high |
+| `pi`, `zcode`, `windsurf` | `none` | can't fan out concurrently (no named dispatch / `background:false` / undocumented) — isolation is moot | shipped descriptors | — |
+| others (`cline`, `codebuddy`, `copilot`, `hermes`, `kilo`, `qwen`, `augment`, `antigravity`, `trae`) | `undocumented` → `none` | not researched for this axis; fail-closed to sequential | — | — |
+
+**So the answer to "are there others that can benefit": yes — five beyond Codex, definitively.** Two (`claude`, `cursor`) are `harness-worktree` (no new backend); three (`kimi`, `kimi-code`, `opencode`) share Codex's `orchestrator-worktree` backend. `pi`/`zcode`/`windsurf` genuinely cannot benefit and correctly stay `none`.
+
+#### Two research findings that shape the code (not hand-waves)
+
+1. **Codex sandbox constraint.** Under Codex's default `workspace-write` sandbox, `.git` is read-only, and Codex resolves a worktree's `.git` *pointer* to the real gitdir — which for `git worktree add` lives in the **main repo's** `.git/worktrees/<name>`, *outside* the worktree. So a sandboxed executor running `git commit` inside a GSD-created sibling worktree can be **blocked** (cited: codex `permissions.rs`). This aligns with — and reinforces — the single-writer design: **the orchestrator should perform the git operations** (merge/commit), the executor only edits files; or the sandbox `writable_roots` must include the resolved gitdir. A Phase-3 acceptance test must cover this.
+2. **OpenCode descriptor is wrong (separate defect).** `capabilities/opencode/capability.json` declares `dispatch.background:true, backgroundDispatch:true`, but OpenCode's native subagent dispatch is **synchronous-only** (confirmed by opencode issues #14195/#29638/#5887; ADR-1239's text was right). This does not change OpenCode's `orchestrator-worktree` verdict (that path is `opencode run --dir` at the process level, not the native subagent), but the descriptor's `background`/`backgroundDispatch` values are a genuine accuracy bug that should be corrected independently of #2584. **Tracked as #2598.**
+
+**Why a sub-field, not a new axis.** Isolation is a property of the dispatch/fan-out primitive — it is only ever consumed alongside `dispatch.background`/`maxDepth` when the scheduler decides whether a wave can fan out — and `dispatch` is already an object built to hold per-host fan-out properties. `dispatch` sub-fields are negotiated **independently** (`negotiateHostCapabilities`, `src/host-integration.cts:417-435`): each has its own floor (`FAIL_CLOSED_FLOOR.dispatch`, `:112`), its own `undocumented` warning, and its own `effective = host && engine` resolution. So `isolation` gets the full `effective ⊆ host-declared ∩ engine-known` trust invariant per-sub-field — an unknown value fails closed to `none` without dragging the other dispatch fields down — at strictly less surface than a standalone axis (no new top-level `VALID_` set, no new negotiation branch, no new profile-baseline entry). *(A standalone `isolationSurface` axis was considered and rejected: `effortSurface` earned its own axis because it is a model-layer concern orthogonal to dispatch and `modelMode` was a scalar it could not nest inside — neither holds for isolation.)*
+
+**Consumer — runtime-neutral, no `runtime === 'codex'`.** `execute-phase` negotiates `dispatch.isolation` and dispatches through the matching isolation adapter, exactly as it already consults `degradationFor`/`shouldFlattenDispatch` for nesting:
+- `harness-worktree` → pass the host's own isolation flag on dispatch (`isolation="worktree"` for Claude; `--worktree` for `cursor-agent`) and let the host isolate. No GSD git.
+- `orchestrator-worktree` → the new backend (below): GSD creates the worktree and process-spawns the executor into it with the host's headless-exec cwd flag.
+- `none` → run the wave's plans inline, sequentially (unchanged current behavior).
+
+The per-host dispatch invocation (`harness` flag vs. the `orchestrator` exec command + cwd flag — `codex exec --cd`, `opencode run --dir`, `kimi --work-dir`, `kimi-code` process-cwd) is **descriptor data**, not a scheduler branch.
+
+**The `orchestrator-worktree` adapter — the only genuinely new code.** ADR-1239's negotiation seam and the worktree merge/cleanup machinery already exist; the adapter wires them together plus one new primitive:
+- **New:** a `worktree create` verb on the worktree command route (`routeWorktree`, `gsd-tools.cjs`, which today exposes cleanup-wave / record-agent / reap-orphans / base-check / set-baseref and **no creation verb**). Captures + validates one wave base, creates a bounded branch + worktree per plan, returns the explicit working directory for the executor. Bounded per the unbounded-subprocess gate (5–30s git timeout; degrade, don't throw).
+- **Reused unchanged:** base capture, per-plan submodule gating, the serialized merge loop that stops the wave and retains the worktree on conflict (`executeWorktreeWaveCleanupPlan`, `src/worktree-safety.cts:664`), post-wave/post-phase gates, **manifest-only cleanup** (never glob-inferred).
+- **Preserved invariant:** single-writer `STATE.md`/`ROADMAP.md`. `execute-plan` gates those writes on `IS_WORKTREE` (the `.git`-is-a-file primitive) — a GSD-created worktree trips the identical guard for free.
+- **Shared validation:** both isolation adapters route their merge through the declared-scope conformance check tracked in #2596.
+
+**Fail-closed.** An undeclared/unknown/higher-`protocolVersion` `dispatch.isolation` degrades to `none` (sequential) — never an unsafe parallel path.
+
+**Validator parity.** `dispatch.isolation` gets a `VALID_DISPATCH_ISOLATION` closed set validated inside the existing `dispatch` validation (`capability-validator.cjs`), checked across all `hostIntegration` descriptors by the parity guard, and extends `FAIL_CLOSED_FLOOR.dispatch` with `isolation:'none'`.
+
+---
+
+### Consequences
+
+**Positive.** Codex gains wave parallelism with **no `runtime===` branch** in the scheduler — isolation becomes a declared, negotiated, tested capability instead of a hardcoded harness assumption. The Codex binding is now consolidated into ADR-1239 as a first-class worked host-plugin, sibling to OpenCode. Claude's path is unchanged; it now merely *declares* `dispatch.isolation: harness-worktree` for what it always did.
+
+**Negative / forever-cost.** A new closed-vocabulary sub-field on `dispatch` across descriptors; a new orchestrator-worktree adapter + its `(OS × runtime)` matrix we now own; the `worktree create` verb is new robustness surface on the git seam (bounded, manifest-scoped, fail-closed).
+
+**Sequencing (hard).** The **code** builds on `executeWorktreeWaveCleanupPlan`, the subject of open `confirmed-bug` #2556 (the `cat-file -e HEAD:<path>` exit-code gate — 128-not-1, fails the SUMMARY rescue closed). **#2556 must land before any `orchestrator-worktree` code phase.** This amendment (design) and Phase 1 (the sub-field + descriptors + validator) do not touch the gauntlet and are not gated on it.
+
+---
+
+### Implementing epic (#2584)
+
+Each phase is its own `approved-*` sub-issue + PR, dependency-ordered. **Phase 0 (this amendment) is docs-only and closes its own Phase-0 sub-issue, not the epic.**
+
+- **Phase 0 — this ADR-1239 amendment.** The design lock: the Codex worked binding + the `dispatch.isolation` sub-field + the runtime-neutral scheduler consumer + the orchestrator-worktree adapter contract. Docs-only.
+- **Phase 1 — the sub-field, declared but unconsumed.** `dispatch.isolation` schema + `VALID_DISPATCH_ISOLATION` + `FAIL_CLOSED_FLOOR.dispatch.isolation='none'` + per-field negotiation + validator parity; **descriptor values from the confirmed support table** (`claude`/`cursor`: `harness-worktree`; `codex`/`kimi`/`kimi-code`/`opencode`: `orchestrator-worktree`; the rest `none`/`undocumented`); **update `docs/reference/host-integration-capability-matrix.md`** with the `dispatch.isolation` row (value + citation) for every host. Golden-parity + validator + negotiation tests. No behavior change. *Not gated on #2556. (Docs may ride the Phase-0 amendment PR.)*
+- **Phase 2 — the `worktree create` verb + orchestrator-exec dispatch.** Orchestrator-side creation primitive on `routeWorktree` (bounded, manifest-recorded, fail-closed) + the per-host headless-exec-with-cwd invocation (from the descriptor). Failing-first tests via `gsd-test`. **Gated on #2556.**
+- **Phase 3 — the scheduler consumer + adapters, proven on one host per model.** `execute-phase` negotiates `dispatch.isolation` and dispatches: `harness-worktree` → the host flag (Claude already works; add Cursor's `--worktree`); `orchestrator-worktree` → Phase 2's verb → executor-with-cwd → the existing merge/validation gauntlet → #2596's scope check, with the **orchestrator performing the git ops** (per the Codex sandbox constraint). **v1 proves `orchestrator-worktree` end-to-end on Codex**; `kimi`/`kimi-code`/`opencode` are enabled by descriptor value + per-host validation once Codex is proven (they share the backend). **Gated on #2556 (and #2596 if it lands first).**
+
+`/adr-phase-coverage` must confirm every deliverable is claimed by exactly one phase before code starts.
+
+---
+
+### Decisions & rollout
+
+- **Form.** This lands as an amendment to ADR-1239, the sibling of the OpenCode binding above — Codex's integration already shipped (#2088); the ADR only lacked the Codex worked-binding section.
+- **Naming.** The sub-field is `dispatch.isolation` with values `harness-worktree | orchestrator-worktree | none` (+ the `undocumented` sentinel). A sub-field over a new axis, and mechanism-specific values over abstract ones, both follow the `effortSurface`/#2481 precedent — terse `dispatch` sub-field naming (`nested`, `background`), the kebab-compound enum idiom (`slash-file`, `read-only`, `prose-only`), and "name only what a host actually has" (which excluded `config-file` for the same reason). A future non-worktree isolation adds `*-container` then, evidence-backed.
+- **Rollout.** v1 proves the `orchestrator-worktree` backend end-to-end on Codex; the other orchestrator-worktree hosts (`kimi`, `kimi-code`, `opencode`) are descriptor-value + per-host-validation follow-ups on the *same* backend, and the `harness-worktree` hosts (`claude`, `cursor`) need only the scheduler to pass their native flag. Two research findings shape the code: the Codex sandbox constraint (the orchestrator performs the git operations) and the OpenCode descriptor bug (`background`/`backgroundDispatch` stale — tracked as #2598).
 
 ## Alternatives considered
 

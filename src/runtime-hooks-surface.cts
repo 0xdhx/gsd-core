@@ -200,6 +200,81 @@ function atomicWriteFileSync(target: string, data: string, options: fs.WriteFile
 }
 
 // ---------------------------------------------------------------------------
+// CommonJS package.json marker for staged .js hook scripts (#2717)
+//
+// Node resolves the nearest package.json walking up from a .js file. When a
+// runtime's config root (e.g. ~/.cursor, ~/.codeium/windsurf, ~/.codex) — or any
+// parent — declares {"type":"module"}, Node loads GSD's staged CommonJS hook
+// scripts as ESM and every require() fails with "require is not defined",
+// silently disabling that runtime's lifecycle hooks.
+//
+// installSharedHooksBundle writes this marker for the 12 runtimes that go
+// through the shared hooks bundle, but cursor/windsurf (skipSharedHooksInstall)
+// and codex (the !isCodex gate) stage their .js hooks via the dedicated paths
+// below and never reached it. These helpers decouple the marker write from the
+// shared bundle so any code path that stages .js hooks can ensure the marker
+// lands in the SAME directory as the scripts (#2717).
+//
+// The marker content is byte-identical to installSharedHooksBundle's
+// (bin/install.js installSharedHooksBundle): {"type":"commonjs"}\n.
+// ---------------------------------------------------------------------------
+
+/** The exact marker content GSD writes, matching installSharedHooksBundle. */
+const COMMONJS_MARKER_CONTENT = '{"type":"commonjs"}\n';
+
+/**
+ * Ensure a `package.json` forcing CommonJS mode exists in `dir` (the directory
+ * holding GSD-staged `.js` hook scripts). Idempotent: a no-op if the marker is
+ * already present with GSD's content. Overwrites only when the file is absent
+ * or already carries GSD's exact marker — it never clobbers a distinct
+ * user-authored package.json (it leaves such a file in place; the user owns it).
+ *
+ * @param dir - absolute path to the directory holding the staged .js hooks
+ * @returns `true` if the marker is present after the call (written or already there)
+ */
+function ensureCommonJsMarker(dir: string): boolean {
+  const markerPath = path.join(dir, 'package.json');
+  try {
+    if (fs.existsSync(markerPath)) {
+      const existing = fs.readFileSync(markerPath, 'utf8');
+      // Already GSD's marker (tolerant of trailing-whitespace variants) — done.
+      if (existing.trim() === '{"type":"commonjs"}') return true;
+      // A distinct package.json the user owns — do NOT clobber. The hook will
+      // load as whatever type the user declared; that is the user's choice.
+      return false;
+    }
+    fs.writeFileSync(markerPath, COMMONJS_MARKER_CONTENT);
+    return true;
+  } catch {
+    // Best-effort: a marker write failure must not fail the whole install.
+    return false;
+  }
+}
+
+/**
+ * Remove the CommonJS marker from `dir` on uninstall — but ONLY if it carries
+ * GSD's exact marker content. A user-authored package.json is never deleted.
+ * Mirrors the kimi uninstall guard in bin/install.js.
+ *
+ * @param dir - absolute path to the directory that held the staged .js hooks
+ * @returns `true` if a GSD-owned marker was removed
+ */
+function removeCommonJsMarkerIfGsdOwned(dir: string): boolean {
+  const markerPath = path.join(dir, 'package.json');
+  try {
+    if (!fs.existsSync(markerPath)) return false;
+    const content = fs.readFileSync(markerPath, 'utf8').trim();
+    if (content === '{"type":"commonjs"}') {
+      fs.unlinkSync(markerPath);
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // parseTomlValue + findMultilineBasicStringClose
 // (needed by rewriteLegacyCodexHookBlock — pure TOML helpers, no state)
 // ---------------------------------------------------------------------------
@@ -1153,6 +1228,51 @@ function writeCursorHooksJson(targetDir: string, src: string, opts?: WriteCursor
     }
   }
 
+  // Stage the hooks/lib/ helpers the staged scripts require (#2587). Cursor sets
+  // hostBehaviors.skipSharedHooksInstall, so it never reaches the installer's
+  // bulk hooks/lib copy — without this, a script requiring './lib/…' would throw
+  // MODULE_NOT_FOUND at load, BEFORE its own try/catch, and wedge every Cursor
+  // session on the one runtime these hooks exist for. Driven off what the staged
+  // scripts actually require so a future helper cannot be silently omitted.
+  const requiredLibFiles = new Set<string>();
+  for (const script of installedScripts) {
+    const staged = fs.readFileSync(path.join(hooksDir, script), 'utf8');
+    // Tolerant of interior whitespace and either quote style: a hook author
+    // writing `require( "./lib/x.js" )` must still get its helper staged, since
+    // a miss here surfaces as MODULE_NOT_FOUND at hook load, not at install.
+    const re = /require\(\s*['"]\.\/lib\/([A-Za-z0-9._-]+)['"]\s*\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(staged)) !== null) requiredLibFiles.add(m[1]);
+  }
+  if (requiredLibFiles.size > 0) {
+    const srcLibDir = path.join(srcHooksDir, 'lib');
+    const destLibDir = path.join(hooksDir, 'lib');
+    fs.mkdirSync(destLibDir, { recursive: true });
+    for (const libFile of requiredLibFiles) {
+      const libSrc = path.join(srcLibDir, libFile);
+      if (!fs.existsSync(libSrc)) {
+        // FAIL LOUD. Skipping here would ship hook scripts whose top-level
+        // require() throws before their own try/catch, wedging every session —
+        // and the install would still exit 0, so nobody would know until a user
+        // hit it. A missing helper source is a packaging bug; surface it.
+        throw new Error(
+          `hooks/lib/${libFile} is required by a staged Cursor hook but is missing from ${srcLibDir}. `
+          + 'Installing would ship a hook that throws MODULE_NOT_FOUND at load.',
+        );
+      }
+      let libContent = fs.readFileSync(libSrc, 'utf8');
+      libContent = libContent.replace(/gsd:/gi, 'gsd-');
+      fs.writeFileSync(path.join(destLibDir, libFile), libContent);
+    }
+  }
+
+  // #2717: write the CommonJS marker into hooks/ alongside the staged .js
+  // scripts. Cursor sets skipSharedHooksInstall, so it never reaches
+  // installSharedHooksBundle (the only other writer of this marker); without
+  // it, a ~/.cursor/package.json declaring {"type":"module"} makes Node load
+  // these require()-using scripts as ESM and every Cursor hook fails silently.
+  ensureCommonJsMarker(hooksDir);
+
   const hookOpts: BuildHookCommandOpts = { runtime: 'cursor', platform: opts.platform || process.platform };
   const commands: Record<string, string | null> = {};
   for (const ev of events) {
@@ -1186,6 +1306,11 @@ function removeCursorHooksJson(targetDir: string): { changed: boolean } {
       );
       if (!hasAnyEvents) {
         fs.unlinkSync(hooksJsonPath);
+        // #2717: also remove the CommonJS marker GSD wrote into hooks/ — but
+        // only if it still carries GSD's exact content (a user-authored
+        // package.json is never deleted). Best-effort: a failure here must not
+        // mask the hooks.json removal above.
+        try { removeCommonJsMarkerIfGsdOwned(path.join(targetDir, 'hooks')); } catch { /* leave it */ }
         return { changed: true };
       }
     } catch { /* best-effort: leave the file */ }
@@ -1354,6 +1479,13 @@ function writeWindsurfHooksJson(targetDir: string, src: string, opts?: WriteWind
     }
   }
 
+  // #2717: write the CommonJS marker into hooks/ alongside the staged .js
+  // scripts. Windsurf sets skipSharedHooksInstall, so it never reaches
+  // installSharedHooksBundle (the only other writer of this marker); without
+  // it, a config-root package.json declaring {"type":"module"} makes Node load
+  // these require()-using scripts as ESM and the Windsurf hooks fail silently.
+  ensureCommonJsMarker(hooksDir);
+
   const hookOpts: BuildHookCommandOpts = { runtime: 'windsurf', platform: opts.platform || process.platform };
   const commands: Record<string, string | null> = {};
   for (const ev of WINDSURF_HOOK_EVENTS) {
@@ -1395,6 +1527,10 @@ function removeWindsurfHooksJson(targetDir: string): { changed: boolean } {
       );
       if (!hasAnyEvents) {
         fs.unlinkSync(hooksJsonPath);
+        // #2717: also remove the CommonJS marker GSD wrote into hooks/ — but
+        // only if it still carries GSD's exact content (a user-authored
+        // package.json is never deleted). Best-effort.
+        try { removeCommonJsMarkerIfGsdOwned(path.join(targetDir, 'hooks')); } catch { /* leave it */ }
         return { changed: true };
       }
     } catch { /* best-effort: leave the file */ }
@@ -2314,6 +2450,8 @@ export = {
   GSD_WINDSURF_PRE_WRITE_HOOK_SCRIPT,
   GSD_WINDSURF_PRE_COMMAND_HOOK_SCRIPT,
   GSD_WINDSURF_HOOK_SCRIPTS,
+  ensureCommonJsMarker,
+  removeCommonJsMarkerIfGsdOwned,
   GSD_WINDSURF_HOOK_MARKER,
 
   // Copilot

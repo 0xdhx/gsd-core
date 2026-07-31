@@ -1,7 +1,7 @@
 {
   "id": "cline",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "title": "Cline",
   "description": "Cline (VS Code extension) — global-only nested-skill layout; cline-rules hook surface (.clinerules); no hook events emitted; tier-2 support.",
   "tier": "core",
@@ -49,13 +49,15 @@
         "maxDepth": 1,
         "background": true,
         "subagentToolkit": "read-only",
-        "backgroundDispatch": false
+        "backgroundDispatch": false,
+        "isolation": "undocumented"
       },
       "modelMode": "active",
       "hookBus": "host",
       "stateIO": "filesystem",
       "transport": "mcp",
-      "runtime": "node"
+      "runtime": "node",
+      "effortSurface": "undocumented"
     },
     "hostBehaviors": {
       "reapplyCommand": "/gsd-update --reapply",

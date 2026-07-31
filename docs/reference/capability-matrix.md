@@ -19,7 +19,7 @@ See also: [ADR-1244](../adr/1244-capability-ecosystem.md) —
 | Column | Description |
 |---|---|
 | **id** | Canonical capability identifier; unique across first- and third-party capabilities. Reserved prefixes: `gsd-`, `gsd-core-`, `anthropic-`. |
-| **role** | `feature` — extends what the loop does; `runtime` — adapts GSD to a specific AI runtime/IDE. |
+| **role** | `feature` — extends what the loop does; `runtime` — adapts GSD to a specific AI runtime/IDE; `reviewer` — declares a cross-AI reviewer lane (ADR-2782). A capability may be both a runtime and a reviewer. |
 | **tier** | `core` — always active; `standard` — active when the runtime supports it; `full` — opt-in or runtime-specific. |
 | **engines.gsd** | Semver RANGE expressing host-version compatibility. A hard gate at install and at load. `—` means the capability declares no range. |
 | **extension points** | The loop points this capability registers hooks into (from the registry's `byLoopPoint` index). `—` means it registers none (typical for runtime capabilities, whose job is surface emission). |
@@ -73,7 +73,7 @@ points.
 | `tdd` | feature | full | `>=1.6.0` | `plan:pre`, `execute:post` | contribution, gate | first-party |
 | `ui` | feature | full | `>=1.6.0` | `plan:pre`, `execute:wave:post`, `verify:post` | step, gate | first-party |
 
-### Runtime capabilities (role: runtime) — 18
+### Runtime capabilities (role: runtime) — 19
 
 Runtime capabilities adapt GSD to a specific AI runtime or IDE — emitting
 skills, agents, hooks configuration, and surface files for that host. They
@@ -93,6 +93,7 @@ emission), so their extension-point and hook-kind cells are `—`.
 | `hermes` | runtime | core | `>=1.6.0` | — | — | first-party |
 | `kilo` | runtime | core | `>=1.6.0` | — | — | first-party |
 | `kimi` | runtime | core | `>=1.6.0` | — | — | first-party |
+| `kimi-code` | runtime | core | `>=1.7.0` | — | — | first-party |
 | `opencode` | runtime | core | `>=1.6.0` | — | — | first-party |
 | `pi` | runtime | core | `>=1.7.0` | — | — | first-party |
 | `qwen` | runtime | core | `>=1.6.0` | — | — | first-party |
@@ -100,6 +101,29 @@ emission), so their extension-point and hook-kind cells are `—`.
 | `vscode` | runtime | core | `>=1.7.0` | — | — | first-party |
 | `windsurf` | runtime | core | `>=1.6.0` | — | — | first-party |
 | `zcode` | runtime | core | `>=1.6.0` | — | — | first-party |
+
+### Reviewer capabilities (role: reviewer) — 5
+
+Reviewer capabilities declare a cross-AI **reviewer lane** — one external CLI or
+model endpoint `/gsd:review` hands a plan to (ADR-2782 D3). They are not install
+targets: they emit no skills, agents, hooks or surface files, so their
+extension-point and hook-kind cells are `—`. A host that is *also* a reviewer
+(Claude, Codex, Cursor, OpenCode, Qwen, Antigravity) keeps one manifest and
+appears under **runtime** above, carrying its lane alongside its runtime body;
+only lanes that GSD never installs into appear here.
+
+Because a lane receives the plan text, requirements, research findings and
+`CONTEXT.md` decisions, it is a disclosed executable surface and is consent-gated
+at install like any other — see
+[the trust model](../explanation/capability-trust-model.md).
+
+| id | role | tier | engines.gsd | extension points | hook kinds | source |
+|---|---|---|---|---|---|---|
+| `coderabbit` | reviewer | full | `>=1.8.0` | — | — | first-party |
+| `gemini` | reviewer | full | `>=1.8.0` | — | — | first-party |
+| `llama-cpp` | reviewer | full | `>=1.8.0` | — | — | first-party |
+| `lm-studio` | reviewer | full | `>=1.8.0` | — | — | first-party |
+| `ollama` | reviewer | full | `>=1.8.0` | — | — | first-party |
 
 ---
 
@@ -120,7 +144,7 @@ fields described below, with `source` = `third-party`.
 | Column | Value |
 |---|---|
 | **id** | As declared in `capability.json`. Must not use reserved prefixes (`gsd-`, `gsd-core-`, `anthropic-`). |
-| **role** | `feature` or `runtime`, as declared. |
+| **role** | `feature`, `runtime`, or `reviewer`, as declared. |
 | **tier** | `core`, `standard`, or `full`, as declared. |
 | **engines.gsd** | Range from `capability.json`; verified at install and at each load. |
 | **extension points** | The loop points the capability registers into, validated against the known 12 identifiers. |

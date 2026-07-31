@@ -101,6 +101,24 @@ describe('resolveRuntimeArtifactLayout — codex', () => {
     assert.strictEqual(layout.kinds[0].prefix, 'gsd-');
     assert.strictEqual(typeof layout.kinds[0].stage, 'function');
   });
+
+  test('#2429: codex local scope does not set $HOME/.agents skills home override', () => {
+    const layout = resolveRuntimeArtifactLayout('codex', FAKE_DIR, 'local');
+    const skills = layout.kinds.find(k => k.kind === 'skills');
+    assert.ok(skills, 'codex local must have a skills kind');
+    assert.strictEqual(skills.home, undefined,
+      'codex local skills must NOT have a home override (would redirect to $HOME/.agents instead of project-local)');
+  });
+
+  test('#2429: codex global scope DOES set $HOME/.agents skills home override', () => {
+    const layout = resolveRuntimeArtifactLayout('codex', FAKE_DIR, 'global');
+    const skills = layout.kinds.find(k => k.kind === 'skills');
+    assert.ok(skills, 'codex global must have a skills kind');
+    assert.ok(typeof skills.home === 'string' && skills.home.length > 0,
+      'codex global skills MUST have a home override ($HOME/.agents)');
+    assert.ok(skills.home.includes('.agents'),
+      'codex global skills home should point to .agents directory');
+  });
 });
 
 describe('resolveRuntimeArtifactLayout — copilot', () => {
@@ -916,5 +934,145 @@ describe('#1477 .gsd-source marker provisioning', () => {
       const resolved = findInstallSourceRoot(cfgDir);
       assert.equal(path.resolve(resolved), path.resolve(REPO_ROOT, 'commands', 'gsd'));
     });
+  });
+});
+
+// ─── #2624: stale .gsd-source marker read before rewrite on upgrade ──────────
+//
+// Regression for #2624: a Claude-global upgrade silently installed skill content
+// from the PREVIOUS version. findInstallSourceRoot prefers <configDir>/.gsd-source,
+// and install() used to REWRITE that marker AFTER staging had already read it — so
+// on an upgrade the marker still pointed at the prior version's source (an npx
+// cache dir that still exists on disk) and every converted skill was generated from
+// the OLD commands/gsd. Fix: write the marker BEFORE staging reads it.
+//
+// These exercise the real install(true, 'claude') with HOME redirected to a tmp dir,
+// pre-seeding a STALE marker that points at a different (still-existing) source —
+// the exact upgrade condition. No live npx / network.
+describe('#2624 .gsd-source marker is rewritten before staging reads it', () => {
+  let tmpRoot;
+  let savedHome;
+  let savedUserProfile;
+  let savedExplicitConfigDir;
+  let savedTestMode;
+
+  // Run install() with process.exit and console output mocked via t.mock (auto-restored),
+  // per CONTRIBUTING.md test rules (no manual monkeypatch / try-finally in test bodies).
+  // process.exit during install is a hard failure — surface it, don't let it kill the runner.
+  function runInstall(t, isGlobal, runtime) {
+    t.mock.method(process, 'exit', (code) => {
+      throw new Error(`process.exit(${code}) during install — should not happen`);
+    });
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(console, 'warn', () => {});
+    t.mock.method(console, 'error', () => {});
+    return install(isGlobal, runtime);
+  }
+
+  beforeEach(() => {
+    tmpRoot = createTempDir('gsd-2624-');
+    savedHome = process.env.HOME;
+    savedUserProfile = process.env.USERPROFILE;
+    process.env.HOME = tmpRoot;
+    process.env.USERPROFILE = tmpRoot;
+    savedExplicitConfigDir = process.env.GSD_EXPLICIT_CONFIG_DIR;
+    delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    savedTestMode = process.env.GSD_TEST_MODE;
+    process.env.GSD_TEST_MODE = '1';
+  });
+
+  afterEach(() => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedUserProfile;
+    if (savedExplicitConfigDir === undefined) delete process.env.GSD_EXPLICIT_CONFIG_DIR;
+    else process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
+    if (savedTestMode === undefined) delete process.env.GSD_TEST_MODE;
+    else process.env.GSD_TEST_MODE = savedTestMode;
+    cleanup(tmpRoot);
+  });
+
+  // The current package's commands/gsd — what the marker MUST point at after install.
+  const CURRENT_SOURCE = path.join(REPO_ROOT, 'commands', 'gsd');
+
+  test('claude-global install overwrites a stale .gsd-source marker before staging reads it', (t) => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+
+    // Simulate the PREVIOUS install's marker: a different source dir that STILL EXISTS
+    // on disk (mirroring a coexisting npx per-version cache dir). findInstallSourceRoot
+    // returns this immediately if it is read before the marker is rewritten.
+    const staleSource = path.join(tmpRoot, 'old-npx-cache', 'commands', 'gsd');
+    fs.mkdirSync(staleSource, { recursive: true });
+    fs.writeFileSync(path.join(claudeDir, '.gsd-source'), staleSource + '\n', 'utf8');
+
+    // Spy on findInstallSourceRoot to capture WHICH source staging actually resolves.
+    // The marker ends up correct either way (the late write corrected it on the old code),
+    // so the marker content alone cannot prove the ordering — the resolved-source captures
+    // can. Before the fix, staging resolves the stale path; after, the current path.
+    // install-engine.cjs calls runtimeArtifactLayout.findInstallSourceRoot via the module
+    // object (not a captured ref), so mocking the property on the shared module instance
+    // intercepts the staging call. Same pattern as tests/phase.test.cjs (capture original,
+    // delegate).
+    const runtimeArtifactLayout = require('../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+    const realFindInstallSourceRoot = runtimeArtifactLayout.findInstallSourceRoot;
+    const resolvedSources = [];
+    t.mock.method(runtimeArtifactLayout, 'findInstallSourceRoot', function (configDir) {
+      const result = realFindInstallSourceRoot.call(this, configDir);
+      resolvedSources.push(path.resolve(result));
+      return result;
+    });
+
+    runInstall(t, true /* isGlobal */, 'claude');
+
+    const markerPath = path.join(claudeDir, '.gsd-source');
+    assert.ok(fs.existsSync(markerPath), 'marker must exist after install');
+    const finalMarker = path.resolve(fs.readFileSync(markerPath, 'utf8').trim());
+    assert.equal(finalMarker, path.resolve(CURRENT_SOURCE),
+      `final marker must point at the current package source, not ${finalMarker}`);
+
+    // The decisive assertion: staging must NEVER have resolved the stale source. Before the
+    // fix, at least one staging resolution returned the stale path (read before rewrite).
+    const resolvedStale = resolvedSources.filter((p) => p === path.resolve(staleSource));
+    assert.equal(resolvedStale.length, 0,
+      `staging must not resolve the stale source during install, but did ${resolvedStale.length} time(s). ` +
+      `Resolved: ${JSON.stringify(resolvedSources)}`);
+  });
+
+  test('fresh claude-global install (no prior marker) still writes the correct marker', (t) => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // No pre-existing marker — fresh install (negative space, must stay correct).
+    runInstall(t, true /* isGlobal */, 'claude');
+
+    const markerPath = path.join(claudeDir, '.gsd-source');
+    assert.ok(fs.existsSync(markerPath), 'fresh claude-global install must write the marker');
+    const resolved = fs.readFileSync(markerPath, 'utf8').trim();
+    assert.equal(
+      path.resolve(resolved),
+      path.resolve(CURRENT_SOURCE),
+      'fresh install marker must point at the current package source',
+    );
+  });
+
+  test('claude-global install rewrites a marker pointing at a deleted (ghost) source', (t) => {
+    const claudeDir = path.join(tmpRoot, '.claude');
+    fs.mkdirSync(claudeDir, { recursive: true });
+    // A ghost path that does NOT exist on disk — findInstallSourceRoot ignores it and
+    // falls through to walk-up, then install() rewrites the marker to the current source.
+    const ghost = path.join(tmpRoot, 'gone', 'commands', 'gsd');
+    fs.writeFileSync(path.join(claudeDir, '.gsd-source'), ghost + '\n', 'utf8');
+
+    runInstall(t, true /* isGlobal */, 'claude');
+
+    const markerPath = path.join(claudeDir, '.gsd-source');
+    assert.ok(fs.existsSync(markerPath), 'marker must exist after install');
+    const resolved = fs.readFileSync(markerPath, 'utf8').trim();
+    assert.equal(
+      path.resolve(resolved),
+      path.resolve(CURRENT_SOURCE),
+      'ghost marker must be rewritten to the current package source',
+    );
   });
 });

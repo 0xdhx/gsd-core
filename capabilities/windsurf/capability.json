@@ -1,7 +1,7 @@
 {
   "id": "windsurf",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "title": "Windsurf",
   "description": "Windsurf (Codeium) — workspace workflow artifact layout for slash commands; Cascade native hooks.json blocking hook bus (pre_write_code, pre_run_command); tier-2 support.",
   "tier": "core",
@@ -67,13 +67,15 @@
         "maxDepth": "undocumented",
         "background": "undocumented",
         "subagentToolkit": "undocumented",
-        "backgroundDispatch": "undocumented"
+        "backgroundDispatch": "undocumented",
+        "isolation": "none"
       },
       "modelMode": "passive",
       "hookBus": "host",
       "stateIO": "filesystem",
       "transport": "mcp",
-      "runtime": "undocumented"
+      "runtime": "undocumented",
+      "effortSurface": "undocumented"
     },
     "hostBehaviors": {
       "skipSharedHooksInstall": true,

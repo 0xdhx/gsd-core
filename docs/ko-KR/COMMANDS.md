@@ -171,7 +171,6 @@ GSD 워크스페이스 관리 — 리포지토리 복사본과 독립적인 `.pl
 | `--ingest <path-or-glob>` | 컨텍스트 합성을 위해 discuss-phase 대신 ADR 파일 사용 |
 | `--ingest-format <auto\|nygard\|madr\|narrative>` | `--ingest`에 대한 선택적 ADR 파서 형식 재정의 |
 | `--reviews` | REVIEWS.md의 크로스 AI 리뷰 피드백으로 재계획 |
-| `--validate` | 계획 시작 전 상태 검증 실행 |
 | `--bounce` | 계획 후 외부 계획 바운스 검증 실행 (`workflow.plan_bounce_script` 사용) |
 | `--skip-bounce` | 설정에서 활성화되어 있어도 계획 바운스 생략 |
 | `--mvp` | 수직 MVP 모드 — 계획자가 수평 레이어 대신 기능 슬라이스(UI→API→DB)로 작업을 구성합니다. 이전 단계 요약이 없는 새 프로젝트의 단계 1에서는 `SKELETON.md`(Walking Skeleton)도 생성합니다. ROADMAP.md에 `**Mode:** mvp`를 추가하여 단계별로 지속시킬 수 있으며, 플래그 없이 자동으로 `--mvp`가 적용됩니다. |
@@ -200,7 +199,6 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 /gsd-plan-phase 1                              # 단계 1 리서치 + 계획 + 검증
 /gsd-plan-phase 3 --skip-research              # 리서치 없이 계획 (친숙한 도메인)
 /gsd-plan-phase --auto                         # 비대화형 계획 수립
-/gsd-plan-phase 2 --validate                   # 계획 전 상태 검증
 /gsd-plan-phase 1 --bounce                     # 계획 + 외부 바운스 검증
 /gsd-plan-phase 2 --ingest docs/adr/0010.md   # 컨텍스트 합성을 위한 ADR 익스프레스 경로
 /gsd-plan-phase 2 --ingest 'docs/adr/00*.md' --ingest-format auto
@@ -220,7 +218,7 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 | 인수 / 플래그 | 필수 | 설명 |
 |-----------------|----------|-------------|
 | `N` | **예** | 계획 및 리뷰할 단계 번호 |
-| `--codex` / `--gemini` / `--claude` / `--opencode` | 아니요 | 단일 리뷰어 선택 |
+| 리뷰어 플래그 | 아니요 | 모든 리뷰어 레인 플래그를 그대로 전달: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | 아니요 | 구성된 모든 리뷰어를 병렬로 실행 |
 | `--max-cycles N` | 아니요 | 사이클 상한 재정의 (기본값 3) |
 
@@ -258,7 +256,6 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 |----------|----------|-------------|
 | `N` | **예** | 실행할 단계 번호 |
 | `--wave N` | 아니요 | 단계에서 웨이브 `N`만 실행 |
-| `--validate` | 아니요 | 실행 시작 전 상태 검증 실행 |
 | `--cross-ai` | 아니요 | 외부 AI CLI에 실행 위임 (`workflow.cross_ai_command` 사용) |
 | `--no-cross-ai` | 아니요 | 설정에서 크로스 AI가 활성화되어 있어도 로컬 실행 강제 |
 
@@ -270,7 +267,6 @@ WebSearch에서 가져온 패키지는 `[ASSUMED]`(`[VERIFIED]`가 아님)로 �
 ```bash
 /gsd-execute-phase 1                # 단계 1 실행
 /gsd-execute-phase 1 --wave 2       # 웨이브 2만 실행
-/gsd-execute-phase 1 --validate     # 실행 전 상태 검증
 /gsd-execute-phase 2 --cross-ai     # 단계 2를 외부 AI CLI에 위임
 ```
 
@@ -592,7 +588,7 @@ Nyquist 검증 갭을 소급하여 감사하고 보완합니다.
     "flags": {
       "discuss": "--auto",
       "plan": "--skip-research",
-      "execute": "--validate"
+      "execute": "--cross-ai"
     }
   }
 }
@@ -1254,6 +1250,7 @@ AI 시스템 구축을 포함하는 단계에 대한 AI-SPEC.md 디자인 계약
 | `--qwen` | Qwen Code 검토 포함 (Alibaba Qwen 모델) |
 | `--cursor` | Cursor 에이전트 검토 포함 |
 | `--agy` / `--antigravity` | Antigravity CLI 검토 포함 (Google 자격증명으로 무료) |
+| `--kimi-code` | Kimi Code CLI 검토 포함 (Moonshot AI) |
 | `--ollama` | Ollama 서버 검토 포함 |
 | `--lm-studio` | LM Studio 서버 검토 포함 |
 | `--llama-cpp` | llama.cpp 서버 검토 포함 |

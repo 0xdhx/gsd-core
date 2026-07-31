@@ -1,7 +1,7 @@
 {
   "id": "trae",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "title": "Trae IDE",
   "description": "Trae IDE — nested-skill artifact layout; no hook surface (profile-marker-only config); tier-2 support.",
   "tier": "core",
@@ -74,13 +74,15 @@
         "maxDepth": "undocumented",
         "background": true,
         "subagentToolkit": "undocumented",
-        "backgroundDispatch": "undocumented"
+        "backgroundDispatch": "undocumented",
+        "isolation": "undocumented"
       },
       "modelMode": "passive",
       "hookBus": "engine",
       "stateIO": "filesystem",
       "transport": "mcp",
-      "runtime": "node"
+      "runtime": "node",
+      "effortSurface": "undocumented"
     },
     "hostBehaviors": {
       "skipSharedHooksInstall": true,

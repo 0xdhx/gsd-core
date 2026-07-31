@@ -40,6 +40,9 @@ const {
   executeWorktreeWaveCleanupPlan,
   planWorktreeRecordAgent,
   cmdWorktreeRecordAgent,
+  planWorktreeCreate,
+  executeWorktreeCreatePlan,
+  cmdWorktreeCreate,
 } = require(WORKTREE_SAFETY_PATH);
 
 const isWindows = process.platform === 'win32';
@@ -662,6 +665,16 @@ describe('planWorktreeRecordAgent', () => {
     assert.equal(readBack.reason, 'empty_manifest');
   });
 
+  test('accepts the current agent-<id> namespace (#1995)', () => {
+    const plan = planWorktreeRecordAgent('{"worktrees":[]}', { ...VALID, branch: 'agent-a1' });
+    assert.equal(plan.ok, true);
+    assert.equal(plan.entry.branch, 'agent-a1');
+    const readBack = planWorktreeWaveCleanup('/repo/main', JSON.parse(plan.manifest));
+    assert.equal(readBack.ok, true);
+    assert.equal(readBack.entries.length, 1);
+    assert.equal(readBack.entries[0].branch, 'agent-a1');
+  });
+
   test('fails loudly on malformed manifest JSON instead of clobbering it', () => {
     const plan = planWorktreeRecordAgent('{not valid json', VALID);
     assert.equal(plan.ok, false);
@@ -749,7 +762,9 @@ describe('planWorktreeRecordAgent', () => {
 
 describe('planWorktreeRecordAgent — fast-check parity invariant (#1298)', () => {
   const seg = fc.stringMatching(/^[A-Za-z0-9._/-]+$/); // include '/' — the namespace allows it
-  const agentBranch = seg.map((s) => `worktree-agent-${s}`);
+  const legacyAgentBranch = seg.map((s) => `worktree-agent-${s}`);
+  const currentAgentBranch = seg.map((s) => `agent-${s}`);
+  const agentBranch = fc.oneof(legacyAgentBranch, currentAgentBranch);
   const nonEmpty = fc.stringMatching(/^\S[\S ]*$/); // no leading whitespace, not blank
 
   test('any writer-accepted entry round-trips through the cleanup reader unchanged', () => {
@@ -776,7 +791,7 @@ describe('planWorktreeRecordAgent — fast-check parity invariant (#1298)', () =
         agentId: nonEmpty,
         worktreePath: nonEmpty,
         // Any branch that does NOT match the disposable namespace.
-        branch: fc.string({ minLength: 1 }).filter((b) => !/^worktree-agent-[A-Za-z0-9._/-]+$/.test(b.trim())),
+        branch: fc.string({ minLength: 1 }).filter((b) => !/^(worktree-)?agent-[A-Za-z0-9._/-]+$/.test(b.trim())),
         base: nonEmpty,
       }),
       (fields) => {
@@ -785,6 +800,79 @@ describe('planWorktreeRecordAgent — fast-check parity invariant (#1298)', () =
         assert.equal(plan.manifest, null);
       },
     ));
+  });
+});
+
+// ─── branch namespace boundary tests (#1995) ─────────────────────────────────
+// Claude Code's isolation="worktree" branch naming changed from worktree-agent-<id>
+// to agent-<id>. Both namespaces must be accepted; non-agent branches rejected.
+
+describe('worktree branch namespace boundaries (#1995)', () => {
+  const ACCEPTED_BRANCHES = [
+    'agent-a1',
+    'agent-abc123',
+    'agent-session.42',
+    'worktree-agent-a1',
+    'worktree-agent-abc123',
+    'worktree-agent-session.42',
+  ];
+  const REJECTED_BRANCHES = [
+    'feature-x',
+    'main',
+    'agent',
+    'worktree-agent',
+    'xagent-y',
+    'worktree-foo',
+    'worktree-agent-',
+    'agent-',
+    '',
+  ];
+
+  for (const branch of ACCEPTED_BRANCHES) {
+    test(`planWorktreeRecordAgent accepts branch "${branch}"`, () => {
+      const plan = planWorktreeRecordAgent('{"worktrees":[]}', {
+        agentId: 'a1', worktreePath: '/repo/wt', branch, base: 'abc123',
+      });
+      assert.equal(plan.ok, true, `expected branch "${branch}" to be accepted`);
+      assert.equal(plan.entry.branch, branch);
+    });
+  }
+
+  for (const branch of REJECTED_BRANCHES) {
+    test(`planWorktreeRecordAgent rejects branch "${branch}"`, () => {
+      const plan = planWorktreeRecordAgent('{"worktrees":[]}', {
+        agentId: 'a1', worktreePath: '/repo/wt', branch, base: 'abc123',
+      });
+      if (branch === '') {
+        assert.equal(plan.reason, 'missing_field');
+      } else {
+        assert.equal(plan.ok, false, `expected branch "${branch}" to be rejected`);
+        assert.equal(plan.reason, 'invalid_entry');
+        assert.match(plan.hint, /\(worktree-\)\?agent-/);
+      }
+    });
+  }
+
+  test('cleanup-wave retains agent-<id> entries alongside worktree-agent-<id> entries', () => {
+    const manifest = {
+      orchestrator_root: '/repo/main',
+      worktrees: [
+        { agent_id: 'a1', worktree_path: '/repo/wt-a1', branch: 'agent-a1', expected_base: 'abc' },
+        { agent_id: 'a2', worktree_path: '/repo/wt-a2', branch: 'worktree-agent-a2', expected_base: 'def' },
+      ],
+    };
+    const result = planWorktreeWaveCleanup('/repo/main', manifest);
+    assert.equal(result.ok, true);
+    assert.equal(result.entries.length, 2);
+    assert.deepEqual(result.entries.map((e) => e.branch), ['agent-a1', 'worktree-agent-a2']);
+  });
+
+  test('hint string names the widened accepted pattern', () => {
+    const plan = planWorktreeRecordAgent('{"worktrees":[]}', {
+      agentId: 'a1', worktreePath: '/repo/wt', branch: 'feature-x', base: 'abc123',
+    });
+    assert.equal(plan.ok, false);
+    assert.match(plan.hint, /\(worktree-\)\?agent-\[A-Za-z0-9\._\/-\]\+/);
   });
 });
 
@@ -822,6 +910,26 @@ describe('cmdWorktreeRecordAgent', () => {
     assert.equal(written.worktrees.length, 1);
     assert.equal(written.worktrees[0].agent_id, 'a1');
     assert.match(out.join(''), /"ok": true/);
+  });
+
+  test('accepts the current agent-<id> namespace via CLI (#1995)', () => {
+    let writtenContent = null;
+    const agentArgs = [
+      '--manifest', 'manifest.json',
+      '--agent-id', 'a1',
+      '--path', '/repo/.claude/worktrees/agent-a1',
+      '--branch', 'agent-a1',
+      '--base', 'abc123',
+    ];
+    const result = cmdWorktreeRecordAgent('/repo/main', agentArgs, {
+      readFile: () => '{"orchestrator_root":"/repo/main","worktrees":[]}',
+      writeFile: (_p, c) => { writtenContent = c; },
+      write: () => {},
+      writeErr: () => {},
+    });
+    assert.equal(result.ok, true);
+    const written = JSON.parse(writtenContent);
+    assert.equal(written.worktrees[0].branch, 'agent-a1');
   });
 
   test('exits 2 with usage when --manifest is missing', () => {
@@ -938,6 +1046,610 @@ describe('worktree record-agent — real CLI dispatch (#1298)', () => {
       path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md'), 'utf8',
     );
     assert.match(wf, /worktree\.record-agent/, 'execute-phase.md must wire the record-agent verb');
+  });
+});
+
+// ─── worktree create (#2584 ADR-1239 Codex-binding amendment — Phase 2) ───────
+// UNCONSUMED in Phase 2: no scheduler calls this yet (Phase 3 wires it). These
+// tests pin the git-worktree-creation primitive itself.
+
+describe('planWorktreeCreate', () => {
+  const okFields = {
+    agentId: 'a1',
+    worktreePath: '/repo/.claude/worktrees/agent-a1',
+    branch: 'worktree-agent-a1',
+    base: 'abc123',
+  };
+
+  test('happy path returns ok:true with the normalized entry', () => {
+    const plan = planWorktreeCreate(okFields);
+    assert.equal(plan.ok, true);
+    assert.equal(plan.reason, 'ok');
+    assert.equal(plan.entry.agent_id, 'a1');
+    assert.equal(plan.entry.worktree_path, okFields.worktreePath);
+    assert.equal(plan.entry.branch, 'worktree-agent-a1');
+    assert.equal(plan.entry.expected_base, 'abc123');
+  });
+
+  test('missing --agent-id reports the missing flag', () => {
+    const plan = planWorktreeCreate({ ...okFields, agentId: '' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'missing_field');
+    assert.match(plan.hint, /--agent-id/);
+    assert.equal(plan.entry, null);
+  });
+
+  test('whitespace-only field is treated as missing', () => {
+    const plan = planWorktreeCreate({ ...okFields, base: '   ' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'missing_field');
+    assert.match(plan.hint, /--base/);
+  });
+
+  test('branch-regex fail-closed: a branch outside the worktree-agent-* namespace is rejected', () => {
+    const plan = planWorktreeCreate({ ...okFields, branch: 'not-worktree-agent-x' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'invalid_entry');
+    assert.equal(plan.entry, null);
+  });
+
+  test('accepts the current agent-<id> namespace (#1995)', () => {
+    const plan = planWorktreeCreate({ ...okFields, branch: 'agent-a1' });
+    assert.equal(plan.ok, true);
+    assert.equal(plan.entry.branch, 'agent-a1');
+  });
+
+  // ─── #2584 FIX 4: git argument-injection + path-traversal guards ──────────
+
+  test('FIX4: a leading-dash branch is rejected (fail-closed via the pre-existing branch-namespace regex)', () => {
+    // The leading-dash guard runs AFTER normalizeCleanupManifestEntry (per the
+    // fix ordering), and WORKTREE_AGENT_BRANCH_RE anchors on `^(worktree-)?agent-`
+    // — no string starting with '-' can ever match it. So a dash-prefixed branch
+    // is already fully fail-closed by the EARLIER regex gate (reason
+    // 'invalid_entry') and never reaches the leading-dash check at all; the
+    // net security property (a branch value can never reach git as a bare
+    // flag) holds either way.
+    const plan = planWorktreeCreate({ ...okFields, branch: '-x' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'invalid_entry');
+    assert.equal(plan.entry, null);
+  });
+
+  test('FIX4: a leading-dash base is rejected', () => {
+    const plan = planWorktreeCreate({ ...okFields, base: '-f' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'unsafe_leading_dash');
+  });
+
+  test('FIX4: a leading-dash path is rejected', () => {
+    const plan = planWorktreeCreate({ ...okFields, worktreePath: '-f' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'unsafe_leading_dash');
+  });
+
+  test('FIX4: a ".." path-traversal segment is rejected (POSIX separator)', () => {
+    const plan = planWorktreeCreate({ ...okFields, worktreePath: 'a/../../etc/x' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'unsafe_path_traversal');
+  });
+
+  test('FIX4: a ".." path-traversal segment is rejected (Windows separator)', () => {
+    const plan = planWorktreeCreate({ ...okFields, worktreePath: 'a\\..\\..\\etc\\x' });
+    assert.equal(plan.ok, false);
+    assert.equal(plan.reason, 'unsafe_path_traversal');
+  });
+
+  test('FIX4: a normal path with a hyphen in a segment name still passes', () => {
+    const plan = planWorktreeCreate({ ...okFields, worktreePath: '/tmp/wt-1' });
+    assert.equal(plan.ok, true);
+  });
+
+  test('FIX4: an absolute path is NOT rejected (the orchestrator legitimately uses absolute paths)', () => {
+    const plan = planWorktreeCreate({ ...okFields, worktreePath: '/repo/.claude/worktrees/agent-a1' });
+    assert.equal(plan.ok, true);
+    assert.equal(plan.entry.worktree_path, '/repo/.claude/worktrees/agent-a1');
+  });
+});
+
+describe('executeWorktreeCreatePlan', () => {
+  const okFields = {
+    agentId: 'a1',
+    worktreePath: '/repo/.claude/worktrees/agent-a1',
+    branch: 'worktree-agent-a1',
+    base: 'abc123',
+  };
+
+  test('base_unresolved: a non-zero rev-parse --verify blocks BEFORE any worktree add is attempted', () => {
+    const plan = planWorktreeCreate(okFields);
+    const calls = [];
+    const execGit = (args) => {
+      calls.push(args);
+      if (args[0] === 'rev-parse') return { exitCode: 1, stdout: '', stderr: 'fatal: bad revision', timedOut: false };
+      return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    };
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'base_unresolved');
+    assert.ok(!calls.some((c) => c[0] === 'worktree'), 'must NOT attempt `git worktree add` when the base is unresolved');
+  });
+
+  test('successful create: ok:true, cwd is the posix-normalized worktree path', () => {
+    const plan = planWorktreeCreate(okFields);
+    const calls = [];
+    const execGit = (args) => {
+      calls.push(args);
+      return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    };
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit });
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, 'created');
+    assert.equal(result.cwd, okFields.worktreePath);
+    assert.equal(result.worktree_path, okFields.worktreePath);
+    assert.equal(result.branch, 'worktree-agent-a1');
+    assert.equal(result.base, 'abc123');
+    assert.ok(calls.some((c) => c[0] === 'worktree' && c[1] === 'add'), 'must call `git worktree add`');
+  });
+
+  test('timeout on the base check degrades to git_timeout — does not throw, and no rollback is attempted (nothing was created)', () => {
+    const plan = planWorktreeCreate(okFields);
+    const calls = [];
+    const timeoutStub = makeTimeoutStub();
+    const execGit = (args, opts) => { calls.push(args); return timeoutStub(args, opts); };
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'git_timeout');
+    assert.ok(!calls.some((c) => c[0] === 'worktree'), 'must NOT attempt any `git worktree` call (nothing was ever created)');
+  });
+
+  test('FIX3: timeout on `git worktree add` degrades to git_timeout AND best-effort rolls back the partial worktree', () => {
+    const plan = planWorktreeCreate(okFields);
+    const timeoutStub = makeTimeoutStub();
+    const calls = [];
+    const execGit = (args, opts) => {
+      calls.push(args);
+      if (args[0] === 'rev-parse') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      return timeoutStub(args, opts);
+    };
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'git_timeout');
+    const rollbackCall = calls.find((c) => c[0] === 'worktree' && c[1] === 'remove');
+    assert.ok(rollbackCall, 'a best-effort `git worktree remove --force` rollback must be attempted');
+    assert.ok(rollbackCall.includes('--force'));
+    assert.equal(rollbackCall[rollbackCall.length - 1], okFields.worktreePath);
+  });
+
+  test('FIX5 [data-loss guard]: worktree_add_failed (clean collision exit) does NOT roll back — leaves a pre-existing peer worktree untouched', () => {
+    // The most common non-zero `add` exit is a COLLISION: the target
+    // path/branch is already a registered worktree. git fails FAST there and
+    // creates nothing. The branch namespace this verb writes into
+    // (worktree-agent-*/agent-*) IS the concurrent-executor namespace, so a
+    // colliding path is very plausibly a LIVE PEER executor — rolling it back
+    // would destroy real, uncommitted work. This must NEVER call
+    // `git worktree remove`.
+    const plan = planWorktreeCreate(okFields);
+    const calls = [];
+    const execGit = (args) => {
+      calls.push(args);
+      if (args[0] === 'rev-parse') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      return { exitCode: 128, stdout: '', stderr: `fatal: '${okFields.worktreePath}' already exists`, timedOut: false };
+    };
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'worktree_add_failed');
+    assert.match(result.stderr, /already exists/);
+    assert.ok(
+      !calls.some((c) => c[0] === 'worktree' && c[1] === 'remove'),
+      'a clean non-zero `add` exit must NEVER trigger a rollback — the colliding path may be a live peer executor',
+    );
+  });
+
+  test('the timeout-path rollback never masks the original failure even if the rollback execGit itself throws', () => {
+    // The throwing-rollback contract is only exercised on the SURVIVING
+    // rollback call site (the timeout path) after FIX 5 removed the
+    // clean-exit rollback.
+    const plan = planWorktreeCreate(okFields);
+    const execGit = (args) => {
+      if (args[0] === 'rev-parse') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        return { exitCode: null, stdout: '', stderr: '', timedOut: true, signal: 'SIGTERM' };
+      }
+      throw new Error('rollback execGit exploded');
+    };
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'git_timeout');
+  });
+
+  test('a skip plan (invalid_entry) is echoed back without any git call', () => {
+    const plan = planWorktreeCreate({ ...okFields, branch: 'not-worktree-agent-x' });
+    const calls = [];
+    const result = executeWorktreeCreatePlan(plan, '/repo/main', { execGit: (args) => { calls.push(args); return { exitCode: 0, stdout: '', stderr: '', timedOut: false }; } });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, 'invalid_entry');
+    assert.equal(calls.length, 0);
+  });
+
+  test('Windows path: a worktreePath with backslashes is posix-normalized in the result (worktree_path and cwd)',
+    () => {
+      const winFields = { ...okFields, worktreePath: 'C:\\repo\\.claude\\worktrees\\agent-a1' };
+      const plan = planWorktreeCreate(winFields);
+      const execGit = () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false });
+      const result = executeWorktreeCreatePlan(plan, 'C:\\repo\\main', { execGit });
+      assert.equal(result.ok, true);
+      assert.equal(result.cwd, 'C:/repo/.claude/worktrees/agent-a1');
+      assert.equal(result.worktree_path, 'C:/repo/.claude/worktrees/agent-a1');
+      assert.ok(!result.cwd.includes('\\'), 'cwd must contain no backslashes');
+    });
+});
+
+describe('cmdWorktreeCreate', () => {
+  function withExitCode(fn) {
+    const saved = process.exitCode;
+    try { return fn(); } finally { process.exitCode = saved; }
+  }
+
+  const okArgs = [
+    '--manifest', 'manifest.json',
+    '--agent-id', 'a1',
+    '--path', '/repo/.claude/worktrees/agent-a1',
+    '--branch', 'worktree-agent-a1',
+    '--base', 'abc123',
+  ];
+
+  function okExecGit() {
+    return () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false });
+  }
+
+  test('creates the worktree and appends the entry to an empty manifest', () => {
+    let writtenPath = null;
+    let writtenContent = null;
+    const out = [];
+    const result = cmdWorktreeCreate('/repo/main', okArgs, {
+      readFile: () => '{"orchestrator_root":"/repo/main","worktrees":[]}',
+      writeFile: (p, c) => { writtenPath = p; writtenContent = c; },
+      write: (s) => out.push(s),
+      writeErr: () => {},
+      execGit: okExecGit(),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, 'created');
+    assert.equal(result.cwd, '/repo/.claude/worktrees/agent-a1');
+    assert.equal(writtenPath, path.resolve('/repo/main', 'manifest.json'));
+    const written = JSON.parse(writtenContent);
+    assert.equal(written.worktrees.length, 1);
+    assert.equal(written.worktrees[0].agent_id, 'a1');
+    assert.equal(written.worktrees[0].worktree_path, '/repo/.claude/worktrees/agent-a1');
+    assert.equal(written.worktrees[0].branch, 'worktree-agent-a1');
+    assert.equal(written.worktrees[0].expected_base, 'abc123');
+    assert.deepEqual(
+      Object.keys(written.worktrees[0]).sort(),
+      ['agent_id', 'branch', 'expected_base', 'worktree_path'],
+      'FIX2: the on-disk entry must be the minimal 4-field shape — no derived allowed_bases',
+    );
+    assert.match(out.join(''), /"ok": true/);
+  });
+
+  // #2627 Phase 3: --root confines the created worktree. Absent the flag the
+  // behavior is exactly Phase 2's (every test above passes unchanged); the
+  // orchestrator-worktree scheduler path always passes it, because Phase 3 is
+  // what starts SPAWNING processes into these directories.
+  describe('--root confinement', () => {
+    const rootedArgs = (wtPath, root) => [
+      '--manifest', 'manifest.json',
+      '--agent-id', 'a1',
+      '--path', wtPath,
+      '--branch', 'worktree-agent-a1',
+      '--base', 'abc123',
+      '--root', root,
+    ];
+
+    function run(args) {
+      const out = [];
+      let gitCalled = false;
+      const result = withExitCode(() => cmdWorktreeCreate('/repo/main', args, {
+        readFile: () => '{"orchestrator_root":"/repo/main","worktrees":[]}',
+        writeFile: () => {},
+        write: (s) => out.push(s),
+        writeErr: () => {},
+        execGit: () => { gitCalled = true; return { exitCode: 0, stdout: '', stderr: '', timedOut: false }; },
+      }));
+      return { result, out: out.join(''), gitCalled };
+    }
+
+    test('a path inside --root is accepted', () => {
+      const { result } = run(rootedArgs('/repo/main/.claude/worktrees/agent-a1', '/repo/main'));
+      assert.equal(result.ok, true);
+      assert.equal(result.reason, 'created');
+    });
+
+    test('a sibling path OUTSIDE --root is rejected before any git runs', () => {
+      const { result, gitCalled } = run(rootedArgs('/repo/.claude/worktrees/agent-a1', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+      assert.equal(gitCalled, false, 'confinement must reject BEFORE the git side effect');
+    });
+
+    test('an arbitrary absolute path is rejected (the hole a ".."-segment check cannot see)', () => {
+      const { result } = run(rootedArgs('/etc/gsd-evil', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+    });
+
+    test('a path EQUAL to --root is rejected (would clobber the checkout)', () => {
+      const { result } = run(rootedArgs('/repo/main', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+    });
+
+    test('a sibling whose name merely PREFIXES the root is rejected (not a substring check)', () => {
+      // '/repo/main-evil' starts with '/repo/main' textually but is not inside it.
+      const { result } = run(rootedArgs('/repo/main-evil/wt', '/repo/main'));
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'path_outside_root');
+    });
+
+    test('omitting --root preserves Phase-2 behavior (no confinement)', () => {
+      const { result } = run([
+        '--manifest', 'manifest.json',
+        '--agent-id', 'a1',
+        '--path', '/repo/.claude/worktrees/agent-a1',
+        '--branch', 'worktree-agent-a1',
+        '--base', 'abc123',
+      ]);
+      assert.equal(result.ok, true, 'no --root → unchanged Phase-2 acceptance');
+    });
+  });
+
+  test('boundary: appending to a manifest with 1 existing entry yields 2', () => {
+    let writtenContent = null;
+    const result = cmdWorktreeCreate('/repo/main', okArgs, {
+      readFile: () => JSON.stringify({
+        orchestrator_root: '/repo/main',
+        worktrees: [{ agent_id: 'other', worktree_path: '/repo/.claude/worktrees/agent-other', branch: 'worktree-agent-other', expected_base: 'def456' }],
+      }),
+      writeFile: (_p, c) => { writtenContent = c; },
+      write: () => {},
+      writeErr: () => {},
+      execGit: okExecGit(),
+    });
+    assert.equal(result.ok, true);
+    const written = JSON.parse(writtenContent);
+    assert.equal(written.worktrees.length, 2);
+  });
+
+  test('boundary: appending to a manifest with 2 existing entries yields 3', () => {
+    let writtenContent = null;
+    const result = cmdWorktreeCreate('/repo/main', okArgs, {
+      readFile: () => JSON.stringify({
+        orchestrator_root: '/repo/main',
+        worktrees: [
+          { agent_id: 'x1', worktree_path: '/repo/.claude/worktrees/agent-x1', branch: 'worktree-agent-x1', expected_base: 'def456' },
+          { agent_id: 'x2', worktree_path: '/repo/.claude/worktrees/agent-x2', branch: 'worktree-agent-x2', expected_base: 'def456' },
+        ],
+      }),
+      writeFile: (_p, c) => { writtenContent = c; },
+      write: () => {},
+      writeErr: () => {},
+      execGit: okExecGit(),
+    });
+    assert.equal(result.ok, true);
+    const written = JSON.parse(writtenContent);
+    assert.equal(written.worktrees.length, 3);
+  });
+
+  test('dedupe: re-recording an identical (worktree_path, branch) entry does NOT grow the manifest', () => {
+    let writtenContent = null;
+    const result = cmdWorktreeCreate('/repo/main', okArgs, {
+      readFile: () => JSON.stringify({
+        orchestrator_root: '/repo/main',
+        worktrees: [
+          { agent_id: 'a1', worktree_path: '/repo/.claude/worktrees/agent-a1', branch: 'worktree-agent-a1', expected_base: 'abc123' },
+        ],
+      }),
+      writeFile: (_p, c) => { writtenContent = c; },
+      write: () => {},
+      writeErr: () => {},
+      execGit: okExecGit(),
+    });
+    assert.equal(result.ok, true);
+    const written = JSON.parse(writtenContent);
+    assert.equal(written.worktrees.length, 1, 'dedupe must not append a second identical entry');
+  });
+
+  test('exits 2 with usage when --manifest is missing', () => {
+    withExitCode(() => {
+      const errs = [];
+      const result = cmdWorktreeCreate('/repo/main', ['--agent-id', 'a1'], {
+        writeErr: (s) => errs.push(s),
+        write: () => {},
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'usage');
+      assert.equal(process.exitCode, 2);
+      assert.match(errs.join(''), /Usage: worktree create/);
+    });
+  });
+
+  test('exits 1 loudly when the manifest cannot be read', () => {
+    withExitCode(() => {
+      const errs = [];
+      const result = cmdWorktreeCreate('/repo/main', okArgs, {
+        readFile: () => { throw new Error('ENOENT'); },
+        writeErr: (s) => errs.push(s),
+        write: () => {},
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'manifest_read_failed');
+      assert.equal(process.exitCode, 1);
+      assert.match(errs.join(''), /manifest_read_failed/);
+    });
+  });
+
+  test('does not write the manifest and does not call git when the entry is invalid', () => {
+    withExitCode(() => {
+      let wrote = false;
+      let gitCalled = false;
+      const result = cmdWorktreeCreate('/repo/main',
+        ['--manifest', 'm.json', '--agent-id', 'a1', '--path', '/p', '--branch', 'feature/x', '--base', 'abc123'], {
+          readFile: () => '{"worktrees":[]}',
+          writeFile: () => { wrote = true; },
+          write: () => {},
+          writeErr: () => {},
+          execGit: () => { gitCalled = true; return { exitCode: 0, stdout: '', stderr: '', timedOut: false }; },
+        });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'invalid_entry');
+      assert.equal(wrote, false);
+      assert.equal(gitCalled, false, 'must not call git before the entry validates');
+      assert.equal(process.exitCode, 1);
+    });
+  });
+
+  test('does not write the manifest when the base is unresolved', () => {
+    withExitCode(() => {
+      let wrote = false;
+      const result = cmdWorktreeCreate('/repo/main', okArgs, {
+        readFile: () => '{"worktrees":[]}',
+        writeFile: () => { wrote = true; },
+        write: () => {},
+        writeErr: () => {},
+        execGit: (args) => (args[0] === 'rev-parse'
+          ? { exitCode: 1, stdout: '', stderr: 'fatal: bad revision', timedOut: false }
+          : { exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'base_unresolved');
+      assert.equal(wrote, false, 'must not write the manifest when the worktree was never created');
+      assert.equal(process.exitCode, 1);
+    });
+  });
+
+  // ─── #2584 FIX 1: manifest work must ALL run before the git side effect ───
+
+  test('FIX1: a malformed (truncated JSON) manifest fails with the parse reason BEFORE any git command runs', () => {
+    withExitCode(() => {
+      let addCalled = false;
+      let wrote = false;
+      const result = cmdWorktreeCreate('/repo/main', okArgs, {
+        readFile: () => '{"worktrees": [', // truncated JSON — a git stub here WOULD succeed if ever called
+        writeFile: () => { wrote = true; },
+        write: () => {},
+        writeErr: () => {},
+        execGit: (args) => {
+          if (args[0] === 'worktree' && args[1] === 'add') addCalled = true;
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'invalid_manifest_json');
+      assert.equal(addCalled, false, 'git worktree add must never be invoked when the manifest fails to parse (no orphan possible)');
+      assert.equal(wrote, false);
+      assert.equal(process.exitCode, 1);
+    });
+  });
+
+  test('FIX1: a manifest whose "worktrees" is not an array fails with manifest_shape_invalid BEFORE any git command runs', () => {
+    withExitCode(() => {
+      let addCalled = false;
+      const result = cmdWorktreeCreate('/repo/main', okArgs, {
+        readFile: () => JSON.stringify({ orchestrator_root: '/repo/main', worktrees: 'not-an-array' }),
+        writeFile: () => {},
+        write: () => {},
+        writeErr: () => {},
+        execGit: (args) => {
+          if (args[0] === 'worktree' && args[1] === 'add') addCalled = true;
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'manifest_shape_invalid');
+      assert.equal(addCalled, false, 'git worktree add must never be invoked when the manifest shape is invalid');
+      assert.equal(process.exitCode, 1);
+    });
+  });
+
+  test('FIX1: a writeFile failure AFTER a successful git create rolls back the worktree and reports manifest_write_failed', () => {
+    withExitCode(() => {
+      const gitCalls = [];
+      const result = cmdWorktreeCreate('/repo/main', okArgs, {
+        readFile: () => '{"orchestrator_root":"/repo/main","worktrees":[]}',
+        writeFile: () => { throw new Error('EACCES: permission denied'); },
+        write: () => {},
+        writeErr: () => {},
+        execGit: (args) => { gitCalls.push(args); return { exitCode: 0, stdout: '', stderr: '', timedOut: false }; },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'manifest_write_failed');
+      assert.equal(process.exitCode, 1);
+      assert.ok(gitCalls.some((c) => c[0] === 'worktree' && c[1] === 'add'), 'the worktree must actually have been created before the write failed');
+      const rollbackCall = gitCalls.find((c) => c[0] === 'worktree' && c[1] === 'remove');
+      assert.ok(rollbackCall, 'a git worktree remove --force rollback call must be made after a manifest write failure');
+      assert.ok(rollbackCall.includes('--force'));
+      assert.equal(rollbackCall[rollbackCall.length - 1], '/repo/.claude/worktrees/agent-a1');
+    });
+  });
+
+  test('FIX1: a writeFile failure does not throw past cmdWorktreeCreate even when the rollback execGit itself throws', () => {
+    withExitCode(() => {
+      const result = cmdWorktreeCreate('/repo/main', okArgs, {
+        readFile: () => '{"orchestrator_root":"/repo/main","worktrees":[]}',
+        writeFile: () => { throw new Error('ENOSPC: no space left on device'); },
+        write: () => {},
+        writeErr: () => {},
+        execGit: (args) => {
+          if (args[0] === 'worktree' && args[1] === 'remove') throw new Error('rollback execGit exploded');
+          return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, 'manifest_write_failed');
+      assert.equal(process.exitCode, 1);
+    });
+  });
+});
+
+// ─── #2584 FIX 2: on-disk entry-shape parity between create and record-agent ──
+// Generative-fix-divergence guard: both verbs write into the SAME manifest, so
+// they must persist the identical field-set for equivalent inputs.
+
+describe('cmdWorktreeCreate / cmdWorktreeRecordAgent — on-disk entry parity (#2584 FIX 2)', () => {
+  test('both verbs persist the identical 4-field entry for equivalent inputs', () => {
+    const argsFor = (manifestFlag) => [
+      manifestFlag, 'manifest.json',
+      '--agent-id', 'a1',
+      '--path', '/repo/.claude/worktrees/agent-a1',
+      '--branch', 'worktree-agent-a1',
+      '--base', 'abc123',
+    ];
+
+    let createdContent = null;
+    cmdWorktreeCreate('/repo/main', argsFor('--manifest'), {
+      readFile: () => '{"worktrees":[]}',
+      writeFile: (_p, c) => { createdContent = c; },
+      write: () => {},
+      writeErr: () => {},
+      execGit: () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+    });
+
+    let recordedContent = null;
+    cmdWorktreeRecordAgent('/repo/main', argsFor('--manifest'), {
+      readFile: () => '{"worktrees":[]}',
+      writeFile: (_p, c) => { recordedContent = c; },
+      write: () => {},
+      writeErr: () => {},
+    });
+
+    assert.ok(createdContent, 'cmdWorktreeCreate must have written a manifest');
+    assert.ok(recordedContent, 'cmdWorktreeRecordAgent must have written a manifest');
+    const createdEntry = JSON.parse(createdContent).worktrees[0];
+    const recordedEntry = JSON.parse(recordedContent).worktrees[0];
+    assert.deepEqual(
+      Object.keys(createdEntry).sort(),
+      Object.keys(recordedEntry).sort(),
+      'both verbs must persist the SAME field-set (no derived allowed_bases from create)',
+    );
+    assert.deepEqual(createdEntry, recordedEntry, 'identical inputs must produce byte-identical on-disk entries');
   });
 });
 
@@ -1146,9 +1858,11 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
           return { exitCode: 0, stdout: '', stderr: '' };
         }
-        // SUMMARY is NOT committed on the branch — cat-file -e HEAD:<path> returns non-zero
+        // SUMMARY is NOT committed on the branch. `git cat-file -e HEAD:<path>` returns
+        // exit 128 (NOT 1) for an absent path (#2556): "fatal: path '...' does not exist
+        // in 'HEAD'". Rescue must fire on this real exit code.
         if (key === '-C /repo/.claude/worktrees/agent-a1 cat-file -e HEAD:.planning/q1-SUMMARY.md') {
-          return { exitCode: 1, stdout: '', stderr: 'error: pathspec \'.planning/q1-SUMMARY.md\' did not match any file(s) known to git' };
+          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
         }
         if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
           // Only the SUMMARY is dirty — no other modified files
@@ -1219,9 +1933,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
           return { exitCode: 0, stdout: '', stderr: '' };
         }
-        // SUMMARY is NOT committed on the branch (uncommitted, per quick.md contract)
+        // SUMMARY is NOT committed on the branch (uncommitted, per quick.md contract).
+        // cat-file -e returns 128 for an absent path (#2556).
         if (key === '-C /repo/.claude/worktrees/agent-a1 cat-file -e HEAD:.planning/q1-SUMMARY.md') {
-          return { exitCode: 1, stdout: '', stderr: 'error: pathspec \'.planning/q1-SUMMARY.md\' did not match any file(s) known to git' };
+          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
         }
         if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
           // SUMMARY plus another dirty file
@@ -1275,9 +1990,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
           return { exitCode: 0, stdout: '', stderr: '' };
         }
-        // SUMMARY is NOT committed on the branch — rescue should proceed (and fail with ENOSPC)
+        // SUMMARY is NOT committed — cat-file -e returns exit 128 for an absent path (#2556);
+        // rescue proceeds and copyFileSync throws (ENOSPC).
         if (key === '-C /repo/.claude/worktrees/agent-a1 cat-file -e HEAD:.planning/q1-SUMMARY.md') {
-          return { exitCode: 1, stdout: '', stderr: 'error: pathspec \'.planning/q1-SUMMARY.md\' did not match any file(s) known to git' };
+          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
         }
         if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
           // Only the SUMMARY is dirty
@@ -1476,9 +2192,9 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
           return { exitCode: 0, stdout: '', stderr: '' };
         }
-        // SUMMARY is staged but NOT committed — cat-file -e HEAD:<path> returns non-zero
+        // SUMMARY is staged but NOT committed — absent from HEAD, cat-file returns 128 (#2556)
         if (key === '-C /repo/.claude/worktrees/agent-a1 cat-file -e HEAD:.planning/q1-SUMMARY.md') {
-          return { exitCode: 1, stdout: '', stderr: 'fatal: Not a valid object name HEAD:.planning/q1-SUMMARY.md' };
+          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'" };
         }
         if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
           // File is staged ('A  .planning/q1-SUMMARY.md')
@@ -1515,15 +2231,18 @@ describe('executeWorktreeWaveCleanupPlan', () => {
     assert.equal(result.entries[0].status, 'merged_removed');
   });
 
-  test('#706: cat-file fatal exit 128 causes rescue to be skipped (fail-closed on uncertain git)', () => {
-    // Finding #1 (code-review): exit code 128 means a fatal git error (e.g. corrupt
-    // object store, unborn HEAD, missing repo).  The guard must treat it as
-    // "uncertain — cannot determine committed status" and skip rescue, NOT proceed.
-    // Rescuing when status is uncertain would re-create the #706 merge collision if
-    // the file is actually already committed.
+  test('#2556: cat-file exit 128 RESCUES the SUMMARY (fail-open — 128 is the normal absent code)', () => {
+    // #2556 reversal of the prior #706 "fail-closed on 128" policy. That policy
+    // assumed exit 128 = fatal git error. It does not — `git cat-file -e` returns
+    // 128 for an ABSENT path, which is the NORMAL uncommitted-SUMMARY state; a
+    // genuine fatal (corrupt store, unborn HEAD) is rare. Fail-closed on 128
+    // therefore skipped rescue in the common case and the untracked SUMMARY was
+    // silently discarded by `worktree remove --force`. Data safety wins: rescue on
+    // 128. The rare genuinely-fatal-128-with-actually-committed-file case may now
+    // produce a recoverable merge collision (caught by the merge) — far less
+    // severe than the silent, unrecoverable data loss fail-closed caused.
     //
-    // Fixture: cat-file returns exitCode:128, timedOut:false.
-    // The cleanup must NOT rescue the SUMMARY (no copy into main tree).
+    // Fixture: cat-file returns exitCode:128.  Rescue MUST fire (copy into main tree).
     const rescued = [];
     const plan = {
       ok: true,
@@ -1549,9 +2268,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') {
           return { exitCode: 0, stdout: '', stderr: '' };
         }
-        // cat-file returns 128 — fatal git error (e.g. corrupt object store)
+        // cat-file returns 128 — the SUMMARY is absent from HEAD (#2556: the normal
+        // uncommitted state, NOT a fatal error)
         if (key === '-C /repo/.claude/worktrees/agent-a1 cat-file -e HEAD:.planning/q1-SUMMARY.md') {
-          return { exitCode: 128, stdout: '', stderr: 'fatal: not a git repository', timedOut: false };
+          return { exitCode: 128, stdout: '', stderr: "fatal: path '.planning/q1-SUMMARY.md' does not exist in 'HEAD'", timedOut: false };
         }
         if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') {
           // Worktree appears clean (SUMMARY is committed on branch)
@@ -1580,23 +2300,23 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
     });
 
-    // On fatal exit 128, rescue must be skipped (fail-closed) — no copy into main tree
-    assert.equal(rescued.length, 0,
-      'cat-file exit 128 must NOT rescue the SUMMARY — uncertain git state, skip to avoid recreating #706 collision');
+    // #2556: on exit 128 rescue MUST fire — 128 is the normal absent-path code and
+    // skipping loses the uncommitted SUMMARY (silent data loss via worktree remove --force).
+    assert.equal(rescued.length, 1,
+      'cat-file exit 128 must RESCUE the SUMMARY — 128 is the normal absent-path code, not a fatal error (#2556)');
     // The rest of cleanup proceeds normally (merge/remove/delete succeed in this fixture)
-    assert.equal(result.ok, true, 'cleanup can still succeed when cat-file returns 128 and worktree is clean');
+    assert.equal(result.ok, true, 'cleanup can still succeed after rescuing on cat-file exit 128');
   });
 
-  test('#706: cat-file timeout causes rescue to be skipped (fail-closed on unreliable git)', () => {
-    // Codex adversarial finding: on cat-file timeout, rescuing an actually-committed
-    // file would re-create the untracked collision.  The fix treats timeout as
-    // "cannot determine status — skip rescue" (fail-closed).  This means the merge
-    // will fail with merge_failed, which is the observable pre-fix behaviour and
-    // is recoverable, rather than silently corrupting the main tree.
+  test('#2556: cat-file timeout RESCUES the SUMMARY (fail-open — data safety over uncertain status)', () => {
+    // #2556 reversal: on cat-file timeout we cannot determine committed status, but
+    // data safety wins — rescue anyway. Skipping rescue on timeout (the prior
+    // fail-closed policy) risks losing an uncommitted SUMMARY to `worktree remove
+    // --force`. If the file turns out to be committed, the rescue copy is a no-op
+    // when the main tree already holds identical content (the destination check),
+    // and any real collision is caught by the merge as a recoverable merge_failed.
     //
-    // Fixture: cat-file returns timedOut:true.  The cleanup must NOT rescue the
-    // SUMMARY (no copy).  The merge will then succeed normally (SUMMARY is on the
-    // branch) or fail safely if the worktree status check catches something.
+    // Fixture: cat-file returns timedOut:true.  Rescue MUST fire (copy into main tree).
     const rescued = [];
     const plan = {
       ok: true,
@@ -1660,11 +2380,13 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       copyFileSync: (src, dest) => { rescued.push({ src, dest }); },
     });
 
-    // On timeout, rescue must be skipped (fail-closed) — no copy into main tree
-    assert.equal(rescued.length, 0,
-      'cat-file timeout must NOT rescue the SUMMARY — copying a committed file as untracked would recreate the #706 merge collision');
+    // #2556: on timeout rescue MUST fire — skipping risks silent data loss; a copy
+    // of an actually-committed file is a no-op (destination check) or a recoverable
+    // merge collision, neither of which is as bad as losing the uncommitted SUMMARY.
+    assert.equal(rescued.length, 1,
+      'cat-file timeout must RESCUE the SUMMARY — data safety wins over uncertain status (#2556)');
     // The rest of cleanup proceeds normally (merge/remove/delete succeed in this fixture)
-    assert.equal(result.ok, true, 'cleanup can still succeed when cat-file times out and worktree is clean');
+    assert.equal(result.ok, true, 'cleanup can still succeed after rescuing on cat-file timeout');
   });
 
   test('blocks dirty worktrees before merge/remove/delete', () => {
@@ -2190,16 +2912,27 @@ describe('bug-3707: startup orphan sweep is wired into workflow entry points', (
     );
   });
 
-  test('execute-phase.md calls worktree.reap-orphans at startup when USE_WORKTREES is not false', () => {
-    const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf8');
+  test('execute-phase.md calls worktree.reap-orphans at startup, guarded by the isolation decision', () => {
+    // #2584 Phase 3 (#2627): the startup sweep moved into the isolation-dispatch
+    // fragment alongside the ISOLATION resolution it is guarded by (the host
+    // workflow keeps only a pointer, per the ADR-857 byte budget). The guard is
+    // now `ISOLATION != none`, which USE_WORKTREES=false forces — so the #3707
+    // protection is unchanged, just keyed one level up.
+    const ISOLATION_FRAGMENT_PATH = path.join(
+      __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'executor-isolation-dispatch.md',
+    );
+    const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf8')
+      + fs.readFileSync(ISOLATION_FRAGMENT_PATH, 'utf8');
     assert.ok(
       content.includes('worktree.reap-orphans'),
-      'execute-phase.md must call gsd-sdk query worktree.reap-orphans at startup'
+      'execute-phase must call gsd-sdk query worktree.reap-orphans at startup'
     );
     assert.ok(
       /USE_WORKTREES.*!=.*false[\s\S]{0,200}worktree\.reap-orphans/m.test(content) ||
-      /worktree\.reap-orphans[\s\S]{0,200}USE_WORKTREES.*!=.*false/m.test(content),
-      'execute-phase.md startup sweep must be guarded by USE_WORKTREES != false'
+      /worktree\.reap-orphans[\s\S]{0,200}USE_WORKTREES.*!=.*false/m.test(content) ||
+      /ISOLATION.*!=.*none[\s\S]{0,200}worktree\.reap-orphans/m.test(content) ||
+      /worktree\.reap-orphans[\s\S]{0,200}ISOLATION.*!=.*none/m.test(content),
+      'execute-phase startup sweep must be guarded by USE_WORKTREES != false or ISOLATION != none'
     );
   });
 
@@ -2620,10 +3353,10 @@ describe('bug #3384: adjacent worktree data-loss guards', () => {
 
     const fragmentSource = fs.readFileSync(WORKTREE_BRANCH_CHECK_FRAGMENT, 'utf8');
     const branchCheck = fragmentSource.indexOf('HEAD_REF=$(git symbolic-ref --quiet HEAD || echo');
-    const namespaceCheck = fragmentSource.indexOf('^worktree-agent-');
+    const namespaceCheck = fragmentSource.indexOf('(worktree-)?agent-');
 
     assert.ok(branchCheck > 0, 'canonical fragment must assert HEAD before any work');
-    assert.ok(namespaceCheck > branchCheck, 'canonical fragment must require disposable worktree-agent branch');
+    assert.ok(namespaceCheck > branchCheck, 'canonical fragment must require disposable agent/worktree-agent branch');
     // #48: verify-only — the destructive self-recovery is gone; the fragment fails closed instead.
     assert.ok(!fragmentSource.includes('git reset --hard {EXPECTED_BASE}'), 'canonical fragment must not self-recover via reset --hard — orchestrator owns recovery (#48)');
     assert.ok(fragmentSource.includes('exit 42'), 'canonical fragment must fail closed with exit 42 on base mismatch (#48)');
@@ -2933,6 +3666,214 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
     });
   });
 
+  // 5b. #2547 — a malformed Kimi edit list must not downgrade the block to an allow
+  describe('#2547: malformed Kimi edit list does not bypass the cross-root block', () => {
+    // normalizeKimiPayload rebuilt old_string/new_string with `String(e.old ?? '')`.
+    // `??` guards the value, not the dereference, so a NULLISH entry threw a
+    // TypeError before any tool dispatch — and the guard's outer
+    // `catch { process.exit(0) }` turned that crash into a silent ALLOW on the one
+    // path this guard exists to BLOCK (#260).
+    //
+    // The boundary is nullish specifically, not "non-object": `('x').old` and
+    // `(7).old` are legal property reads that yield undefined, so string/number
+    // entries never threw. They are kept below as controls proving `e?.old` did
+    // not change their behaviour; the nullish cases are the actual regression and
+    // are the ones that exit 0 (bypass) against pre-fix code.
+    const crossRootTarget = () => path.join(mainRepo, 'src', 'index.ts');
+
+    test('well-formed Kimi edit list blocks the cross-root write (positive control)', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'StrReplaceFile',
+        tool_input: { path: crossRootTarget(), edit: [{ old: 'orig', new: 'pwned' }] },
+      });
+      assert.strictEqual(result.status, 2,
+        `expected exit 2 (block), got ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+    });
+
+    for (const [label, edit] of [
+      ['null entry (the #2547 bypass)', [null]],
+      ['null alongside a well-formed entry (the #2547 bypass)', [{ old: 'a', new: 'b' }, null]],
+      // `{"toString": null}` is valid JSON whose coercion throws "Cannot
+      // convert object to primitive value" — the same crash-to-allow reached
+      // through String() rather than through the property read.
+      ['non-coercible old (the #2547 String() bypass)', [{ old: { toString: null }, new: 'x' }]],
+      ['non-coercible new (the #2547 String() bypass)', [{ old: 'x', new: { toString: null } }]],
+      ['string entry (control — never threw)', ['nope']],
+      ['number entry (control — never threw)', [7]],
+    ]) {
+      test(`${label} in the edit list still blocks the cross-root write`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'StrReplaceFile',
+          tool_input: { path: crossRootTarget(), edit },
+        });
+        assert.strictEqual(result.status, 2,
+          `a malformed edit list (${label}) must not downgrade the #260 block to a silent ` +
+          `allow. Got exit ${result.status}. stderr: ${result.stderr}`);
+        assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+      });
+    }
+
+    test('malformed edit list inside the worktree still exits 0 (no over-block)', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'StrReplaceFile',
+        tool_input: { path: path.join(worktreeDir, 'src', 'index.ts'), edit: [null] },
+      });
+      assert.strictEqual(result.status, 0,
+        `an in-worktree write must stay allowed. Got exit ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(result.stdout, '');
+    });
+  });
+
+  // 5c. #2547 (review BLOCKER) — a model-supplied `file_path` must not shadow
+  // Kimi's authoritative `path`. This vector needs NO crash: normalizeKimiPayload
+  // copied `path` into `file_path` only when `file_path === undefined`, so any
+  // `file_path` the model chose to include won, and this guard's block logic
+  // reads `file_path` alone. kimi-cli executes on `path`, so the guard inspected
+  // one file while the write landed on another.
+  //
+  // Reachability is not speculative: soul/toolset.py json-parses the model's raw
+  // tool arguments and passes that dict verbatim as tool_input to PreToolUse,
+  // performing typed validation only later inside tool.call() — so the model
+  // controls extra keys in tool_input at the moment the hook decides.
+  describe('#2547: a spurious file_path does not shadow Kimi\'s authoritative path', () => {
+    const crossRootTarget = () => path.join(mainRepo, 'src', 'index.ts');
+    const inWorktreeTarget = () => path.join(worktreeDir, 'src', 'index.ts');
+
+    // Each case pairs a cross-root `path` with a `file_path` the model supplied.
+    // All three exited 0 (bypass) before the fix.
+    for (const [label, filePath] of [
+      ['empty-string file_path (the #2547 review BLOCKER)', ''],
+      ['in-worktree decoy file_path', null], // resolved below — needs worktreeDir
+      // A NON-STRING file_path additionally threw inside path.isAbsolute() and
+      // reached the outer `catch { process.exit(0) }` — crash-to-allow through
+      // the guard's own read rather than through normalization.
+      ['non-string file_path (array)', []],
+      ['non-string file_path (object)', {}],
+    ]) {
+      test(`${label} still blocks the cross-root write`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'StrReplaceFile',
+          tool_input: {
+            path: crossRootTarget(),
+            file_path: filePath === null ? inWorktreeTarget() : filePath,
+            edit: [{ old: 'orig', new: 'pwned' }],
+          },
+        });
+        assert.strictEqual(result.status, 2,
+          `a model-supplied file_path (${label}) must not shadow Kimi's authoritative ` +
+          `path and downgrade the #260 block to a silent allow. Got exit ${result.status}. ` +
+          `stderr: ${result.stderr}`);
+        assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+      });
+    }
+
+    // Negative control: the same shadowing shape pointed INSIDE the worktree must
+    // still be allowed, so the fix narrows what the guard inspects without
+    // over-blocking.
+    test('a spurious file_path on an in-worktree write still exits 0 (no over-block)', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'StrReplaceFile',
+        tool_input: {
+          path: inWorktreeTarget(),
+          file_path: crossRootTarget(),
+          edit: [{ old: 'orig', new: 'ok' }],
+        },
+      });
+      assert.strictEqual(result.status, 0,
+        `an in-worktree write must stay allowed even when a decoy file_path points ` +
+        `cross-root — the guard follows the path kimi-cli executes on. ` +
+        `Got exit ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(result.stdout, '');
+    });
+
+    // Control: a NATIVE Claude payload has no `path` field, so the overwrite must
+    // not fire and file_path must keep governing. Guards against a fix that
+    // silently changed the non-Kimi contract.
+    test('native Claude payload (no path field) still blocks on file_path alone', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'Edit',
+        tool_input: { file_path: crossRootTarget() },
+      });
+      assert.strictEqual(result.status, 2,
+        `a native Claude Edit must still block on file_path. Got exit ${result.status}. ` +
+        `stderr: ${result.stderr}`);
+      assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+    });
+  });
+
+  // 5d. #2595 (review Major 3) — the non-string `file_path` crash-to-allow, read
+  // WITHOUT a string `path` to mask it.
+  //
+  // The 5c cases above pair a non-string file_path with a valid cross-root
+  // `path`, so they pass because the authoritative-path overwrite replaces the
+  // bad value before the read. That is real coverage of the SHADOWING fix, but
+  // the review was right that it is not coverage of the crash: drop the `path`
+  // key and the identical payload took `data.tool_input?.file_path || ''` ->
+  // `[]` (truthy, survives the `!rawFilePath` early-out) -> `path.isAbsolute([])`
+  // -> TypeError -> outer `catch { process.exit(0) }`.
+  //
+  // READ THE ASSERTION HONESTLY: these expect exit 0, and pre-fix code ALSO
+  // exits 0 — via the catch instead of via the early-out. There is no black-box
+  // signature that separates them, so these cases document the fail-open and
+  // guard against a future change that makes a malformed payload BLOCK; they do
+  // not detect a revert. The gate that fails on a revert is the source-level
+  // invariant in tests/kimi-guard-typed-payload-reads.test.cjs. Asserting exit 0
+  // here and calling it regression coverage would repeat, one level up, exactly
+  // the false-green the review flagged in 5c.
+  describe('#2595: a non-string file_path with no path key fails open explicitly', () => {
+    for (const [label, filePath] of [
+      ['array', []],
+      ['object', {}],
+      ['number', 42],
+      ['boolean', true],
+    ]) {
+      test(`native Claude Edit with a ${label} file_path exits 0 without crashing`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'Edit',
+          tool_input: { file_path: filePath },
+        });
+        assert.strictEqual(result.status, 0,
+          `a malformed file_path has no path to check and must fail open quietly, ` +
+          `not block. Got exit ${result.status}. stderr: ${result.stderr}`);
+        assert.strictEqual(result.stdout, '');
+      });
+
+      test(`Kimi payload with a ${label} file_path and no path key exits 0`, () => {
+        const result = runHook(worktreeDir, {
+          cwd: worktreeDir,
+          tool_name: 'StrReplaceFile',
+          tool_input: { file_path: filePath, edit: [{ old: 'orig', new: 'pwned' }] },
+        });
+        assert.strictEqual(result.status, 0,
+          `with no string path to normalize from, there is nothing to check. ` +
+          `Got exit ${result.status}. stderr: ${result.stderr}`);
+        assert.strictEqual(result.stdout, '');
+      });
+    }
+
+    // Control: the SAME payload shape with a string cross-root file_path must
+    // still block, proving the typed read did not narrow the guard's reach.
+    test('control: a string cross-root file_path with no path key still blocks', () => {
+      const result = runHook(worktreeDir, {
+        cwd: worktreeDir,
+        tool_name: 'Edit',
+        tool_input: { file_path: path.join(mainRepo, 'src', 'index.ts') },
+      });
+      assert.strictEqual(result.status, 2,
+        `typing the read must not stop the guard seeing legitimate string paths. ` +
+        `Got exit ${result.status}. stderr: ${result.stderr}`);
+      assert.strictEqual(JSON.parse(result.stdout).decision, 'block');
+    });
+  });
+
   // 6. Sibling directory path is BLOCKED (validates the '/' boundary check AND prefix-overlap)
   describe('sibling path is blocked', () => {
     test('path that shares prefix with worktree root but is a sibling exits 2', () => {
@@ -3124,6 +4065,83 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
     });
   });
 
+});
+
+// ---------------------------------------------------------------------------
+// #2304 — Kimi tool vocabulary engages the guard
+// ---------------------------------------------------------------------------
+
+describe('#2304 — Kimi tool vocabulary engages the guard', () => {
+  // Payload shapes mirror kimi-cli's actual tool schemas
+  // (src/kimi_cli/tools/file/{write,replace}.py): WriteFile takes
+  // `path`/`content`, StrReplaceFile takes `path` + `edit: Edit | list[Edit]`
+  // — NOT Claude's `file_path`/`old_string`/`new_string`.
+
+  test('WriteFile targeting the main repo from a worktree is blocked like Write', () => {
+    const offendingPath = path.join(mainRepo, 'out.txt');
+    const payload = {
+      cwd: worktreeDir,
+      tool_name: 'WriteFile',
+      tool_input: { path: offendingPath, content: 'leak' },
+    };
+    const result = runHook(worktreeDir, payload);
+    assert.strictEqual(result.status, 2,
+      `Kimi WriteFile targeting an outside path must be blocked. Got ${result.status}. stderr: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.decision, 'block');
+    // Kimi feeds stderr (not stdout) back to the model on exit 2, so the
+    // reason must also reach stderr or the model gets a bare denial.
+    assert.ok(result.stderr.includes(offendingPath),
+      `block reason must reach stderr for Kimi's exit-2 protocol. Got stderr: ${result.stderr}`);
+  });
+
+  test('StrReplaceFile targeting the main repo from a worktree is blocked like Edit', () => {
+    const payload = {
+      cwd: worktreeDir,
+      tool_name: 'StrReplaceFile',
+      tool_input: { path: path.join(mainRepo, 'src', 'index.ts'), edit: { old: 'a', new: 'b' } },
+    };
+    const result = runHook(worktreeDir, payload);
+    assert.strictEqual(result.status, 2,
+      `Kimi StrReplaceFile targeting an outside path must be blocked. Got ${result.status}. stderr: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.decision, 'block');
+  });
+
+  test('module-qualified kimi_cli.tools.file:WriteFile is also recognized', () => {
+    const payload = {
+      cwd: worktreeDir,
+      tool_name: 'kimi_cli.tools.file:WriteFile',
+      tool_input: { path: path.join(mainRepo, 'out.txt'), content: 'leak' },
+    };
+    const result = runHook(worktreeDir, payload);
+    assert.strictEqual(result.status, 2,
+      `Module-qualified Kimi WriteFile must be blocked. Got ${result.status}. stderr: ${result.stderr}`);
+    const parsed = JSON.parse(result.stdout);
+    assert.strictEqual(parsed.decision, 'block');
+  });
+
+  test('StrReplaceFile with a path inside the worktree still passes', () => {
+    const payload = {
+      cwd: worktreeDir,
+      tool_name: 'StrReplaceFile',
+      tool_input: { path: path.join(worktreeDir, 'src', 'foo.ts'), edit: { old: 'a', new: 'b' } },
+    };
+    const result = runHook(worktreeDir, payload);
+    assert.strictEqual(result.status, 0,
+      `Kimi StrReplaceFile inside the worktree should pass. Got ${result.status}. stderr: ${result.stderr}`);
+  });
+
+  test('non-file Kimi tools still pass through silently', () => {
+    const payload = {
+      cwd: worktreeDir,
+      tool_name: 'kimi_cli.tools.file:Grep',
+      tool_input: { path: path.join(mainRepo, 'src', 'index.ts') },
+    };
+    const result = runHook(worktreeDir, payload);
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stdout, '');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -3873,12 +4891,12 @@ describe('execute-phase.md dispatch wires USE_WORKTREES_FOR_PLAN (#2772)', () =>
     assert.ok(fs.existsSync(gatePath), `expected ${gatePath} to exist`);
   });
 
-  test('Worktree-mode dispatch gate reads USE_WORKTREES_FOR_PLAN, not USE_WORKTREES', () => {
+  test('Worktree-mode dispatch gate reads both USE_WORKTREES and USE_WORKTREES_FOR_PLAN (#2474)', () => {
     const md = fs.readFileSync(workflowPath, 'utf-8');
     assert.match(
       md,
-      /\*\*Worktree mode\*\*\s*\(`USE_WORKTREES_FOR_PLAN`/,
-      'Worktree-mode header must gate on USE_WORKTREES_FOR_PLAN per-plan'
+      /\*\*Worktree mode\*\*.*`USE_WORKTREES`.*`USE_WORKTREES_FOR_PLAN`/,
+      'Worktree-mode header must gate on both USE_WORKTREES and USE_WORKTREES_FOR_PLAN (#2474)'
     );
   });
 

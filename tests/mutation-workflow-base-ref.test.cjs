@@ -55,12 +55,44 @@ const THREE_DOT_WORKFLOWS = [
 // Bounded: git subprocesses in tests must never hang a CI lane.
 const GIT_TIMEOUT_MS = 30_000;
 
+/**
+ * Environment for every git call below, with EVERY `GIT_*` variable stripped.
+ *
+ * Without this the helper inherits the runner's environment. A leaked
+ * `GIT_INDEX_FILE` makes `git add` in this temp repo write into a DIFFERENT
+ * repository's index; a leaked `GIT_OBJECT_DIRECTORY` /
+ * `GIT_ALTERNATE_OBJECT_DIRECTORIES` sends the blob to a different object store;
+ * a leaked `GIT_DIR` / `GIT_WORK_TREE` redirects the operation wholesale. In
+ * each case `git commit` then cannot resolve a blob it just staged, and git
+ * reports exactly:
+ *
+ *   error: invalid object 100644 <sha> for 'base-N.txt'
+ *   error: Error building trees
+ *
+ * That failure was previously attributed to `git add .` rehashing O(n²) blobs
+ * "before the object write had landed" (see the loop comment below) and worked
+ * around by staging one path per iteration. That reduced the churn but not the
+ * cause: sequential execFileSync calls cannot race each other's object writes,
+ * and the failure persisted — reappearing at a lower commit index on PR branches
+ * while `next` stayed green. Making the environment hermetic addresses the
+ * mechanism rather than the symptom; the single-path staging below is kept
+ * because it is genuinely less work.
+ */
+function gitEnv() {
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('GIT_')) delete env[key];
+  }
+  return env;
+}
+
 function git(cwd, args) {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf8',
     timeout: GIT_TIMEOUT_MS,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: gitEnv(),
   });
 }
 
@@ -172,9 +204,27 @@ describe('#2452 CI gates: base-ref fetch must preserve ancestry', () => {
       // Base then advances, leaving `feature` BEHIND — the failing condition.
       git(origin, ['checkout', '--quiet', 'base']);
       for (let n = 1; n <= BASE_ADVANCE; n++) {
-        fs.writeFileSync(path.join(origin, `base-${n}.txt`), `${n}\n`);
-        git(origin, ['add', '.']);
-        git(origin, ['commit', '--quiet', '-m', `base advance ${n}`]);
+        // EMPTY commits: this loop needs base-branch DEPTH, nothing else. No
+        // assertion reads these commits' contents — the three-dot diff below is
+        // asserted on `covered.cts`, which lives on the HEAD side, and base-side
+        // files cannot appear in `origin/base...HEAD` at all.
+        //
+        // They used to write and stage a `base-N.txt` per iteration, and that is
+        // what kept failing in CI:
+        //
+        //   error: invalid object 100644 <sha> for 'base-N.txt'
+        //   error: Error building trees
+        //
+        // The first attempt blamed `git add .` rehashing O(n²) blobs and switched
+        // to staging one path per iteration (#1881). It did not work — the failure
+        // simply moved from commit 32 to commit 25, and went on blocking unrelated
+        // PRs. The trigger for the lost object write was never reproduced off-CI.
+        //
+        // So rather than keep guessing at the trigger, this removes the failure
+        // CLASS: `--allow-empty` writes no blob and no tree for these commits, so
+        // there is no object for the index to reference and lose. It is also
+        // dramatically less work than 60 write+hash+index cycles.
+        git(origin, ['commit', '--quiet', '--allow-empty', '-m', `base advance ${n}`]);
       }
 
       // ---- runner: has the PR head, must fetch the base ref separately ------
@@ -193,8 +243,17 @@ describe('#2452 CI gates: base-ref fetch must preserve ancestry', () => {
         git(dir, ['remote', 'add', 'origin', origin]);
         git(dir, ['fetch', '--quiet', 'origin', 'feature']);
         git(dir, ['checkout', '--quiet', 'FETCH_HEAD']);
-        git(dir, ['fetch', '--quiet', 'origin', 'base', ...baseFetchArgs]);
+        // The FETCH is inside the try, not before it. A base fetch whose shallow
+        // boundary lands short of the merge base can fail during the FETCH itself
+        // ("unable to parse commit" — the boundary commit's parent is unavailable)
+        // rather than succeeding and leaving the DIFF to fail with "no merge base".
+        // Which of the two git picks is version/transport dependent: this test
+        // passed on ubuntu-22 and windows-24 and failed on ubuntu-24 for the same
+        // commit. Both outcomes mean the same thing for what this guard protects —
+        // a shallow base ref cannot resolve the three-dot diff — so both are
+        // recorded as ok:false instead of one of them escaping as a crash.
         try {
+          git(dir, ['fetch', '--quiet', 'origin', 'base', ...baseFetchArgs]);
           return { ok: true, out: git(dir, ['diff', '--name-only', 'origin/base...HEAD']).trim() };
         } catch (err) {
           return { ok: false, err: String(err.stderr || err.message) };
@@ -210,11 +269,12 @@ describe('#2452 CI gates: base-ref fetch must preserve ancestry', () => {
           'If this stops holding, the #2452 mechanism no longer reproduces and ' +
           'this guard needs revisiting.',
       );
-      assert.match(
-        depth1.err,
-        /no merge base/i,
-        'Expected git to report "no merge base" for a depth-1 base ref',
-      );
+      // Asserting git's exact wording couples this guard to a git version:
+      // "no merge base" (diff-time) and "unable to parse commit" (fetch-time)
+      // are the same condition reported at different stages. CONTRIBUTING also
+      // prohibits raw text matching on subprocess output — the typed outcome
+      // above (`ok === false`) IS the contract this test exists to pin.
+      assert.ok(depth1.err.length > 0, 'a failed shallow diff must report a cause');
 
       // (b) BOUNDARY, just below: the merge base is one commit out of reach.
       // This is the changeset-required.yml / docs-required.yml --depth=50 case
@@ -226,7 +286,7 @@ describe('#2452 CI gates: base-ref fetch must preserve ancestry', () => {
         `Expected FAIL at --depth=${MERGE_BASE_DEPTH - 1} (merge base one commit ` +
           'beyond the shallow boundary) — this is why a bounded cushion is not a fix',
       );
-      assert.match(below.err, /no merge base/i);
+      assert.ok(below.err.length > 0, 'a failed shallow diff must report a cause');
 
       // (c) BOUNDARY, exactly deep enough: the merge base is the last commit in.
       const atDepth = runnerDiff('runner-depth-at', [`--depth=${MERGE_BASE_DEPTH}`]);

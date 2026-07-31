@@ -44,7 +44,32 @@ const HOST_INTEGRATION_AXES = Object.freeze({
   stateIO:         Object.freeze(['filesystem', 'sandboxed-storage', 'session-log-append'] as const),
   transport:       Object.freeze(['mcp', 'native-extension'] as const),
   runtime:         Object.freeze(['node', 'bun', 'sandboxed-web', 'python', 'go', 'rust', 'electron', 'other'] as const),
-  subagentToolkit: Object.freeze(['full', 'read-only'] as const),
+  subagentToolkit: Object.freeze(['full', 'read-only', 'built-in-only'] as const),
+  // ADR-1239 amendment (#2481): how reasoning effort reaches this host.
+  // `argv` — deliverable as an argument on the host's own invocation.
+  // `none` — the host exposes no reasoning-effort mechanism.
+  // `undocumented` is NOT a member here; it is the corpus-wide sentinel above.
+  // A config-file-only surface deliberately has NO vocabulary member: the only
+  // host that ever had one (Gemini CLI's thinkingConfig) was removed as a sunset
+  // runtime in #1928/#1996, and neither its successor Antigravity CLI nor ZCode
+  // documents a reasoning setting. Adding a member with no host would be a guess.
+  effortSurface:   Object.freeze(['argv', 'none'] as const),
+  // ADR-1239 Codex-binding amendment (#2584): a `dispatch` sub-field — not a new
+  // axis — declaring how a host isolates concurrent same-wave executors.
+  // `harness-worktree` — the host's own harness creates + binds a git worktree
+  // per executor; GSD passes the host's own isolation flag and calls no git
+  // itself (host-driven fan-out).
+  // `orchestrator-worktree` — GSD itself process-spawns each executor with an
+  // explicit working directory into a worktree GSD created, validated, and
+  // merges (GSD-driven fan-out; concurrency is OS-level, not the host's).
+  // `none` — no isolation primitive; same-wave plans run inline/sequentially
+  // (the #853 flatten rule).
+  // `undocumented` is NOT a member here; it is the corpus-wide sentinel above.
+  // Mechanism-specific ("worktree"), not abstract — same "name only what a
+  // host actually has" rule that kept effortSurface from guessing a
+  // config-file member above. A future non-worktree isolation mechanism adds a
+  // `*-container` member then, evidence-backed.
+  isolation:       Object.freeze(['harness-worktree', 'orchestrator-worktree', 'none'] as const),
 });
 
 const INTERFACE_POINTS = Object.freeze(['command', 'dispatch', 'model', 'hooks', 'state', 'artifact'] as const);
@@ -61,6 +86,8 @@ type StateIO          = 'filesystem' | 'sandboxed-storage' | 'session-log-append
 type Transport        = 'mcp' | 'native-extension';
 type HostRuntime      = 'node' | 'bun' | 'sandboxed-web' | 'python' | 'go' | 'rust' | 'electron' | 'other';
 type SubagentToolkit  = 'full' | 'read-only';
+type EffortSurface    = 'argv' | 'none';
+type DispatchIsolation = 'harness-worktree' | 'orchestrator-worktree' | 'none';
 type DegradationLevel = 'full' | 'degraded' | 'absent';
 type InterfacePoint   = 'command' | 'dispatch' | 'model' | 'hooks' | 'state' | 'artifact';
 
@@ -71,6 +98,7 @@ interface DispatchCapability {
   background: boolean;
   subagentToolkit: SubagentToolkit;
   backgroundDispatch: boolean;
+  isolation: DispatchIsolation;
 }
 
 interface HostIntegrationAxes {
@@ -82,6 +110,7 @@ interface HostIntegrationAxes {
   stateIO: StateIO;
   transport: Transport;
   runtime: HostRuntime;
+  effortSurface: EffortSurface;
 }
 
 interface DegradationResult {
@@ -98,12 +127,13 @@ interface DegradationResult {
 const SAFE_DEFAULTS: HostIntegrationAxes = {
   embeddingMode:  'declarative',
   commandSurface: 'prose-only',
-  dispatch: { namedDispatch: false, nested: false, maxDepth: 0, background: false, subagentToolkit: 'read-only', backgroundDispatch: false },
+  dispatch: { namedDispatch: false, nested: false, maxDepth: 0, background: false, subagentToolkit: 'read-only', backgroundDispatch: false, isolation: 'none' },
   modelMode:      'passive',
   hookBus:        'none',
   stateIO:        'session-log-append',
   transport:      'mcp',
   runtime:        'node',
+  effortSurface:  'none',
 };
 
 const PROFILE_BASELINES: Readonly<Record<'programmatic-cli' | 'declarative-cli' | 'ide', HostIntegrationAxes>> =
@@ -111,32 +141,35 @@ const PROFILE_BASELINES: Readonly<Record<'programmatic-cli' | 'declarative-cli' 
     'programmatic-cli': Object.freeze({
       embeddingMode:  'imperative',
       commandSurface: 'slash-file',
-      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true }),
+      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none' }),
       modelMode:      'passive',
       hookBus:        'host',
       stateIO:        'filesystem',
       transport:      'mcp',
       runtime:        'node',
+      effortSurface:  'none',
     } as HostIntegrationAxes),
     'declarative-cli': Object.freeze({
       embeddingMode:  'declarative',
       commandSurface: 'slash-file',
-      dispatch: Object.freeze({ namedDispatch: true, nested: false, maxDepth: 1, background: false, subagentToolkit: 'full', backgroundDispatch: false }),
+      dispatch: Object.freeze({ namedDispatch: true, nested: false, maxDepth: 1, background: false, subagentToolkit: 'full', backgroundDispatch: false, isolation: 'none' }),
       modelMode:      'passive',
       hookBus:        'host',
       stateIO:        'filesystem',
       transport:      'mcp',
       runtime:        'node',
+      effortSurface:  'none',
     } as HostIntegrationAxes),
     'ide': Object.freeze({
       embeddingMode:  'imperative',
       commandSurface: 'palette',
-      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: 5, background: true, subagentToolkit: 'full', backgroundDispatch: true }),
+      dispatch: Object.freeze({ namedDispatch: true, nested: true, maxDepth: 5, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none' }),
       modelMode:      'active',
       hookBus:        'engine',
       stateIO:        'sandboxed-storage',
       transport:      'mcp',
       runtime:        'sandboxed-web',
+      effortSurface:  'none',
     } as HostIntegrationAxes),
   });
 
@@ -190,6 +223,13 @@ function degradationFor(point: InterfacePoint, axes: Partial<HostIntegrationAxes
     }
 
     case 'model': {
+      // NOTE (#2481): the effortSurface axis is deliberately NOT folded into this
+      // level. `modelMode` has graded interface point 3 since Phase A, and every
+      // existing consumer reads it as "can GSD drive model selection". Widening it
+      // to also mean "…and deliver effort" silently redefines an established
+      // contract — an `active` host with no declared effort surface would flip
+      // from `full` to `absent`. Effort is negotiated on its own axis and read
+      // from `effective.effortSurface` by the consumers that care.
       const mm = (axes as Record<string, unknown>).modelMode;
       if (mm === 'active')  return { level: 'full',     fallback: '' };
       if (mm === 'passive') return { level: 'degraded', fallback: 'instruction-injection / per-agent model field' };
@@ -256,12 +296,13 @@ const DEFAULT_ENGINE: EngineCapabilities = {
   axes: {
     embeddingMode:  'imperative',
     commandSurface: 'slash-file',
-    dispatch: { namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true },
+    dispatch: { namedDispatch: true, nested: true, maxDepth: -1, background: true, subagentToolkit: 'full', backgroundDispatch: true, isolation: 'none' },
     modelMode:      'active',
     hookBus:        'host',
     stateIO:        'filesystem',
     transport:      'mcp',
     runtime:        'node',
+    effortSurface:  'argv',
   },
   known: HOST_INTEGRATION_AXES,
 };
@@ -346,6 +387,14 @@ function negotiateHostCapabilities(
     if (axis === 'modelMode') {
       if (hostVal === 'active' && engineVal === 'passive') return 'passive';
     }
+    // For effortSurface: 'argv' > 'none'. An engine that cannot deliver the
+    // host's richer channel caps the result to what it can drive.
+    if (axis === 'effortSurface') {
+      const RANK: Record<string, number> = { argv: 1, none: 0 };
+      const hr = RANK[hostVal as string] ?? 0;
+      const er = RANK[engineVal as string] ?? 0;
+      if (hr > er) return engineVal;
+    }
     return hostVal;
   }
 
@@ -357,6 +406,7 @@ function negotiateHostCapabilities(
   const effectiveStateIO        = negotiateScalar('stateIO');
   const effectiveTransport      = negotiateScalar('transport');
   const effectiveRuntime        = negotiateScalar('runtime');
+  const effectiveEffortSurface  = negotiateScalar('effortSurface');
 
   // ---------------------------------------------------------------------------
   // Dispatch struct negotiation
@@ -372,6 +422,7 @@ function negotiateHostCapabilities(
   let effectiveBackgroundDispatch: boolean;
   let effectiveSubagentToolkit: SubagentToolkit;
   let effectiveMaxDepth: number;
+  let effectiveIsolation: DispatchIsolation;
 
   if (hostDispatch === null) {
     // Host didn't declare dispatch at all — fail-closed to most-restrictive values
@@ -382,6 +433,7 @@ function negotiateHostCapabilities(
     effectiveBackgroundDispatch = false;
     effectiveSubagentToolkit    = 'read-only';
     effectiveMaxDepth           = 0;
+    effectiveIsolation          = 'none';
   } else {
     // N1: observability warnings for 'undocumented' sentinel on dispatch fields
     if (hostDispatch.namedDispatch === 'undocumented') {
@@ -399,6 +451,16 @@ function negotiateHostCapabilities(
     if (hostDispatch.backgroundDispatch === 'undocumented') {
       warnings.push(`dispatch.backgroundDispatch is undocumented — degraded closed`);
     }
+    if (hostDispatch.isolation === 'undocumented') {
+      warnings.push(`dispatch.isolation is undocumented — degraded closed (none)`);
+    }
+    if (hostDispatch.maxDepth === UNDOCUMENTED) {
+      // #2603: maxDepth was the one dispatch sub-axis with no sentinel-specific
+      // warning, so a descriptor carrying the documented fail-closed sentinel was
+      // reported as `missing or not a number` — indistinguishable from a genuinely
+      // malformed descriptor. Six shipped runtimes use the sentinel here.
+      warnings.push(`dispatch.maxDepth is undocumented — degraded closed (0)`);
+    }
 
     effectiveNamedDispatch      = (hostDispatch.namedDispatch === true) && engineDispatch.namedDispatch;
     effectiveNested             = (hostDispatch.nested === true) && engineDispatch.nested;
@@ -411,10 +473,23 @@ function negotiateHostCapabilities(
     const engineToolkit = engineDispatch.subagentToolkit === 'read-only' ? 'read-only' : 'full';
     effectiveSubagentToolkit = (hostToolkit === 'read-only' || engineToolkit === 'read-only') ? 'read-only' : 'full';
 
-    // maxDepth: missing/non-number/non-finite → 0 + warning
+    // isolation: effective = the host's declared value only if it is a known
+    // valid vocabulary member; otherwise 'none'. NOT host && engine gated —
+    // GSD owns the vocabulary, so "engine-known" == "in the valid set" (this
+    // still satisfies effective ⊆ host-declared ∩ engine-known).
+    const hostIso = hostDispatch.isolation;
+    effectiveIsolation = (typeof hostIso === 'string' && (HOST_INTEGRATION_AXES.isolation as readonly string[]).includes(hostIso))
+      ? hostIso as DispatchIsolation
+      : 'none';
+
+    // maxDepth: missing/non-number/non-finite → 0 + warning. The documented
+    // 'undocumented' sentinel also degrades to 0, but is reported by the
+    // sentinel-specific warning above rather than as a malformed value (#2603).
     let hostMaxDepth: number;
     if (typeof hostDispatch.maxDepth !== 'number' || !Number.isFinite(hostDispatch.maxDepth)) {
-      warnings.push(`host dispatch.maxDepth is missing or not a number — treating as 0`);
+      if (hostDispatch.maxDepth !== UNDOCUMENTED) {
+        warnings.push(`host dispatch.maxDepth is missing or not a number — treating as 0`);
+      }
       hostMaxDepth = 0;
     } else {
       hostMaxDepth = hostDispatch.maxDepth;
@@ -442,6 +517,7 @@ function negotiateHostCapabilities(
     background:         effectiveBackground,
     subagentToolkit:    effectiveSubagentToolkit,
     backgroundDispatch: effectiveBackgroundDispatch,
+    isolation:          effectiveIsolation,
   };
 
   // ---------------------------------------------------------------------------
@@ -456,6 +532,7 @@ function negotiateHostCapabilities(
     stateIO:        effectiveStateIO,
     transport:      effectiveTransport,
     runtime:        effectiveRuntime,
+    effortSurface:  effectiveEffortSurface,
   };
 
   // ---------------------------------------------------------------------------
@@ -510,6 +587,64 @@ function shouldFlattenDispatch(dispatch: UnvalidatedDispatch): boolean {
   if (!dispatch || typeof dispatch !== 'object') return true;
   const canBackground = dispatch.background === true && dispatch.backgroundDispatch === true;
   return !canBackground;
+}
+
+// ---------------------------------------------------------------------------
+// resolveDispatchType — ADR-1239 / epic #2505 Phase 4 (Option A)
+//
+// Maps a requested GSD subagent name (e.g. "gsd-planner") to the type an
+// Agent() call should actually use on the CURRENT runtime. On runtimes whose
+// descriptor declares `hostIntegration.dispatch.namedDispatch: true` (Claude,
+// OpenCode, Cursor, …), the requested name is returned unchanged — those hosts
+// can dispatch GSD's named subagents directly. On runtimes with
+// `namedDispatch: false` (kimi-code — only three built-in subagents
+// `coder`/`explore`/`plan`, per moonshotai.github.io/kimi-code/en/customization/
+// agents), the name is mapped to the closest built-in by role-suffix
+// heuristic. The persona rides the existing `${AGENT_SKILLS_*}` prompt
+// injection (Phase 3 / #2510) regardless of the resolved type, so the
+// dispatcher does not need to know the persona — only the toolkit tier.
+//
+// This is Option A of the Phase 4 design (per-workflow runtime detection via
+// `gsd_run query resolve-dispatch-type`), not Option B (PreToolUse mutation) —
+// Kimi Code's documented hook API supports only allow/deny on PreToolUse, not
+// tool_input rewriting, so a hook-based remap is infeasible (see #2508).
+//
+// Fail-closed: unknown dispatch shape or missing namedDispatch axis ⇒ return
+// the requested name unchanged (named-dispatch is the GSD default; degrading
+// to it on unknown runtimes preserves behavior for every runtime already in
+// the field).
+// ---------------------------------------------------------------------------
+
+// Role-suffix → built-in mapping. Order matters: the first match wins.
+// `plan`-tier agents plan/design without touching files; `explore`-tier agents
+// are read-only; everything else (executors, writers, fixers, debuggers) maps
+// to `coder` (the general-purpose built-in with the full tool set).
+const DISPATCH_TYPE_SUFFIX_MAP: ReadonlyArray<readonly [RegExp, string]> = Object.freeze([
+  [/-?(planner|roadmapper|selector|spec)$/i, 'plan'],
+  [/-?(researcher|mapper|checker|verifier|auditor|analyzer|synthesizer|profiler|curator|classifier|reviewer)$/i, 'explore'],
+]);
+
+// Names that are already generic (not gsd-*) and should map to the
+// general-purpose built-in on built-in-only runtimes.
+const GENERIC_NAMES_TO_CODER: ReadonlySet<string> = Object.freeze(new Set([
+  'general-purpose', 'general', 'default', 'sonnet', 'opus', 'haiku',
+]));
+
+function resolveDispatchType(requested: unknown, dispatch: UnvalidatedDispatch): string {
+  if (typeof requested !== 'string' || requested.length === 0) return 'coder';
+  // Built-in-only runtime (EXPLICIT namedDispatch: false, e.g. kimi-code):
+  // map to coder/explore/plan by suffix heuristic.
+  if (dispatch && typeof dispatch === 'object' && dispatch.namedDispatch === false) {
+    if (GENERIC_NAMES_TO_CODER.has(requested)) return 'coder';
+    for (const [pattern, builtin] of DISPATCH_TYPE_SUFFIX_MAP) {
+      if (pattern.test(requested)) return builtin;
+    }
+    return 'coder';
+  }
+  // Named-dispatch runtime (namedDispatch: true OR unknown/absent): use the
+  // requested name unchanged. Absent namedDispatch degrades to named-dispatch
+  // (the GSD default) so every runtime already in the field keeps working.
+  return requested;
 }
 
 // ---------------------------------------------------------------------------
@@ -616,6 +751,111 @@ function extensionEventSurfaceFor(extensionEvents: unknown): readonly string[] |
 }
 
 // ---------------------------------------------------------------------------
+// resolveOrchestratorExec — ADR-1239 Codex-binding amendment (#2584), Phase 2
+//
+// The `orchestratorExec` descriptor field (sibling of `runtime.hostBehaviors`
+// in capability.json) tells GSD how to process-spawn a host's own CLI as the
+// executor inside a worktree GSD itself created (`isolation:
+// 'orchestrator-worktree'`). Pure, no I/O — this only shapes the argv/cwd a
+// caller would pass to a process-spawn primitive; it does not spawn anything
+// itself. UNCONSUMED in Phase 2 — no scheduler calls this yet (Phase 3 wires
+// it to the actual spawn).
+// ---------------------------------------------------------------------------
+
+interface OrchestratorExec {
+  command: string;
+  args?: string[];
+  cwdFlag?: string | null;
+  promptFlag?: string | null;
+}
+
+type OrchestratorExecResolution =
+  | { ok: true; command: string; args: string[]; cwd: string }
+  | { ok: false; reason: string };
+
+/**
+ * Resolve an `orchestratorExec` descriptor + target cwd (+ optional executor
+ * prompt) into a concrete argv/cwd shape for a process-spawn primitive.
+ *
+ * Fail-closed: never throws, always returns a discriminated result. When
+ * `cwdFlag` is a non-empty string, `[cwdFlag, cwd]` is appended to `args`
+ * exactly once (e.g. codex: `exec --cd <cwd>`); when `cwdFlag` is `null` or
+ * absent (e.g. kimi-code, which binds via the spawned process's own cwd —
+ * "process-cwd" case), no flag is appended and `cwd` is returned for the
+ * caller to bind via the subprocess's own working-directory option.
+ *
+ * Prompt passing (Phase 3, #2627) is descriptor data for the same reason the
+ * cwd flag is: the confirmed `orchestrator-worktree` hosts disagree on the
+ * shape. `codex exec "<prompt>"` and `opencode run "<prompt>"` take it
+ * positionally; `kimi --print --prompt "<p>"` and Kimi Code's `kimi -p "<p>"`
+ * take a flag. Encoding that as `promptFlag` keeps the scheduler free of the
+ * per-host branch ADR-1239 exists to remove. Omit `prompt` entirely and the
+ * resolution is byte-identical to Phase 2's (the unconsumed-resolver shape).
+ *
+ * Argv order is base args → cwd flag → prompt, so the prompt stays the final
+ * positional token for the hosts that read it that way.
+ */
+function resolveOrchestratorExec(
+  orchestratorExec: OrchestratorExec | undefined,
+  cwd: string,
+  prompt?: string,
+): OrchestratorExecResolution {
+  if (!orchestratorExec || typeof orchestratorExec !== 'object' || Array.isArray(orchestratorExec)) {
+    return { ok: false, reason: 'missing_command' };
+  }
+  const oe = orchestratorExec as unknown as Record<string, unknown>;
+  if (typeof oe.command !== 'string' || oe.command.length === 0) {
+    return { ok: false, reason: 'missing_command' };
+  }
+  if (typeof cwd !== 'string' || cwd.length === 0) {
+    return { ok: false, reason: 'invalid_cwd' };
+  }
+  if (oe.args !== undefined && (!Array.isArray(oe.args) || !oe.args.every((a) => typeof a === 'string'))) {
+    return { ok: false, reason: 'invalid_args' };
+  }
+  if (oe.cwdFlag !== undefined && oe.cwdFlag !== null && typeof oe.cwdFlag !== 'string') {
+    return { ok: false, reason: 'invalid_cwd_flag' };
+  }
+  if (oe.promptFlag !== undefined && oe.promptFlag !== null && typeof oe.promptFlag !== 'string') {
+    return { ok: false, reason: 'invalid_prompt_flag' };
+  }
+  // An executor spawned with no instruction is a hang, not a degraded run —
+  // fail closed rather than launching a prompt-less process.
+  if (prompt !== undefined && (typeof prompt !== 'string' || prompt.length === 0)) {
+    return { ok: false, reason: 'invalid_prompt' };
+  }
+  // Leading-dash guard, mirroring worktree-safety.cts's `unsafe_leading_dash`
+  // check on git arguments. A positional prompt (or a cwd) beginning with '-'
+  // is parsed by the spawned CLI as a FLAG, not a value — the same failure the
+  // git path already rejects, and for the same reason: `--` end-of-options
+  // support is inconsistent across these CLIs, so rejecting outright is the
+  // portable fix rather than relying on a separator. Applied to the resolver
+  // (not just its current caller) because this is a general descriptor->argv
+  // seam: a future caller must not have to rediscover the hazard.
+  if (typeof prompt === 'string' && prompt.startsWith('-')) {
+    return { ok: false, reason: 'unsafe_leading_dash_prompt' };
+  }
+  if (cwd.startsWith('-')) {
+    return { ok: false, reason: 'unsafe_leading_dash_cwd' };
+  }
+
+  const baseArgs = Array.isArray(oe.args) ? [...oe.args] : [];
+  const args = typeof oe.cwdFlag === 'string' && oe.cwdFlag.length > 0
+    ? [...baseArgs, oe.cwdFlag, cwd]
+    : baseArgs;
+
+  if (typeof prompt === 'string') {
+    if (typeof oe.promptFlag === 'string' && oe.promptFlag.length > 0) {
+      args.push(oe.promptFlag, prompt);
+    } else {
+      args.push(prompt);
+    }
+  }
+
+  return { ok: true, command: oe.command, args, cwd };
+}
+
+// ---------------------------------------------------------------------------
 // Module export (CommonJS — matches existing src/*.cts pattern)
 // ---------------------------------------------------------------------------
 
@@ -632,6 +872,8 @@ export = {
   profileOf,
   negotiateHostCapabilities,
   shouldFlattenDispatch,
+  resolveDispatchType,
   hookEventSurfaceFor,
   extensionEventSurfaceFor,
+  resolveOrchestratorExec,
 };

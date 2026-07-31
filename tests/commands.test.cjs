@@ -1303,7 +1303,7 @@ describe('resolve-model command', () => {
 
 describe('commit command', () => {
   const { createTempGitProject } = require('./helpers.cjs');
-  const { execSync } = require('child_process');
+  const { execSync, execFileSync } = require('child_process');
   let tmpDir;
 
   beforeEach(() => {
@@ -1489,6 +1489,154 @@ describe('commit command', () => {
     const { execFileSync } = require('child_process');
     const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
     assert.strictEqual(branch, 'gsd/phase-45.14-golden-capture', 'should be on decimal phase branch, not integer-only');
+  });
+
+  // #2539: the phase-token extraction must be anchored to the path segment under
+  // .planning/phases/ and reuse the project-code-aware extractPhaseToken helper.
+  // The prior unanchored `match(/(\d+(?:\.\d+)*)-/)` matched the leftmost
+  // digit-run-then-hyphen anywhere in the joined file path, so a project_code
+  // ending in a digit (e.g. PROJECT_V2) made `.../PROJECT_V2-07-name/...` match
+  // the `2-` inside `V2-` BEFORE reaching the real `07-` phase token —
+  // resolving phase "2" instead of phase "7". findPhaseInternal also searches
+  // archived milestones, so an existing archived phase 2 produced a real branch
+  // name, and the silent `git checkout <existing-branch>` fallback switched the
+  // whole working tree onto the wrong branch in the same call that then
+  // committed. This fixture reproduces both preconditions.
+  test('#2539: digit-suffixed project_code does not collide with the phase number', () => {
+    // Configure phase branching strategy with a project_code ending in a digit.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        commit_docs: true,
+        project_code: 'PROJECT_V2',
+        branching_strategy: 'phase',
+        phase_branch_template: 'gsd/phase-{phase}-{slug}',
+      })
+    );
+
+    // Archived phase 02 under a shipped milestone — the collision target that
+    // findPhaseInternal reaches via the .planning/milestones/<v>-phases/ search.
+    fs.mkdirSync(
+      path.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', 'PROJECT_V2-02-archived-phase'),
+      { recursive: true }
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', 'PROJECT_V2-02-archived-phase', '02-CONTEXT.md'),
+      '# Archived\n'
+    );
+
+    // Active phase 07 — the phase actually being committed.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', 'PROJECT_V2-07-active-phase'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Phase 7: Active Phase\nGoal: ship it\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'phases', 'PROJECT_V2-07-active-phase', '07-CONTEXT.md'),
+      '# Context\n'
+    );
+
+    const result = runGsdTools(
+      'commit "docs(07): add context" --files .planning/phases/PROJECT_V2-07-active-phase/07-CONTEXT.md',
+      tmpDir
+    );
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.committed, true, 'should have committed');
+
+    // The commit must land on the phase-07 branch. Pre-fix this resolved the
+    // `2-` in `PROJECT_V2-` and silently switched onto the archived phase-02
+    // branch instead.
+    const branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
+    assert.strictEqual(
+      branch,
+      'gsd/phase-07-active-phase',
+      `should be on the active phase-07 branch, not the archived phase-02 branch (got ${branch})`
+    );
+
+    // The committed file must exist on the phase-07 branch's HEAD, proving the
+    // commit did not silently land on the wrong branch.
+    const committedFile = execFileSync(
+      'git',
+      ['show', 'HEAD:.planning/phases/PROJECT_V2-07-active-phase/07-CONTEXT.md'],
+      { cwd: tmpDir, encoding: 'utf-8' }
+    );
+    assert.ok(committedFile.includes('# Context'), 'phase-07 file must be in the commit');
+  });
+
+  // #2539 second defect: an auto-checkout mid-commit must never be silent. The
+  // #1278 intent was to CREATE the phase branch before the FIRST commit on it —
+  // not to force-switch an already-checked-out working branch onto a different
+  // existing branch. If the resolved phase branch already exists and the working
+  // tree is on some other branch, switching to it silently is the dangerous
+  // drift; the fix keeps create-if-absent but drops the silent switch-to-existing.
+  test('#2539: does not silently switch onto an existing unrelated phase branch', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({
+        commit_docs: true,
+        branching_strategy: 'phase',
+        phase_branch_template: 'gsd/phase-{phase}-{slug}',
+      })
+    );
+    // Active phase 01.
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '01-first-phase'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Phase 1: First Phase\nGoal: start\n'
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'phases', '01-first-phase', '01-CONTEXT.md'),
+      '# Context\n'
+    );
+
+    // Pre-create the phase-01 branch and check it out, then return to the
+    // default branch so the working tree is NOT on the phase branch when commit
+    // runs. The resolved branch already exists; the pre-fix code silently
+    // switched onto it.
+    execFileSync('git', ['branch', 'gsd/phase-01-first-phase'], { cwd: tmpDir, stdio: 'pipe' });
+    // Ensure the file is staged only by the commit command itself (it must run
+    // from the current/default branch and must not be force-switched).
+    const beforeBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: tmpDir, encoding: 'utf-8',
+    }).trim();
+
+    // Invoke gsd-tools via spawnSync so stderr is observable on the success
+    // path — the warning that proves the no-switch path is not silent (#2539
+    // AC2) is written to stderr, which execFileSync discards on success.
+    const { TOOLS_PATH } = require('./helpers.cjs');
+    const { spawnSync } = require('child_process');
+    const proc = spawnSync(process.execPath, [
+      TOOLS_PATH, 'commit', 'docs(01): add context',
+      '--files', '.planning/phases/01-first-phase/01-CONTEXT.md',
+    ], { cwd: tmpDir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+    const stdout = proc.stdout || '';
+    const stderr = proc.stderr || '';
+    if (proc.status !== 0) {
+      throw new Error(`gsd-tools commit exited ${proc.status}: stdout=${stdout} stderr=${stderr}`);
+    }
+
+    const output = JSON.parse(stdout.trim());
+    assert.strictEqual(output.committed, true, 'should have committed');
+
+    // The command must NOT have silently switched the working tree onto the
+    // pre-existing phase branch. The commit lands on the branch we were on.
+    const afterBranch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+      cwd: tmpDir, encoding: 'utf-8',
+    }).trim();
+    assert.strictEqual(
+      afterBranch,
+      beforeBranch,
+      `must not silently switch onto an existing phase branch mid-commit (was ${beforeBranch}, now ${afterBranch})`
+    );
+
+    // #2539 AC2: the no-switch path must not be silent either. The warning
+    // surfaces the resolved branch and the branch the commit actually lands on.
+    assert.ok(
+      /Warning: resolved phase branch .* already exists/.test(stderr),
+      `expected a non-silent warning on stderr when the resolved branch already exists; got stderr=${stderr}`
+    );
   });
 });
 
@@ -3551,3 +3699,67 @@ describe('feat-488: effort sync command', () => {
 });
   });
 }
+
+describe('query commit --files scoping (#2269)', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  test('secure-phase.md passes --files to its query commit call', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'secure-phase.md'), 'utf-8'
+    );
+    const idx = content.indexOf('add/update security threat verification');
+    assert.notEqual(idx, -1, 'must contain the security commit message');
+    assert.match(content.slice(idx, idx + 200), /--files/);
+    assert.match(content.slice(idx, idx + 200), /SECURITY\.md/);
+  });
+
+  test('validate-phase.md passes --files to its query commit call', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'validate-phase.md'), 'utf-8'
+    );
+    const idx = content.indexOf('add/update validation strategy');
+    assert.notEqual(idx, -1, 'must contain the validation commit message');
+    assert.match(content.slice(idx, idx + 200), /--files/);
+    assert.match(content.slice(idx, idx + 200), /VALIDATION\.md/);
+  });
+
+  test('next.md passes --files to its deferral query commit call', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'next.md'), 'utf-8'
+    );
+    const idx = content.indexOf('defer incomplete Phase');
+    assert.notEqual(idx, -1, 'must contain the deferral commit message');
+    assert.match(content.slice(idx, idx + 200), /--files/);
+    assert.match(content.slice(idx, idx + 200), /ROADMAP\.md/);
+  });
+});
+
+describe('#2279: map-codebase date stamp instructions overwrite existing dates', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  test('codebase-mapper agent says to SET date stamps, overwriting existing values', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'agents', 'gsd-codebase-mapper.md'), 'utf-8'
+    );
+    assert.match(content, /overwriting whatever date is already there/i,
+      'must instruct the agent to SET date stamps unconditionally, not just replace [YYYY-MM-DD] placeholders');
+  });
+
+  test('map-codebase workflow spawn prompts say to SET date stamps, not replace placeholders', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'map-codebase.md'), 'utf-8'
+    );
+    const stampLines = content.match(/Set all date stamps[^\r\n]*/g) || [];
+    assert.ok(stampLines.length >= 4,
+      `must have ≥4 "Set all date stamps" instructions (4 spawn prompts + 1 sequential); got ${stampLines.length}`);
+  });
+
+  test('map-codebase sequential path says to SET date stamps overwriting existing dates', () => {
+    const content = fs.readFileSync(
+      path.join(REPO_ROOT, 'gsd-core', 'workflows', 'map-codebase.md'), 'utf-8'
+    );
+    const idx = content.indexOf('overwriting any existing date');
+    assert.notEqual(idx, -1,
+      'workflow must instruct agents to overwrite existing dates, not just replace [YYYY-MM-DD] placeholders');
+  });
+});

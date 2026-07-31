@@ -1,7 +1,7 @@
 {
   "id": "vscode",
   "role": "runtime",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "title": "VS Code",
   "description": "VS Code — Marketplace/VSIX extension; no file-projected config directory; IDE-profile reference host (active vscode.lm model, engine-owned hook bus, sandboxed globalState/workspaceState stateIO).",
   "tier": "core",
@@ -39,13 +39,15 @@
         "maxDepth": 5,
         "background": true,
         "subagentToolkit": "undocumented",
-        "backgroundDispatch": "undocumented"
+        "backgroundDispatch": "undocumented",
+        "isolation": "undocumented"
       },
       "modelMode": "active",
       "hookBus": "engine",
       "stateIO": "sandboxed-storage",
       "transport": "mcp",
-      "runtime": "sandboxed-web"
+      "runtime": "sandboxed-web",
+      "effortSurface": "undocumented"
     }
   }
 }

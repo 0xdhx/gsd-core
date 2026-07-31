@@ -39,7 +39,11 @@ const RUNTIME_IDS = Object.keys(registry.runtimes);
 
 // Contract-pinned profile split (derived from .host-cli-final.json):
 // programmatic-cli: claude, cline, cursor, hermes, kilo, kimi, opencode, pi, qwen, trae (10)
-// declarative-cli:  antigravity, augment, codebuddy, codex, copilot, windsurf, zcode (7)
+// declarative-cli:  antigravity, augment, codebuddy, codex, copilot, kimi-code, windsurf, zcode (8)
+// kimi-code moved programmatic-cli → declarative-cli in #2603: its plugin surface is a
+// `kimi.plugin.json` manifest plus markdown Skills with no in-process programmatic API
+// (docs/en/customization/plugins.md), the same shape as codex. The value had been inherited
+// from the Python `kimi` descriptor rather than sourced for Kimi Code CLI.
 // ide: vscode (1) — #2103, the first installed ide-profile host.
 const EXPECTED_PROFILES = {
   claude:      'programmatic-cli',
@@ -57,6 +61,7 @@ const EXPECTED_PROFILES = {
   codebuddy:   'declarative-cli',
   codex:       'declarative-cli',
   copilot:     'declarative-cli',
+  'kimi-code': 'declarative-cli',
   windsurf:    'declarative-cli',
   zcode:       'declarative-cli',
   vscode:      'ide',
@@ -267,8 +272,8 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
 
   // ─── shouldFlattenDispatch per-host (#853 discriminator) ─────────────────────
 
-  // Expected: false (may background) for codex, cursor, kimi, and opencode;
-  // true (must inline) for the other 13.
+  // Expected: false (may background) for codex, cursor, kimi, and kimi-code;
+  // true (must inline) for the other 14.
   const EXPECTED_FLATTEN = {
     antigravity: true,
     augment:     true,
@@ -285,9 +290,16 @@ describe('ADR-1239 Phase A: hostIntegration descriptors', () => {
     // true → dispatch.background/backgroundDispatch both true → NOT
     // force-flattened (mirrors the #2087 OpenCode precedent below).
     kimi:        false,
-    // #2087: OpenCode background subagents (v1.15 param, v1.17 default-on) →
-    // dispatch.background/backgroundDispatch true → NOT force-flattened.
-    opencode:    false,
+    // #2454: Kimi Code (Node CLI) — same background-dispatch model as Python
+    // kimi-cli per Kimi Code docs (dispatch.background/backgroundDispatch both
+    // true) → NOT force-flattened.
+    'kimi-code': false,
+    // #2598: OpenCode's background subagents sit behind the opt-in
+    // OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS flag (default false), and the
+    // session loop still handles one subtask at a time (upstream #29638, OPEN).
+    // #2087 read v1.15/v1.17 as default-on; that does not hold against current
+    // `dev`, so dispatch.background/backgroundDispatch are false → force-flattened.
+    opencode:    true,
     // #2102: pi's dispatch.background/backgroundDispatch are both false
     // (undocumented background-subagent primitive) → force-flattened.
     pi:          true,

@@ -300,6 +300,13 @@ export type StateTransitionDeps = {
    * guard — the core stays pure and testable without disk I/O).
    */
   phaseInventoryProvider?: () => PhaseInventoryRecord[] | null;
+  /**
+   * Resolved path of the STATE.md the content was read from. Injected (not
+   * derived) so the core stays pure; used only to name the file in an
+   * unusable-input frontmatter diagnostic (#1882). Optional: existing
+   * callers and test stubs are unaffected when absent.
+   */
+  sourcePath?: string;
 };
 
 /**
@@ -438,7 +445,7 @@ function beginPhaseCore(
   // #1255: body-field replacements operate on body only (frontmatter stripped),
   // not on the full content. The YAML `status:` key matches `^Status:\s*`
   // before the body pipe-table row if full content is passed.
-  const existingFm = extractFrontmatter(content) as Record<string, unknown>;
+  const existingFm = extractFrontmatter(content, deps.sourcePath) as Record<string, unknown>;
   const hasFrontmatter = Object.keys(existingFm).length > 0;
   let body = stripFrontmatter(content);
 
@@ -527,7 +534,11 @@ function beginPhaseCore(
     body = mutateCurrentPositionResume(body, intent, today, updated);
   }
 
-  return { content: reassemble(body), updated };
+  // #2736: surface the #3127 resume decision so the adapter can drop its
+  // intent-first current_phase_name override on a resume — the core just
+  // preserved the mid-flight name, and an override would drift frontmatter
+  // away from the preserved body value.
+  return { content: reassemble(body), updated, data: { resumed: isAlreadyExecuting } };
 }
 
 // Local frontmatter type aliases matching frontmatter.cts so we can call
@@ -751,7 +762,7 @@ function advancePlanCore(content: string, deps: StateTransitionDeps): StateTrans
   // not on the full content. The YAML `status:` key matches `^Status:\s*`
   // before the body field if full content is passed (codex Phase 2 review:
   // HIGH blocking finding — same pattern beginPhaseCore already handles).
-  const existingFm = extractFrontmatter(content) as Record<string, unknown>;
+  const existingFm = extractFrontmatter(content, deps.sourcePath) as Record<string, unknown>;
   const hasFrontmatter = Object.keys(existingFm).length > 0;
   let body = stripFrontmatter(content);
   const reassemble = (b: string): string =>
@@ -898,7 +909,7 @@ function completePhaseCore(
 
   // #1255: body-field replacements operate on body only (frontmatter stripped),
   // so the YAML `status:` / `current_phase:` keys cannot shadow the body fields.
-  const existingFm = extractFrontmatter(content) as Record<string, unknown>;
+  const existingFm = extractFrontmatter(content, deps.sourcePath) as Record<string, unknown>;
   const hasFrontmatter = Object.keys(existingFm).length > 0;
   let body = stripFrontmatter(content);
   const reassemble = (b: string): string =>
@@ -1059,7 +1070,7 @@ function plannedPhaseCore(
   }
 
   // #1255: body-field replacements operate on body only.
-  const existingFm = extractFrontmatter(content) as Record<string, unknown>;
+  const existingFm = extractFrontmatter(content, deps.sourcePath) as Record<string, unknown>;
   const hasFrontmatter = Object.keys(existingFm).length > 0;
   let body = stripFrontmatter(content);
   const reassemble = (b: string): string =>
@@ -1117,6 +1128,19 @@ function plannedPhaseCore(
   );
   if (body !== beforePos) updated.push('Current Position');
 
+  // #2400 Bug B: sync progress.total_plans to the frontmatter when a plan count
+  // is given. This writes the explicitly-provided count — it is NOT a re-derivation
+  // from disk (#500 RC1 is about deriving from a half-planned snapshot, not about
+  // refusing to write an explicitly-passed argument).
+  if (intent.planCount !== null && intent.planCount !== undefined && hasFrontmatter) {
+    const fmProgress = (existingFm['progress'] as Record<string, unknown> | undefined) || {};
+    if (fmProgress['total_plans'] !== intent.planCount) {
+      fmProgress['total_plans'] = intent.planCount;
+      existingFm['progress'] = fmProgress;
+      updated.push('progress.total_plans');
+    }
+  }
+
   return { content: reassemble(body), updated };
 }
 
@@ -1161,7 +1185,7 @@ function milestoneSwitchCore(
     'Current Position',
   ];
 
-  const existingFm = extractFrontmatter(content) as Record<string, unknown>;
+  const existingFm = extractFrontmatter(content, deps.sourcePath) as Record<string, unknown>;
   const body = stripFrontmatter(content);
   const resolvedName = (intent.name && intent.name.trim()) || 'milestone';
 
@@ -1319,7 +1343,7 @@ function milestoneCompleteCore(
   }
 
   // #1255: body-field replacements operate on body only.
-  const existingFm = extractFrontmatter(content) as Record<string, unknown>;
+  const existingFm = extractFrontmatter(content, deps.sourcePath) as Record<string, unknown>;
   const hasFrontmatter = Object.keys(existingFm).length > 0;
   let body = stripFrontmatter(content);
   const reassemble = (b: string): string =>
@@ -1717,7 +1741,9 @@ function rebuildCore(
 
   // §2 Decision: re-derive derived sections, preserve others. Order is
   // oldest-section-first so log entries appear in body order.
-  modified = reconcileCurrentPosition(modified, timestamp, log);
+  // sourcePath threaded so `state rebuild --dry-run` names the file: that branch reads STATE.md
+  // directly rather than through readModifyWriteStateMd, so nothing upstream has named it yet.
+  modified = reconcileCurrentPosition(modified, timestamp, log, deps.sourcePath);
   modified = reconcileByPhaseTable(modified, deps, timestamp, log);
   modified = stripTemplatePlaceholders(modified, timestamp, log);
   modified = deduplicateSessionArchive(modified, timestamp, log);
@@ -1758,8 +1784,9 @@ function reconcileCurrentPosition(
   content: string,
   timestamp: string,
   log: RebuildLogEntry[],
+  sourcePath?: string,
 ): string {
-  const fm = extractFrontmatter(content) as Record<string, unknown>;
+  const fm = extractFrontmatter(content, sourcePath) as Record<string, unknown>;
   if (!fm || typeof fm !== 'object') return content;
 
   let modified = content;
