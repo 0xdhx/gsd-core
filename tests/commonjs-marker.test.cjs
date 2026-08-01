@@ -483,13 +483,21 @@ describe('#2544 regression: install must not clobber the config-root package.jso
     // The stated reason for gating the marker on `stagedHooks` rather than a
     // plain existence check: hooks/ is shared space, and dropping a GSD marker
     // into a directory the user created and GSD never wrote to is the same
-    // write-into-someone-else's-territory this issue is about. Windsurf declares
-    // hostBehaviors.skipSharedHooksInstall, so GSD never stages hooks for it.
+    // write-into-someone-else's-territory this issue is about.
+    //
+    // ZCode, not Windsurf. Windsurf was the original choice because
+    // hostBehaviors.skipSharedHooksInstall kept it out of the shared bundle —
+    // but #2717 then began staging cursor/windsurf/codex .js hooks via dedicated
+    // paths and writing the marker beside them, so for those three GSD now DOES
+    // fill hooks/ and the marker is correct. ZCode is the durable choice: per
+    // #1821 it has hooksSurface:'none' AND no plugin surface to spawn hooks, so
+    // GSD stages no .js there by either route. (Measured on this tree: zcode
+    // stages 0 .js hooks and gets no marker; windsurf stages 2 and gets one.)
     const userHooks = path.join(root, 'hooks');
     fs.mkdirSync(userHooks, { recursive: true });
     fs.writeFileSync(path.join(userHooks, 'my-hook.js'), '// user-authored\n');
 
-    runInstall(root, 'windsurf');
+    runInstall(root, 'zcode');
 
     assert.ok(
       !fs.existsSync(path.join(userHooks, 'package.json')),
