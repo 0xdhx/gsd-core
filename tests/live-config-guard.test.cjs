@@ -196,6 +196,39 @@ describe('#2665: guard watches non-root write surfaces', () => {
     }
   });
 
+  test('extra targets are DERIVED from the descriptor array, not a named resolver', () => {
+    const {
+      NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+      resolveConfigHomeFromDescriptor,
+    } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+    const home = tmpRoot();
+    try {
+      const env = { GSD_HOME: home };
+      const targets = resolveExtraWatchTargets({ env, os: { homedir: () => home } });
+
+      // Every descriptor in the array must contribute a target. Calling one
+      // named resolver instead would cover today's single entry and silently
+      // miss tomorrow's — the same partial-enumeration defect that put
+      // KIMI_SHARE_DIR outside the scrub set, one layer over.
+      for (const d of NON_REGISTRY_CONFIG_HOME_DESCRIPTORS) {
+        const dir = resolveConfigHomeFromDescriptor(d, { env, home });
+        assert.ok(
+          targets.includes(path.resolve(path.join(dir, 'config.toml'))),
+          `descriptor ${JSON.stringify(d.env)} contributed no watch target`,
+        );
+      }
+      // The count is what actually catches a regression to a hardcoded call:
+      // it fails the moment the array grows and the guard does not follow.
+      assert.strictEqual(
+        targets.length,
+        1 + NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.length,
+        'expected the GSD store root plus exactly one target per descriptor',
+      );
+    } finally {
+      cleanup(home);
+    }
+  });
+
   test('GSD_HOME falls back to homedir when unset', () => {
     const home = tmpRoot();
     try {

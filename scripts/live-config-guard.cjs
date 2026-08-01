@@ -74,6 +74,19 @@ const GSD_OWNED_ENTRIES = ['gsd-core', 'gsd-file-manifest.json', 'gsd-pristine']
 const GSD_PREFIXED_PARENTS = ['agents', 'commands', 'skills'];
 const GSD_ARTIFACT_PREFIX = 'gsd-';
 
+/**
+ * The file GSD writes into a NON-REGISTRY config home.
+ *
+ * Today's only such descriptor is kimi's `~/.kimi` (KIMI_SHARE_DIR), where GSD
+ * writes its native `[[hooks]]` block into `config.toml`. NAMED RESIDUAL: this
+ * assumes every non-registry descriptor is written the same way. A future
+ * descriptor whose owned file differs needs a per-descriptor mapping here — the
+ * consequence of getting it wrong is under-watching (a missed leak), not a false
+ * positive, so it fails in the quiet direction and is called out rather than
+ * left to be discovered.
+ */
+const NON_REGISTRY_OWNED_FILE = 'config.toml';
+
 /** Bounds on the recursive walk, so a pathological tree cannot stall the suite. */
 const MAX_ENTRIES = 20000;
 const MAX_DEPTH = 12;
@@ -143,12 +156,27 @@ function resolveExtraWatchTargets(deps = {}) {
   const targets = [path.resolve(path.join(env.GSD_HOME || homedir(), '.gsd'))];
 
   try {
-    const { resolveKimiHooksTomlDir } = require(path.join(libDir, 'runtime-homes.cjs'));
-    // Thread the SAME injected env/home the GSD_HOME line above uses. Calling it
-    // bare reads process.env and os.homedir() regardless of `deps`, which leaves
-    // the seam untestable and the two targets resolved against different worlds.
-    const kimiDir = resolveKimiHooksTomlDir({ env, home: homedir() });
-    targets.push(path.resolve(path.join(kimiDir, 'config.toml')));
+    const {
+      NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+      resolveConfigHomeFromDescriptor,
+    } = require(path.join(libDir, 'runtime-homes.cjs'));
+
+    // ITERATE the descriptor array rather than naming one resolver. Calling
+    // resolveKimiHooksTomlDir directly would cover today's only entry and
+    // silently miss tomorrow's — the same partial-enumeration defect that put
+    // KIMI_SHARE_DIR outside the scrub set in the first place, reintroduced one
+    // layer over. TEST_ENV_BASE derives its keys from this array; deriving the
+    // guard's paths from it keeps the two halves from drifting apart.
+    //
+    // Thread the SAME injected env/home used above: resolving bare would read
+    // process.env and os.homedir() regardless of `deps`, leaving the seam
+    // untestable and the targets resolved against different worlds.
+    for (const descriptor of NON_REGISTRY_CONFIG_HOME_DESCRIPTORS) {
+      const dir = resolveConfigHomeFromDescriptor(descriptor, { env, home: homedir() });
+      // GSD writes ONE named file into these third-party roots; the root itself
+      // belongs to the runtime, so it is never watched wholesale.
+      targets.push(path.resolve(path.join(dir, NON_REGISTRY_OWNED_FILE)));
+    }
   } catch {
     // Unbuilt tree — same posture as resolveLiveConfigRoots: advisory, never fatal.
   }
