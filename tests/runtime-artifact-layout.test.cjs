@@ -946,6 +946,7 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
   let savedUserProfile;
   let savedExplicitConfigDir;
   let savedTestMode;
+  let restoreConfigLocationEnv;
 
   // Run install() with process.exit and console output mocked via t.mock (auto-restored),
   // per CONTRIBUTING.md test rules (no manual monkeypatch / try-finally in test bodies).
@@ -970,6 +971,13 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
     delete process.env.GSD_EXPLICIT_CONFIG_DIR;
     savedTestMode = process.env.GSD_TEST_MODE;
     process.env.GSD_TEST_MODE = '1';
+    // #2665: same in-process hazard as the block above. This one calls
+    // install(true, 'claude') via runInstall(), and HOME/USERPROFILE alone do
+    // not contain it — getGlobalConfigDir is env-FIRST, so an ambient
+    // CLAUDE_CONFIG_DIR beats the fixture, the install lands in the developer's
+    // live config dir, and these tests then fail looking for a marker under
+    // tmpRoot that was never written there.
+    restoreConfigLocationEnv = scrubConfigLocationEnv();
   });
 
   afterEach(() => {
@@ -981,6 +989,7 @@ describe('#2624 .gsd-source marker is rewritten before staging reads it', () => 
     else process.env.GSD_EXPLICIT_CONFIG_DIR = savedExplicitConfigDir;
     if (savedTestMode === undefined) delete process.env.GSD_TEST_MODE;
     else process.env.GSD_TEST_MODE = savedTestMode;
+    restoreConfigLocationEnv();
     cleanup(tmpRoot);
   });
 
