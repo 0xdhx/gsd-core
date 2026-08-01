@@ -51,6 +51,29 @@ describe('withIsolatedProcessState', () => {
 // diagnosing this class and each fixing only the instance in front of them;
 // this is the third pass. A hand-maintained scrub list cannot be defended by
 // review alone, so the invariant is asserted instead of trusted.
+//
+// SCOPE BOUNDARY — read this before trusting a green run here.
+//
+// Every test below asserts that TEST_ENV_BASE covers some ENUMERATION (the
+// capability registry, the non-registry descriptor set, GSD's own location
+// keys). Each therefore proves only that the scrub set is not narrower than the
+// enumeration it derives from. NONE of them can prove the enumeration is itself
+// complete: a config-location var that no enumeration carries is invisible to
+// all of them, and they stay green.
+//
+// That is not hypothetical — it is how round 2 found GSD_HOME and
+// KIMI_SHARE_DIR while this block was fully green. GSD_HOME belonged to no
+// enumeration at all (it is GSD's own store root, not a runtime configHome);
+// KIMI_SHARE_DIR sat inside a function body where nothing could enumerate it.
+// Round 3's fix was to make both enumerable rather than to add two assertions,
+// precisely because an assertion added per reviewer-named var is the
+// hand-maintained list wearing a test's clothes.
+//
+// The completeness question — "is every env-first first-party location var in
+// SOME enumeration?" — is answered by a source census re-derived each round
+// (see the PR discussion), and by scripts/live-config-guard.cjs at runtime,
+// which observes actual writes rather than reasoning about names. Neither lives
+// here, and this block should not be read as standing in for them.
 describe('#2665: TEST_ENV_BASE config-location coverage', () => {
   test('every runtime configHome env var in the registry is scrubbed', () => {
     const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
@@ -97,6 +120,51 @@ describe('#2665: TEST_ENV_BASE config-location coverage', () => {
     // (src/planning-workspace.cts). Named explicitly so deleting one from the
     // helper is a test failure rather than a silent narrowing.
     for (const key of ['GROK_AGENTS_HOME', 'GSD_RUNTIME', 'GSD_PROJECT', 'GSD_WORKSTREAM']) {
+      assert.strictEqual(TEST_ENV_BASE[key], '', `${key} must be scrubbed`);
+    }
+  });
+
+  test('descriptor-shaped config homes OUTSIDE the registry are derived, not listed', () => {
+    const {
+      NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+    } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+
+    // Round 3. kimi owns TWO config homes: KIMI_CONFIG_DIR (registry-visible) and
+    // KIMI_SHARE_DIR (a hardcoded descriptor inside resolveKimiHooksTomlDir, which
+    // decides where its native config.toml — carrying GSD's [[hooks]] block — is
+    // written). The registry-only derivation reached the first and not the second,
+    // so it looked structurally complete while missing a live write surface.
+    const declared = [
+      ...new Set(NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.flatMap((d) => d?.env ?? [])),
+    ];
+    assert.ok(
+      declared.length >= 1,
+      'expected at least one non-registry descriptor — an empty array makes this vacuous',
+    );
+    assert.ok(
+      declared.includes('KIMI_SHARE_DIR'),
+      `KIMI_SHARE_DIR must come from the descriptor set, got ${declared.join(', ')}`,
+    );
+
+    const missing = declared.filter((k) => !(k in TEST_ENV_BASE));
+    assert.deepStrictEqual(
+      missing,
+      [],
+      `descriptor-declared config-location vars not scrubbed: ${missing.join(', ')}`,
+    );
+  });
+
+  test("GSD's OWN location vars are scrubbed (a second family, not a registry gap)", () => {
+    const { GSD_LOCATION_ENV_KEYS } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+
+    // GSD_HOME decides where GSD keeps user-owned state ($GSD_HOME/.gsd/ —
+    // consent.json, defaults.json, capability overlays) and is read env-FIRST,
+    // ahead of os.homedir(), across capability-loader / capability-consent /
+    // capability-state / capability-writer / config-loader / install-profiles /
+    // bin/install.js. GSD_AGENTS_DIR is priority 1 in getAgentsDir. Neither is a
+    // runtime configHome, so no amount of registry derivation reaches them.
+    assert.ok(GSD_LOCATION_ENV_KEYS.includes('GSD_HOME'));
+    for (const key of GSD_LOCATION_ENV_KEYS) {
       assert.strictEqual(TEST_ENV_BASE[key], '', `${key} must be scrubbed`);
     }
   });
