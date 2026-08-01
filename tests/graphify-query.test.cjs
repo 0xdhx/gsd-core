@@ -379,6 +379,12 @@ describe('query', () => {
       assert.strictEqual(typeof result.budget_estimate, 'number');
     });
 
+    // NOTE: this one passes on `next` too — before the fix graphifyQuery never
+    // set these keys, so both assertions already held. It is a forward guard
+    // against the spread leaking budget fields into a no-budget response, NOT
+    // the failing-first regression proof for #2738; do not count it toward
+    // RULESET.TESTS.regression-must-fail-first. The failing-first tests are the
+    // tier-loop and budget-outcome ones above.
     test('omits budget fields when no budget was requested (#2738)', () => {
       enableGraphify(planningDir);
       writeGraphJson(planningDir, SAMPLE_GRAPH);
@@ -415,6 +421,33 @@ describe('query', () => {
         emittedTokens(result) <= probe.budget_estimate,
         `emitted ${emittedTokens(result)} must not exceed the granted ${probe.budget_estimate}`,
       );
+    });
+
+    // RULESET.TESTS.boundary-coverage: the decision point is `estimate <= budget`,
+    // so the inputs that matter are estimate-1 / estimate / estimate+1 — an
+    // off-by-one in that comparison flips budget_met and nothing else catches it.
+    test('boundary coverage around budget === estimate (#2738)', () => {
+      enableGraphify(planningDir);
+      writeGraphJson(planningDir, SAMPLE_GRAPH);
+      const e = graphifyQuery(tmpDir, 'auth', { budget: 100000 }).budget_estimate;
+
+      const atLimit = graphifyQuery(tmpDir, 'auth', { budget: e });
+      assert.strictEqual(atLimit.budget_met, true, 'budget === estimate is met (<=, not <)');
+      assert.strictEqual(atLimit.budget_estimate, e, 'no trimming needed at the limit');
+
+      const overLimit = graphifyQuery(tmpDir, 'auth', { budget: e + 1 });
+      assert.strictEqual(overLimit.budget_met, true, 'limit+1 is met');
+      assert.strictEqual(overLimit.budget_estimate, e, 'no trimming needed above the limit');
+
+      const underLimit = graphifyQuery(tmpDir, 'auth', { budget: e - 1 });
+      // limit-1 forces the loop to act; whatever it returns, the report must be
+      // consistent with what it returns.
+      assert.strictEqual(
+        underLimit.budget_met,
+        underLimit.budget_estimate <= e - 1,
+        'budget_met must agree with the reported estimate at limit-1',
+      );
+      assert.strictEqual(underLimit.budget_estimate, emittedTokens(underLimit));
     });
 
     // QUERY-01: returns total_nodes and total_edges counts
