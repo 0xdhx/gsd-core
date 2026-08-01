@@ -9,6 +9,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { createTempProject, cleanup } = require('./helpers.cjs');
+const fc = require('./helpers/fast-check-setup.cjs');
 
 const {
   graphifyQuery,
@@ -423,6 +424,137 @@ describe('query', () => {
       const result = graphifyQuery(tmpDir, 'auth');
       assert.strictEqual(typeof result.total_nodes, 'number');
       assert.strictEqual(typeof result.total_edges, 'number');
+    });
+  });
+
+  // RULESET.TESTS.property-based-testing — applyBudget is a budget-limit
+  // contract, and #2738 turns it into a *reporting* contract, which is what
+  // properties express well. These hold for any graph and any budget >= 0.
+  describe('graphifyQuery budget properties (#2738)', () => {
+    let tmpDir;
+    let planningDir;
+    // Surfaced-config-dir fixture: makes positive-path tests deterministic.
+    // See module-level comment for rationale.
+    let surfacedConfigDir;
+    let savedEnv;
+
+    beforeEach(() => {
+      tmpDir = createTempProject();
+      planningDir = path.join(tmpDir, '.planning');
+      surfacedConfigDir = makeSurfacedConfigDir();
+      savedEnv = saveSurfacedEnv();
+      delete process.env.GSD_RUNTIME;
+      process.env.CLAUDE_CONFIG_DIR = surfacedConfigDir;
+      delete process.env.GSD_WORKSTREAM;
+      delete process.env.GSD_PROJECT;
+      enableGraphify(planningDir);
+    });
+
+    afterEach(() => {
+      savedEnv.restore();
+      cleanup(surfacedConfigDir);
+      cleanup(tmpDir);
+    });
+
+    /**
+     * A small arbitrary graph that always seeds on 'auth'.
+     *
+     * seedAndExpand matches on `label` and `description` (case-insensitive
+     * substring) — NOT on `id` or `name` — so the seed node has to carry the
+     * term in its label or the whole graph expands to nothing.
+     */
+    const arbGraph = fc
+      .array(
+        fc.record({
+          label: fc.string({ minLength: 1, maxLength: 6 }),
+          type: fc.constantFrom('module', 'service', 'doc'),
+        }),
+        { minLength: 0, maxLength: 8 },
+      )
+      .map((extra) => {
+        const nodes = [
+          { id: 'n0', label: 'AuthService', description: 'handles authentication', type: 'service' },
+          ...extra.map((n, i) => ({
+            id: `n${i + 1}`,
+            label: n.label,
+            description: '',
+            type: n.type,
+          })),
+        ];
+        const edges = nodes.slice(1).map((n, i) => ({
+          source: nodes[i].id,
+          target: n.id,
+          label: `e${i}`,
+          confidence: ['AMBIGUOUS', 'INFERRED', 'EXTRACTED'][i % 3],
+        }));
+        return { nodes, edges };
+      });
+
+    test('budget_met agrees with budget_estimate against the requested budget', () => {
+      fc.assert(
+        fc.property(arbGraph, fc.nat({ max: 5000 }), (graph, budget) => {
+          writeGraphJson(planningDir, graph);
+          const r = graphifyQuery(tmpDir, 'auth', { budget });
+          assert.strictEqual(r.budget_met, r.budget_estimate <= budget);
+        }),
+      );
+    });
+
+    test('budget_estimate always measures the emitted payload', () => {
+      fc.assert(
+        fc.property(arbGraph, fc.nat({ max: 5000 }), (graph, budget) => {
+          writeGraphJson(planningDir, graph);
+          const r = graphifyQuery(tmpDir, 'auth', { budget });
+          assert.strictEqual(r.budget_estimate, emittedTokens(r));
+        }),
+      );
+    });
+
+    test('the seed set is a floor the reduction never goes below', () => {
+      fc.assert(
+        fc.property(arbGraph, fc.nat({ max: 5000 }), (graph, budget) => {
+          writeGraphJson(planningDir, graph);
+          const r = graphifyQuery(tmpDir, 'auth', { budget });
+          assert.ok(r.nodes.some((n) => n.id === 'n0'), 'seed survives any budget');
+        }),
+      );
+    });
+
+    test('total_nodes and total_edges always match the returned arrays', () => {
+      fc.assert(
+        fc.property(arbGraph, fc.nat({ max: 5000 }), (graph, budget) => {
+          writeGraphJson(planningDir, graph);
+          const r = graphifyQuery(tmpDir, 'auth', { budget });
+          assert.strictEqual(r.total_nodes, r.nodes.length);
+          assert.strictEqual(r.total_edges, r.edges.length);
+        }),
+      );
+    });
+
+    // Monotonicity is asserted over the PAYLOAD, not over budget_estimate.
+    // budget_estimate measures the emitted bytes exactly, and `budget_met`
+    // renders as "false" (5 chars) or "true" (4), so the identical payload can
+    // measure one token larger when the budget is missed. That is the estimate
+    // being honest, not a monotonicity break — so the invariant is stated over
+    // the thing a caller actually cares about: how much graph came back.
+    test('a larger budget never yields a smaller payload', () => {
+      fc.assert(
+        fc.property(arbGraph, fc.nat({ max: 2000 }), fc.nat({ max: 2000 }), (graph, a, b) => {
+          writeGraphJson(planningDir, graph);
+          const lo = Math.min(a, b);
+          const hi = Math.max(a, b);
+          const rLo = graphifyQuery(tmpDir, 'auth', { budget: lo });
+          const rHi = graphifyQuery(tmpDir, 'auth', { budget: hi });
+          assert.ok(
+            rLo.total_edges <= rHi.total_edges,
+            `edges must be monotone in the budget (${lo}:${rLo.total_edges} > ${hi}:${rHi.total_edges})`,
+          );
+          assert.ok(
+            rLo.total_nodes <= rHi.total_nodes,
+            `nodes must be monotone in the budget (${lo}:${rLo.total_nodes} > ${hi}:${rHi.total_nodes})`,
+          );
+        }),
+      );
     });
   });
 
