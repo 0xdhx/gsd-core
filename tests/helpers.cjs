@@ -42,12 +42,22 @@ const SESSION_IDENTITY_ENV_KEYS = [
 // incapable of being narrower than the surface it guards: adding a capability
 // that declares a new configHome env var extends this set in the same commit.
 const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
+const {
+  NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+  GSD_LOCATION_ENV_KEYS,
+} = require('../gsd-core/bin/lib/runtime-homes.cjs');
 
-// Config-location vars the registry does NOT carry, each with its reader:
+// Config-location vars that are neither in the registry nor descriptor-shaped,
+// each with its reader:
 //   GROK_AGENTS_HOME — hardcoded `grok` branch in getGlobalConfigDir (src/runtime-homes.cts)
 //   GSD_RUNTIME      — selects WHICH runtime home resolves (src/model-resolver.cts)
 //   GSD_PROJECT      — planningDir() project segment (src/planning-workspace.cts)
 //   GSD_WORKSTREAM   — planningDir() workstream segment (src/planning-workspace.cts)
+//
+// #2665 round 3: this list shrinks as sources become enumerable, and that direction
+// is the point. KIMI_SHARE_DIR was NOT added here — it now derives from
+// NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, because hand-adding each var a reviewer
+// names is precisely what reopened this bug three times.
 const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
   'GROK_AGENTS_HOME',
   'GSD_RUNTIME',
@@ -57,7 +67,15 @@ const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
 
 const CONFIG_LOCATION_ENV_KEYS = [
   ...new Set([
+    // 1. Every runtime descriptor the capability registry carries.
     ...Object.values(runtimes).flatMap((r) => r?.runtime?.configHome?.env ?? []),
+    // 2. Descriptor-shaped config homes resolved OUTSIDE the registry (kimi's
+    //    native config.toml home via KIMI_SHARE_DIR). Derived, not hand-listed.
+    ...NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.flatMap((d) => d?.env ?? []),
+    // 3. GSD's OWN location vars — a different family: they decide where GSD keeps
+    //    user-owned state ($GSD_HOME/.gsd/), not where a runtime keeps its config.
+    ...GSD_LOCATION_ENV_KEYS,
+    // 4. The residue that is neither registry-carried nor descriptor-shaped.
     ...NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS,
   ]),
 ].sort();
