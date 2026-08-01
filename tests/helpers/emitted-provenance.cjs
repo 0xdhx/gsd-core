@@ -394,13 +394,40 @@ const PROVENANCE_RULES = [
     // registration JSON above it is emitted, never built — there is no
     // `hooks/package.json` or `plugins/package.json` in the repo, so the
     // built-script rule would attribute it to a path that does not exist.
-    // HOOKS_WINDOWS_SHIM_SRC is the #2717 emitter: src/runtime-hooks-surface.cts
-    // writes this same marker into hooks/ for cursor/windsurf, and the codex copy
-    // block calls that same exported helper. It is a genuine second producer of
-    // these bytes, so a PR that changes the marker there must be attributable —
-    // which is why it is named here rather than left to the drift-ack file.
+    // Sources are scoped PER ROOT, not declared as one flat union. Each root has
+    // exactly one writer besides the shared marker module, and a flat list would
+    // attribute every root to all of them — `extensions/package.json` to the
+    // hooks-surface writer that never touches it, `.kimi/hooks/package.json` to
+    // the native-plugin writer, and so on. That matters because
+    // `emitted-diff.cjs` accepts the FIRST satisfied source: a flat list
+    // containing `bin/install.js` lets any change anywhere in that 13k-line file
+    // authorise marker drift for every root — the blanket escape hatch this
+    // file's own agents-verbatim comment (above) refuses for the same reason.
+    //
+    //   hooks/ (shared bundle)  -> bin/install.js  (installSharedHooksBundle)
+    //   hooks/ (#2717 runtimes) -> src/runtime-hooks-surface.cts + bin/install.js
+    //                              (the codex copy block calls the exported helper)
+    //   .kimi/hooks/            -> bin/install.js  (the kimi hooks-root bundle)
+    //   plugins/, extensions/   -> src/install-engine.cts
+    //                              (_installNativePluginIfDeclared)
+    //
+    // COMMONJS_MARKER_SRC is in every root: it owns the marker BYTES, so a change
+    // to it can move any of them.
+    // The rule ctx is `{ rel, runtime }` — it carries no `root`, so the root is
+    // derived from `rel` here. Keying on a ctx field that does not exist would
+    // send every path down one branch silently, which is the failure this
+    // per-root split exists to prevent.
     pattern: /^package\.json$/,
-    sources: () => [COMMONJS_MARKER_SRC, INSTALLER_SRC, INSTALL_ENGINE_SRC, HOOKS_WINDOWS_SHIM_SRC],
+    sources: (_m, ctx) => {
+      const root = String(ctx.rel).replace(/\/package\.json$/, '');
+      if (root === 'plugins' || root === 'extensions') {
+        return [COMMONJS_MARKER_SRC, INSTALL_ENGINE_SRC];
+      }
+      if (root === '.kimi/hooks') return [COMMONJS_MARKER_SRC, INSTALLER_SRC];
+      // 'hooks' — written by the shared bundle for most runtimes and by the
+      // #2717 dedicated paths for cursor/windsurf/codex.
+      return [COMMONJS_MARKER_SRC, INSTALLER_SRC, HOOKS_WINDOWS_SHIM_SRC];
+    },
   },
   {
     id: 'copilot-hook-registration',
