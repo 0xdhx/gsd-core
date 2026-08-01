@@ -20,6 +20,13 @@ const {
   applyBudget,
 } = require('../gsd-core/bin/lib/graphify.cjs');
 
+// The emitter itself, not a local re-implementation of it — the whole point of
+// the #2738 budget-outcome pin below is that these two must never drift.
+const { serializeForOutput } = require('../gsd-core/bin/lib/io.cjs');
+
+/** Tokens of a response as `output()` actually emits it. */
+const emittedTokens = (result) => Math.ceil(serializeForOutput(result).length / 4);
+
 const {
   enableGraphify,
   writeGraphJson,
@@ -377,6 +384,36 @@ describe('query', () => {
       const result = graphifyQuery(tmpDir, 'auth');
       assert.ok(!('budget_met' in result), 'budget_met absent without --budget');
       assert.ok(!('budget_estimate' in result), 'budget_estimate absent without --budget');
+    });
+
+    // #2738 Blocker: budget_estimate must measure the payload the caller is
+    // actually handed — output() pretty-prints with 2-space indent and emits the
+    // wrapper keys too. Estimating a compact {nodes, edges} understated a 12-node
+    // response by ~1.5x, so `--budget N` could report budget_met: true while
+    // returning well over N tokens. This pins estimator to emitter so the two
+    // cannot silently re-diverge if output() ever changes its indentation.
+    test('budget_estimate equals the tokens actually emitted (#2738)', () => {
+      enableGraphify(planningDir);
+      writeGraphJson(planningDir, SAMPLE_GRAPH);
+      const result = graphifyQuery(tmpDir, 'auth', { budget: 100000 });
+      assert.strictEqual(
+        result.budget_estimate,
+        emittedTokens(result),
+        'reported estimate must equal the serialized-for-output token count',
+      );
+    });
+
+    test('a met budget is honest about the emitted size (#2738)', () => {
+      enableGraphify(planningDir);
+      writeGraphJson(planningDir, SAMPLE_GRAPH);
+      const probe = graphifyQuery(tmpDir, 'auth', { budget: 100000 });
+      // Budget exactly at the untrimmed size: met, and genuinely within it.
+      const result = graphifyQuery(tmpDir, 'auth', { budget: probe.budget_estimate });
+      assert.strictEqual(result.budget_met, true);
+      assert.ok(
+        emittedTokens(result) <= probe.budget_estimate,
+        `emitted ${emittedTokens(result)} must not exceed the granted ${probe.budget_estimate}`,
+      );
     });
 
     // QUERY-01: returns total_nodes and total_edges counts

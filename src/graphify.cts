@@ -15,6 +15,17 @@ import { execTool, execGit, platformWriteSync } from './shell-command-projection
 import capabilityStateMod = require('./capability-state.cjs');
 const { isCapabilityActive } = capabilityStateMod;
 
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- io.cjs is an export= CommonJS module
+import ioMod = require('./io.cjs');
+const { serializeForOutput } = ioMod;
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- prompt-budget.cjs is an export= CommonJS module
+import promptBudget = require('./prompt-budget.cjs');
+// The repo's single token scale (phase-estimation.cts documents the rule: a
+// ratio between two measurement methods measures the methods, not the miss).
+// This module previously carried a private copy of the same chars/4 formula.
+const { estimateTokens } = promptBudget;
+
 // ─── Config Gate ─────────────────────────────────────────────────────────────
 
 interface DisabledResponse {
@@ -299,12 +310,52 @@ interface BudgetResult {
   budget_estimate: number;
 }
 
+/** The core payload a query response wraps, before the wire shape is applied. */
+interface QueryResponseCore {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  trimmed: string | null;
+  budget?: { met: boolean; estimate: number };
+}
+
+/**
+ * The single definition of `graphifyQuery`'s wire shape.
+ *
+ * Both the emitter (`graphifyQuery`'s return) and the budget estimator go
+ * through here, so `budget_estimate` measures the object the caller actually
+ * receives rather than a private approximation of it (#2738).
+ */
+function buildQueryResponse(term: string, core: QueryResponseCore) {
+  return {
+    term,
+    nodes: core.nodes,
+    edges: core.edges,
+    total_nodes: core.nodes.length,
+    total_edges: core.edges.length,
+    trimmed: core.trimmed,
+    // Budget outcome (#2738) — only present when a budget was requested
+    ...(core.budget ? { budget_met: core.budget.met, budget_estimate: core.budget.estimate } : {}),
+  };
+}
+
 /**
  * Apply token budget by dropping edges by confidence tier (D-04, D-05, D-06).
- * Token estimation: Math.ceil(JSON.stringify(obj).length / 4).
  * Drop order: AMBIGUOUS -> INFERRED -> EXTRACTED.
+ *
+ * The estimate measures the response **as emitted** — `serializeForOutput()`
+ * over the same object `graphifyQuery` returns, pretty-printed and including
+ * the wrapper keys. Measuring a compact `{nodes, edges}` instead understates
+ * the payload the caller receives, which makes `budget_met` a confident claim
+ * about a payload nobody is handed (#2738).
+ *
+ * `term` participates in the emitted bytes, so it is threaded through; the
+ * default keeps direct unit calls on the same wire shape, minus those bytes.
  */
-function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandResult | BudgetResult {
+function applyBudget(
+  result: ExpandResult,
+  budgetTokens: number | null,
+  term = '',
+): ExpandResult | BudgetResult {
   // == null (not truthiness): --budget 0 is a valid parsed budget the router
   // forwards, and treating it as "no budget" silently returns the unbounded
   // result — the same silent-non-application defect class as #974/#2738.
@@ -313,8 +364,6 @@ function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandR
   const CONFIDENCE_ORDER = ['AMBIGUOUS', 'INFERRED', 'EXTRACTED'];
   let edges = [...result.edges];
   let omitted = 0;
-
-  const estimateTokens = (obj: unknown) => Math.ceil(JSON.stringify(obj).length / 4);
 
   // Nodes that survive a given edge set: edge-reachable, plus seeds (always kept)
   const survivingNodes = (edgeSet: GraphEdge[]) => {
@@ -326,11 +375,48 @@ function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandR
     return result.nodes.filter(n => reachableNodes.has(n.id) || (result.seeds && result.seeds.has(n.id)));
   };
 
+  const trimmedLabel = (dropped: number, unreachable: number) =>
+    dropped > 0 ? `[${dropped} edges omitted, ${unreachable} nodes unreachable]` : null;
+
+  /**
+   * Tokens of the response as `output()` will emit it.
+   *
+   * Self-referential by construction: `budget_estimate` is itself one of the
+   * emitted fields, so its own digit width counts toward the total. Resolved by
+   * iterating to a fixed point — the sequence is non-decreasing (a wider number,
+   * and `false` over `true`, can only add characters), so it settles in a couple
+   * of passes. The cap is a guard rather than an expectation, and it exits on the
+   * larger value: over-reporting is the safe direction for a budget signal;
+   * under-reporting is the defect this fixes.
+   */
+  const wireEstimate = (
+    candidateNodes: GraphNode[],
+    candidateEdges: GraphEdge[],
+    trimmed: string | null,
+  ): number => {
+    let est = 0;
+    for (let i = 0; i < 8; i++) {
+      const next = estimateTokens(
+        serializeForOutput(
+          buildQueryResponse(term, {
+            nodes: candidateNodes,
+            edges: candidateEdges,
+            trimmed,
+            budget: { met: est <= budgetTokens, estimate: est },
+          }),
+        ),
+      );
+      if (next === est) break;
+      est = next;
+    }
+    return est;
+  };
+
   // Estimate against the post-pruning node set after each tier removal, so a
   // removal that already fits (once orphaned nodes are excluded) stops the loop
   // instead of dropping the next, higher-confidence tier too (#2738).
   let nodes = survivingNodes(edges);
-  let estimate = estimateTokens({ nodes, edges });
+  let estimate = wireEstimate(nodes, edges, trimmedLabel(omitted, result.nodes.length - nodes.length));
 
   for (const tier of CONFIDENCE_ORDER) {
     if (estimate <= budgetTokens) break;
@@ -339,7 +425,7 @@ function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandR
     edges = edges.filter(e => (e.confidence || e.confidence_score) !== tier);
     omitted += before - edges.length;
     nodes = survivingNodes(edges);
-    estimate = estimateTokens({ nodes, edges });
+    estimate = wireEstimate(nodes, edges, trimmedLabel(omitted, result.nodes.length - nodes.length));
   }
 
   const unreachable = result.nodes.length - nodes.length;
@@ -347,7 +433,7 @@ function applyBudget(result: ExpandResult, budgetTokens: number | null): ExpandR
   return {
     nodes,
     edges,
-    trimmed: omitted > 0 ? `[${omitted} edges omitted, ${unreachable} nodes unreachable]` : null,
+    trimmed: trimmedLabel(omitted, unreachable),
     total_nodes: nodes.length,
     total_edges: edges.length,
     // Seeds are retained unconditionally, so the seed set is a floor the
@@ -444,21 +530,19 @@ function graphifyQuery(cwd: string, term: string, options: { budget?: number | n
   let result: ExpandResult | BudgetResult = seedAndExpand(graph, term);
 
   if (options.budget != null) {
-    result = applyBudget(result, options.budget);
+    result = applyBudget(result, options.budget, term);
   }
 
-  return {
-    term,
+  // Same builder the estimator measured, so budget_estimate describes exactly
+  // these bytes (#2738).
+  return buildQueryResponse(term, {
     nodes: result.nodes,
     edges: result.edges,
-    total_nodes: result.nodes.length,
-    total_edges: result.edges.length,
     trimmed: 'trimmed' in result ? (result.trimmed || null) : null,
-    // Budget outcome (#2738) — only present when a budget was requested
-    ...('budget_met' in result
-      ? { budget_met: result.budget_met, budget_estimate: result.budget_estimate }
-      : {}),
-  };
+    budget: 'budget_met' in result
+      ? { met: result.budget_met, estimate: result.budget_estimate }
+      : undefined,
+  });
 }
 
 /**
