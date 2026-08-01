@@ -29,9 +29,14 @@ const RUNTIME_INSTALL_CONTRACTS = {
   augment: { surface: 'flat-skills', settings: true, hooksPackageJson: true },
   cline: { surface: 'clinerules', settings: false, hooksPackageJson: false },
   codebuddy: { surface: 'flat-skills', settings: true, hooksPackageJson: true },
-  codex: { surface: 'flat-skills', settings: false, hooksPackageJson: false, codexConfig: true },
+  // codex/cursor/windsurf: #2717 stages their .js hooks via dedicated paths
+  // (skipSharedHooksInstall / the !isCodex gate keep them out of the shared
+  // bundle) and writes the marker beside those scripts, so hooks/package.json
+  // is expected for all three. Measured on this tree: codex stages 3 .js hooks,
+  // cursor 6, windsurf 2 — each with the marker.
+  codex: { surface: 'flat-skills', settings: false, hooksPackageJson: true, codexConfig: true },
   copilot: { surface: 'flat-skills', settings: false, hooksPackageJson: false, copilotInstructions: true },
-  cursor: { surface: 'flat-skills', settings: false, hooksPackageJson: false },
+  cursor: { surface: 'flat-skills', settings: false, hooksPackageJson: true },
   gemini: { surface: 'commands-gsd', settings: true, hooksPackageJson: true },
   hermes: { surface: 'hermes-skills', settings: true, hooksPackageJson: true },
   kimi: { surface: 'kimi-skills-agents', settings: false, hooksPackageJson: false },
@@ -63,7 +68,7 @@ const RUNTIME_INSTALL_CONTRACTS = {
   pi: { surface: 'plugin-only', settings: false, hooksPackageJson: true },
   qwen: { surface: 'flat-skills', settings: true, hooksPackageJson: true },
   trae: { surface: 'flat-skills', settings: false, hooksPackageJson: false },
-  windsurf: { surface: 'global-artifacts-noop', settings: false, hooksPackageJson: false },
+  windsurf: { surface: 'global-artifacts-noop', settings: false, hooksPackageJson: true },
   // #1821: ZCode (hooksSurface:none, no plugin surface) no longer receives the
   // dead hook scripts or the CommonJS package.json marker.
   zcode: { surface: 'flat-skills', settings: false, hooksPackageJson: false },
