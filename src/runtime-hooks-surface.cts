@@ -27,6 +27,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+// #2544: the single source of truth for the CommonJS module-type marker. The
+// two helpers below are thin boolean-returning shims over these — see the
+// marker section for why this file no longer carries its own copy.
+import {
+  ensureCommonJsMarker as ensureCommonJsMarkerOwned,
+  removeCommonJsMarker as removeCommonJsMarkerOwned,
+} from './commonjs-marker.cjs';
 import {
   CURSOR_HOOK_EVENTS,
   CURSOR_EVENT_SCRIPT_MAP,
@@ -217,61 +224,53 @@ function atomicWriteFileSync(target: string, data: string, options: fs.WriteFile
 //
 // The marker content is byte-identical to installSharedHooksBundle's
 // (bin/install.js installSharedHooksBundle): {"type":"commonjs"}\n.
+//
+// #2544: the two helpers below no longer carry their own copy of the write and
+// remove rules — they DELEGATE to src/commonjs-marker.cts, which #2544 makes the
+// single place both rules are enforced. Keeping a second copy here was not
+// merely redundant; the copies had drifted apart on exactly the two properties
+// that matter:
+//
+//   - ownership probe: `fs.existsSync` FOLLOWS symlinks and reports `false` for
+//     a DANGLING one, so a dangling `package.json` symlink classified as absent
+//     and the write below followed the link outside the directory GSD owns.
+//     `classifyMarker` uses `lstat` + `isFile()`, so a symlink or a directory at
+//     the marker path is classified `foreign` and left strictly alone.
+//   - create: a plain `writeFileSync` leaves the classify->write window open.
+//     `ensureCommonJsMarker` creates with `flag: 'wx'` (O_EXCL), so anything
+//     that appears at the path in between fails with EEXIST instead of being
+//     followed or overwritten.
+//
+// The exported signatures are unchanged (both still return a boolean), so every
+// caller and the #2717 tests are unaffected.
 // ---------------------------------------------------------------------------
-
-/** The exact marker content GSD writes, matching installSharedHooksBundle. */
-const COMMONJS_MARKER_CONTENT = '{"type":"commonjs"}\n';
 
 /**
  * Ensure a `package.json` forcing CommonJS mode exists in `dir` (the directory
  * holding GSD-staged `.js` hook scripts). Idempotent: a no-op if the marker is
- * already present with GSD's content. Overwrites only when the file is absent
- * or already carries GSD's exact marker — it never clobbers a distinct
- * user-authored package.json (it leaves such a file in place; the user owns it).
+ * already present with GSD's content. Never clobbers a distinct user-authored
+ * package.json (it leaves such a file in place; the user owns it).
  *
  * @param dir - absolute path to the directory holding the staged .js hooks
- * @returns `true` if the marker is present after the call (written or already there)
+ * @returns `true` if GSD's marker is present after the call (written or already there)
  */
 function ensureCommonJsMarker(dir: string): boolean {
-  const markerPath = path.join(dir, 'package.json');
-  try {
-    if (fs.existsSync(markerPath)) {
-      const existing = fs.readFileSync(markerPath, 'utf8');
-      // Already GSD's marker (tolerant of trailing-whitespace variants) — done.
-      if (existing.trim() === '{"type":"commonjs"}') return true;
-      // A distinct package.json the user owns — do NOT clobber. The hook will
-      // load as whatever type the user declared; that is the user's choice.
-      return false;
-    }
-    fs.writeFileSync(markerPath, COMMONJS_MARKER_CONTENT);
-    return true;
-  } catch {
-    // Best-effort: a marker write failure must not fail the whole install.
-    return false;
-  }
+  // 'written' | 'unchanged' -> the marker is ours and present.
+  // 'preserved-foreign'     -> a file GSD does not own is there; left untouched.
+  // 'failed'                -> environmental (EACCES/EROFS/ENOSPC); best-effort.
+  const outcome = ensureCommonJsMarkerOwned(dir);
+  return outcome === 'written' || outcome === 'unchanged';
 }
 
 /**
  * Remove the CommonJS marker from `dir` on uninstall — but ONLY if it carries
  * GSD's exact marker content. A user-authored package.json is never deleted.
- * Mirrors the kimi uninstall guard in bin/install.js.
  *
  * @param dir - absolute path to the directory that held the staged .js hooks
  * @returns `true` if a GSD-owned marker was removed
  */
 function removeCommonJsMarkerIfGsdOwned(dir: string): boolean {
-  const markerPath = path.join(dir, 'package.json');
-  try {
-    if (!fs.existsSync(markerPath)) return false;
-    const content = fs.readFileSync(markerPath, 'utf8').trim();
-    if (content === '{"type":"commonjs"}') {
-      fs.unlinkSync(markerPath);
-      return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  return removeCommonJsMarkerOwned(dir);
 }
 
 // ---------------------------------------------------------------------------

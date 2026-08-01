@@ -139,6 +139,43 @@ describe('commonjs-marker: ownership predicate', () => {
     assert.ok(fs.lstatSync(link).isSymbolicLink(), 'the symlink itself must survive');
   });
 
+  test('the #2717 hooks-surface helpers inherit the same symlink guard', (t) => {
+    const dir = mkTmp('cjs-marker-hookssurface-');
+    t.after(() => cleanup(dir));
+
+    // #2717 added a SECOND copy of these helpers in runtime-hooks-surface.cts
+    // for the runtimes that stage .js hooks via dedicated paths
+    // (cursor/windsurf/codex). That copy probed with `fs.existsSync`, which
+    // follows symlinks and reports false for a DANGLING one — so it classified
+    // the link `absent` and wrote straight through it, landing outside the
+    // directory GSD owns. #2544 makes it delegate to commonjs-marker instead.
+    //
+    // This asserts the hardening reaches that path, not just the module: it is
+    // the only coverage that fails if the duplicate is ever reintroduced, since
+    // the two implementations agree on every non-adversarial input.
+    const hooksSurface = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+
+    const outside = path.join(dir, 'escaped.json');
+    const owned = path.join(dir, 'hooks');
+    fs.mkdirSync(owned);
+    fs.symlinkSync(outside, path.join(owned, 'package.json'));
+
+    assert.equal(
+      hooksSurface.ensureCommonJsMarker(owned),
+      false,
+      'a dangling symlink is not GSD-owned, so the marker must not be reported present',
+    );
+    assert.ok(
+      !fs.existsSync(outside),
+      'the write must not follow the symlink out of the hooks directory',
+    );
+    assert.equal(
+      hooksSurface.removeCommonJsMarkerIfGsdOwned(owned),
+      false,
+      'a symlink is never GSD-owned, so uninstall must not remove it',
+    );
+  });
+
   test('removeCommonJsMarker removes only GSD-owned markers', (t) => {
     const dir = mkTmp('cjs-marker-remove-');
     t.after(() => cleanup(dir));
