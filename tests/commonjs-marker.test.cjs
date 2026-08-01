@@ -516,10 +516,15 @@ describe('#2544 regression: install must not clobber the config-root package.jso
     const root = mkTmp('gsd-2544-stagedhooks-');
     t.after(() => cleanup(root));
 
-    // The stated reason for gating the marker on `stagedHooks` rather than a
-    // plain existence check: hooks/ is shared space, and dropping a GSD marker
-    // into a directory the user created and GSD never wrote to is the same
-    // write-into-someone-else's-territory this issue is about.
+    // Scope, stated precisely: this pins the OUTCOME — a pre-existing,
+    // GSD-untouched hooks/ stays marker-free — for a runtime GSD stages no .js
+    // into. It does NOT exercise installSharedHooksBundle's `stagedHooks` gate:
+    // zcode declares skipSharedHooksInstall, so the outer guard in bin/install.js
+    // skips that helper entirely and the gate is never evaluated. For a runtime
+    // that DOES reach the bundle, `stagedHooks` is true whenever any hook source
+    // exists, so the gate is only distinguishable under fault injection. The two
+    // `staging zero hook scripts` tests above are the ones that pin a real
+    // staged-nothing gate, on the #2717 writers.
     //
     // ZCode, not Windsurf. Windsurf was the original choice because
     // hostBehaviors.skipSharedHooksInstall kept it out of the shared bundle —
