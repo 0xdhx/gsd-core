@@ -529,3 +529,83 @@ describe('guard <-> complete-milestone workflow binding (the escape hatch is WIR
       'step is an unguarded catastrophic-shrink Write (#2255 round 8 Blocker)');
   });
 });
+
+describe('guard <-> gsd-roadmapper binding (the /gsd:new-milestone collapse path is hatched)', () => {
+  // #2255 round 10 Blocker 1: complete-milestone was not the only first-party
+  // flow that overwrites a curated artifact wholesale. gsd-roadmapper's Step 7
+  // Writes BOTH .planning/ROADMAP.md and .planning/STATE.md, and
+  // /gsd:new-milestone spawns it against the OUTGOING milestone's files —
+  // new-milestone's `phases.clear` archives phase DIRECTORIES, never
+  // ROADMAP.md, so nothing compacts it first and no ordering rule forces
+  // /gsd:complete-milestone to run before /gsd:new-milestone.
+  //
+  // Measured against the shipped hook at the #973 file size (292 lines): a new
+  // 4-phase roadmap lands at 18.2% and an 8-phase one at 31.8% — both blocked;
+  // only a 12-phase replacement (45.5%) clears. The sentinel is path-bound and
+  // single-use, so each Write needs its own arming. As in the sibling binding
+  // above, the sentinel name is taken from the guard's typed output so a
+  // rename on EITHER side fails here instead of silently unwiring the hatch.
+  const roadmapperPath = path.join(__dirname, '..', 'agents', 'gsd-roadmapper.md');
+
+  test('the roadmapper write step arms the exact sentinel the guard consumes, for BOTH curated targets', () => {
+    const src = fs.readFileSync(roadmapperPath, 'utf8');
+    const stepStart = src.indexOf('## Step 7: Write Files Immediately');
+    assert.notEqual(stepStart, -1,
+      'roadmapper Step 7 missing or renamed in gsd-roadmapper.md — rebind this test');
+    const step = src.slice(stepStart, src.indexOf('## Step 8', stepStart));
+
+    fs.writeFileSync(roadmapPath, lines(292));
+    const blocked = runHook(writePayload(roadmapPath, lines(53), { cwd: projectDir }));
+    assert.equal(blocked.status, 2,
+      'baseline: the new-milestone-shaped roadmap Write must block without the hatch');
+    const sentinel = JSON.parse(blocked.stdout).overrideSentinel;
+    assert.ok(sentinel, 'the guard must publish its sentinel path as a typed field');
+
+    assert.ok(step.includes(sentinel),
+      `gsd-roadmapper.md Step 7 no longer arms ${sentinel} — its whole-file ROADMAP.md ` +
+      'write would be hard-blocked by gsd-write-guard on /gsd:new-milestone (#2255 round 10 Blocker 1)');
+
+    // Both curated targets the step writes must be armed by name — one arming
+    // cannot cover both, because the token is path-bound and single-use.
+    for (const target of ['.planning/ROADMAP.md', '.planning/STATE.md']) {
+      assert.ok(step.includes(`printf '${target}\\n' > ${sentinel}`),
+        `Step 7 must arm ${sentinel} for ${target} immediately before writing it — ` +
+        'the sentinel is path-bound and single-use, so a single arming covers only one file');
+    }
+  });
+
+  test('the armed sequence passes the exact collapse /gsd:new-milestone produces', () => {
+    // The real failure: roadmapper follows Step 7, arms the sentinel, Writes.
+    fs.writeFileSync(roadmapPath, lines(292));
+    fs.writeFileSync(path.join(planningDir, '.gsd-allow-shrink'), '.planning/ROADMAP.md\n');
+    const allowed = runHook(writePayload(roadmapPath, lines(53), { cwd: projectDir }));
+    assert.equal(allowed.status, 0,
+      'the identical collapse must pass under the sentinel the roadmapper step arms');
+
+    // And the STATE.md leg, which the same step writes seconds later — its own
+    // arming, because the ROADMAP arming was consumed by the write above.
+    const statePath = path.join(planningDir, 'STATE.md');
+    fs.writeFileSync(statePath, lines(195));
+    const stateBlocked = runHook(writePayload(statePath, lines(60), { cwd: projectDir }));
+    assert.equal(stateBlocked.status, 2,
+      'a collapsing STATE.md rewrite must block once the ROADMAP arming is spent');
+    fs.writeFileSync(path.join(planningDir, '.gsd-allow-shrink'), '.planning/STATE.md\n');
+    const stateAllowed = runHook(writePayload(statePath, lines(60), { cwd: projectDir }));
+    assert.equal(stateAllowed.status, 0,
+      'the STATE.md collapse must pass under its own arming');
+  });
+
+  test('arming is conditional on the target existing, so /gsd:new-project leaves no unconsumed token', () => {
+    // A new-project run has no ROADMAP.md: the guard exempts via ENOENT and
+    // never consumes a token, so an unconditional arming would strand a live
+    // 15-minute unlock on disk. The step must guard both armings with [ -f ].
+    const src = fs.readFileSync(roadmapperPath, 'utf8');
+    const stepStart = src.indexOf('## Step 7: Write Files Immediately');
+    const step = src.slice(stepStart, src.indexOf('## Step 8', stepStart));
+    for (const target of ['.planning/ROADMAP.md', '.planning/STATE.md']) {
+      assert.ok(step.includes(`[ -f ${target} ] &&`),
+        `Step 7 must gate the ${target} arming on the file existing — an unconditional ` +
+        'arming on the new-project path strands an unconsumed sentinel (#2255 round 10)');
+    }
+  });
+});
