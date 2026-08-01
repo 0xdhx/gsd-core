@@ -8,12 +8,21 @@
 // and Write-overwrote the whole 292-line file with it — three milestones of
 // committed history destroyed. Fixes 1 and 2 (PR #989) are instructions to a
 // model: they lower the probability of a clobber but cannot prevent one, and
-// they protect only the agents that were audited. This hook is the defense
-// that is independent of per-agent tool config: it compares the pending Write
-// payload against the file on disk and hard-blocks a catastrophic shrink
-// BEFORE it happens. An advisory will not do — #973 records an agent reading
-// the advisory, classifying it as non-binding, and reasoning past it while
+// they protect only the agents that were audited. This hook is enforced by
+// code rather than by instruction: it compares the pending Write payload
+// against the file on disk and hard-blocks a catastrophic shrink BEFORE it
+// happens. An advisory will not do — #973 records an agent reading the
+// advisory, classifying it as non-binding, and reasoning past it while
 // holding a false model of what Write does.
+//
+// The guarantee is bounded, and the bound is worth stating where the code
+// lives: this stops accidental and single-shot collapse, not a determined
+// agent. The sentinel hatch below is a plain file, so an agent that would
+// reason past an advisory can arm one with a single Bash call it is already
+// permitted to make. What ships is the conversion of "ignore a sentence" into
+// "take one deliberate, path-bound, single-use, auditable action" — a real
+// improvement against the confused-agent threat #973 records, not a defense
+// against an evader.
 //
 // Deliberately narrow trigger:
 //   - Write only (Edit/MultiEdit are scoped by construction);
@@ -270,7 +279,7 @@ process.stdin.on('end', () => {
     // ENOENT alone fails open (no baseline to protect); any OTHER read error
     // (EACCES, EISDIR, ELOOP, EMFILE, a Windows lock) fails CLOSED — a guard
     // that waves a curated Write through on a transient read error is not
-    // "independent of per-agent tool config", it is a race away from #973.
+    // enforced by code at all, it is a race away from #973.
     let onDisk;
     try {
       onDisk = fs.readFileSync(filePath, 'utf8');

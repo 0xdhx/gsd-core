@@ -530,6 +530,41 @@ describe('guard <-> complete-milestone workflow binding (the escape hatch is WIR
   });
 });
 
+describe('the shipped claim matches the shipped guarantee (round 10 Major 2)', () => {
+  // The guard's reach is bounded: the sentinel is a plain file, so an agent
+  // that would reason past an advisory can arm one with a single Bash call.
+  // Round 10 asked that the claim not outrun that, and specifically that the
+  // stronger wording not reach CHANGELOG.md. Pinned on the DURABLE surfaces
+  // only — a changeset fragment is consumed at release, so a test reading it
+  // would start failing the moment the release lands.
+  const RETIRED = 'the only defense independent of per-agent tool config';
+  const surfaces = [
+    ['hooks/gsd-write-guard.js', path.join(__dirname, '..', 'hooks', 'gsd-write-guard.js')],
+    ['docs/USER-GUIDE.md', path.join(__dirname, '..', 'docs', 'USER-GUIDE.md')],
+  ];
+
+  for (const [label, file] of surfaces) {
+    test(`${label} does not restate the retired unbounded claim`, () => {
+      const src = fs.readFileSync(file, 'utf8');
+      assert.ok(!src.includes(RETIRED),
+        `${label} carries the retired claim "${RETIRED}" — it overstates what the guard ` +
+        'delivers, because the sentinel is agent-armable (#2255 round 10 Major 2)');
+    });
+
+    test(`${label} states the determined-agent bound`, () => {
+      // Normalize before matching: the claim is prose, and in a source file it
+      // is prose wrapped in `//` across several lines. A pin that breaks when
+      // a paragraph is reflowed tests the formatter, not the claim.
+      const src = fs.readFileSync(file, 'utf8')
+        .replace(/^\s*\/\/ ?/gm, '')
+        .replace(/\s+/g, ' ');
+      assert.match(src, /not a defense against (a determined agent|an evader)/,
+        `${label} must state that the guard does not stop a determined agent — the bound is ` +
+        'the half a reader acts on (#2255 round 10 Major 2)');
+    });
+  }
+});
+
 describe('guard <-> gsd-roadmapper binding (the /gsd:new-milestone collapse path is hatched)', () => {
   // #2255 round 10 Blocker 1: complete-milestone was not the only first-party
   // flow that overwrites a curated artifact wholesale. gsd-roadmapper's Step 7
