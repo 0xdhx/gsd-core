@@ -176,6 +176,42 @@ describe('commonjs-marker: ownership predicate', () => {
     );
   });
 
+  // The #2717 writers mkdir hooks/ unconditionally, then staged their scripts
+  // conditionally on the source existing — so with an empty hooks source they
+  // created a directory, filled it with nothing, and marked it as GSD's anyway.
+  // That is the same write-into-territory-GSD-did-not-fill this issue is about,
+  // and it is what `stagedHooks` guards on the shared-bundle path. These pin the
+  // matching gate on the two dedicated writers.
+  for (const rt of ['cursor', 'windsurf']) {
+    test(`${rt}: staging zero hook scripts leaves hooks/ marker-free`, (t) => {
+      const hooksSurface = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
+      const root = mkTmp(`gsd-2544-${rt}-nostage-`);
+      t.after(() => cleanup(root));
+
+      // A src tree whose hooks/ dir exists but holds none of the runtime's
+      // scripts — the writer stages nothing and must not claim the directory.
+      const emptySrc = path.join(root, 'src');
+      fs.mkdirSync(path.join(emptySrc, 'hooks'), { recursive: true });
+      const targetDir = path.join(root, 'target');
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      const write = rt === 'cursor'
+        ? hooksSurface.writeCursorHooksJson
+        : hooksSurface.writeWindsurfHooksJson;
+      write(targetDir, emptySrc);
+
+      const hooksDir = path.join(targetDir, 'hooks');
+      const staged = fs.existsSync(hooksDir)
+        ? fs.readdirSync(hooksDir).filter((f) => f.endsWith('.js'))
+        : [];
+      assert.equal(staged.length, 0, 'precondition: the writer staged no scripts');
+      assert.ok(
+        !fs.existsSync(path.join(hooksDir, 'package.json')),
+        `${rt} must not mark a hooks/ directory it staged nothing into`,
+      );
+    });
+  }
+
   test('removeCommonJsMarker removes only GSD-owned markers', (t) => {
     const dir = mkTmp('cjs-marker-remove-');
     t.after(() => cleanup(dir));

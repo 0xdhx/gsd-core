@@ -1270,7 +1270,15 @@ function writeCursorHooksJson(targetDir: string, src: string, opts?: WriteCursor
   // installSharedHooksBundle (the only other writer of this marker); without
   // it, a ~/.cursor/package.json declaring {"type":"module"} makes Node load
   // these require()-using scripts as ESM and every Cursor hook fails silently.
-  ensureCommonJsMarker(hooksDir);
+  //
+  // #2544: gated on having actually staged a script, mirroring
+  // installSharedHooksBundle's `stagedHooks` gate. hooks/ is shared space, and
+  // this function mkdirs it unconditionally — so an ungated write drops a GSD
+  // marker into a directory GSD created but did not fill, which is the same
+  // write-into-someone-else's-territory this issue is about.
+  if (installedScripts.size > 0) {
+    ensureCommonJsMarker(hooksDir);
+  }
 
   const hookOpts: BuildHookCommandOpts = { runtime: 'cursor', platform: opts.platform || process.platform };
   const commands: Record<string, string | null> = {};
@@ -1483,7 +1491,12 @@ function writeWindsurfHooksJson(targetDir: string, src: string, opts?: WriteWind
   // installSharedHooksBundle (the only other writer of this marker); without
   // it, a config-root package.json declaring {"type":"module"} makes Node load
   // these require()-using scripts as ESM and the Windsurf hooks fail silently.
-  ensureCommonJsMarker(hooksDir);
+  //
+  // #2544: gated on having actually staged a script — see the identical gate in
+  // the Cursor writer above and `stagedHooks` in installSharedHooksBundle.
+  if (installedScripts.size > 0) {
+    ensureCommonJsMarker(hooksDir);
+  }
 
   const hookOpts: BuildHookCommandOpts = { runtime: 'windsurf', platform: opts.platform || process.platform };
   const commands: Record<string, string | null> = {};

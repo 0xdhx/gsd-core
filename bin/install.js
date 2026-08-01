@@ -11740,6 +11740,10 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       const codexHooksDest = path.join(targetDir, 'hooks');
       fs.mkdirSync(codexHooksDest, { recursive: true });
       const configDirReplacement = getConfigDirFromHome(runtime, isGlobal);
+      // #2544: track whether anything was actually staged. hooks/dist existing
+      // is not the same as an allowlisted file landing in it — see the marker
+      // gate below.
+      let codexStagedHooks = false;
       for (const entry of fs.readdirSync(codexHooksSrc)) {
         if (!CODEX_HOOKS_TO_COPY.includes(entry)) continue;
         const srcFile = path.join(codexHooksSrc, entry);
@@ -11773,6 +11777,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
           fs.copyFileSync(srcFile, destFile);
           try { fs.chmodSync(destFile, 0o755); } catch (e) { /* Windows */ }
         }
+        codexStagedHooks = true;
       }
       console.log(`  ${green}✓${reset} Installed hooks (Codex)`);
       // #2717: write the CommonJS marker into hooks/ alongside the staged .js
@@ -11783,7 +11788,12 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // gsd-context-monitor.js as ESM and their require() calls fail silently.
       // Reuses the same helper the Cursor/Windsurf writers call so the marker
       // content + user-file-preservation contract is identical everywhere.
-      if (hooksSurface.ensureCommonJsMarker(codexHooksDest)) {
+      //
+      // #2544: gated on codexStagedHooks, mirroring installSharedHooksBundle's
+      // `stagedHooks`. The enclosing guard only proves hooks/dist EXISTS; if it
+      // holds none of CODEX_HOOKS_TO_COPY, this block mkdirs hooks/ and stages
+      // nothing, and an ungated marker would claim a directory GSD did not fill.
+      if (codexStagedHooks && hooksSurface.ensureCommonJsMarker(codexHooksDest)) {
         console.log(`  ${green}✓${reset} Wrote hooks/package.json (CommonJS mode)`);
       }
     }
