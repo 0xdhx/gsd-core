@@ -450,6 +450,20 @@ describe('query', () => {
       assert.strictEqual(underLimit.budget_estimate, emittedTokens(underLimit));
     });
 
+    // Nit #2738: NaN must not reach the budget comparisons — every `estimate <= NaN`
+    // is false, so the loop would strip all three tiers and return a seeds-only
+    // payload indistinguishable from a legitimate aggressive trim. Unreachable via
+    // the CLI (the router rejects non-numeric --budget), reachable module-level.
+    test('a non-finite budget is treated as no budget (#2738)', () => {
+      enableGraphify(planningDir);
+      writeGraphJson(planningDir, SAMPLE_GRAPH);
+      for (const budget of [NaN, Infinity, -Infinity]) {
+        const result = graphifyQuery(tmpDir, 'auth', { budget });
+        assert.ok(!('budget_met' in result), `budget ${budget} takes the no-budget path`);
+        assert.ok(!('budget_estimate' in result), `budget ${budget} reports no estimate`);
+      }
+    });
+
     // QUERY-01: returns total_nodes and total_edges counts
     test('returns total_nodes and total_edges counts', () => {
       enableGraphify(planningDir);

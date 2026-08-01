@@ -359,7 +359,16 @@ function applyBudget(
   // == null (not truthiness): --budget 0 is a valid parsed budget the router
   // forwards, and treating it as "no budget" silently returns the unbounded
   // result — the same silent-non-application defect class as #974/#2738.
-  if (budgetTokens == null) return result;
+  //
+  // Number.isFinite additionally keeps NaN out of the comparisons below, where
+  // every `estimate <= NaN` is false: the loop would strip all three tiers and
+  // return a seeds-only payload indistinguishable from a legitimate aggressive
+  // trim. The CLI cannot reach that state — graphify-command-router rejects a
+  // non-numeric --budget before this is called — but graphifyQuery and
+  // applyBudget are module-level entry points a future caller could reach
+  // without that validation. Infinity routes here too, and deliberately: an
+  // unbounded budget is not a budget.
+  if (budgetTokens == null || !Number.isFinite(budgetTokens)) return result;
 
   const CONFIDENCE_ORDER = ['AMBIGUOUS', 'INFERRED', 'EXTRACTED'];
   let edges = [...result.edges];
