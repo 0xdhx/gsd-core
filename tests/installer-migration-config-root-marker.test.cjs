@@ -43,6 +43,12 @@ const {
   applyInstallerMigrationPlan,
 } = require('../gsd-core/bin/lib/installer-migrations.cjs');
 
+// The shared teardown helper, not a local rmSync: it chdir's out of the target
+// first (Windows cannot remove a directory that is the CWD) and retries
+// 20 x 250ms to absorb the deferred-scan handle Windows Defender holds on
+// newly-written files. This repo runs a windows-latest lane, so both matter.
+const { cleanup } = require('./helpers.cjs');
+
 const MARKER = '{"type":"commonjs"}';
 const ROOT_REL = 'package.json';
 
@@ -59,11 +65,6 @@ const USER_PACKAGE_JSON = JSON.stringify(
 
 function createTempDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-migration-007-test-'));
-}
-
-function cleanup(dir) {
-  // eslint-disable-next-line local/no-raw-rmsync-in-tests -- local cleanup in migration test; no helpers import available
-  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 function writeFile(root, relPath, content) {
