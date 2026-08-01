@@ -10,7 +10,7 @@ const capabilities = {
   "ai-integration": {
     "id": "ai-integration",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "AI design contract",
     "description": "AI-SPEC design contract workflow for phases that build AI systems; owns the AI integration command, agents, and workflow.ai_integration_phase activation key.",
     "tier": "full",
@@ -95,7 +95,7 @@ const capabilities = {
   "antigravity": {
     "id": "antigravity",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Antigravity",
     "description": "Google Antigravity IDE — nested under ~/.gemini/antigravity; probed across 1.x and 2.x layouts; Gemini hook event dialect; flat skill layout; tier-1 support.",
     "tier": "core",
@@ -193,12 +193,53 @@ const capabilities = {
         "hookPathStyle": "raw",
         "globalDirResolver": "antigravity"
       }
+    },
+    "reviewer": {
+      "slug": "antigravity",
+      "flags": [
+        "--antigravity",
+        "--agy"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "agy"
+      },
+      "invoke": {
+        "binary": "agy",
+        "args": [
+          "--print-timeout",
+          "540s",
+          "{{model}}",
+          "-p",
+          "{{prompt}}"
+        ],
+        "promptChannel": "argv-file-ref",
+        "outputChannel": "stdout",
+        "modelArg": "--model",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 600000,
+      "emptyOutput": "handler-owned",
+      "reviewsSection": "Antigravity",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.agy",
+      "handler": "antigravity"
+    },
+    "config": {
+      "review.models.agy": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Antigravity reviewer lane. The key suffix is the lane binary/flag alias `agy`, not the slug `antigravity` — preserved verbatim so existing .planning/config.json files keep working."
+      }
     }
   },
   "assumption-delta": {
     "id": "assumption-delta",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Assumption-delta architecture checkpoint",
     "description": "Rarely-firing advisory checkpoint that triggers when a phase makes something plural, optional, or chosen that used to be singular, required, or derived. Surfaces one identity-model question (promote the new general representation to primary, or add it alongside?) so a silent primary-key drift does not accumulate into a later user-facing bug. Non-blocking; fires only on a detected signal.",
     "tier": "full",
@@ -244,7 +285,7 @@ const capabilities = {
   "audit": {
     "id": "audit",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Audit",
     "description": "Open-artifact audit and UAT-gap audit for milestone close gates; exposes `gsd-tools audit-uat` (cross-phase UAT outstanding items) and `gsd-tools audit-open` (structured open-artifact scan across debug, tasks, threads, todos, seeds, UAT, verification, context-questions).",
     "tier": "full",
@@ -281,7 +322,7 @@ const capabilities = {
   "augment": {
     "id": "augment",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Augment Code",
     "description": "Augment Code CLI — commands + nested-skill artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -390,7 +431,7 @@ const capabilities = {
   "broken-windows": {
     "id": "broken-windows",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Broken-windows ledger",
     "description": "Cross-phase defect register accumulating stubs, TODOs, skipped tests, unrun verifies, and unmet truths into .planning/WINDOWS.md. Blocks /gsd-ship while any window is open unless explicitly waived with a recorded reason. Operationalizes GSD's no-defer discipline as a tracked, enforced artifact (issue #1950).",
     "tier": "full",
@@ -436,7 +477,7 @@ const capabilities = {
   "claude": {
     "id": "claude",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Claude Code",
     "description": "Anthropic Claude Code — primary development runtime; tier-1 support with full hook surface and skills-based global install.",
     "tier": "core",
@@ -539,12 +580,51 @@ const capabilities = {
         "hyphenNameAgentBody": true,
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "claude",
+      "flags": [
+        "--claude"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "claude"
+      },
+      "invoke": {
+        "binary": "claude",
+        "args": [
+          "{{model}}",
+          "{{effort}}",
+          "-p",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": "--model",
+        "effortChannel": "argv"
+      },
+      "timeoutFloorMs": 1200000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Claude",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.claude",
+      "handler": null
+    },
+    "config": {
+      "review.models.claude": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Claude reviewer lane."
+      }
     }
   },
   "claude-orchestration": {
     "id": "claude-orchestration",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Claude orchestration (Workflow backend)",
     "description": "Default-off, BETA, claude-only capability that adopts Claude Code's Workflow tool (the engine behind /effort ultracode) as an optional parallel-execution backend for the GSD loop. When the runtime exposes the Workflow tool and claude_orchestration.execution_backend resolves to 'workflow', execute-phase emits a generated Workflow script (waves -> parallel() barriers, plans -> agent({ agentType: 'gsd-executor', isolation: 'worktree' }), files_modified overlap -> separate sequential stages, resumeFromRunId wired to the phase run id, shared token budget) that composes the SAME gsd-executor agent and worktree isolation the inline path uses, restoring the wave parallelism the #853 backgrounded-agent nesting limitation forces inline on Claude Code. (The plan-checker and verifier remain inline until separately wired — this capability delivers the parallel-execution backend, not those gates.) Also folds the ultraplan plan-offload under one runtime gate (plan:* surface). On any runtime lacking the Workflow tool, or when the capability is disabled, behaviour is byte-identical to today (inline/manual dispatch). Detection + emission live in gsd-core/bin/lib/claude-orchestration.cjs (pure, fail-closed). Mirrors the existing gsd-ultraplan-phase BETA-isolation posture.",
     "tier": "full",
@@ -632,7 +712,7 @@ const capabilities = {
   "cline": {
     "id": "cline",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Cline",
     "description": "Cline (VS Code extension) — global-only nested-skill layout; cline-rules hook surface (.clinerules); no hook events emitted; tier-2 support.",
     "tier": "core",
@@ -703,7 +783,7 @@ const capabilities = {
   "code-review": {
     "id": "code-review",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Code review",
     "description": "Source-file code review and review-fix workflow support for completed execution work.",
     "tier": "full",
@@ -764,7 +844,7 @@ const capabilities = {
   "codebuddy": {
     "id": "codebuddy",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "CodeBuddy",
     "description": "CodeBuddy (Tencent) — converted commands + skills artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -874,10 +954,52 @@ const capabilities = {
       }
     }
   },
+  "coderabbit": {
+    "id": "coderabbit",
+    "role": "reviewer",
+    "version": "1.9.1",
+    "title": "CodeRabbit",
+    "description": "CodeRabbit CLI — cross-AI /gsd:review reviewer lane only; not a GSD install target (no runtime body, no artifacts). Reviews the working-tree diff (`coderabbit review --prompt-only`), not the source tree, and accepts neither a prompt nor a model flag; findings are down-weighted in consensus (evidenceClass: diff-only).",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.8.0"
+    },
+    "reviewer": {
+      "slug": "coderabbit",
+      "flags": [
+        "--coderabbit"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "coderabbit"
+      },
+      "invoke": {
+        "binary": "coderabbit",
+        "args": [
+          "review",
+          "--prompt-only"
+        ],
+        "promptChannel": "none",
+        "outputChannel": "stdout",
+        "modelArg": null,
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 360000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "CodeRabbit",
+      "evidenceClass": "diff-only",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": null,
+      "handler": null
+    }
+  },
   "codex": {
     "id": "codex",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "OpenAI Codex CLI",
     "description": "OpenAI Codex CLI — shell-var command style; per-agent sandbox tiers; config.toml + hooks.json hook surface; tier-1 support.",
     "tier": "core",
@@ -967,12 +1089,55 @@ const capabilities = {
         "frontmatterDialect": "codex",
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "codex",
+      "flags": [
+        "--codex"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "codex"
+      },
+      "invoke": {
+        "binary": "codex",
+        "args": [
+          "exec",
+          "--ephemeral",
+          "{{model}}",
+          "{{effort}}",
+          "--skip-git-repo-check",
+          "{{output}}",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "file-arg",
+        "outputArg": "-o",
+        "modelArg": "--model",
+        "effortChannel": "argv"
+      },
+      "timeoutFloorMs": 1200000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Codex",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.codex",
+      "handler": null
+    },
+    "config": {
+      "review.models.codex": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Codex reviewer lane."
+      }
     }
   },
   "copilot": {
     "id": "copilot",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "GitHub Copilot",
     "description": "GitHub Copilot (VS Code) — markdown config format; copilot-inline hook surface; no hook events emitted; flat skill nesting (unconfirmed recursive loader); tier-2 support.",
     "tier": "core",
@@ -1067,7 +1232,7 @@ const capabilities = {
   "cursor": {
     "id": "cursor",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Cursor",
     "description": "Cursor IDE — skills + converted commands artifact layout; hooks.json surface; Claude hook event dialect; recursive skill loader (flat nesting); tier-2 support.",
     "tier": "core",
@@ -1186,12 +1351,47 @@ const capabilities = {
         ],
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "cursor",
+      "flags": [
+        "--cursor"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "cursor-agent"
+      },
+      "invoke": {
+        "binary": "cursor-agent",
+        "args": [
+          "-p",
+          "--mode",
+          "ask",
+          "--trust",
+          "--output-format",
+          "text",
+          "{{prompt}}"
+        ],
+        "promptChannel": "argv-file-ref",
+        "outputChannel": "stdout",
+        "modelArg": null,
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Cursor",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": null,
+      "handler": null
     }
   },
   "drift": {
     "id": "drift",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Drift detection gates",
     "description": "Drift detection gates for the planning loop. At execute:wave:post: a blocking schema drift gate (detects schema files changed without a database push) and a non-blocking codebase drift gate (detects structural additions not reflected in STRUCTURE.md). At plan:pre: a non-blocking, warn-only codebase drift gate (gated on workflow.plan_drift_precheck) that flags a stale codebase map before planning, so plans are authored against a fresh STRUCTURE.md instead of discovering drift mid-execution.",
     "tier": "full",
@@ -1269,7 +1469,7 @@ const capabilities = {
   "external-job": {
     "id": "external-job",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Async external-job scheduler adapter",
     "description": "Default-off producer of the async external-job manifest (#1164). At execute:wave:post an executor can externalize long-running compute (SLURM first, scheduler-pluggable), commit a .planning/async-jobs/<job>.json manifest, defer SUMMARY.md, and return external_job_waiting. The core loop (#1165) consumes the manifest; this capability is the only thing that writes it. NOTE on contribution point: #1164 specifies execute:wave:pre, but execute-phase.md only dispatches execute:wave:post today (wave:pre is declared in the loop host contract but not rendered); wiring wave:pre dispatch is a core-loop change #1164 explicitly puts out of scope, so this capability registers at wave:post and the executor honors the runtime_budget classification guidance before running any tagged task. The adapter (scripts/slurm-adapter.cjs) reads external_job.submit_timeout_ms / poll_timeout_ms / artifact_dir through the canonical capability-config seam (env override > config > registry default).",
     "tier": "full",
@@ -1352,7 +1552,7 @@ const capabilities = {
   "gap-analysis": {
     "id": "gap-analysis",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Post-planning gap analysis",
     "description": "Proactive, non-blocking post-planning coverage report. After all PLAN.md files are generated, cross-references every REQ-ID and D-ID from REQUIREMENTS.md and CONTEXT.md against plan bodies. Emits a Source | Item | Status table. Does not block phase advancement.",
     "tier": "standard",
@@ -1390,10 +1590,60 @@ const capabilities = {
       }
     ]
   },
+  "gemini": {
+    "id": "gemini",
+    "role": "reviewer",
+    "version": "1.9.1",
+    "title": "Gemini CLI",
+    "description": "Google Gemini CLI — cross-AI /gsd:review reviewer lane only; not a GSD install target (no runtime body, no artifacts). Spawned as `gemini -p - -m <model>` with the plan piped on stdin.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.8.0"
+    },
+    "reviewer": {
+      "slug": "gemini",
+      "flags": [
+        "--gemini"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "gemini"
+      },
+      "invoke": {
+        "binary": "gemini",
+        "args": [
+          "{{model}}",
+          "-p",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": "-m",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Gemini",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.gemini",
+      "handler": null
+    },
+    "config": {
+      "review.models.gemini": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Gemini reviewer lane."
+      }
+    }
+  },
   "graphify": {
     "id": "graphify",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Knowledge graph",
     "description": "Build, query, and inspect the project knowledge graph in `.planning/graphs/`; exposes graphify CLI subcommands (build, query, status, diff) and the /gsd-graphify skill.",
     "tier": "full",
@@ -1434,7 +1684,7 @@ const capabilities = {
   "hermes": {
     "id": "hermes",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Hermes Agent",
     "description": "Hermes Agent (NousResearch) — skills nest under skills/gsd/ category bucket; nested skill layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -1525,7 +1775,7 @@ const capabilities = {
   "intel": {
     "id": "intel",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Codebase intelligence",
     "description": "Code-intelligence store for codebase querying, diff, snapshot, and API-surface extraction; exposes `gsd-tools intel` subcommands (query, status, update, diff, snapshot, patch-meta, validate, extract-exports, api-surface) and backs `/gsd-map-codebase` and `gsd-intel-updater`.",
     "tier": "full",
@@ -1577,7 +1827,7 @@ const capabilities = {
   "kilo": {
     "id": "kilo",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Kilo Code",
     "description": "Kilo Code — XDG-based config dir; global skills at ~/.kilo/skills (separate from XDG config); flat command/ + skills artifact layout; no lifecycle hook registration; tier-2 support.",
     "tier": "core",
@@ -1686,7 +1936,7 @@ const capabilities = {
   "kimi": {
     "id": "kimi",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Kimi CLI",
     "description": "Kimi CLI (Moonshot AI) — generic agents root at ~/.config/agents; skills + kimi-agents artifact layout; native config.toml [[hooks]] bus at ~/.kimi/config.toml; background dispatch; tier-2 support.",
     "tier": "core",
@@ -1784,7 +2034,7 @@ const capabilities = {
   "kimi-code": {
     "id": "kimi-code",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Kimi Code CLI",
     "description": "Kimi Code CLI (Moonshot AI, Node) — Agent Skills auto-discovered at ~/.kimi-code/skills; global AGENTS.md at ~/.kimi-code/AGENTS.md; native config.toml + [[hooks]] bus; three built-in subagents (coder/explore/plan), NO custom named subagents; background dispatch; tier-2 support. Distinct from Python kimi-cli (the 'kimi' capability) per ADR-1239 EoS — Kimi Code cannot dispatch named subagents so the kimi-agents YAML layout does NOT apply; persona injection rides the existing ${AGENT_SKILLS_*} workflow fallback. Install-layout, agent-install-check, and install-time decision (kimi vs kimi-code) land in follow-up PRs; this descriptor is the EoS foundation.",
     "tier": "core",
@@ -1871,12 +2121,168 @@ const capabilities = {
         "skipSharedHooksInstall": true,
         "namedSubagentsSupported": false
       }
+    },
+    "reviewer": {
+      "slug": "kimi-code",
+      "flags": [
+        "--kimi-code"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-capability",
+        "binary": "kimi",
+        "needle": "--output-format",
+        "timeoutMs": 5000
+      },
+      "invoke": {
+        "binary": "kimi",
+        "args": [
+          "{{model}}",
+          "-p",
+          "{{prompt}}"
+        ],
+        "promptChannel": "argv-file-ref",
+        "outputChannel": "stdout",
+        "modelArg": "-m",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Kimi Code",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.kimi-code",
+      "handler": null
+    },
+    "config": {
+      "review.models.kimi-code": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Kimi Code reviewer lane."
+      }
+    }
+  },
+  "llama-cpp": {
+    "id": "llama-cpp",
+    "role": "reviewer",
+    "version": "1.9.1",
+    "title": "llama.cpp",
+    "description": "llama.cpp server — cross-AI /gsd:review reviewer lane only; not a GSD install target (no runtime body, no artifacts). OpenAI-compatible HTTP transport against a user-configured `review.llama_cpp_host` (POST /v1/chat/completions); model discovered via GET /v1/models piped through jq. Capability id/folder are kebab (`llama-cpp`, required by KEBAB_RE); `reviewer.slug` stays snake (`llama_cpp`) to match the shipped roster and the `review.llama_cpp_host` config key (ADR-2782's three-namespace trap).",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.8.0"
+    },
+    "reviewer": {
+      "slug": "llama_cpp",
+      "flags": [
+        "--llama-cpp"
+      ],
+      "transport": "openai-http",
+      "probe": {
+        "kind": "http-reachable",
+        "hostConfigKey": "review.llama_cpp_host",
+        "path": "/v1/models",
+        "timeoutMs": 2000
+      },
+      "invoke": {
+        "hostConfigKey": "review.llama_cpp_host",
+        "defaultHost": "http://localhost:8080",
+        "path": "/v1/chat/completions",
+        "modelDiscovery": "first-from-models-endpoint",
+        "fallbackModel": "local-model",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 120000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "llama.cpp",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": "review.max_prompt_tokens_per_reviewer.llama_cpp",
+      "modelConfigKey": "review.models.llama_cpp",
+      "handler": "openai-compatible"
+    },
+    "config": {
+      "review.models.llama_cpp": {
+        "type": "string",
+        "default": "",
+        "description": "Model requested from the llama.cpp reviewer lane; empty discovers the first model from /v1/models."
+      },
+      "review.llama_cpp_host": {
+        "type": "string",
+        "default": "",
+        "description": "Base URL of the llama.cpp OpenAI-compatible server."
+      },
+      "review.max_prompt_tokens_per_reviewer.llama_cpp": {
+        "type": "number",
+        "default": -1,
+        "description": "Prompt-token budget for the llama.cpp reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+      }
+    }
+  },
+  "lm-studio": {
+    "id": "lm-studio",
+    "role": "reviewer",
+    "version": "1.9.1",
+    "title": "LM Studio",
+    "description": "LM Studio local model server — cross-AI /gsd:review reviewer lane only; not a GSD install target (no runtime body, no artifacts). OpenAI-compatible HTTP transport against a user-configured `review.lm_studio_host` (POST /v1/chat/completions); model discovered via GET /v1/models piped through jq. Capability id/folder are kebab (`lm-studio`, required by KEBAB_RE); `reviewer.slug` stays snake (`lm_studio`) to match the shipped roster and the `review.lm_studio_host` config key (ADR-2782's three-namespace trap).",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.8.0"
+    },
+    "reviewer": {
+      "slug": "lm_studio",
+      "flags": [
+        "--lm-studio"
+      ],
+      "transport": "openai-http",
+      "probe": {
+        "kind": "http-reachable",
+        "hostConfigKey": "review.lm_studio_host",
+        "path": "/v1/models",
+        "timeoutMs": 2000
+      },
+      "invoke": {
+        "hostConfigKey": "review.lm_studio_host",
+        "defaultHost": "http://localhost:1234",
+        "path": "/v1/chat/completions",
+        "modelDiscovery": "first-from-models-endpoint",
+        "fallbackModel": "local-model",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 120000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "LM Studio",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": "review.max_prompt_tokens_per_reviewer.lm_studio",
+      "modelConfigKey": "review.models.lm_studio",
+      "handler": "openai-compatible"
+    },
+    "config": {
+      "review.models.lm_studio": {
+        "type": "string",
+        "default": "",
+        "description": "Model requested from the LM Studio reviewer lane; empty discovers the first model from /v1/models."
+      },
+      "review.lm_studio_host": {
+        "type": "string",
+        "default": "",
+        "description": "Base URL of the LM Studio OpenAI-compatible server."
+      },
+      "review.max_prompt_tokens_per_reviewer.lm_studio": {
+        "type": "number",
+        "default": -1,
+        "description": "Prompt-token budget for the LM Studio reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+      }
     }
   },
   "mempalace": {
     "id": "mempalace",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "MemPalace memory",
     "description": "Cross-session, cross-project memory: deliberate recall before discuss/plan and verbatim capture + temporal-KG sync at phase boundaries, via the MemPalace MCP server and CLI.",
     "tier": "full",
@@ -2050,7 +2456,7 @@ const capabilities = {
   "nyquist": {
     "id": "nyquist",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Nyquist validation",
     "description": "Validation coverage audit that maps executed work back to tests and manual-only evidence.",
     "tier": "full",
@@ -2097,10 +2503,68 @@ const capabilities = {
     "contributions": [],
     "gates": []
   },
+  "ollama": {
+    "id": "ollama",
+    "role": "reviewer",
+    "version": "1.9.1",
+    "title": "Ollama",
+    "description": "Ollama local model server — cross-AI /gsd:review reviewer lane only; not a GSD install target (no runtime body, no artifacts). OpenAI-compatible HTTP transport against a user-configured `review.ollama_host` (POST /v1/chat/completions); model discovered via GET /v1/models piped through jq.",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.8.0"
+    },
+    "reviewer": {
+      "slug": "ollama",
+      "flags": [
+        "--ollama"
+      ],
+      "transport": "openai-http",
+      "probe": {
+        "kind": "http-reachable",
+        "hostConfigKey": "review.ollama_host",
+        "path": "/v1/models",
+        "timeoutMs": 2000
+      },
+      "invoke": {
+        "hostConfigKey": "review.ollama_host",
+        "defaultHost": "http://localhost:11434",
+        "path": "/v1/chat/completions",
+        "modelDiscovery": "first-from-models-endpoint",
+        "fallbackModel": "llama3",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 120000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Ollama",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": "review.max_prompt_tokens_per_reviewer.ollama",
+      "modelConfigKey": "review.models.ollama",
+      "handler": "openai-compatible"
+    },
+    "config": {
+      "review.models.ollama": {
+        "type": "string",
+        "default": "",
+        "description": "Model requested from the Ollama reviewer lane; empty discovers the first model from /v1/models."
+      },
+      "review.ollama_host": {
+        "type": "string",
+        "default": "",
+        "description": "Base URL of the Ollama OpenAI-compatible server."
+      },
+      "review.max_prompt_tokens_per_reviewer.ollama": {
+        "type": "number",
+        "default": -1,
+        "description": "Prompt-token budget for the Ollama reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+      }
+    }
+  },
   "opencode": {
     "id": "opencode",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "OpenCode",
     "description": "OpenCode — XDG-based config dir; flat commands/ + skills artifact layout; settings-json config format; no lifecycle hook registration; tier-2 support.",
     "tier": "core",
@@ -2211,12 +2675,53 @@ const capabilities = {
         "skipCodexSkillsManifest": true,
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "opencode",
+      "flags": [
+        "--opencode"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "opencode"
+      },
+      "invoke": {
+        "binary": "opencode",
+        "args": [
+          "run",
+          "{{model}}",
+          "{{effort}}",
+          "--format",
+          "json",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": "--model",
+        "effortChannel": "argv"
+      },
+      "timeoutFloorMs": 660000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "OpenCode",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.opencode",
+      "handler": "opencode"
+    },
+    "config": {
+      "review.models.opencode": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the OpenCode reviewer lane."
+      }
     }
   },
   "pattern-mapper": {
     "id": "pattern-mapper",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Pattern mapping",
     "description": "Optional codebase-pattern mapping before planning; owns the pattern mapper agent and workflow.pattern_mapper activation key.",
     "tier": "full",
@@ -2270,7 +2775,7 @@ const capabilities = {
   "pi": {
     "id": "pi",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "pi",
     "description": "pi (pi.dev) — bun-runtime programmatic-CLI; TS ExtensionAPI (registerCommand/registerTool/registerProvider/pi.on); single native-extension file at ~/.pi/agent/extensions/gsd.js (.js, not .cjs — pi's extension auto-discovery accepts only .ts/.js, #2470); no shared-settings hook surface; tier-2 support.",
     "tier": "core",
@@ -2332,7 +2837,7 @@ const capabilities = {
   "profile-pipeline": {
     "id": "profile-pipeline",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Developer profiling pipeline",
     "description": "Developer behavioral profiling from Claude Code session history; scans session JSONL files, extracts and samples user messages, and generates profile artifacts (USER-PROFILE.md, dev-preferences.md, CLAUDE.md sections). Exposes eight `gsd-tools` commands: scan-sessions, extract-messages, profile-sample (pipeline phase) and write-profile, profile-questionnaire, generate-dev-preferences, generate-claude-profile, generate-claude-md (output phase). Backs the /gsd-profile-user skill and gsd-user-profiler agent.",
     "tier": "full",
@@ -2409,7 +2914,7 @@ const capabilities = {
   "qwen": {
     "id": "qwen",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Qwen Code",
     "description": "Qwen Code (Alibaba) — nested-skill artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -2511,12 +3016,41 @@ const capabilities = {
         "hyphenNameAgentBody": true,
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "qwen",
+      "flags": [
+        "--qwen"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "qwen"
+      },
+      "invoke": {
+        "binary": "qwen",
+        "args": [
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": null,
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Qwen",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": null,
+      "handler": null
     }
   },
   "research": {
     "id": "research",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Phase research",
     "description": "Optional phase research before planning; owns the phase researcher agent and workflow.research activation key.",
     "tier": "standard",
@@ -2568,7 +3102,7 @@ const capabilities = {
   "schema-gate": {
     "id": "schema-gate",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Schema push detection gate",
     "description": "Detects ORM schema-relevant files in the phase scope during planning and injects a mandatory [BLOCKING] schema push task into the plan. Prevents false-positive verification where build/types pass because TypeScript types come from config, not the live database.",
     "tier": "full",
@@ -2614,7 +3148,7 @@ const capabilities = {
   "security": {
     "id": "security",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Security enforcement",
     "description": "Threat mitigation verification and ship-time security blocking for phases with security enforcement enabled.",
     "tier": "full",
@@ -2713,7 +3247,7 @@ const capabilities = {
   "tdd": {
     "id": "tdd",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Test-driven development",
     "description": "Injects TDD heuristics into the planner and enforces RED/GREEN gate compliance on type:tdd plans after execution. Owns workflow.tdd_mode; the --tdd CLI flag is the ephemeral override.",
     "tier": "full",
@@ -2766,7 +3300,7 @@ const capabilities = {
   "trae": {
     "id": "trae",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Trae IDE",
     "description": "Trae IDE — nested-skill artifact layout; no hook surface (profile-marker-only config); tier-2 support.",
     "tier": "core",
@@ -2858,7 +3392,7 @@ const capabilities = {
   "ui": {
     "id": "ui",
     "role": "feature",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "UI design contracts",
     "description": "UI-SPEC design contract + retrospective UI audit for frontend phases.",
     "tier": "full",
@@ -2953,7 +3487,7 @@ const capabilities = {
   "vscode": {
     "id": "vscode",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "VS Code",
     "description": "VS Code — Marketplace/VSIX extension; no file-projected config directory; IDE-profile reference host (active vscode.lm model, engine-owned hook bus, sandboxed globalState/workspaceState stateIO).",
     "tier": "core",
@@ -3006,7 +3540,7 @@ const capabilities = {
   "windsurf": {
     "id": "windsurf",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Windsurf",
     "description": "Windsurf (Codeium) — workspace workflow artifact layout for slash commands; Cascade native hooks.json blocking hook bus (pre_write_code, pre_run_command); tier-2 support.",
     "tier": "core",
@@ -3093,7 +3627,7 @@ const capabilities = {
   "zcode": {
     "id": "zcode",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "ZCode",
     "description": "ZCode (Z.ai) — desktop Agentic Development Environment for GLM-5.2; Claude-shaped nested skills at ~/.zcode/skills/<name>/SKILL.md, slash commands, named subagents, native MCP; declarative plugin surface; profile-marker install; tier-2 community support.",
     "tier": "core",
@@ -3792,13 +4326,16 @@ const byLoopPoint = {
 const configKeys = {
   "workflow.ai_integration_phase": "ai-integration",
   "workflow.api_coverage_gate": "ai-integration",
+  "review.models.agy": "antigravity",
   "workflow.assumption_delta": "assumption-delta",
   "workflow.windows_enforce": "broken-windows",
+  "review.models.claude": "claude",
   "claude_orchestration.enabled": "claude-orchestration",
   "claude_orchestration.execution_backend": "claude-orchestration",
   "claude_orchestration.min_agent_sdk_version": "claude-orchestration",
   "workflow.code_review": "code-review",
   "workflow.code_review_depth": "code-review",
+  "review.models.codex": "codex",
   "workflow.drift_threshold": "drift",
   "workflow.drift_action": "drift",
   "workflow.schema_drift_gate": "drift",
@@ -3809,8 +4346,16 @@ const configKeys = {
   "external_job.submit_timeout_ms": "external-job",
   "external_job.poll_timeout_ms": "external-job",
   "workflow.post_planning_gaps": "gap-analysis",
+  "review.models.gemini": "gemini",
   "graphify.enabled": "graphify",
   "intel.enabled": "intel",
+  "review.models.kimi-code": "kimi-code",
+  "review.models.llama_cpp": "llama-cpp",
+  "review.llama_cpp_host": "llama-cpp",
+  "review.max_prompt_tokens_per_reviewer.llama_cpp": "llama-cpp",
+  "review.models.lm_studio": "lm-studio",
+  "review.lm_studio_host": "lm-studio",
+  "review.max_prompt_tokens_per_reviewer.lm_studio": "lm-studio",
   "mempalace.enabled": "mempalace",
   "mempalace.memory_mode": "mempalace",
   "mempalace.wing": "mempalace",
@@ -3822,6 +4367,10 @@ const configKeys = {
   "mempalace.diary_journal": "mempalace",
   "mempalace.auto_capture_hooks": "mempalace",
   "workflow.nyquist_validation": "nyquist",
+  "review.models.ollama": "ollama",
+  "review.ollama_host": "ollama",
+  "review.max_prompt_tokens_per_reviewer.ollama": "ollama",
+  "review.models.opencode": "opencode",
   "workflow.pattern_mapper": "pattern-mapper",
   "profile-pipeline.enabled": "profile-pipeline",
   "workflow.research": "research",
@@ -3848,6 +4397,12 @@ const configSchema = {
     "default": true,
     "description": "Require an explicit API-coverage decision (full-by-default, opt-out-not-opt-in) before a phase that integrates an external API/SDK/service can seal. At plan:pre the planner is prompted to enumerate the API surface into COVERAGE.md; at verify:pre a blocking gate fails the seal unless the matrix exists with every non-integrated capability an explicit, reasoned opt-out. Independent of ai_integration_phase (applies to any external-API integration, not only AI)."
   },
+  "review.models.agy": {
+    "owner": "antigravity",
+    "type": "string",
+    "default": "",
+    "description": "Model passed to the Antigravity reviewer lane. The key suffix is the lane binary/flag alias `agy`, not the slug `antigravity` — preserved verbatim so existing .planning/config.json files keep working."
+  },
   "workflow.assumption_delta": {
     "owner": "assumption-delta",
     "type": "boolean",
@@ -3859,6 +4414,12 @@ const configSchema = {
     "type": "boolean",
     "default": false,
     "description": "Enable the blocking ship:pre gate for the broken-windows ledger. When true (opt-in), /gsd-ship blocks while .planning/WINDOWS.md has any open entry. When false (default), windows are still tracked (the executor and verifier still populate WINDOWS.md via gsd-tools windows append) but ship does not block — teams can adopt tracking before enforcement. Issue #1950."
+  },
+  "review.models.claude": {
+    "owner": "claude",
+    "type": "string",
+    "default": "",
+    "description": "Model passed to the Claude reviewer lane."
   },
   "claude_orchestration.enabled": {
     "owner": "claude-orchestration",
@@ -3899,6 +4460,12 @@ const configSchema = {
       "standard",
       "deep"
     ]
+  },
+  "review.models.codex": {
+    "owner": "codex",
+    "type": "string",
+    "default": "",
+    "description": "Model passed to the Codex reviewer lane."
   },
   "workflow.drift_threshold": {
     "owner": "drift",
@@ -3967,6 +4534,12 @@ const configSchema = {
     "default": true,
     "description": "Run the post-planning gap analysis report after plans are generated."
   },
+  "review.models.gemini": {
+    "owner": "gemini",
+    "type": "string",
+    "default": "",
+    "description": "Model passed to the Gemini reviewer lane."
+  },
   "graphify.enabled": {
     "owner": "graphify",
     "type": "boolean",
@@ -3978,6 +4551,48 @@ const configSchema = {
     "type": "boolean",
     "default": false,
     "description": "Enable the intel code-intelligence command."
+  },
+  "review.models.kimi-code": {
+    "owner": "kimi-code",
+    "type": "string",
+    "default": "",
+    "description": "Model passed to the Kimi Code reviewer lane."
+  },
+  "review.models.llama_cpp": {
+    "owner": "llama-cpp",
+    "type": "string",
+    "default": "",
+    "description": "Model requested from the llama.cpp reviewer lane; empty discovers the first model from /v1/models."
+  },
+  "review.llama_cpp_host": {
+    "owner": "llama-cpp",
+    "type": "string",
+    "default": "",
+    "description": "Base URL of the llama.cpp OpenAI-compatible server."
+  },
+  "review.max_prompt_tokens_per_reviewer.llama_cpp": {
+    "owner": "llama-cpp",
+    "type": "number",
+    "default": -1,
+    "description": "Prompt-token budget for the llama.cpp reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+  },
+  "review.models.lm_studio": {
+    "owner": "lm-studio",
+    "type": "string",
+    "default": "",
+    "description": "Model requested from the LM Studio reviewer lane; empty discovers the first model from /v1/models."
+  },
+  "review.lm_studio_host": {
+    "owner": "lm-studio",
+    "type": "string",
+    "default": "",
+    "description": "Base URL of the LM Studio OpenAI-compatible server."
+  },
+  "review.max_prompt_tokens_per_reviewer.lm_studio": {
+    "owner": "lm-studio",
+    "type": "number",
+    "default": -1,
+    "description": "Prompt-token budget for the LM Studio reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
   },
   "mempalace.enabled": {
     "owner": "mempalace",
@@ -4049,6 +4664,30 @@ const configSchema = {
     "type": "boolean",
     "default": true,
     "description": "Enable Nyquist validation coverage auditing."
+  },
+  "review.models.ollama": {
+    "owner": "ollama",
+    "type": "string",
+    "default": "",
+    "description": "Model requested from the Ollama reviewer lane; empty discovers the first model from /v1/models."
+  },
+  "review.ollama_host": {
+    "owner": "ollama",
+    "type": "string",
+    "default": "",
+    "description": "Base URL of the Ollama OpenAI-compatible server."
+  },
+  "review.max_prompt_tokens_per_reviewer.ollama": {
+    "owner": "ollama",
+    "type": "number",
+    "default": -1,
+    "description": "Prompt-token budget for the Ollama reviewer lane. Unset is -1, a sentinel: 0 is a legitimate value meaning \"do not trim this lane\", so it cannot double as \"not configured\"."
+  },
+  "review.models.opencode": {
+    "owner": "opencode",
+    "type": "string",
+    "default": "",
+    "description": "Model passed to the OpenCode reviewer lane."
   },
   "workflow.pattern_mapper": {
     "owner": "pattern-mapper",
@@ -4129,7 +4768,7 @@ const runtimes = {
   "antigravity": {
     "id": "antigravity",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Antigravity",
     "description": "Google Antigravity IDE — nested under ~/.gemini/antigravity; probed across 1.x and 2.x layouts; Gemini hook event dialect; flat skill layout; tier-1 support.",
     "tier": "core",
@@ -4227,12 +4866,53 @@ const runtimes = {
         "hookPathStyle": "raw",
         "globalDirResolver": "antigravity"
       }
+    },
+    "reviewer": {
+      "slug": "antigravity",
+      "flags": [
+        "--antigravity",
+        "--agy"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "agy"
+      },
+      "invoke": {
+        "binary": "agy",
+        "args": [
+          "--print-timeout",
+          "540s",
+          "{{model}}",
+          "-p",
+          "{{prompt}}"
+        ],
+        "promptChannel": "argv-file-ref",
+        "outputChannel": "stdout",
+        "modelArg": "--model",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 600000,
+      "emptyOutput": "handler-owned",
+      "reviewsSection": "Antigravity",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.agy",
+      "handler": "antigravity"
+    },
+    "config": {
+      "review.models.agy": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Antigravity reviewer lane. The key suffix is the lane binary/flag alias `agy`, not the slug `antigravity` — preserved verbatim so existing .planning/config.json files keep working."
+      }
     }
   },
   "augment": {
     "id": "augment",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Augment Code",
     "description": "Augment Code CLI — commands + nested-skill artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -4341,7 +5021,7 @@ const runtimes = {
   "claude": {
     "id": "claude",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Claude Code",
     "description": "Anthropic Claude Code — primary development runtime; tier-1 support with full hook surface and skills-based global install.",
     "tier": "core",
@@ -4444,12 +5124,51 @@ const runtimes = {
         "hyphenNameAgentBody": true,
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "claude",
+      "flags": [
+        "--claude"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "claude"
+      },
+      "invoke": {
+        "binary": "claude",
+        "args": [
+          "{{model}}",
+          "{{effort}}",
+          "-p",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": "--model",
+        "effortChannel": "argv"
+      },
+      "timeoutFloorMs": 1200000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Claude",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.claude",
+      "handler": null
+    },
+    "config": {
+      "review.models.claude": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Claude reviewer lane."
+      }
     }
   },
   "cline": {
     "id": "cline",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Cline",
     "description": "Cline (VS Code extension) — global-only nested-skill layout; cline-rules hook surface (.clinerules); no hook events emitted; tier-2 support.",
     "tier": "core",
@@ -4520,7 +5239,7 @@ const runtimes = {
   "codebuddy": {
     "id": "codebuddy",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "CodeBuddy",
     "description": "CodeBuddy (Tencent) — converted commands + skills artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -4633,7 +5352,7 @@ const runtimes = {
   "codex": {
     "id": "codex",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "OpenAI Codex CLI",
     "description": "OpenAI Codex CLI — shell-var command style; per-agent sandbox tiers; config.toml + hooks.json hook surface; tier-1 support.",
     "tier": "core",
@@ -4723,12 +5442,55 @@ const runtimes = {
         "frontmatterDialect": "codex",
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "codex",
+      "flags": [
+        "--codex"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "codex"
+      },
+      "invoke": {
+        "binary": "codex",
+        "args": [
+          "exec",
+          "--ephemeral",
+          "{{model}}",
+          "{{effort}}",
+          "--skip-git-repo-check",
+          "{{output}}",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "file-arg",
+        "outputArg": "-o",
+        "modelArg": "--model",
+        "effortChannel": "argv"
+      },
+      "timeoutFloorMs": 1200000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Codex",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.codex",
+      "handler": null
+    },
+    "config": {
+      "review.models.codex": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Codex reviewer lane."
+      }
     }
   },
   "copilot": {
     "id": "copilot",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "GitHub Copilot",
     "description": "GitHub Copilot (VS Code) — markdown config format; copilot-inline hook surface; no hook events emitted; flat skill nesting (unconfirmed recursive loader); tier-2 support.",
     "tier": "core",
@@ -4823,7 +5585,7 @@ const runtimes = {
   "cursor": {
     "id": "cursor",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Cursor",
     "description": "Cursor IDE — skills + converted commands artifact layout; hooks.json surface; Claude hook event dialect; recursive skill loader (flat nesting); tier-2 support.",
     "tier": "core",
@@ -4942,12 +5704,47 @@ const runtimes = {
         ],
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "cursor",
+      "flags": [
+        "--cursor"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "cursor-agent"
+      },
+      "invoke": {
+        "binary": "cursor-agent",
+        "args": [
+          "-p",
+          "--mode",
+          "ask",
+          "--trust",
+          "--output-format",
+          "text",
+          "{{prompt}}"
+        ],
+        "promptChannel": "argv-file-ref",
+        "outputChannel": "stdout",
+        "modelArg": null,
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Cursor",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": null,
+      "handler": null
     }
   },
   "hermes": {
     "id": "hermes",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Hermes Agent",
     "description": "Hermes Agent (NousResearch) — skills nest under skills/gsd/ category bucket; nested skill layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -5038,7 +5835,7 @@ const runtimes = {
   "kilo": {
     "id": "kilo",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Kilo Code",
     "description": "Kilo Code — XDG-based config dir; global skills at ~/.kilo/skills (separate from XDG config); flat command/ + skills artifact layout; no lifecycle hook registration; tier-2 support.",
     "tier": "core",
@@ -5147,7 +5944,7 @@ const runtimes = {
   "kimi": {
     "id": "kimi",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Kimi CLI",
     "description": "Kimi CLI (Moonshot AI) — generic agents root at ~/.config/agents; skills + kimi-agents artifact layout; native config.toml [[hooks]] bus at ~/.kimi/config.toml; background dispatch; tier-2 support.",
     "tier": "core",
@@ -5245,7 +6042,7 @@ const runtimes = {
   "kimi-code": {
     "id": "kimi-code",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Kimi Code CLI",
     "description": "Kimi Code CLI (Moonshot AI, Node) — Agent Skills auto-discovered at ~/.kimi-code/skills; global AGENTS.md at ~/.kimi-code/AGENTS.md; native config.toml + [[hooks]] bus; three built-in subagents (coder/explore/plan), NO custom named subagents; background dispatch; tier-2 support. Distinct from Python kimi-cli (the 'kimi' capability) per ADR-1239 EoS — Kimi Code cannot dispatch named subagents so the kimi-agents YAML layout does NOT apply; persona injection rides the existing ${AGENT_SKILLS_*} workflow fallback. Install-layout, agent-install-check, and install-time decision (kimi vs kimi-code) land in follow-up PRs; this descriptor is the EoS foundation.",
     "tier": "core",
@@ -5332,12 +6129,52 @@ const runtimes = {
         "skipSharedHooksInstall": true,
         "namedSubagentsSupported": false
       }
+    },
+    "reviewer": {
+      "slug": "kimi-code",
+      "flags": [
+        "--kimi-code"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-capability",
+        "binary": "kimi",
+        "needle": "--output-format",
+        "timeoutMs": 5000
+      },
+      "invoke": {
+        "binary": "kimi",
+        "args": [
+          "{{model}}",
+          "-p",
+          "{{prompt}}"
+        ],
+        "promptChannel": "argv-file-ref",
+        "outputChannel": "stdout",
+        "modelArg": "-m",
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Kimi Code",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.kimi-code",
+      "handler": null
+    },
+    "config": {
+      "review.models.kimi-code": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the Kimi Code reviewer lane."
+      }
     }
   },
   "opencode": {
     "id": "opencode",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "OpenCode",
     "description": "OpenCode — XDG-based config dir; flat commands/ + skills artifact layout; settings-json config format; no lifecycle hook registration; tier-2 support.",
     "tier": "core",
@@ -5448,12 +6285,53 @@ const runtimes = {
         "skipCodexSkillsManifest": true,
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "opencode",
+      "flags": [
+        "--opencode"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "opencode"
+      },
+      "invoke": {
+        "binary": "opencode",
+        "args": [
+          "run",
+          "{{model}}",
+          "{{effort}}",
+          "--format",
+          "json",
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": "--model",
+        "effortChannel": "argv"
+      },
+      "timeoutFloorMs": 660000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "OpenCode",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": "review.models.opencode",
+      "handler": "opencode"
+    },
+    "config": {
+      "review.models.opencode": {
+        "type": "string",
+        "default": "",
+        "description": "Model passed to the OpenCode reviewer lane."
+      }
     }
   },
   "pi": {
     "id": "pi",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "pi",
     "description": "pi (pi.dev) — bun-runtime programmatic-CLI; TS ExtensionAPI (registerCommand/registerTool/registerProvider/pi.on); single native-extension file at ~/.pi/agent/extensions/gsd.js (.js, not .cjs — pi's extension auto-discovery accepts only .ts/.js, #2470); no shared-settings hook surface; tier-2 support.",
     "tier": "core",
@@ -5515,7 +6393,7 @@ const runtimes = {
   "qwen": {
     "id": "qwen",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Qwen Code",
     "description": "Qwen Code (Alibaba) — nested-skill artifact layout; settings-json hook surface; Claude hook event dialect; tier-2 support.",
     "tier": "core",
@@ -5617,12 +6495,41 @@ const runtimes = {
         "hyphenNameAgentBody": true,
         "reviewerCli": true
       }
+    },
+    "reviewer": {
+      "slug": "qwen",
+      "flags": [
+        "--qwen"
+      ],
+      "transport": "spawn",
+      "probe": {
+        "kind": "command-exists",
+        "binary": "qwen"
+      },
+      "invoke": {
+        "binary": "qwen",
+        "args": [
+          "-"
+        ],
+        "promptChannel": "stdin",
+        "outputChannel": "stdout",
+        "modelArg": null,
+        "effortChannel": "none"
+      },
+      "timeoutFloorMs": 900000,
+      "emptyOutput": "stub-with-stderr",
+      "reviewsSection": "Qwen",
+      "evidenceClass": "source-grounded",
+      "requiresBinaries": [],
+      "promptBudgetKey": null,
+      "modelConfigKey": null,
+      "handler": null
     }
   },
   "trae": {
     "id": "trae",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Trae IDE",
     "description": "Trae IDE — nested-skill artifact layout; no hook surface (profile-marker-only config); tier-2 support.",
     "tier": "core",
@@ -5714,7 +6621,7 @@ const runtimes = {
   "vscode": {
     "id": "vscode",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "VS Code",
     "description": "VS Code — Marketplace/VSIX extension; no file-projected config directory; IDE-profile reference host (active vscode.lm model, engine-owned hook bus, sandboxed globalState/workspaceState stateIO).",
     "tier": "core",
@@ -5767,7 +6674,7 @@ const runtimes = {
   "windsurf": {
     "id": "windsurf",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "Windsurf",
     "description": "Windsurf (Codeium) — workspace workflow artifact layout for slash commands; Cascade native hooks.json blocking hook bus (pre_write_code, pre_run_command); tier-2 support.",
     "tier": "core",
@@ -5854,7 +6761,7 @@ const runtimes = {
   "zcode": {
     "id": "zcode",
     "role": "runtime",
-    "version": "1.8.0",
+    "version": "1.9.1",
     "title": "ZCode",
     "description": "ZCode (Z.ai) — desktop Agentic Development Environment for GLM-5.2; Claude-shaped nested skills at ~/.zcode/skills/<name>/SKILL.md, slash commands, named subagents, native MCP; declarative plugin surface; profile-marker install; tier-2 community support.",
     "tier": "core",
@@ -6120,20 +7027,25 @@ const _requiresGraph = {
   "cline": [],
   "code-review": [],
   "codebuddy": [],
+  "coderabbit": [],
   "codex": [],
   "copilot": [],
   "cursor": [],
   "drift": [],
   "external-job": [],
   "gap-analysis": [],
+  "gemini": [],
   "graphify": [],
   "hermes": [],
   "intel": [],
   "kilo": [],
   "kimi": [],
   "kimi-code": [],
+  "llama-cpp": [],
+  "lm-studio": [],
   "mempalace": [],
   "nyquist": [],
+  "ollama": [],
   "opencode": [],
   "pattern-mapper": [
     "research"

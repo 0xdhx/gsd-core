@@ -49,6 +49,7 @@ import {
 import { tokenizeHeadings, collectSection, replaceSection } from './markdown-sectionizer.cjs';
 import type { HeadingToken } from './markdown-sectionizer.cjs';
 import { parseMarkdownTable, updateTableCell, deleteTableRow, insertTableRow, splitTableRow, isDelimiterRow } from './markdown-table.cjs';
+import { textEncodingError } from './validate.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -65,6 +66,13 @@ interface ReadModifyWriteOptions {
   resync?: boolean;
   /** #2440: when true, total_plans/total_phases take derived values even under !resync. */
   deriveProgressKeys?: boolean;
+  /**
+   * #2736: intent-first frontmatter values forwarded to syncStateFrontmatter.
+   * Transition adapters that already hold the exact value (e.g. beginPhase's
+   * display name) pass it here so the lossy body-prose re-derivation can never
+   * destroy information the transition just resolved.
+   */
+  authoritativeFm?: Record<string, unknown>;
 }
 
 interface StateRecordMetricOptions {
@@ -1300,6 +1308,31 @@ function matchSessionSection(body: string): string | null {
 }
 
 /**
+ * Match the "Current Position" section body from a STATE.md body. #2956: this
+ * is the Phase analogue of matchSessionSection. `Phase` canonically lives under
+ * `## Current Position` (gsd-core/templates/state.md), so — like Stopped At /
+ * Paused At under `## Session` — it must be extracted from THAT section, not
+ * from the first `Phase:` / `**Phase:**` line anywhere in the body. Without the
+ * scope, a historical `Phase:` line in an archive section silently overwrites
+ * `current_phase` on every write, and because `current_phase` is routing input
+ * for gsd-progress / --next the rewind routes work to the wrong phase.
+ *
+ * Level-flexible: the canonical template uses an h2 `## Current Position`, the
+ * bootstrap template an h3 `### Current Position` (templates/state.md). Both
+ * must match — mirroring how matchSessionSection recognises `## Session` and
+ * `## Session Continuity`. Exact 'current position' text match (case-insensitive)
+ * excludes unrelated headings. Built on the same `collectSection` seam as
+ * matchSessionSection, so it inherits that seam's CRLF tolerance (#2444 fix).
+ * Returns the section body, or null (caller falls back to full-body search).
+ */
+function matchCurrentPositionSection(body: string): string | null {
+  const isCurrentPosition = (h: HeadingToken): boolean =>
+    (h.level === 2 || h.level === 3) && h.text.trim().toLowerCase() === 'current position';
+  const section = collectSection(body, isCurrentPosition, { levelBounded: true });
+  return section ? section.body : null;
+}
+
+/**
  * #2567: prevent a stale archive "Last activity:" line from overwriting a
  * newer frontmatter value. `stateExtractField` matches the first body
  * occurrence, which may be a historical line in an archive section. Unlike
@@ -1384,7 +1417,14 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   };
 
   // Extract basic fields — frontmatter keys take precedence over body
-  const prosePhase = parseProsePhaseField(stateExtractField(body, 'Phase'));
+  // #2956: scope `Phase` extraction to ## Current Position so a historical
+  // Phase: / **Phase:** line in an archive section cannot overwrite the current
+  // value. Phase canonically lives in ## Current Position (templates/state.md),
+  // so it is scopeable exactly like Stopped At under ## Session. Fall back to
+  // full-body search only when no ## Current Position section exists, so files
+  // with no section heading keep their current behaviour.
+  const currentPositionScope = matchCurrentPositionSection(body) ?? body;
+  const prosePhase = parseProsePhaseField(stateExtractField(currentPositionScope, 'Phase'));
   const currentPhase = fmScalar('current_phase') ?? stateExtractField(body, 'Current Phase') ?? prosePhase.phase;
   const currentPhaseName = fmScalar('current_phase_name') ?? stateExtractField(body, 'Current Phase Name') ?? prosePhase.name;
   const totalPhasesRaw = fmScalar('total_phases') ?? stateExtractField(body, 'Total Phases');
@@ -1396,7 +1436,12 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   const proseLastActivity = parseProseLastActivityField(rawLastActivity);
   const lastActivity = fmScalar('last_activity') ?? proseLastActivity.date ?? rawLastActivity;
   const lastActivityDesc = fmScalar('last_activity_desc') ?? stateExtractField(body, 'Last Activity Description') ?? proseLastActivity.description;
-  const pausedAt = fmScalar('paused_at') ?? stateExtractField(body, 'Paused At');
+  // #2956: Paused At canonically lives in ## Session (see the comment above
+  // preferNewerLastActivity and the write seam in buildStateFrontmatter). The
+  // write seam already scopes it to ## Session; this read seam must agree, so a
+  // stale "Paused At:" in a Session Continuity Archive cannot win here either.
+  const sessionScope = matchSessionSection(body) ?? body;
+  const pausedAt = fmScalar('paused_at') ?? stateExtractField(sessionScope, 'Paused At');
 
   // Parse numeric fields
   const totalPhases = totalPhasesRaw ? parseInt(totalPhasesRaw, 10) : null;
@@ -1544,7 +1589,14 @@ function extractRetiredPhaseNumbers(scope: string): Set<string> {
  * reliably via `state json` instead of fragile regex parsing.
  */
 function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Record<string, unknown> {
-  const prosePhase = parseProsePhaseField(stateExtractField(bodyContent, 'Phase'));
+  // #2956: scope `Phase` extraction to ## Current Position (mirrors the read
+  // path in cmdStateSnapshot and the Stopped At / Paused At ## Session scoping
+  // below). Phase canonically lives in ## Current Position (templates/state.md);
+  // without the scope, a historical Phase: / **Phase:** line in an archive
+  // section overwrites current_phase here, and the next read surfaces it. Fall
+  // back to full-body search when no ## Current Position section exists.
+  const currentPositionScope = matchCurrentPositionSection(bodyContent) ?? bodyContent;
+  const prosePhase = parseProsePhaseField(stateExtractField(currentPositionScope, 'Phase'));
   const currentPhase = stateExtractField(bodyContent, 'Current Phase') ?? prosePhase.phase;
   const currentPhaseName = stateExtractField(bodyContent, 'Current Phase Name') ?? prosePhase.name;
   const currentPlan = stateExtractField(bodyContent, 'Current Plan');
@@ -1697,10 +1749,20 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
               );
               milestoneBounded = versionedHeading.test(roadmapRaw);
             }
+            // #2828: distinguish a FLAT unmilestoned roadmap (no milestone sectioning
+            // at all — only Phase headings) from a MILESTONED-but-unbounded one
+            // (milestone/version headings exist but the asserted one isn't among them).
+            // On a flat roadmap the whole-doc count is correct (no sibling milestones to
+            // conflate); on a sectioned-but-unbounded one it conflates siblings (#1761),
+            // so fall back to phaseDirs.length.
+            const hasMilestoneSectioning = roadmapRaw !== null
+              && /^#{2,3}\s+(?!Phase\s+\S)/mi.test(roadmapRaw);
+            const safeToUseRoadmapCount = milestoneBounded
+              || (roadmapPhaseCount > 0 && !hasMilestoneSectioning);
             return {
-              totalPhases: (!milestoneBounded || roadmapPhaseCount === 0)
-                ? phaseDirs.length
-                : Math.max(phaseDirs.length, roadmapPhaseCount),
+              totalPhases: safeToUseRoadmapCount
+                ? Math.max(phaseDirs.length, roadmapPhaseCount)
+                : phaseDirs.length,
               milestoneBounded,
               completedPhases: diskCompletedPhases,
               totalPlans: diskTotalPlans,
@@ -1766,7 +1828,7 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
   return fm;
 }
 
-function syncStateFrontmatter(content: string, cwd: string | undefined): string {
+function syncStateFrontmatter(content: string, cwd: string | undefined, authoritativeFm?: Record<string, unknown>): string {
   // Read existing frontmatter BEFORE stripping — it may contain values
   // that the body no longer has (e.g., Status field removed by an agent).
   // `cwd` already identifies the workspace this content came from, so the STATE.md path is
@@ -1868,6 +1930,21 @@ function syncStateFrontmatter(content: string, cwd: string | undefined): string 
   // #2567: guard the information-losing direction — a stale archive
   // "Last activity:" line must not overwrite a newer frontmatter value.
   preferNewerLastActivity(existingFm, derivedFm);
+
+  // #2736: intent-first override, applied last. A transition adapter that
+  // already holds the exact value (completePhase's next-phase display name,
+  // beginPhase's phase name) passes it here, so the body-prose re-derivation
+  // above — which is lossy by construction for names containing a
+  // parenthetical (`Closer-ruling measurement (D1a)` → `D1a`) — never runs
+  // the final word on a field the transition just resolved. The prose parser
+  // remains the fallback for genuinely unknown prose only.
+  if (authoritativeFm) {
+    for (const [key, value] of Object.entries(authoritativeFm)) {
+      if (typeof value === 'string' && value.trim().length > 0) {
+        derivedFm[key] = value;
+      }
+    }
+  }
 
   const yamlStr = reconstructFrontmatter(derivedFm as unknown as Frontmatter);
   return `---\n${yamlStr}\n---\n\n${body}`;
@@ -2187,7 +2264,7 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
       return;
     }
 
-    let synced = syncStateFrontmatter(modified, cwd);
+    let synced = syncStateFrontmatter(modified, cwd, options?.authoritativeFm);
 
     // Post-transform body source fields used for the delta comparison (#1230).
     // Use `modified` (not `synced`): syncStateFrontmatter only rewrites the frontmatter block, so the body is identical in both — and we need the body the transform produced.
@@ -2218,7 +2295,22 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
       preBodyStoppedAt, postBodyStoppedAt,
       preBodyPhaseSource, postBodyPhaseSource,
     });
-    if (preservation.mutated) {
+    // #2736: re-assert the intent-first values AFTER preservation. On STATE.md
+    // layouts with no body `Phase:` line, both phase-source snapshots are null
+    // (equal), so the #1695 restore fires and would put the stale pre-transition
+    // name back over the authoritative one. Intent beats both the prose
+    // re-derivation and the curated restore — the transition just resolved it.
+    let authoritativeReasserted = false;
+    if (options?.authoritativeFm) {
+      for (const [key, value] of Object.entries(options.authoritativeFm)) {
+        if (typeof value === 'string' && value.trim().length > 0 && preservation.postFm[key] !== value) {
+          preservation.postFm[key] = value;
+          authoritativeReasserted = true;
+        }
+      }
+    }
+
+    if (preservation.mutated || authoritativeReasserted) {
       const yamlStr = reconstructFrontmatter(preservation.postFm as unknown as Frontmatter);
       const body = stripFrontmatter(synced);
       synced = `---\n${yamlStr}\n---\n\n${body}`;
@@ -2314,12 +2406,28 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number, phaseName
     sourcePath: statePath,
   };
 
+  // #2736: the transition holds the exact display name; without this the
+  // post-transform sync re-derives current_phase_name from the freshly
+  // written `Phase: N (Name) — EXECUTING` line, which truncates any name
+  // that itself contains a parenthetical. The #1695 delta-gate preservation
+  // still runs after the sync; the override is re-asserted after it inside
+  // readModifyWriteStateMd for layouts with no body `Phase:` line.
+  const rmwOptions: ReadModifyWriteOptions = {
+    authoritativeFm: intent.phaseName ? { current_phase_name: intent.phaseName } : undefined,
+  };
   let updated: string[] = [];
   readModifyWriteStateMd(statePath, (content) => {
     const result = transitionCore(content, intent, deps);
     updated = result.updated;
+    // #3127 resume: the core preserved the mid-flight Current Phase Name, so
+    // the intent-first override must not fire — it would drift frontmatter
+    // away from the preserved body value. Dropping it here is safe because
+    // readModifyWriteStateMd consults options only after this callback returns.
+    if (result.data?.['resumed']) {
+      delete rmwOptions.authoritativeFm;
+    }
     return result.content;
-  }, cwd);
+  }, cwd, rmwOptions);
 
   output({ updated, phase: phaseNumber, phase_name: phaseName || null, plan_count: planCount || null }, raw, updated.length > 0 ? 'true' : 'false');
 }
@@ -2639,6 +2747,14 @@ function cmdStateValidate(cwd: string, raw: boolean): void {
   }
 
   const content = fs.readFileSync(statePath, 'utf-8');
+  // #2701: fail loud on NUL/binary corruption before drift checks. A corrupt
+  // STATE.md otherwise validates as clean and is silently skipped by recursive
+  // searchers downstream, reading as "absent" rather than "corrupt."
+  const encErr = textEncodingError(content, 'STATE.md');
+  if (encErr) {
+    output({ valid: false, warnings: [encErr], drift: {} }, raw, undefined);
+    return;
+  }
   const warnings: string[] = [];
   const drift: Record<string, unknown> = {};
 

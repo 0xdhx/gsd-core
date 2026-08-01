@@ -92,6 +92,9 @@ export default tseslint.config(
       'gsd-core/bin/lib/clock.cjs',
       'gsd-core/bin/lib/ui-safety-gate.cjs',
       'gsd-core/bin/lib/review-reviewer-selection.cjs',
+      'gsd-core/bin/lib/review-lane-descriptor.cjs',
+      'gsd-core/bin/lib/review-lane-invocation.cjs',
+      'gsd-core/bin/lib/review-lane-runner.cjs',
       'gsd-core/bin/lib/clusters.cjs',
       'gsd-core/bin/lib/installer-migrations/001-legacy-orphan-files.cjs',
       'gsd-core/bin/lib/observability/redaction.cjs',
@@ -231,6 +234,10 @@ export default tseslint.config(
       'gsd-core/bin/lib/state-io.cjs',
       'gsd-core/bin/lib/external-descriptor-trust.cjs',
       'gsd-core/bin/lib/mcp-server.cjs',
+      // ADR-1671 (#2928): tsc-generated runtime artifact — lint the src/context-predicates.cts source.
+      'gsd-core/bin/lib/context-predicates.cjs',
+      // #2929: tsc-generated runtime artifact — lint the src/context-composer.cts source.
+      'gsd-core/bin/lib/context-composer.cjs',
     ],
   },
 

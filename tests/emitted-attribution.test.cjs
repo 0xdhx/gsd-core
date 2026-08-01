@@ -33,12 +33,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const fc = require('fast-check');
 
 const { cleanup, createTempDir } = require('./helpers.cjs');
-const { BUILD_SCRIPT } = require('./helpers/install-shared.cjs');
+const { BUILD_SCRIPT, buildParityManifest, buildInstallTree, PKG_VERSION } = require('./helpers/install-shared.cjs');
 const {
   resolveChangedPaths,
   resolveBase,
@@ -48,7 +50,13 @@ const {
   currentSizes,
   readAckFile,
   readAckFileAtRef,
+  readAckSources,
+  readAckSourcesAtRef,
+  listAckFragmentFiles,
+  listAckFragmentFilesAtRef,
   ACK_REPO_PATH,
+  ACK_DIR,
+  ACK_DIR_REPO_PATH,
   baselineFamilyNamesAtRef,
   MANIFEST_FAMILIES,
   MINIMUM_MANIFEST_FAMILIES,
@@ -57,17 +65,25 @@ const {
   touchesRuntimeRegistry,
   reconcileFamilies,
   safeDirArgs,
+  measuredPackageVersion,
 } = require('./helpers/emitted-runtime.cjs');
 
 const { EXPECTED_MANIFEST_COUNT, loadManifests } = require('./helpers/emitted-provenance.cjs');
-const { validateAckText } = require('../scripts/lint-emitted-drift-ack.cjs');
+const {
+  validateAckText,
+  assertAbsentOnNext,
+  MAX_ACK_FRAGMENTS: MAX_ACK_FRAGMENTS_LINT,
+} = require('../scripts/lint-emitted-drift-ack.cjs');
 const {
   ACK_VERSION,
   ACK_FILE,
+  ACK_DIR: ACK_DIR_PURE,
   NEW_FILE_CAP,
+  MAX_ACK_FRAGMENTS,
   REMEDIATION,
   sourceSatisfiedBy,
   parseAck,
+  mergeAckSources,
   diffEmitted,
   buildReport,
   formatReport,
@@ -76,9 +92,9 @@ const {
 const {
   BASELINE_ENV,
   BASELINE_VERSION,
-  DEFAULT_CACHE_PATH,
   resolveBaseline,
 } = require('./helpers/emitted-baseline.cjs');
+
 
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -712,6 +728,13 @@ test('the pre-merge lint and the gate parser agree on what is schema-valid', () 
     ['whitespace reason', '{"version":1,"paths":{"a.md":{"reason":"   "}}}', false],
     ['missing reason', '{"version":1,"paths":{"a.md":{}}}', false],
     ['numeric reason', '{"version":1,"paths":{"a.md":42}}', false],
+    // #2914 review: a `__proto__`/`constructor`/`prototype` key is a genuine OWN key on
+    // the production path (`JSON.parse`, unlike a JS object literal), and both surfaces
+    // must reject it outright rather than one silently filtering it and the other
+    // erroring or mishandling it.
+    ['reserved key __proto__', '{"version":1,"paths":{"__proto__":{"reason":"ok"}}}', false],
+    ['reserved key constructor', '{"version":1,"paths":{"constructor":{"reason":"ok"}}}', false],
+    ['reserved key prototype', '{"version":1,"paths":{"prototype":{"reason":"ok"}}}', false],
   ];
 
   for (const [label, raw, expectedValid] of corpus) {
@@ -733,6 +756,48 @@ test('the pre-merge lint and the gate parser agree on what is schema-valid', () 
       + 'would let a document through that the other rejects',
     );
   }
+});
+
+test('a __proto__/constructor/prototype ack key is rejected loudly by both surfaces, never silently dropped (#2914 review)', () => {
+  // Built via JSON.parse — the production path — so the key is a genuine OWN property,
+  // never the JS object-literal special case (`{__proto__: v}` sets the prototype and
+  // yields zero own keys, which is what made the pre-fix regression test vacuous).
+  for (const key of ['__proto__', 'constructor', 'prototype']) {
+    const raw = JSON.stringify({ version: ACK_VERSION, paths: { [key]: { reason: 'hostile' } } });
+    const doc = JSON.parse(raw);
+    assert.deepEqual(Object.keys(doc.paths), [key], `JSON.parse must create a genuine own key for ${key}`);
+
+    const gate = parseAck(doc, { source: 'tests/emitted-drift-acks/1000-a.json' });
+    assert.equal(gate.entries.size, 0, `${key} must never become a live ack entry`);
+    assert.equal(gate.errors.length, 1);
+    assert.match(gate.errors[0], /reserved/);
+    assert.match(gate.errors[0], new RegExp(key));
+
+    const lint = validateAckText(raw, { source: 'tests/emitted-drift-acks/1000-a.json' });
+    assert.equal(lint.schemaErrors.length, 1);
+    assert.match(lint.schemaErrors[0], /reserved/);
+    assert.match(lint.schemaErrors[0], new RegExp(key));
+
+    // Recognizably the SAME finding on both surfaces, not merely both non-empty.
+    assert.equal(
+      gate.errors[0].replace('tests/emitted-drift-acks/1000-a.json', 'SOURCE'),
+      lint.schemaErrors[0].replace('tests/emitted-drift-acks/1000-a.json', 'SOURCE'),
+      `${key}: parseAck and validateAckText must report the same finding`,
+    );
+
+    assert.equal(({}).reason, undefined, 'Object.prototype must stay untouched throughout');
+  }
+});
+
+test('the pre-merge lint and the gate helpers agree on the fragment-count cap (#2914 review)', () => {
+  // Duplicated by necessity (scripts/ ships, tests/ does not — see MAX_ACK_FRAGMENTS's
+  // doc comment in both files), so this parity test is what keeps the two values from
+  // silently drifting apart the way the schema rules above are held together.
+  assert.equal(
+    MAX_ACK_FRAGMENTS_LINT, MAX_ACK_FRAGMENTS,
+    'scripts/lint-emitted-drift-ack.cjs and tests/helpers/emitted-diff.cjs must agree on '
+    + 'MAX_ACK_FRAGMENTS',
+  );
 });
 
 test('the lint additionally rejects a present-but-entryless document the parser accepts', () => {
@@ -768,6 +833,500 @@ test('the lint rejects a present-but-empty file rather than reading it as absent
     assert.match(r.schemaErrors[0], /present but empty/, `${JSON.stringify(raw)} must name emptiness`);
     assert.ok(!r.ok);
   }
+});
+
+test('validateAckText names the SOURCE it is checking, not a hardcoded literal (#2914)', () => {
+  // Generalized so the lint can run the SAME rules over a fragment as over the legacy
+  // file. A message that hardcoded tests/emitted-drift-ack.json would misname every
+  // fragment's own errors.
+  const r = validateAckText('{"version":1,"paths":{"a.md":{"reason":""}}}', {
+    source: 'tests/emitted-drift-acks/1000-a.json',
+  });
+  assert.match(r.schemaErrors[0], /tests\/emitted-drift-acks\/1000-a\.json/);
+});
+
+test('declaredKeys: only a schema-trustworthy document contributes keys for collision detection', () => {
+  const { declaredKeys } = require('../scripts/lint-emitted-drift-ack.cjs');
+  assert.deepEqual(declaredKeys(null), []);
+  assert.deepEqual(declaredKeys('{ not json'), [], 'unparseable JSON contributes no keys');
+  assert.deepEqual(declaredKeys('[]'), [], 'a non-object document contributes no keys');
+  assert.deepEqual(declaredKeys('{"paths":{"a.md":{"reason":"r"}}}'), ['a.md']);
+  assert.deepEqual(
+    declaredKeys('{"paths":{"__proto__":{"reason":"r"}}}'), [],
+    '__proto__ is excluded from collision detection as belt-and-suspenders — in practice '
+    + 'main() never reaches this on such a document, because validateAckText already '
+    + 'rejects it outright (#2914 review), so there is no schema-valid document left for '
+    + 'declaredKeys to see it on',
+  );
+});
+
+test('listFragmentFiles: absent directory is zero fragments, present directory is sorted .json only', () => {
+  const { listFragmentFiles } = require('../scripts/lint-emitted-drift-ack.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-lint-frag-'));
+  try {
+    assert.deepEqual(listFragmentFiles(path.join(dir, 'missing')), []);
+    fs.writeFileSync(path.join(dir, '2000-z.json'), '{}');
+    fs.writeFileSync(path.join(dir, '1000-a.json'), '{}');
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'nope');
+    assert.deepEqual(listFragmentFiles(dir), ['1000-a.json', '2000-z.json']);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('listFragmentFiles: exactly MAX_ACK_FRAGMENTS entries passes, one over fails loudly (#2914 review)', () => {
+  const { listFragmentFiles } = require('../scripts/lint-emitted-drift-ack.cjs');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-lint-frag-cap-'));
+  try {
+    for (let i = 0; i < MAX_ACK_FRAGMENTS; i++) {
+      fs.writeFileSync(path.join(dir, `f-${String(i).padStart(4, '0')}.json`), '{}');
+    }
+    assert.equal(listFragmentFiles(dir).length, MAX_ACK_FRAGMENTS, 'at the cap must still pass');
+
+    fs.writeFileSync(path.join(dir, `f-${String(MAX_ACK_FRAGMENTS).padStart(4, '0')}.json`), '{}');
+    assert.throws(
+      () => listFragmentFiles(dir),
+      (err) => {
+        assert.match(err.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(err.message, new RegExp(String(MAX_ACK_FRAGMENTS + 1)));
+        assert.match(err.message, new RegExp(String(MAX_ACK_FRAGMENTS)));
+        return true;
+      },
+      'one over the cap must throw, naming the directory, the cap, and the actual count',
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// ─── guard-no-ack-on-next: presence itself is the failure (#2914) ────────────
+//
+// Unlike `validateAckText` above (a PR-lane shape lint that must let a live, well-formed
+// ack through), `assertAbsentOnNext` runs ONLY against `next` itself — see the
+// `guard-no-ack-on-next` job in `.github/workflows/test.yml`, gated on push to `next` — and
+// rejects PRESENCE outright, valid or not. Per the ack-lifecycle law (#2789), an entry
+// already at the base is spent the moment it merges, so the shape never matters here.
+// `assertAbsentOnNext` takes only the boolean `present` — an entryless-vs-populated
+// distinction is collapsed to that boolean before this function ever sees it (see
+// `main()`'s `fs.existsSync` call in `scripts/lint-emitted-drift-ack.cjs`), so no test
+// here can exercise that distinction: there is deliberately no separate "entryless"
+// case below, since one would be identical in input and assertion to the populated
+// case and would claim coverage the function structurally cannot provide.
+
+test('assertAbsentOnNext passes when the file is absent — the healthy steady state', () => {
+  const r = assertAbsentOnNext(false);
+  assert.ok(r.ok);
+  assert.match(r.message, /absent \(the healthy steady state\)/);
+});
+
+test('assertAbsentOnNext fails when the file is present with entries, naming the file and the remedy', () => {
+  const r = assertAbsentOnNext(true);
+  assert.ok(!r.ok);
+  assert.match(r.message, /tests\/emitted-drift-ack\.json exists on next/);
+  assert.match(r.message, /spent and inert/);
+  assert.match(r.message, /delete the file too/, 'must cite CONTRIBUTING.md\'s delete-the-file rule');
+  assert.match(r.message, /git rm tests\/emitted-drift-ack\.json/, 'the remedy must be named, not just the problem');
+  assert.match(
+    r.message, /tests\/emitted-drift-acks\//,
+    '#2914: the message must explain that acks now go in per-PR fragments, and that a '
+    + 'persisting fragment (unlike this legacy file) is harmless',
+  );
+});
+
+test('assertAbsentOnNext fed from a real next-like tree: absent passes, present fails (regression, #2914)', () => {
+  // A throwaway directory standing in for `next`'s tree, so the check exercises real
+  // fs.existsSync semantics on ACK_REPO_PATH rather than a hand-picked boolean.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-guard-next-'));
+  const ackPath = path.join(dir, ACK_REPO_PATH);
+  fs.mkdirSync(path.dirname(ackPath), { recursive: true });
+
+  assert.ok(
+    assertAbsentOnNext(fs.existsSync(ackPath)).ok,
+    'a fresh tree with no ack file must pass',
+  );
+
+  // Reproduces the exact #2834/#2900 shape: 34 spent entries surviving on next.
+  fs.writeFileSync(ackPath, JSON.stringify({ version: 1, paths: { 'a.md': { reason: 'spent' } } }));
+  const r = assertAbsentOnNext(fs.existsSync(ackPath));
+  assert.ok(!r.ok, 'a tree carrying the file, however well-formed, must fail');
+  assert.match(r.message, /exists on next/);
+});
+
+// ─── Per-PR ack fragments: mergeAckSources + readAckSources (#2914) ──────────
+//
+// #2914 replaces the single shared tests/emitted-drift-ack.json with per-PR fragments
+// under tests/emitted-drift-acks/, exactly the shape .changeset/ already uses to solve
+// the same "every PR rewrites one file wholesale" conflict problem. The legacy file is
+// still read and unioned in — five open PRs (#2818, #2812, #2728, #2566, #2531) carry it
+// — so BOTH surfaces must keep working, together and alone.
+
+// `merged.paths` is deliberately built via `Object.create(null)` (see mergeAckSources's
+// doc comment: a fragment/legacy source naming a key `__proto__` must set a PROPERTY,
+// never the prototype). `assert.deepEqual`/`deepStrictEqual` compares `[[Prototype]]`
+// too, so a direct comparison against an ordinary `{}` literal fails on the prototype
+// alone even when every key/value matches. Round-tripping through JSON (exactly what a
+// real committed ack document goes through) normalizes it to a plain object for
+// assertion purposes without touching the production code under test.
+const plain = (o) => JSON.parse(JSON.stringify(o));
+
+test('mergeAckSources: a single source with no entries merges to an empty, legal document', () => {
+  const { merged, errors } = mergeAckSources([]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(plain(merged), { version: ACK_VERSION, paths: {} });
+});
+
+test('mergeAckSources: fragments-only union with no overlap', () => {
+  const { merged, errors } = mergeAckSources([
+    { source: 'tests/emitted-drift-acks/1000-a.json', doc: { version: ACK_VERSION, paths: { 'a.md': { reason: 'ra' } } } },
+    { source: 'tests/emitted-drift-acks/1001-b.json', doc: { version: ACK_VERSION, paths: { 'b.md': { reason: 'rb' } } } },
+  ]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(plain(merged.paths), { 'a.md': { reason: 'ra' }, 'b.md': { reason: 'rb' } });
+});
+
+test('mergeAckSources: legacy-only (a single source) merges through unchanged', () => {
+  const { merged, errors } = mergeAckSources([
+    { source: ACK_FILE, doc: { version: ACK_VERSION, paths: { 'a.md': { reason: 'legacy' } } } },
+  ]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(plain(merged.paths), { 'a.md': { reason: 'legacy' } });
+});
+
+test('mergeAckSources: legacy file and fragments together, no overlap', () => {
+  const { merged, errors } = mergeAckSources([
+    { source: ACK_FILE, doc: { version: ACK_VERSION, paths: { 'legacy.md': { reason: 'from legacy' } } } },
+    { source: 'tests/emitted-drift-acks/1000-a.json', doc: { version: ACK_VERSION, paths: { 'a.md': { reason: 'from fragment' } } } },
+  ]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(plain(merged.paths), {
+    'legacy.md': { reason: 'from legacy' },
+    'a.md': { reason: 'from fragment' },
+  });
+});
+
+test('mergeAckSources: a duplicate key across two fragments is a loud error, never silent last-wins', () => {
+  const { merged, errors } = mergeAckSources([
+    { source: 'tests/emitted-drift-acks/1000-a.json', doc: { version: ACK_VERSION, paths: { [WORKFLOW_KEY]: { reason: 'first' } } } },
+    { source: 'tests/emitted-drift-acks/1001-b.json', doc: { version: ACK_VERSION, paths: { [WORKFLOW_KEY]: { reason: 'second' } } } },
+  ]);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /duplicate ack for/);
+  assert.match(errors[0], /1000-a\.json/, 'the error must name the first source');
+  assert.match(errors[0], /1001-b\.json/, 'the error must name the second source');
+  // First-wins is a deliberate, DOCUMENTED simplification (not silent): the caller is
+  // told loudly via `errors`, and the merged doc still holds a well-defined value.
+  assert.equal(merged.paths[WORKFLOW_KEY].reason, 'first');
+});
+
+test('mergeAckSources: an empty fragments directory (represented as zero docs) is legal', () => {
+  const { merged, errors } = mergeAckSources([]);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(plain(merged.paths), {});
+});
+
+test('mergeAckSources: a malformed source (bad version) surfaces the same error parseAck would', () => {
+  const { errors } = mergeAckSources([
+    { source: 'tests/emitted-drift-acks/1000-bad.json', doc: { version: 99, paths: {} } },
+  ]);
+  assert.match(errors.join('\n'), /unsupported version 99/);
+});
+
+test('mergeAckSources: a __proto__ key from a fragment is rejected, never merged in or used to pollute', () => {
+  // MUST be built via JSON.parse, not a JS object literal: `{ '__proto__': v }` is the
+  // special ObjectLiteral case that SETS THE PROTOTYPE and yields zero own keys, so a
+  // fixture built that way is empty and never exercises this path at all (the exact
+  // reason the previous version of this test was vacuous and failed with "Cannot read
+  // properties of undefined"). `JSON.parse` is the production path and creates a genuine
+  // own key.
+  const doc = JSON.parse('{"version":' + ACK_VERSION + ',"paths":{"__proto__":{"reason":"hostile"}}}');
+  assert.deepEqual(Object.keys(doc.paths), ['__proto__'], 'JSON.parse must create a genuine own key');
+
+  const { merged, errors } = mergeAckSources([
+    { source: 'tests/emitted-drift-acks/1000-a.json', doc },
+  ]);
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /reserved/);
+  assert.match(errors[0], /__proto__/);
+  assert.deepEqual(plain(merged.paths), {}, 'a reserved key must never be merged into the document');
+  assert.equal(Object.getPrototypeOf(merged.paths), null, 'merged.paths stays null-prototype');
+  assert.equal(({}).reason, undefined, 'Object.prototype must be untouched');
+});
+
+test('readAckSources: fragments-only on a real tree', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-frag-'));
+  try {
+    const fragDir = path.join(dir, 'acks');
+    fs.mkdirSync(fragDir, { recursive: true });
+    fs.writeFileSync(path.join(fragDir, '1000-a.json'), JSON.stringify({ version: ACK_VERSION, paths: { 'a.md': { reason: 'ra' } } }));
+    fs.writeFileSync(path.join(fragDir, '1001-b.json'), JSON.stringify({ version: ACK_VERSION, paths: { 'b.md': { reason: 'rb' } } }));
+
+    const { doc, errors } = readAckSources({ legacyPath: path.join(dir, 'emitted-drift-ack.json'), fragmentsDir: fragDir });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(plain(doc.paths), { 'a.md': { reason: 'ra' }, 'b.md': { reason: 'rb' } });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: legacy-only on a real tree (no fragments directory at all)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-legacy-'));
+  try {
+    const legacyPath = path.join(dir, 'emitted-drift-ack.json');
+    fs.writeFileSync(legacyPath, JSON.stringify({ version: ACK_VERSION, paths: { 'legacy.md': { reason: 'from legacy' } } }));
+
+    const { doc, errors } = readAckSources({ legacyPath, fragmentsDir: path.join(dir, 'nonexistent-acks') });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(plain(doc.paths), { 'legacy.md': { reason: 'from legacy' } });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: legacy file and fragments together', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-both-'));
+  try {
+    const legacyPath = path.join(dir, 'emitted-drift-ack.json');
+    const fragDir = path.join(dir, 'acks');
+    fs.mkdirSync(fragDir, { recursive: true });
+    fs.writeFileSync(legacyPath, JSON.stringify({ version: ACK_VERSION, paths: { 'legacy.md': { reason: 'from legacy' } } }));
+    fs.writeFileSync(path.join(fragDir, '1000-a.json'), JSON.stringify({ version: ACK_VERSION, paths: { 'a.md': { reason: 'from fragment' } } }));
+
+    const { doc, errors } = readAckSources({ legacyPath, fragmentsDir: fragDir });
+    assert.deepEqual(errors, []);
+    assert.deepEqual(plain(doc.paths), {
+      'legacy.md': { reason: 'from legacy' },
+      'a.md': { reason: 'from fragment' },
+    });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: neither the legacy file nor the fragments directory exists — the healthy steady state', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-absent-'));
+  try {
+    const { doc, errors } = readAckSources({
+      legacyPath: path.join(dir, 'emitted-drift-ack.json'),
+      fragmentsDir: path.join(dir, 'acks'),
+    });
+    assert.equal(doc, null);
+    assert.deepEqual(errors, []);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: an empty fragments directory (present, zero files) plus no legacy file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-emptydir-'));
+  try {
+    const fragDir = path.join(dir, 'acks');
+    fs.mkdirSync(fragDir, { recursive: true });
+    const { doc, errors } = readAckSources({ legacyPath: path.join(dir, 'emitted-drift-ack.json'), fragmentsDir: fragDir });
+    assert.equal(doc, null, 'zero fragments and no legacy file is still the healthy steady state');
+    assert.deepEqual(errors, []);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: a duplicate key across two fragments fails loudly and would fail the real gate', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-dupe-'));
+  try {
+    const fragDir = path.join(dir, 'acks');
+    fs.mkdirSync(fragDir, { recursive: true });
+    fs.writeFileSync(path.join(fragDir, '1000-a.json'), JSON.stringify({ version: ACK_VERSION, paths: { [WORKFLOW_KEY]: { reason: 'first' } } }));
+    fs.writeFileSync(path.join(fragDir, '1001-b.json'), JSON.stringify({ version: ACK_VERSION, paths: { [WORKFLOW_KEY]: { reason: 'second' } } }));
+
+    const { doc: ack, errors: mergeAckErrors } = readAckSources({
+      legacyPath: path.join(dir, 'emitted-drift-ack.json'),
+      fragmentsDir: fragDir,
+    });
+    assert.equal(mergeAckErrors.length, 1);
+    assert.match(mergeAckErrors[0], /duplicate ack for/);
+
+    // Wired exactly as the real-tree test wires it: folded into diffEmitted's own
+    // errors, which must fail the whole gate — never silently pass with one winner.
+    const r = diffEmitted({
+      baseline: mf({ [WORKFLOW_KEY]: 'aaa' }),
+      current: mf({ [WORKFLOW_KEY]: 'aaa' }),
+      changedPaths: [],
+      ack,
+      baseAck: null,
+      mergeAckErrors,
+    });
+    assert.ok(!r.ok, 'a duplicate ack across two fragments must fail the gate');
+    assert.match(formatReport(r), /duplicate ack for/);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: a malformed fragment (invalid JSON) throws, naming the fragment file', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-malformed-'));
+  try {
+    const fragDir = path.join(dir, 'acks');
+    fs.mkdirSync(fragDir, { recursive: true });
+    fs.writeFileSync(path.join(fragDir, '1000-bad.json'), '{ not json');
+
+    assert.throws(
+      () => readAckSources({ legacyPath: path.join(dir, 'emitted-drift-ack.json'), fragmentsDir: fragDir }),
+      /1000-bad\.json.*not valid JSON/,
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('readAckSources: listAckFragmentFiles returns sorted .json names only, absent dir is empty', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-listing-'));
+  try {
+    assert.deepEqual(listAckFragmentFiles(path.join(dir, 'missing')), []);
+
+    const fragDir = path.join(dir, 'acks');
+    fs.mkdirSync(fragDir, { recursive: true });
+    fs.writeFileSync(path.join(fragDir, '2000-z.json'), '{}');
+    fs.writeFileSync(path.join(fragDir, '1000-a.json'), '{}');
+    fs.writeFileSync(path.join(fragDir, 'README.md'), 'not a fragment');
+    assert.deepEqual(listAckFragmentFiles(fragDir), ['1000-a.json', '2000-z.json']);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('listAckFragmentFilesAtRef: lists .json fragment names at a ref directly, sorted, non-.json excluded', () => {
+  const run = (args) => {
+    assert.equal(args[0], 'ls-tree');
+    assert.equal(args[args.length - 1], `${ACK_DIR_REPO_PATH}/`);
+    return [
+      `${ACK_DIR_REPO_PATH}/2000-z.json`,
+      `${ACK_DIR_REPO_PATH}/1000-a.json`,
+      `${ACK_DIR_REPO_PATH}/README.md`,
+    ].join('\n') + '\n';
+  };
+  assert.deepEqual(listAckFragmentFilesAtRef(SHA_A, { run }), ['1000-a.json', '2000-z.json']);
+});
+
+test('listAckFragmentFilesAtRef: an absent fragment directory at the ref is zero names, not a fault', () => {
+  const run = () => '\n';
+  assert.deepEqual(listAckFragmentFilesAtRef(SHA_A, { run }), []);
+});
+
+test('listAckFragmentFilesAtRef: a git failure listing the directory throws', () => {
+  const run = () => { throw new Error('injected git failure'); };
+  assert.throws(() => listAckFragmentFilesAtRef(SHA_A, { run }), /could not list tests\/emitted-drift-acks\//);
+});
+
+test('listAckFragmentFiles: exactly MAX_ACK_FRAGMENTS entries passes, one over fails loudly (#2914 review)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-ack-listing-cap-'));
+  try {
+    for (let i = 0; i < MAX_ACK_FRAGMENTS; i++) {
+      fs.writeFileSync(path.join(dir, `f-${String(i).padStart(4, '0')}.json`), '{}');
+    }
+    assert.equal(listAckFragmentFiles(dir).length, MAX_ACK_FRAGMENTS, 'at the cap must still pass');
+
+    fs.writeFileSync(path.join(dir, `f-${String(MAX_ACK_FRAGMENTS).padStart(4, '0')}.json`), '{}');
+    assert.throws(
+      () => listAckFragmentFiles(dir),
+      (err) => {
+        assert.match(err.message, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+        assert.match(err.message, new RegExp(String(MAX_ACK_FRAGMENTS + 1)));
+        assert.match(err.message, new RegExp(String(MAX_ACK_FRAGMENTS)));
+        return true;
+      },
+      'one over the cap must throw, naming the directory, the cap, and the actual count',
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test('listAckFragmentFilesAtRef: exactly MAX_ACK_FRAGMENTS entries passes, one over fails loudly (#2914 review)', () => {
+  const makeListing = (count) => Array.from(
+    { length: count },
+    (_, i) => `${ACK_DIR_REPO_PATH}/f-${String(i).padStart(4, '0')}.json`,
+  ).join('\n') + '\n';
+
+  const atCap = () => makeListing(MAX_ACK_FRAGMENTS);
+  assert.equal(
+    listAckFragmentFilesAtRef(SHA_A, { run: atCap }).length,
+    MAX_ACK_FRAGMENTS,
+    'at the cap must still pass',
+  );
+
+  const overCap = () => makeListing(MAX_ACK_FRAGMENTS + 1);
+  assert.throws(
+    () => listAckFragmentFilesAtRef(SHA_A, { run: overCap }),
+    (err) => {
+      assert.match(err.message, new RegExp(`${ACK_DIR_REPO_PATH}/ at "${SHA_A}"`.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.match(err.message, new RegExp(String(MAX_ACK_FRAGMENTS + 1)));
+      assert.match(err.message, new RegExp(String(MAX_ACK_FRAGMENTS)));
+      return true;
+    },
+    'one over the cap must throw, naming the directory, the cap, and the actual count',
+  );
+});
+
+test('the migrated fragment physically lives at ACK_DIR/0000-legacy-migration.json on this checkout', () => {
+  // `includes`, not `deepEqual`, on purpose: other PRs merging their own fragments over
+  // time must not make this permanent regression test fail — it only pins THIS
+  // fragment's continued existence at the real, non-injected path.
+  const fragmentPath = path.join(ACK_DIR, '0000-legacy-migration.json');
+  assert.ok(fs.existsSync(fragmentPath), 'the migration must have landed at the real fragment directory path');
+  assert.ok(listAckFragmentFiles(ACK_DIR).includes('0000-legacy-migration.json'));
+});
+
+test('the migrated legacy fragment still clears the real #2733 spec-phase.md growth (#2914 migration)', () => {
+  // The whole point of MIGRATING rather than deleting: no acknowledgment is lost, only
+  // relocated. This pins the migrated fragment's spec-phase.md entry to the exact
+  // growth #2733 introduced (31987 -> 31997 bytes), so a regression here would have
+  // reproduced the ratchet failure a real verification run already caught once.
+  const fragmentPath = path.join(REPO_ROOT, 'tests', 'emitted-drift-acks', '0000-legacy-migration.json');
+  const doc = JSON.parse(fs.readFileSync(fragmentPath, 'utf8'));
+  const entry = doc.paths['spec-phase.md'];
+  assert.ok(entry, 'the migrated fragment must still carry the spec-phase.md entry from #2733');
+  assert.match(entry.reason, /31987 -> 31997/, 'the exact byte delta must survive the migration');
+
+  // Isolated to JUST this one entry, not the whole 35-entry document: the migrated
+  // fragment carries 34 OTHER already-spent entries for OTHER paths, which this
+  // minimal repro's baseline/current never touches — including the full document here
+  // would report those 34 as freshly-stale (nothing in THIS synthetic diff consumes
+  // them), which is a fact about this test's narrow fixture, not about the migration.
+  const r = diffEmitted({
+    baseline: mf({}),
+    current: mf({}),
+    changedPaths: [],
+    sizeBaseline: { 'spec-phase.md': 31987 },
+    sizeCurrent: { 'spec-phase.md': 31997 },
+    ack: { version: ACK_VERSION, paths: { 'spec-phase.md': entry } },
+    baseAck: null,
+  });
+  assert.equal(r.grown.length, 1);
+  assert.equal(r.grown[0].acked, true, 'the migrated entry must still clear the growth it was written for');
+  assert.deepEqual(r.staleAcks, []);
+  assert.ok(r.ok);
+});
+
+test('the full migrated document is safe to land: every entry is SPENT against the legacy file at base, none stale', () => {
+  // The actual migration PR's real shape: `next` still carries the legacy file with
+  // these SAME 35 entries (until this PR removes it), so every entry in the new
+  // fragment is already "spent" (base already explains it) rather than "live" — this
+  // PR introduces no NEW ripple of its own, it only relocates old acknowledgments.
+  // Getting this wrong (e.g. losing a reason's exact text in the move) would turn a
+  // spent entry into a freshly-unexplained "stale" one and red this very migration PR.
+  const fragmentPath = path.join(REPO_ROOT, 'tests', 'emitted-drift-acks', '0000-legacy-migration.json');
+  const doc = JSON.parse(fs.readFileSync(fragmentPath, 'utf8'));
+
+  const r = diffEmitted({
+    baseline: mf({}),
+    current: mf({}),
+    changedPaths: [],
+    ack: doc,
+    baseAck: doc, // the legacy file at `next` HEAD, byte-identical, before this PR removes it
+  });
+  assert.deepEqual(r.staleAcks, [], 'nothing in the migrated document should read as freshly unexplained');
+  assert.equal(r.spentAcks.length, Object.keys(doc.paths).length, 'every migrated entry must be recognized as already spent');
+  assert.ok(r.ok);
 });
 
 // ─── readAckFileAtRef: the base-side reader (#2789) ──────────────────────────
@@ -838,6 +1397,116 @@ test('readAckFileAtRef: refuses an option-shaped ref rather than handing it to g
       `${JSON.stringify(bad)} must be refused`,
     );
   }
+});
+
+// ─── readAckSourcesAtRef: the base-side UNION reader (#2914) ─────────────────
+//
+// Mirrors readAckFileAtRef's fakeGit harness above, extended to also answer `ls-tree`
+// on the FRAGMENT DIRECTORY and `show` for each fragment name it lists — a base-side
+// stand-in for "the legacy file plus every fragment, as they existed at that ref".
+
+const fakeMultiGit = ({ legacy, fragments = {} } = {}) => (args) => {
+  if (args[0] === 'ls-tree') {
+    const target = args[args.length - 1];
+    if (target === ACK_REPO_PATH) return legacy !== undefined ? `${ACK_REPO_PATH}\n` : '\n';
+    if (target === `${ACK_DIR_REPO_PATH}/`) {
+      const names = Object.keys(fragments);
+      return names.length ? names.map((n) => `${ACK_DIR_REPO_PATH}/${n}`).join('\n') + '\n' : '\n';
+    }
+    // readAckFileAtRef's OWN per-file existence check, once per fragment name it was
+    // told about by the directory listing above — a second, distinct ls-tree call.
+    const name = target.slice(target.lastIndexOf('/') + 1);
+    if (`${ACK_DIR_REPO_PATH}/${name}` === target && Object.prototype.hasOwnProperty.call(fragments, name)) {
+      return `${target}\n`;
+    }
+    throw new Error(`fakeMultiGit: unexpected ls-tree target ${target}`);
+  }
+  if (args[0] === 'show') {
+    const spec = args[1];
+    const p = spec.slice(spec.indexOf(':') + 1);
+    if (p === ACK_REPO_PATH) return legacy;
+    const name = p.slice(p.lastIndexOf('/') + 1);
+    if (Object.prototype.hasOwnProperty.call(fragments, name)) return fragments[name];
+    throw new Error(`fakeMultiGit: unexpected show path ${p}`);
+  }
+  throw new Error(`fakeMultiGit: unexpected git call: ${args.join(' ')}`);
+};
+
+test('readAckSourcesAtRef: fragments-only at a ref', () => {
+  const { doc } = readAckSourcesAtRef(SHA_A, {
+    run: fakeMultiGit({
+      fragments: {
+        '1000-a.json': JSON.stringify({ version: ACK_VERSION, paths: { 'a.md': { reason: 'ra' } } }),
+        '1001-b.json': JSON.stringify({ version: ACK_VERSION, paths: { 'b.md': { reason: 'rb' } } }),
+      },
+    }),
+  });
+  assert.deepEqual(plain(doc.paths), { 'a.md': { reason: 'ra' }, 'b.md': { reason: 'rb' } });
+});
+
+test('readAckSourcesAtRef: legacy-only at a ref (no fragments directory)', () => {
+  const { doc } = readAckSourcesAtRef(SHA_A, {
+    run: fakeMultiGit({ legacy: JSON.stringify({ version: ACK_VERSION, paths: { 'legacy.md': { reason: 'from legacy' } } }) }),
+  });
+  assert.deepEqual(plain(doc.paths), { 'legacy.md': { reason: 'from legacy' } });
+});
+
+test('readAckSourcesAtRef: legacy and fragments together at a ref', () => {
+  const { doc } = readAckSourcesAtRef(SHA_A, {
+    run: fakeMultiGit({
+      legacy: JSON.stringify({ version: ACK_VERSION, paths: { 'legacy.md': { reason: 'from legacy' } } }),
+      fragments: { '1000-a.json': JSON.stringify({ version: ACK_VERSION, paths: { 'a.md': { reason: 'from fragment' } } }) },
+    }),
+  });
+  assert.deepEqual(plain(doc.paths), { 'legacy.md': { reason: 'from legacy' }, 'a.md': { reason: 'from fragment' } });
+});
+
+test('readAckSourcesAtRef: neither legacy nor any fragment exists at the ref', () => {
+  const { doc } = readAckSourcesAtRef(SHA_A, { run: fakeMultiGit({}) });
+  assert.equal(doc, null);
+});
+
+test('readAckSourcesAtRef: an empty fragments directory at the ref, no legacy file', () => {
+  const { doc } = readAckSourcesAtRef(SHA_A, { run: fakeMultiGit({ fragments: {} }) });
+  assert.equal(doc, null, 'zero fragments and no legacy file at the ref is still the healthy steady state');
+});
+
+test('readAckSourcesAtRef: a base-side duplicate across fragments does not throw (discarded like other base schema issues)', () => {
+  // Matches this module's existing precedent for the base side (see diffEmitted's real
+  // -tree caller: "Base-side SCHEMA errors are deliberately discarded"). A base-side
+  // duplicate is `next`'s own health, not this diff's to answer for, and
+  // mergeAckSources's first-source-wins keeps the STRICT reading even with no error
+  // surfaced -- an entry can only be spent against the ONE reason actually kept.
+  const { doc } = readAckSourcesAtRef(SHA_A, {
+    run: fakeMultiGit({
+      fragments: {
+        '1000-a.json': JSON.stringify({ version: ACK_VERSION, paths: { [WORKFLOW_KEY]: { reason: 'first' } } }),
+        '1001-b.json': JSON.stringify({ version: ACK_VERSION, paths: { [WORKFLOW_KEY]: { reason: 'second' } } }),
+      },
+    }),
+  });
+  assert.equal(doc.paths[WORKFLOW_KEY].reason, 'first');
+});
+
+test('readAckSourcesAtRef: a fragment that is unreadable at the ref still throws', () => {
+  const fragRelPath = `${ACK_DIR_REPO_PATH}/1000-a.json`;
+  const run = (args) => {
+    if (args[0] === 'ls-tree') {
+      const target = args[args.length - 1];
+      if (target === ACK_REPO_PATH) return '\n';
+      if (target === `${ACK_DIR_REPO_PATH}/`) return `${fragRelPath}\n`;
+      // readAckFileAtRef's OWN existence check for the individual fragment file, prior
+      // to `show` — it exists at this ref, so the failure below is a genuine read fault.
+      if (target === fragRelPath) return `${fragRelPath}\n`;
+      throw new Error(`unexpected ls-tree target: ${target}`);
+    }
+    if (args[0] === 'show') throw new Error('injected git failure');
+    throw new Error(`unexpected git call: ${args.join(' ')}`);
+  };
+  assert.throws(
+    () => readAckSourcesAtRef(SHA_A, { run }),
+    /exists at .* but could not be read/,
+  );
 });
 
 test('OMITTING baseAck while an ack is present is a loud error, never a silent pass', () => {
@@ -1100,9 +1769,14 @@ test('the taught document derives its version from ACK_VERSION', () => {
   assert.equal(JSON.parse(REMEDIATION.ackDocument([{ key: 'x.md', reason: 'r' }])).version, ACK_VERSION);
 });
 
-test('the remediation surface is frozen and names the ack file once', () => {
+test('the remediation surface is frozen and points at the fragment directory, not the legacy file', () => {
+  // #2914: the remedy is a NEW fragment under ACK_DIR, never the single legacy file —
+  // asserting `ackFile === ACK_FILE` here would pin the exact bandaid this design
+  // replaces (a shared filename every PR is tempted back onto).
   assert.ok(Object.isFrozen(REMEDIATION), 'the exported surface must not be mutable');
-  assert.equal(REMEDIATION.ackFile, ACK_FILE, 'one definition, not a second literal');
+  assert.equal(REMEDIATION.ackDir, ACK_DIR_PURE, 'one definition, not a second literal');
+  assert.ok(REMEDIATION.ackFile.startsWith(`${ACK_DIR_PURE}/`), 'the taught path must live under the fragment directory');
+  assert.notEqual(REMEDIATION.ackFile, ACK_FILE, 'the remedy must not be the legacy shared file');
 });
 
 test('a ripple and a growth in one report share ONE document', () => {
@@ -1431,9 +2105,15 @@ test('baseline resolution precedence is explicit and reported', () => {
 
   // …and an explicitly-pointed-at stale baseline is a hard stop, not a fall-through:
   // the operator said "use this one".
+  //
+  // #2854: this fixture used to be named '/tmp/from-cache-restore.json', which asserted
+  // the exact conflation that broke CI — a CI cache restore is NOT an operator pin, and
+  // naming it one here documented the defect as intended behavior. The hard stop is a
+  // real guarantee for a HAND-SET path and is preserved; what changed is that CI no
+  // longer routes its restore through this door at all.
   const envStale = resolveBaseline({
     expectedSha: SHA_A,
-    env: { [BASELINE_ENV]: '/tmp/x.json' },
+    env: { [BASELINE_ENV]: '/tmp/operator-pinned-baseline.json' },
     cachePath: 'cache.json',
     readJson: () => goodBaseline(SHA_B),
     buildFallback: () => goodBaseline(SHA_A),
@@ -1448,6 +2128,182 @@ test('baseline resolution precedence is explicit and reported', () => {
   });
   assert.ok(viaBuild.ok);
   assert.equal(viaBuild.via, 'build');
+});
+
+// ── #2854: a CI cache restore is not an operator pin ─────────────────────────────
+//
+// ADR-2719 §5: "Cache miss falls back to an in-job build at `origin/next`." The PR lane
+// restores the baseline keyed on the PR's RECORDED base sha (`test.yml:198`) while the
+// gate resolves the base ref LIVE (`resolveBase()`), so the two drift whenever `next`
+// advances between a PR's last sync and its run. The restore was published straight to
+// GSD_EMITTED_BASELINE, where a mismatch is fatal — turning a recoverable cache into a
+// hard failure on diffs that touched nothing related. The export step is the boundary
+// that must be conservative in what it sends.
+
+const CI_CACHE_PATH = '.gsd-cache/emitted-baseline.json';
+
+/** Resolve exactly as CI does: cache restored to the DEFAULT path, nothing announced. */
+const resolveAsCI = (doc, expectedSha = SHA_A) => resolveBaseline({
+  expectedSha,
+  env: {},                                   // no operator pin — this is the whole point
+  cachePath: CI_CACHE_PATH,
+  readJson: typeof doc === 'function' ? doc : () => doc,
+  buildFallback: () => goodBaseline(expectedSha),
+});
+
+test('#2854: a drifted cache restore degrades to the in-job build', () => {
+  const r = resolveAsCI(goodBaseline(SHA_B));    // restored under a drifted key
+  assert.ok(r.ok, `must resolve via the in-job build; got: ${(r.errors || []).join('; ')}`);
+  assert.equal(r.via, 'build');
+  assert.equal(r.sha, SHA_A);
+  assert.deepEqual(r.attempted, [`cache:${CI_CACHE_PATH}`, 'build'],
+    'the cache must be tried and rejected before the build, and the trail must say so');
+});
+
+test('#2854: a current cache restore is used directly (the fast path survives)', () => {
+  const r = resolveAsCI(goodBaseline(SHA_A));
+  assert.ok(r.ok);
+  assert.equal(r.via, `cache:${CI_CACHE_PATH}`, 'a valid cache must not pay for a rebuild');
+});
+
+test('#2854: every recoverable malformation degrades rather than failing the run', () => {
+  // The blocker an isolated reviewer caught: an earlier revision gated only on sha
+  // equality, so a doc with the RIGHT sha but a wrong schema version or broken
+  // manifests was announced as an operator pin and hard-stopped downstream —
+  // reproducing this bug's own class, triggered by malformation instead of staleness.
+  // Routing through the cache path makes every one of these recoverable by construction.
+  const cases = {
+    'stale sha': goodBaseline(SHA_B),
+    'wrong schema version': { version: BASELINE_VERSION + 998, sha: SHA_A, manifests: { c: {} }, sizes: {} },
+    'manifests is an array': { version: BASELINE_VERSION, sha: SHA_A, manifests: [], sizes: {} },
+    'manifests absent': { version: BASELINE_VERSION, sha: SHA_A },
+    'sha absent': { version: BASELINE_VERSION, manifests: { c: {} }, sizes: {} },
+    'sha not 40-hex': { version: BASELINE_VERSION, sha: 'g'.repeat(40), manifests: { c: {} }, sizes: {} },
+    'absent file': null,
+  };
+
+  for (const [name, doc] of Object.entries(cases)) {
+    const r = resolveAsCI(doc);
+    assert.ok(r.ok, `${name}: must degrade to the build, not fail — got ${(r.errors || []).join('; ')}`);
+    assert.equal(r.via, 'build', `${name}: must reach the in-job build`);
+  }
+});
+
+test('#2854: sha length boundary — 39, 40, 41 hex', () => {
+  // limit-1 / limit / limit+1 on the 40-hex contract validateBaseline enforces.
+  for (const len of [39, 41]) {
+    const r = resolveAsCI({ version: BASELINE_VERSION, sha: 'a'.repeat(len), manifests: { c: {} }, sizes: {} });
+    assert.equal(r.via, 'build', `${len} hex is not a sha — must not be used as the baseline`);
+  }
+  const exact = resolveAsCI(goodBaseline(SHA_A));
+  assert.equal(exact.via, `cache:${CI_CACHE_PATH}`, '40 hex matching is the contract');
+});
+
+test('#2854: valid JSON that is not an object degrades rather than passing vacuously', () => {
+  for (const doc of [0, 'str', [], true]) {
+    const r = resolveAsCI(doc);
+    assert.ok(r.ok, `${JSON.stringify(doc)}: must degrade to the build`);
+    assert.equal(r.via, 'build', `${JSON.stringify(doc)} must never read as a usable baseline`);
+  }
+});
+
+test('#2854: an unreadable cache degrades and does not throw', () => {
+  // Deterministic IO failure by injection — never chmod 0o000, which root bypasses.
+  const r = resolveAsCI(() => { throw new Error('EACCES: permission denied'); });
+  assert.ok(r.ok);
+  assert.equal(r.via, 'build');
+});
+
+test('#2854: the cache is used exactly when it is valid for the sha under test', () => {
+  const hex40 = fc.string({
+    unit: fc.constantFrom(...'0123456789abcdef'), minLength: 40, maxLength: 40,
+  });
+  fc.assert(fc.property(hex40, hex40, (built, expected) => {
+    const r = resolveAsCI(goodBaseline(built), expected);
+    // Always resolves; the only question is whether it paid for a rebuild.
+    if (!r.ok) return false;
+    return (r.via === `cache:${CI_CACHE_PATH}`) === (built === expected);
+  }), { numRuns: 200 });
+});
+
+test('#2854: the gate is pinned to the SAME base the tree was merged with', () => {
+  // The deepest half of this bug. "Rebase check" merges `pull_request.base.sha`,
+  // pinned by #2472 so all 12 matrix jobs agree on one tree. But resolveBase()
+  // otherwise falls through to `origin/next`, which `fetch-depth: 0` leaves at the
+  // LIVE tip. When `next` advanced mid-flight the gate compared a tree built on
+  // base.sha against a baseline at a NEWER commit — so the correctly-keyed cache
+  // was rejected as "stale" and the run died. Worse than dying would be surviving:
+  // a baseline at the wrong commit attributes other people's merges to this PR.
+  //
+  // Two surfaces read one value, which is the generative-divergence shape this repo
+  // has been bitten by before, so the parity is asserted rather than assumed.
+  const yaml = require('js-yaml');
+  const wf = yaml.load(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/test.yml'), 'utf8'));
+
+  const jobsUnderTest = Object.entries(wf.jobs).filter(([, job]) =>
+    (job.steps || []).some((s) => typeof s.run === 'string' && s.run.includes('ci-rebase-check.cjs')));
+
+  assert.ok(jobsUnderTest.length >= 2,
+    `expected the rebase-pinned jobs to be found, got ${jobsUnderTest.length}`);
+
+  for (const [name, job] of jobsUnderTest) {
+    const rebaseStep = job.steps.find((s) => typeof s.run === 'string' && s.run.includes('ci-rebase-check.cjs'));
+    const mergedBase = (rebaseStep.env || {}).CI_REBASE_BASE_SHA;
+    const gateBase = (job.env || {}).GSD_EMITTED_BASE;
+
+    assert.ok(mergedBase, `job ${name}: rebase step must pin CI_REBASE_BASE_SHA`);
+    assert.equal(gateBase, mergedBase,
+      `job ${name}: the emitted gate's base (GSD_EMITTED_BASE=${JSON.stringify(gateBase)}) must equal ` +
+      `the commit the tree was merged with (CI_REBASE_BASE_SHA=${JSON.stringify(mergedBase)}). ` +
+      'Diverging them makes the differential compare a tree against a baseline from a ' +
+      'different commit, which mis-attributes unrelated merges to this PR.');
+  }
+});
+
+test('#2854: an explicit base pin outranks the live branch tip', () => {
+  // The mechanism the workflow pin relies on: GSD_EMITTED_BASE must win over
+  // origin/<base>, or setting it in CI would change nothing.
+  const pinned = 'c'.repeat(40);
+  assert.equal(baseRefCandidates({ GSD_EMITTED_BASE: pinned, GITHUB_BASE_REF: 'next' })[0], pinned,
+    'an explicit pin must be tried before origin/next');
+});
+
+test('#2854: an EMPTY base pin is ignored, not treated as a candidate', () => {
+  // The pin is job-level env, so on push/workflow_dispatch — where there is no
+  // pull_request — `${{ github.event.pull_request.base.sha }}` renders as an empty
+  // string rather than being unset. baseRefCandidates' truthy check already excludes
+  // it, but nothing asserted that, so narrowing the check to `!== undefined` would
+  // silently push '' as the first candidate and have `git rev-parse ''` decide the
+  // baseline. Pinned here because the workflow now guarantees this input shape.
+  assert.deepEqual(
+    baseRefCandidates({ GSD_EMITTED_BASE: '', GITHUB_BASE_REF: 'next' }),
+    baseRefCandidates({ GITHUB_BASE_REF: 'next' }),
+    'an empty pin must behave exactly as an absent one',
+  );
+  assert.ok(!baseRefCandidates({ GSD_EMITTED_BASE: '', GITHUB_BASE_REF: 'next' }).includes(''),
+    'the empty string must never become a base-ref candidate');
+});
+
+test('#2854: the resolution summary names only sources actually attempted', () => {
+  // The caller's assertion message hardcoded "(tried env, <cache>, and an in-job build)"
+  // on every failure, including early returns that reached none of them.
+  const envOnly = resolveBaseline({
+    expectedSha: SHA_A,
+    env: { [BASELINE_ENV]: '/tmp/operator-pinned-baseline.json' },
+    cachePath: 'cache.json',
+    readJson: () => goodBaseline(SHA_B),
+    buildFallback: () => goodBaseline(SHA_A),
+  });
+  assert.ok(!envOnly.ok);
+  assert.deepEqual(envOnly.attempted, [`env:${BASELINE_ENV}`],
+    'an env hard stop reaches neither the cache nor the build — the summary must say so');
+
+  const allThree = resolveBaseline({
+    expectedSha: SHA_A, env: {}, cachePath: 'cache.json',
+    readJson: () => goodBaseline(SHA_B),
+    buildFallback: () => goodBaseline(SHA_A),
+  });
+  assert.deepEqual(allThree.attempted, ['cache:cache.json', 'build']);
 });
 
 test('base-ref candidates are ordered most-specific first and de-duplicated', () => {
@@ -2200,24 +3056,32 @@ test('differential attribution over the real tree', { timeout: 900_000 }, async 
   });
   assert.ok(
     resolvedBaseline.ok,
-    `no usable emitted baseline for ${base}@${baseSha.slice(0, 12)} (tried env, ` +
-    `${DEFAULT_CACHE_PATH}, and an in-job build):\n  ${(resolvedBaseline.errors || []).join('\n  ')}`,
+    // #2854: report the sources actually reached, not a hardcoded list of all three. An
+    // early return could claim it "tried an in-job build" it never called, which sent
+    // contributors hunting a rebuild that had not run.
+    `no usable emitted baseline for ${base}@${baseSha.slice(0, 12)} (tried ` +
+    `${(resolvedBaseline.attempted || []).join(', ') || 'nothing'}):` +
+    `\n  ${(resolvedBaseline.errors || []).join('\n  ')}`,
   );
   const baseline = resolvedBaseline.baseline;
   assert.ok(baseline && Object.keys(baseline).length > 0, `resolved baseline via ${resolvedBaseline.via} has no families`);
 
   const changedPaths = resolveChangedPaths(base);
-  const ack = readAckFile();
+  // #2914: unions the legacy single file with every per-PR fragment under
+  // tests/emitted-drift-acks/. `mergeAckErrors` (e.g. two sources naming the same path)
+  // is folded into `diffEmitted`'s own errors below, exactly like any other ack schema
+  // problem — never silently resolved.
+  const { doc: ack, errors: mergeAckErrors } = readAckSources();
   const current = currentManifests();
 
   // Consult the base side ONLY when this tree actually has a document to classify.
-  // `readAckFileAtRef` throws on a base it cannot read, which is right — but reading it
-  // unconditionally would DEADLOCK the repo if `next` ever carried a corrupt ack (a bad
-  // merge leaving conflict markers in exactly the file class this epic exists over):
+  // `readAckSourcesAtRef` throws on a base it cannot read, which is right — but reading
+  // it unconditionally would DEADLOCK the repo if `next` ever carried a corrupt ack (a
+  // bad merge leaving conflict markers in exactly the file class this epic exists over):
   // every PR would go red, INCLUDING the PR that deletes the corrupt file and repairs
   // base. A tree carrying no ack has nothing to inherit, so it needs no base read — which
   // is precisely the shape of the repair PR, and it lands and unblocks everyone.
-  const baseAck = ack === null ? null : readAckFileAtRef(baseSha);
+  const baseAck = ack === null ? null : readAckSourcesAtRef(baseSha).doc;
 
   // Reconcile the family SET across three independent signals, rather than asserting one
   // count against both sides. The baseline is built at the base ref and the current tree
@@ -2255,10 +3119,311 @@ test('differential attribution over the real tree', { timeout: 900_000 }, async 
     baseAck,
     sizeBaseline: resolvedBaseline.sizeBaseline,
     sizeCurrent: currentSizes(),
+    mergeAckErrors,
   });
 
   assert.ok(
     result.ok,
     `emitted-attribution failed against ${base}@${baseSha.slice(0, 12)}:\n\n${formatReport(result)}`,
   );
+});
+
+// ─── Cross-tree version normalization (#2891) ──────────────────────────────────
+//
+// #2767's `currentManifests({ repoRoot })` spawns a DIFFERENT checkout's installer
+// but, before this fix, still normalized the emitted content against THIS checkout's
+// PKG_VERSION — so a version-bumped current tree compared against an older-version
+// baseline worktree never collapsed the baseline's `// gsd-hook-version: <old>` stamp
+// to '<VERSION>', every one of that baseline's emitted files spuriously "differed",
+// and the differential attribution gate above (the real-tree test) failed with all
+// 364 emitted hook paths unattributed. These tests pin the mechanism directly against
+// `buildParityManifest`'s `pkgVersion` option and `measuredPackageVersion`, the two
+// pieces `currentManifests` composes to fix it, rather than only against the
+// expensive real-tree gate.
+
+function makeVersionStampedTree(hookVersion) {
+  const root = createTempDir('gsd-test-ppm-version-');
+  const configDir = path.join(root, 'cfg');
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(configDir, 'hook.js'),
+    `// gsd-hook-version: ${hookVersion}\nconsole.log('hook body unchanged across versions');\n`,
+  );
+  return { root, configDir };
+}
+
+test('buildParityManifest: same content at two different pkgVersions hashes identically when each is normalized against its OWN version (#2891)', () => {
+  const a = makeVersionStampedTree('1.8.0');
+  const b = makeVersionStampedTree('1.9.0');
+  try {
+    const manifestA = buildParityManifest(a.configDir, a.root, { pkgVersion: '1.8.0' });
+    const manifestB = buildParityManifest(b.configDir, b.root, { pkgVersion: '1.9.0' });
+    assert.equal(
+      manifestA['hook.js'],
+      manifestB['hook.js'],
+      'byte-identical-apart-from-version-stamp files must hash identically once each side ' +
+      'is normalized against the version that actually produced it'
+    );
+  } finally {
+    cleanup(a.root);
+    cleanup(b.root);
+  }
+});
+
+test('buildParityManifest: hash of a measured tree does not depend on the MEASURING repo\'s own version (#2891)', () => {
+  // Reproduces the real cross-tree shape: content stamped with version X, normalized
+  // with the EXPLICIT pkgVersion of the tree that produced it (X) — never with this
+  // checkout's own PKG_VERSION (Y), which is what the pre-fix bug silently defaulted to.
+  const measuredVersion = '7.7.7';
+  assert.notEqual(
+    measuredVersion,
+    PKG_VERSION,
+    'test fixture must use a version distinct from this checkout\'s own PKG_VERSION for the assertion below to be meaningful'
+  );
+  const tree = makeVersionStampedTree(measuredVersion);
+  try {
+    const manifest = buildParityManifest(tree.configDir, tree.root, { pkgVersion: measuredVersion });
+    // The stamp must have collapsed to '<VERSION>' — if it hadn't (e.g. because the
+    // measuring repo's own PKG_VERSION had been used instead), the raw '7.7.7' would
+    // still be present pre-hash and this hash would differ from a control manifest
+    // built directly against the sentinel-substituted content.
+    const controlContent = `// gsd-hook-version: <VERSION>\nconsole.log('hook body unchanged across versions');\n`;
+    const controlHash = crypto.createHash('sha256').update(controlContent).digest('hex').slice(0, 16);
+    assert.equal(
+      manifest['hook.js'],
+      controlHash,
+      'hash must reflect the version-stamp collapsing to <VERSION> using the MEASURED tree\'s ' +
+      'own version, independent of whatever PKG_VERSION the measuring repo happens to be at'
+    );
+  } finally {
+    cleanup(tree.root);
+  }
+});
+
+test('buildParityManifest: pkgVersion guard rejects empty/undefined/null/non-string/non-semver-shaped and never corrupts the manifest (#2891)', () => {
+  const tree = makeVersionStampedTree('1.8.0');
+  try {
+    // Omitting pkgVersion entirely is legitimate (defaults to this checkout's own
+    // PKG_VERSION) and must NOT throw.
+    assert.doesNotThrow(() => buildParityManifest(tree.configDir, tree.root));
+
+    // Explicitly passing a bad value must throw — including an EXPLICIT `undefined`,
+    // which is deliberately NOT treated the same as omitting the key (see the `in`
+    // guard in install-shared.cjs: a caller-side bug that resolves a version to
+    // `undefined` must fail loudly, never silently fall back to this checkout's own
+    // version). '1' and '12' are shape failures (#2891 review FINDING 2): a
+    // non-semver-shaped string like '1' must be rejected, not silently accepted and
+    // later matched as a substring of unrelated numeric content (e.g. 'v 1.8.0 x').
+    for (const bad of ['', undefined, null, 42, '1', '12']) {
+      assert.throws(
+        () => buildParityManifest(tree.configDir, tree.root, { pkgVersion: bad }),
+        /pkgVersion must be a non-empty semver-ish string/,
+        `expected pkgVersion=${JSON.stringify(bad)} to throw`
+      );
+    }
+
+    // Corruption check: an empty pkgVersion, if it ever reached blind substring
+    // replacement, would corrupt content that merely contains matching characters.
+    // Confirm the guard fires BEFORE that — a file whose entire content is 'abc' must
+    // never make it into a manifest via a '' pkgVersion.
+    const corruptibleRoot = createTempDir('gsd-test-ppm-corrupt-');
+    const corruptibleDir = path.join(corruptibleRoot, 'cfg');
+    fs.mkdirSync(corruptibleDir, { recursive: true });
+    fs.writeFileSync(path.join(corruptibleDir, 'f.txt'), 'abc');
+    try {
+      assert.throws(
+        () => buildParityManifest(corruptibleDir, corruptibleRoot, { pkgVersion: '' }),
+        /pkgVersion must be a non-empty semver-ish string/
+      );
+    } finally {
+      cleanup(corruptibleRoot);
+    }
+  } finally {
+    cleanup(tree.root);
+  }
+});
+
+test('buildParityManifest: pkgVersion shape guard boundary — limit-1/limit/limit+1 by length (#2891 review FINDING 2)', () => {
+  const tree = makeVersionStampedTree('1.8.0');
+  try {
+    // '0.0.0' is the shortest string SEMVER_ISH_RE accepts (5 chars: MAJOR.MINOR.PATCH,
+    // all single-digit, no prerelease/build) — the "limit" case.
+    assert.doesNotThrow(
+      () => buildParityManifest(tree.configDir, tree.root, { pkgVersion: '0.0.0' }),
+      'a minimal valid MAJOR.MINOR.PATCH string must be accepted (limit)'
+    );
+    // '12' (limit+1 relative to the 1-char failure below, and still nowhere near
+    // semver-shaped) must still be rejected.
+    assert.throws(
+      () => buildParityManifest(tree.configDir, tree.root, { pkgVersion: '12' }),
+      /pkgVersion must be a non-empty semver-ish string/,
+      'a 2-char non-semver-shaped string must be rejected (limit+1 by length from \'1\')'
+    );
+    // '1' (limit-1 relative to '12') must be rejected — the concrete regression this
+    // guard exists to close: {pkgVersion:'1'} was previously ACCEPTED and rewrote
+    // 'v 1.8.0 x' to 'v <VERSION>.8.0 x' via a bare-substring match.
+    assert.throws(
+      () => buildParityManifest(tree.configDir, tree.root, { pkgVersion: '1' }),
+      /pkgVersion must be a non-empty semver-ish string/,
+      'a 1-char string must be rejected (limit-1)'
+    );
+  } finally {
+    cleanup(tree.root);
+  }
+});
+
+test('buildParityManifest: pkgVersion is honored when reachable via the PROTOTYPE CHAIN, not only as an own key (#2891 review FINDING 4)', () => {
+  const tree = makeVersionStampedTree('7.7.7');
+  try {
+    // Object.create({pkgVersion:'7.7.7'}) has NO own 'pkgVersion' key, but the key IS
+    // reachable via `in` — before the fix this silently fell through to this
+    // checkout's own PKG_VERSION (the exact silent-fallback the guard exists to
+    // prevent), reached via a different vector than an explicit own-key bad value.
+    const opts = Object.create({ pkgVersion: '7.7.7' });
+    const manifest = buildParityManifest(tree.configDir, tree.root, opts);
+    const controlContent = `// gsd-hook-version: <VERSION>\nconsole.log('hook body unchanged across versions');\n`;
+    const controlHash = crypto.createHash('sha256').update(controlContent).digest('hex').slice(0, 16);
+    assert.equal(
+      manifest['hook.js'],
+      controlHash,
+      'an inherited pkgVersion must be read and normalized against, not silently ignored in favor of this checkout\'s own PKG_VERSION'
+    );
+  } finally {
+    cleanup(tree.root);
+  }
+});
+
+test('buildParityManifest: opts guard rejects null/non-object (#2891 review FINDING 5)', () => {
+  const tree = makeVersionStampedTree('1.8.0');
+  try {
+    for (const bad of [null, 'x', 42, true, []]) {
+      assert.throws(
+        () => buildParityManifest(tree.configDir, tree.root, bad),
+        /opts must be a plain object or omitted/,
+        `expected opts=${JSON.stringify(bad)} to throw a clear message, not a raw TypeError`
+      );
+    }
+  } finally {
+    cleanup(tree.root);
+  }
+});
+
+test('buildInstallTree: no longer accepts/forwards an opts argument, so a bad third argument is silently ignored rather than reaching buildParityManifest\'s guard (#2891 review FINDINGS 5+6)', () => {
+  // FINDING 6 removed buildInstallTree's dead opts-forwarding parameter (pkgVersion
+  // never affects the emitted FILE SET, only content hashes, and no caller ever passed
+  // a third argument). A consequence: buildInstallTree(cd, root, null) — the exact
+  // FINDING 5 repro against the OLD forwarding code — no longer reaches
+  // buildParityManifest's opts guard at all; the extra argument is simply unused,
+  // consistent with ordinary JS call semantics, and buildParityManifest gets its
+  // default `{}`. This must NOT throw.
+  const tree = makeVersionStampedTree('1.8.0');
+  try {
+    assert.doesNotThrow(() => buildInstallTree(tree.configDir, tree.root, null));
+    assert.deepEqual(
+      buildInstallTree(tree.configDir, tree.root, null),
+      buildInstallTree(tree.configDir, tree.root),
+      'a discarded third argument must not change the result'
+    );
+  } finally {
+    cleanup(tree.root);
+  }
+});
+
+test('measuredPackageVersion: resolves this checkout\'s version with no repoRoot, the measured tree\'s version with one, and fails closed (#2891)', () => {
+  // No repoRoot at all (key genuinely absent): this checkout's own PKG_VERSION, no
+  // filesystem I/O.
+  assert.equal(measuredPackageVersion(), PKG_VERSION);
+  // Explicit `undefined` is the ONLY falsy value treated as "this checkout" — every
+  // OTHER falsy value ('', 0, false) is a caller-side bug and must fail closed rather
+  // than silently defaulting, consistent with `currentManifests`' installScript gate
+  // and with `buildParityManifest`'s pkgVersion guard (#2891 review FINDING 7).
+  assert.equal(measuredPackageVersion(undefined), PKG_VERSION);
+  for (const bad of ['', 0, false]) {
+    assert.throws(
+      () => measuredPackageVersion(bad),
+      /repoRoot must be a non-empty path or omitted entirely/,
+      `expected repoRoot=${JSON.stringify(bad)} to throw`
+    );
+  }
+
+  // A different tree's package.json: its OWN version, not this checkout's.
+  const measuredRoot = createTempDir('gsd-test-mpv-ok-');
+  try {
+    fs.writeFileSync(
+      path.join(measuredRoot, 'package.json'),
+      JSON.stringify({ name: 'measured-tree', version: '9.9.9' }),
+    );
+    assert.equal(measuredPackageVersion(measuredRoot), '9.9.9');
+  } finally {
+    cleanup(measuredRoot);
+  }
+
+  // Missing package.json: fails closed, never falls back to this checkout's version.
+  const missingRoot = createTempDir('gsd-test-mpv-missing-');
+  try {
+    assert.throws(() => measuredPackageVersion(missingRoot), /cannot read/);
+  } finally {
+    cleanup(missingRoot);
+  }
+
+  // Unparseable package.json.
+  const badJsonRoot = createTempDir('gsd-test-mpv-badjson-');
+  try {
+    fs.writeFileSync(path.join(badJsonRoot, 'package.json'), '{not json');
+    assert.throws(() => measuredPackageVersion(badJsonRoot), /not valid JSON/);
+  } finally {
+    cleanup(badJsonRoot);
+  }
+
+  // Version-less package.json (key ABSENT entirely) — the only branch the pre-review
+  // test suite drove.
+  const noVersionRoot = createTempDir('gsd-test-mpv-noversion-');
+  try {
+    fs.writeFileSync(path.join(noVersionRoot, 'package.json'), JSON.stringify({ name: 'no-version' }));
+    assert.throws(() => measuredPackageVersion(noVersionRoot), /no non-empty string "version" field/);
+  } finally {
+    cleanup(noVersionRoot);
+  }
+
+  // "version" key PRESENT but an empty string — a distinct branch from "absent"
+  // (`typeof '' === 'string'` but `''.length === 0`); the pre-review suite never drove
+  // it and both surviving mutants collapse this into the absent-key case (#2891 review
+  // FINDING 3).
+  const emptyVersionRoot = createTempDir('gsd-test-mpv-emptyversion-');
+  try {
+    fs.writeFileSync(path.join(emptyVersionRoot, 'package.json'), JSON.stringify({ version: '' }));
+    assert.throws(() => measuredPackageVersion(emptyVersionRoot), /no non-empty string "version" field/);
+  } finally {
+    cleanup(emptyVersionRoot);
+  }
+
+  // "version" key PRESENT but non-string (e.g. a bare JSON number) — the other branch
+  // `typeof version !== 'string'` guards, distinct from both "absent" and "empty
+  // string" (#2891 review FINDING 3).
+  const numericVersionRoot = createTempDir('gsd-test-mpv-numericversion-');
+  try {
+    fs.writeFileSync(path.join(numericVersionRoot, 'package.json'), JSON.stringify({ version: 123 }));
+    assert.throws(() => measuredPackageVersion(numericVersionRoot), /no non-empty string "version" field/);
+  } finally {
+    cleanup(numericVersionRoot);
+  }
+
+  // Unreadable package.json: monkeypatch fs.readFileSync (NEVER chmod 0o000 — root
+  // bypasses mode bits and the test would silently pass with zero coverage in root
+  // Docker/CI). Save original, override to throw, assert.throws, restore in `finally`.
+  const unreadableRoot = createTempDir('gsd-test-mpv-unreadable-');
+  try {
+    fs.writeFileSync(path.join(unreadableRoot, 'package.json'), JSON.stringify({ version: '1.0.0' }));
+    const orig = fs.readFileSync;
+    try {
+      fs.readFileSync = () => { throw new Error('injected package.json read failure'); };
+      assert.throws(() => measuredPackageVersion(unreadableRoot), /injected package\.json read failure/);
+    } finally {
+      fs.readFileSync = orig;
+    }
+    // Restoration is real, not assumed.
+    assert.equal(measuredPackageVersion(unreadableRoot), '1.0.0');
+  } finally {
+    cleanup(unreadableRoot);
+  }
 });

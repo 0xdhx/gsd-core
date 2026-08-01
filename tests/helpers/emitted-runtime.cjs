@@ -42,16 +42,47 @@ const {
   MINIMUM_MANIFEST_FAMILIES,
   runMinimalInstall,
   buildParityManifest,
+  PKG_VERSION,
 } = require('./install-shared.cjs');
+const { mergeAckSources, MAX_ACK_FRAGMENTS } = require('./emitted-diff.cjs');
+
+/**
+ * Fail loudly when a fragment listing exceeds `MAX_ACK_FRAGMENTS`, naming the
+ * directory, the cap, and the actual count. Never truncate: a silently-truncated
+ * listing would silently drop acknowledgments, which is exactly the class of silent
+ * failure the ack seam exists to prevent (see `MAX_ACK_FRAGMENTS`'s doc comment in
+ * `emitted-diff.cjs`).
+ */
+function assertFragmentCountWithinCap(dirLabel, names) {
+  if (names.length > MAX_ACK_FRAGMENTS) {
+    throw new Error(
+      `emitted-attribution: ${dirLabel} contains ${names.length} ack fragments, `
+      + `exceeding the cap of ${MAX_ACK_FRAGMENTS}. Refusing to read only some of them — a `
+      + 'truncated read would silently drop acknowledgments. Prune spent fragments from '
+      + 'this directory.',
+    );
+  }
+  return names;
+}
 
 const REPO_ROOT = path.join(__dirname, '..', '..');
 /**
  * Repo-relative and POSIX-separated on every platform: this form is what `git show
  * <ref>:<path>` requires, and git speaks only forward slashes regardless of host OS.
  * `ACK_PATH` derives from it so the two can never name different files.
+ *
+ * LEGACY single-file path (#2778), still honored and unioned with `ACK_DIR_REPO_PATH`
+ * below (#2914) — open PRs authored before the fragment split still carry this file.
  */
 const ACK_REPO_PATH = 'tests/emitted-drift-ack.json';
 const ACK_PATH = path.join(REPO_ROOT, ...ACK_REPO_PATH.split('/'));
+/**
+ * Per-PR fragment directory (#2914). Every fragment is independently named, so two PRs
+ * that each need an ack can never collide on this path the way they always did on the
+ * single legacy file above.
+ */
+const ACK_DIR_REPO_PATH = 'tests/emitted-drift-acks';
+const ACK_DIR = path.join(REPO_ROOT, ...ACK_DIR_REPO_PATH.split('/'));
 const FIXTURE_SUBDIR = 'tests/fixtures/golden-install-parity';
 
 /**
@@ -323,8 +354,13 @@ function resolveBaseSha(base = 'origin/next') {
  * the same "does not exist in" message — so absence is established with `ls-tree`, which
  * exits 0 with empty output when the path is simply not there and non-zero on a real
  * fault.
+ *
+ * `repoPath` defaults to the legacy single file, but is generalized (#2914) so the same
+ * read-at-ref logic serves any one fragment under `ACK_DIR_REPO_PATH` too — there is
+ * exactly one implementation of "read this ack path at that ref", reused per source
+ * rather than re-typed per fragment.
  */
-function readAckFileAtRef(base, { cwd = REPO_ROOT, run = git } = {}) {
+function readAckFileAtRef(base, { cwd = REPO_ROOT, run = git, repoPath = ACK_REPO_PATH } = {}) {
   // `execFileSync`'s array form stops SHELL metacharacters but not git's own option
   // parsing: a ref beginning with `-` is read as an option token, and `git show` honors
   // diff options including `--output=<file>`, which writes. Today every caller passes a
@@ -339,7 +375,7 @@ function readAckFileAtRef(base, { cwd = REPO_ROOT, run = git } = {}) {
 
   let listing;
   try {
-    listing = run(['ls-tree', '--name-only', base, '--', ACK_REPO_PATH], { cwd });
+    listing = run(['ls-tree', '--name-only', base, '--', repoPath], { cwd });
   } catch (err) {
     throw new Error(
       `emitted-attribution: could not list the ack at "${base}": ${err.message}. This is a `
@@ -351,22 +387,129 @@ function readAckFileAtRef(base, { cwd = REPO_ROOT, run = git } = {}) {
 
   let raw;
   try {
-    raw = run(['show', `${base}:${ACK_REPO_PATH}`], { cwd });
+    raw = run(['show', `${base}:${repoPath}`], { cwd });
   } catch (err) {
     throw new Error(
-      `emitted-attribution: ${ACK_REPO_PATH} exists at "${base}" but could not be read: ${err.message}`,
+      `emitted-attribution: ${repoPath} exists at "${base}" but could not be read: ${err.message}`,
     );
   }
   if (raw.trim() === '') {
-    throw new Error(`emitted-attribution: ${ACK_REPO_PATH} is present at "${base}" but empty`);
+    throw new Error(`emitted-attribution: ${repoPath} is present at "${base}" but empty`);
   }
   try {
     return JSON.parse(raw);
   } catch (err) {
     throw new Error(
-      `emitted-attribution: ${ACK_REPO_PATH} at "${base}" is not valid JSON: ${err.message}`,
+      `emitted-attribution: ${repoPath} at "${base}" is not valid JSON: ${err.message}`,
     );
   }
+}
+
+/**
+ * Fragment filenames present under `ACK_DIR_REPO_PATH` AT `base`, sorted.
+ *
+ * Mirrors `readAckFileAtRef`'s absence handling: `ls-tree` on a directory that does not
+ * exist at that ref exits 0 with empty output, which this reads as "no fragments there"
+ * — the healthy steady state, not a fault. A genuine git failure (bad ref, corrupt
+ * object) still throws, for the same reason `readAckFileAtRef` throws on one: silently
+ * reading "could not list" as "nothing there" would leave every fragment ack able to
+ * consume a delta it should not.
+ */
+function listAckFragmentFilesAtRef(base, { cwd = REPO_ROOT, run = git } = {}) {
+  let out;
+  try {
+    out = run(['ls-tree', '--name-only', base, '--', `${ACK_DIR_REPO_PATH}/`], { cwd });
+  } catch (err) {
+    throw new Error(
+      `emitted-attribution: could not list ${ACK_DIR_REPO_PATH}/ at "${base}": ${err.message}.`,
+    );
+  }
+  const names = out
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((p) => p.endsWith('.json'))
+    .map((p) => p.slice(p.lastIndexOf('/') + 1))
+    .sort();
+  return assertFragmentCountWithinCap(`${ACK_DIR_REPO_PATH}/ at "${base}"`, names);
+}
+
+/**
+ * Fragment filenames present under `ACK_DIR` on THIS tree (the working copy), sorted.
+ * Absent directory == zero fragments, the healthy steady state — not a fault.
+ */
+function listAckFragmentFiles(dir = ACK_DIR) {
+  if (!fs.existsSync(dir)) return [];
+  const names = fs.readdirSync(dir)
+    .filter((name) => name.endsWith('.json'))
+    .sort();
+  return assertFragmentCountWithinCap(dir, names);
+}
+
+/**
+ * Read + union every ack source on THIS tree (#2914): the legacy single file (if
+ * present) plus every fragment under `ACK_DIR`. Reuses `readAckFile` per physical file
+ * (same absent/empty/unparseable rules for a fragment as for the legacy file — one
+ * definition, not a second one per source) and `mergeAckSources` (tests/helpers/
+ * emitted-diff.cjs) for the union + duplicate-key detection.
+ *
+ * Returns `{ doc: null, errors: [] }` only when NEITHER the legacy file nor any
+ * fragment exists — the healthy steady state matching `readAckFile`'s own `null`
+ * contract, so callers can keep testing `ack === null` to decide whether the base side
+ * needs consulting at all (avoiding the deadlock `readAckFileAtRef`'s doc comment
+ * describes for a corrupt base).
+ *
+ * @returns {{ doc: {version: number, paths: object} | null, errors: string[] }}
+ */
+function readAckSources({ legacyPath = ACK_PATH, fragmentsDir = ACK_DIR } = {}) {
+  const docs = [];
+  if (fs.existsSync(legacyPath)) {
+    docs.push({ source: ACK_REPO_PATH, doc: readAckFile(legacyPath) });
+  }
+  for (const name of listAckFragmentFiles(fragmentsDir)) {
+    docs.push({
+      source: `${ACK_DIR_REPO_PATH}/${name}`,
+      doc: readAckFile(path.join(fragmentsDir, name)),
+    });
+  }
+  if (docs.length === 0) return { doc: null, errors: [] };
+  const { merged, errors } = mergeAckSources(docs);
+  return { doc: merged, errors };
+}
+
+/**
+ * Read + union every ack source AT `base` (#2914): the legacy single file plus every
+ * fragment, as they existed at that ref. Mirrors `readAckSources` above, one ref-read
+ * per physical source via `readAckFileAtRef`'s now-generalized `repoPath` option.
+ *
+ * Base-side merge/schema errors are DELIBERATELY DISCARDED, matching this module's
+ * existing precedent for the base side (see `diffEmitted`'s caller below: "Base-side
+ * SCHEMA errors are deliberately discarded... a document we cannot read simply inherits
+ * nothing — which is the ARMED reading"). A cross-fragment collision found only at the
+ * base is `next`'s own health, not this diff's to answer for; `mergeAckSources`'s
+ * first-source-wins fallback for a duplicate key is still the STRICT reading here (an
+ * entry can only be "spent" against the ONE reason kept, never either of two), so
+ * discarding the error text costs no protection while avoiding a lint-clean PR being
+ * blocked by a historical duplicate it did not introduce and cannot fix by itself.
+ *
+ * A genuine READ failure (corrupt JSON, unreadable object) on any single source still
+ * throws, exactly as `readAckFileAtRef` already does — only the schema/collision
+ * bookkeeping is discarded, never a fault.
+ *
+ * @returns {{ doc: {version: number, paths: object} | null }}
+ */
+function readAckSourcesAtRef(base, { cwd = REPO_ROOT, run = git } = {}) {
+  const docs = [];
+  const legacyDoc = readAckFileAtRef(base, { cwd, run });
+  if (legacyDoc !== null) docs.push({ source: ACK_REPO_PATH, doc: legacyDoc });
+  for (const name of listAckFragmentFilesAtRef(base, { cwd, run })) {
+    const relPath = `${ACK_DIR_REPO_PATH}/${name}`;
+    const doc = readAckFileAtRef(base, { cwd, run, repoPath: relPath });
+    if (doc !== null) docs.push({ source: relPath, doc });
+  }
+  if (docs.length === 0) return { doc: null };
+  const { merged } = mergeAckSources(docs);
+  return { doc: merged };
 }
 
 /**
@@ -602,6 +745,73 @@ function baselineSizesAtRef(base = 'origin/next') {
 }
 
 /**
+ * The package version of the tree whose emitted output is about to be measured.
+ *
+ * `bin/install.js` bakes `{{GSD_VERSION}}` -> `pkg.version` into every emitted hook,
+ * and `buildParityManifest`'s `pkgVersion` normalization exists to collapse that stamp
+ * back to '<VERSION>' so a version bump alone never moves a hash. That normalization is
+ * only correct when `pkgVersion` matches the version of the tree that PRODUCED the
+ * content being hashed — for `repoRoot`-driven cross-tree measurement (#2767, #2891)
+ * that is NOT necessarily this checkout's own `PKG_VERSION`. This helper resolves the
+ * right version for whichever tree is actually being measured.
+ *
+ * Fails closed: a missing, unreadable, unparseable, or version-less `package.json` at
+ * `repoRoot` throws rather than silently falling back to this checkout's own version —
+ * a silent fallback here is exactly the cross-tree mis-attribution bug #2891 fixes
+ * (every emitted hook path would spuriously differ, and the differential attribution
+ * gate would blame nothing for it).
+ *
+ * @param {string} [repoRoot] - absolute path to the tree being measured. Only an
+ *   OMITTED (or explicit `undefined`) repoRoot means "this checkout" and returns this
+ *   module's own PKG_VERSION with no I/O. Any OTHER falsy value (`''`, `0`, `false`) is
+ *   NOT treated as "this checkout" — it is a caller-side bug (e.g. an unresolved path
+ *   variable) and must fail closed rather than silently measuring the wrong tree,
+ *   consistent with `currentManifests`' `installScript` gate below and with how
+ *   `buildParityManifest`'s `pkgVersion` treats an explicit-but-empty value as a caller
+ *   error rather than a fallback trigger (#2891 review FINDING 7).
+ * @returns {string} non-empty package version string.
+ */
+function measuredPackageVersion(repoRoot) {
+  if (repoRoot === undefined) return PKG_VERSION;
+  if (!repoRoot) {
+    throw new Error(
+      `measuredPackageVersion: repoRoot must be a non-empty path or omitted entirely, got ${JSON.stringify(repoRoot)}. ` +
+      'An omitted/undefined repoRoot means "this checkout"; any other falsy value is treated as a caller error.'
+    );
+  }
+
+  const pkgPath = path.join(repoRoot, 'package.json');
+  let raw;
+  try {
+    raw = fs.readFileSync(pkgPath, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `measuredPackageVersion: cannot read ${pkgPath} (${err.message}); cannot normalize ` +
+      'emitted version for the measured tree; a wrong version silently mis-attributes every hook.'
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `measuredPackageVersion: ${pkgPath} is not valid JSON (${err.message}); cannot normalize ` +
+      'emitted version for the measured tree; a wrong version silently mis-attributes every hook.'
+    );
+  }
+
+  const version = parsed && parsed.version;
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(
+      `measuredPackageVersion: ${pkgPath} has no non-empty string "version" field; cannot ` +
+      'normalize emitted version for the measured tree; a wrong version silently mis-attributes every hook.'
+    );
+  }
+  return version;
+}
+
+/**
  * Build the CURRENT emitted manifest set for real — one installer spawn per runtime.
  * This is the expensive, honest half: it reflects what the tree actually emits now,
  * not what the author regenerated into a fixture.
@@ -616,14 +826,25 @@ function baselineSizesAtRef(base = 'origin/next') {
  *   base-ref worktree) so the two sides stay comparable even if the definition itself
  *   evolves — running the OTHER tree's own (older, or absent) copy of this function would
  *   defeat that.
+ *
+ *   The version normalized into '<VERSION>' inside each manifest entry is resolved via
+ *   `measuredPackageVersion(repoRoot)` — i.e. `<repoRoot>/package.json`'s own version,
+ *   NOT this checkout's — since `<repoRoot>/bin/install.js` is what stamped the emitted
+ *   content in the first place (#2891).
  */
 function currentManifests({ repoRoot } = {}) {
-  const installScript = repoRoot ? path.join(repoRoot, 'bin', 'install.js') : undefined;
+  // Gated the same way `measuredPackageVersion` gates its own repoRoot below: only an
+  // omitted/`undefined` repoRoot means "this checkout" (installScript stays the
+  // default). Any other falsy value falls through to `measuredPackageVersion`, which
+  // throws — this line never gets a chance to diverge from that same rule (#2891
+  // review FINDING 7).
+  const installScript = repoRoot !== undefined ? path.join(repoRoot, 'bin', 'install.js') : undefined;
+  const pkgVersion = measuredPackageVersion(repoRoot);
   const manifests = {};
   for (const { name, runtime, scope } of MANIFEST_FAMILIES) {
     const { configDir, root } = runMinimalInstall({ runtime, scope, installScript });
     try {
-      manifests[name] = buildParityManifest(configDir, root);
+      manifests[name] = buildParityManifest(configDir, root, { pkgVersion });
     } finally {
       cleanup(root);
     }
@@ -676,7 +897,13 @@ module.exports = {
   REPO_ROOT,
   ACK_PATH,
   ACK_REPO_PATH,
+  ACK_DIR,
+  ACK_DIR_REPO_PATH,
   readAckFileAtRef,
+  listAckFragmentFiles,
+  listAckFragmentFilesAtRef,
+  readAckSources,
+  readAckSourcesAtRef,
   FIXTURE_SUBDIR,
   MANIFEST_FAMILIES,
   MINIMUM_MANIFEST_FAMILIES,
@@ -695,6 +922,7 @@ module.exports = {
   baselineManifestsAtRef,
   baselineSizesAtRef,
   buildBaselineAtRef,
+  measuredPackageVersion,
   currentManifests,
   currentSizes,
   readAckFile,

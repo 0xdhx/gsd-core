@@ -114,8 +114,15 @@ function buildMatrix(registry) {
   const extByCap = extensionsByCapability(registry);
   const featureTable = renderTable(caps, 'feature', extByCap);
   const runtimeTable = renderTable(caps, 'runtime', extByCap);
+  // ADR-2782 D3 added a third role. Rendering only feature+runtime silently
+  // DROPPED every role:"reviewer" capability from the catalogue — and because
+  // `--check` compares generated output against the committed file, both omitted
+  // them identically, so the drift guard reported "up to date" while five shipped
+  // capabilities were invisible. A guard blind to a whole role is not guarding.
+  const reviewerTable = renderTable(caps, 'reviewer', extByCap);
   const featureCount = caps.filter((c) => c.role === 'feature').length;
   const runtimeCount = caps.filter((c) => c.role === 'runtime').length;
+  const reviewerCount = caps.filter((c) => c.role === 'reviewer').length;
 
   return `# Capability matrix reference
 
@@ -138,7 +145,7 @@ See also: [ADR-1244](../adr/1244-capability-ecosystem.md) —
 | Column | Description |
 |---|---|
 | **id** | Canonical capability identifier; unique across first- and third-party capabilities. Reserved prefixes: \`gsd-\`, \`gsd-core-\`, \`anthropic-\`. |
-| **role** | \`feature\` — extends what the loop does; \`runtime\` — adapts GSD to a specific AI runtime/IDE. |
+| **role** | \`feature\` — extends what the loop does; \`runtime\` — adapts GSD to a specific AI runtime/IDE; \`reviewer\` — declares a cross-AI reviewer lane (ADR-2782). A capability may be both a runtime and a reviewer. |
 | **tier** | \`core\` — always active; \`standard\` — active when the runtime supports it; \`full\` — opt-in or runtime-specific. |
 | **engines.gsd** | Semver RANGE expressing host-version compatibility. A hard gate at install and at load. \`—\` means the capability declares no range. |
 | **extension points** | The loop points this capability registers hooks into (from the registry's \`byLoopPoint\` index). \`—\` means it registers none (typical for runtime capabilities, whose job is surface emission). |
@@ -180,6 +187,23 @@ emission), so their extension-point and hook-kind cells are \`—\`.
 
 ${runtimeTable}
 
+### Reviewer capabilities (role: reviewer) — ${reviewerCount}
+
+Reviewer capabilities declare a cross-AI **reviewer lane** — one external CLI or
+model endpoint \`/gsd:review\` hands a plan to (ADR-2782 D3). They are not install
+targets: they emit no skills, agents, hooks or surface files, so their
+extension-point and hook-kind cells are \`—\`. A host that is *also* a reviewer
+(Claude, Codex, Cursor, OpenCode, Qwen, Antigravity) keeps one manifest and
+appears under **runtime** above, carrying its lane alongside its runtime body;
+only lanes that GSD never installs into appear here.
+
+Because a lane receives the plan text, requirements, research findings and
+\`CONTEXT.md\` decisions, it is a disclosed executable surface and is consent-gated
+at install like any other — see
+[the trust model](../explanation/capability-trust-model.md).
+
+${reviewerTable}
+
 ---
 
 ## Third-party capabilities
@@ -199,7 +223,7 @@ fields described below, with \`source\` = \`third-party\`.
 | Column | Value |
 |---|---|
 | **id** | As declared in \`capability.json\`. Must not use reserved prefixes (\`gsd-\`, \`gsd-core-\`, \`anthropic-\`). |
-| **role** | \`feature\` or \`runtime\`, as declared. |
+| **role** | \`feature\`, \`runtime\`, or \`reviewer\`, as declared. |
 | **tier** | \`core\`, \`standard\`, or \`full\`, as declared. |
 | **engines.gsd** | Range from \`capability.json\`; verified at install and at each load. |
 | **extension points** | The loop points the capability registers into, validated against the known 12 identifiers. |
