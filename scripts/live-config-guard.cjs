@@ -112,6 +112,50 @@ function resolveLiveConfigRoots(deps = {}) {
 }
 
 /**
+ * Watch targets that are NOT runtime config roots, and so cannot be expressed as
+ * `root x GSD_OWNED_ENTRIES`.
+ *
+ * #2665 round 3: resolveLiveConfigRoots enumerates getGlobalConfigDir per registry
+ * runtime plus grok. Two live write surfaces are invisible to that shape, so a leak
+ * on either passed through this guard — the PR's own safety net — silently:
+ *
+ *   $GSD_HOME/.gsd  — GSD's user-owned store (consent.json, defaults.json, capability
+ *                     overlays). Watched WHOLESALE: unlike ~/.claude this root is
+ *                     exclusively ours, so the shared-root false-positive trap in
+ *                     SCOPE above does not apply and an ownership filter would only
+ *                     narrow the guard for nothing.
+ *   <kimi>/config.toml — the file GSD writes its native [[hooks]] block into
+ *                     (resolveKimiHooksTomlDir, KIMI_SHARE_DIR). The INVERSE case:
+ *                     ~/.kimi belongs to Kimi CLI, so only the one file GSD writes is
+ *                     watched, never the root. This is the KNOWN GAP above accepted
+ *                     deliberately in one direction — GSD demonstrably writes this
+ *                     file (bin/install.js calls resolveKimiHooksTomlDir at two sites),
+ *                     so a concurrent Kimi CLI write is the only false positive, and
+ *                     Kimi is not running during the suite.
+ *
+ * @returns {string[]} absolute paths; empty if the built lib is absent.
+ */
+function resolveExtraWatchTargets(deps = {}) {
+  const libDir = deps.libDir || path.join(__dirname, '..', 'gsd-core', 'bin', 'lib');
+  const env = deps.env || process.env;
+  const homedir = (deps.os || os).homedir;
+
+  const targets = [path.resolve(path.join(env.GSD_HOME || homedir(), '.gsd'))];
+
+  try {
+    const { resolveKimiHooksTomlDir } = require(path.join(libDir, 'runtime-homes.cjs'));
+    // Thread the SAME injected env/home the GSD_HOME line above uses. Calling it
+    // bare reads process.env and os.homedir() regardless of `deps`, which leaves
+    // the seam untestable and the two targets resolved against different worlds.
+    const kimiDir = resolveKimiHooksTomlDir({ env, home: homedir() });
+    targets.push(path.resolve(path.join(kimiDir, 'config.toml')));
+  } catch {
+    // Unbuilt tree — same posture as resolveLiveConfigRoots: advisory, never fatal.
+  }
+  return targets;
+}
+
+/**
  * Newest mtime within a tree, bounded. Returns `truncated: true` when a bound
  * was hit — the caller must NOT report such a result as clean, on the same
  * principle that an existence probe passing vacuously is worse than no probe.
@@ -151,7 +195,7 @@ function newestMtime(target, budget) {
  * @returns {Record<string, {exists: boolean, newest: number, truncated: boolean}>}
  *   keyed by absolute entry path.
  */
-function snapshotLiveConfig(roots) {
+function snapshotLiveConfig(roots, extraTargets = []) {
   const budget = { remaining: MAX_ENTRIES };
   const snap = {};
 
@@ -163,6 +207,12 @@ function snapshotLiveConfig(roots) {
     const { newest, truncated } = newestMtime(target, budget);
     snap[target] = { exists: true, newest, truncated };
   };
+
+  // Non-root targets (resolveExtraWatchTargets) are recorded verbatim — they are
+  // already the exact path to watch, whole-dir or single-file. Passed explicitly
+  // rather than resolved here so a caller testing a fixture root does not silently
+  // pull the developer's real ~/.gsd into its snapshot.
+  for (const target of extraTargets) record(path.resolve(target));
 
   for (const root of roots) {
     for (const entry of GSD_OWNED_ENTRIES) record(path.join(root, entry));
@@ -251,6 +301,7 @@ module.exports = {
   MAX_ENTRIES,
   MAX_DEPTH,
   resolveLiveConfigRoots,
+  resolveExtraWatchTargets,
   snapshotLiveConfig,
   diffLiveConfig,
   formatViolations,
