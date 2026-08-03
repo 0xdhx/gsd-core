@@ -229,6 +229,31 @@ describe('#2665: guard watches non-root write surfaces', () => {
     }
   });
 
+  test('#2755: kimi-code config.toml is watched — named, not enumeration-relative', () => {
+    // The test above derives its expectation FROM the descriptor array, so it
+    // passes for whatever that array happens to contain and cannot see a
+    // descriptor that was never added — the enumeration-relative scope boundary
+    // this suite already calls out one layer down. #2755 landed kimi-code's
+    // `~/.kimi-code` (KIMI_CODE_HOME) on `next` as an inline literal inside
+    // resolveKimiHooksTomlDir's body; until it was hoisted into
+    // NON_REGISTRY_CONFIG_HOME_DESCRIPTORS the guard watched Kimi CLI's
+    // config.toml and not Kimi Code's. Naming the path is what makes dropping
+    // the descriptor fail loudly instead of quietly shrinking the expectation.
+    const home = tmpRoot();
+    const codeHome = tmpRoot();
+    try {
+      const env = { GSD_HOME: home, KIMI_CODE_HOME: codeHome };
+      const targets = resolveExtraWatchTargets({ env, os: { homedir: () => home } });
+      assert.ok(
+        targets.includes(path.resolve(path.join(codeHome, 'config.toml'))),
+        `expected kimi-code config.toml in ${JSON.stringify(targets)}`,
+      );
+    } finally {
+      cleanup(home);
+      cleanup(codeHome);
+    }
+  });
+
   test('GSD_HOME falls back to homedir when unset', () => {
     const home = tmpRoot();
     try {

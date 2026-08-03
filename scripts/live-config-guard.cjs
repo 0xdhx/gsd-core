@@ -80,13 +80,15 @@ const GSD_ARTIFACT_PREFIX = 'gsd-';
 /**
  * The file GSD writes into a NON-REGISTRY config home.
  *
- * Today's only such descriptor is kimi's `~/.kimi` (KIMI_SHARE_DIR), where GSD
- * writes its native `[[hooks]]` block into `config.toml`. NAMED RESIDUAL: this
- * assumes every non-registry descriptor is written the same way. A future
- * descriptor whose owned file differs needs a per-descriptor mapping here — the
- * consequence of getting it wrong is under-watching (a missed leak), not a false
- * positive, so it fails in the quiet direction and is called out rather than
- * left to be discovered.
+ * Both current descriptors are Kimi's — Kimi CLI's `~/.kimi` (KIMI_SHARE_DIR) and
+ * Kimi Code's `~/.kimi-code` (KIMI_CODE_HOME) — and GSD writes its native
+ * `[[hooks]]` block into `config.toml` in each, so the single filename below holds
+ * for both. NAMED RESIDUAL: this assumes every non-registry descriptor is written
+ * the same way. That assumption is now load-bearing rather than vacuous — it is
+ * carrying two descriptors, not one — and a future descriptor whose owned file
+ * differs needs a per-descriptor mapping here. The consequence of getting it wrong
+ * is under-watching (a missed leak), not a false positive, so it fails in the quiet
+ * direction and is called out rather than left to be discovered.
  */
 const NON_REGISTRY_OWNED_FILE = 'config.toml';
 
