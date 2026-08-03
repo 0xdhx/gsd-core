@@ -30,10 +30,18 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
+const cp = require('node:child_process');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 
 const { REVIEWER_LANES } = require('../gsd-core/bin/lib/review-lane-descriptor.cjs');
 const { resolveLanePlan } = require('../gsd-core/bin/lib/review-lane-invocation.cjs');
 const { runLane } = require('../gsd-core/bin/lib/review-lane-runner.cjs');
+const { cleanup } = require('./helpers.cjs');
+
+const REPO_ROOT = path.join(__dirname, '..');
+const TOOLS = path.join(REPO_ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
 
 const GUARD = Object.freeze({
   CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
@@ -130,6 +138,69 @@ describe('#2483 the claude reviewer lane suppresses CLAUDE.md + auto-memory inje
       assert.equal(planFor(lane.slug).env, null, `${lane.slug}'s plan must resolve env to null`);
     }
   });
+
+  // The spy tests above stop at the runner's `deps.spawn` seam. Production supplies that seam in
+  // `gsd-core/bin/gsd-tools.cjs`, as a hand-written object no unit test constructs — so the whole
+  // chain could be correct up to `SpawnPlan.env` and the merge could still be wrong or absent. This
+  // is the only assertion that runs the real `spawnSync`, via a `claude` shim on PATH that records
+  // the environment it was handed. POSIX-only: the shim is a shebang script, and mediating a Windows
+  // `.cmd` is a separate concern the repo tests on its own.
+  test(
+    'end-to-end: the real spawn hands the child both variables AND still inherits the rest',
+    { skip: process.platform === 'win32' ? 'POSIX shim (see win32 shim mediation tests)' : false },
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'feat-2483-'));
+      try {
+        const bin = path.join(dir, 'bin');
+        const runDir = path.join(dir, 'run');
+        const seen = path.join(dir, 'seen.txt');
+        fs.mkdirSync(bin);
+        fs.mkdirSync(runDir);
+        fs.writeFileSync(path.join(runDir, 'gsd-review-prompt.md'), 'prompt');
+        fs.writeFileSync(
+          path.join(bin, 'claude'),
+          '#!/usr/bin/env bash\ncat >/dev/null\n{\n' +
+          '  echo "MDS=${CLAUDE_CODE_DISABLE_CLAUDE_MDS:-<unset>}"\n' +
+          '  echo "AUTOMEM=${CLAUDE_CODE_DISABLE_AUTO_MEMORY:-<unset>}"\n' +
+          '  echo "INHERITED=${FEAT_2483_INHERITED:-<unset>}"\n' +
+          `} > "${seen}"\n` +
+          'echo "a review body long enough to clear the empty-output guard."\n',
+          { mode: 0o755 },
+        );
+
+        const r = cp.spawnSync(
+          process.execPath,
+          [TOOLS, 'review-lane', 'invoke', '--slug', 'claude', '--run-dir', runDir,
+            '--repo-root', REPO_ROOT, '--json'],
+          {
+            encoding: 'utf8',
+            timeout: 60_000,
+            killSignal: 'SIGKILL',
+            env: {
+              ...process.env,
+              PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+              FEAT_2483_INHERITED: 'yes',
+            },
+          },
+        );
+        assert.equal(r.status, 0, `gsd-tools review-lane invoke failed: ${r.stderr}`);
+        assert.ok(fs.existsSync(seen), `the claude shim never ran; stdout was: ${r.stdout}`);
+
+        const env = fs.readFileSync(seen, 'utf8');
+        assert.match(env, /^MDS=1$/m, 'the child did not receive CLAUDE_CODE_DISABLE_CLAUDE_MDS=1');
+        assert.match(env, /^AUTOMEM=1$/m, 'the child did not receive CLAUDE_CODE_DISABLE_AUTO_MEMORY=1');
+        // The other half of "merged OVER", and the reason this is one test rather than two: a wiring
+        // that REPLACED the environment instead of merging would satisfy the two assertions above
+        // and break every lane's PATH, HOME and proxy settings.
+        assert.match(
+          env, /^INHERITED=yes$/m,
+          'the lane env REPLACED the inherited environment instead of merging over it'
+        );
+      } finally {
+        cleanup(dir);
+      }
+    },
+  );
 
   test('a manifest-declared env is not honored — only first-party lanes execute', async () => {
     // The scope boundary this change deliberately does not cross, asserted rather than asserted-in-
