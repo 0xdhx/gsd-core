@@ -1,137 +1,175 @@
 'use strict';
 
 /**
- * #2483 — the claude reviewer leg in review.md was a bare headless spawn
- * (`cat {run_dir}/gsd-review-prompt.md | claude ... -p -`), run from the
- * project cwd, so the spawned session inherited the invoking user's global
- * CLAUDE.md, the project CLAUDE.md, and Claude Code auto-memory.
+ * #2483 — the claude reviewer lane spawned headless from the project cwd, so the spawned session
+ * inherited the invoking user's global CLAUDE.md, the project CLAUDE.md, and Claude Code
+ * auto-memory.
  *
- * That made it the only reviewer leg seeing anything beyond the prompt file:
- * `gather_context` assembles PROJECT.md, the roadmap section, every PLAN
- * file, CONTEXT.md, RESEARCH.md and REQUIREMENTS.md into the prompt before
- * any reviewer runs, the gemini leg receives only that prompt, and the codex
- * leg runs `--ephemeral`. Beyond the measured injection cost, the asymmetry
- * cuts at the workflow's premise — "independent review" meant something
- * different for the claude leg than for the other two.
+ * That made it the only reviewer seeing anything beyond the prompt file: the prompt is assembled
+ * once (PROJECT.md, the roadmap section, every PLAN file, CONTEXT.md, RESEARCH.md, REQUIREMENTS.md)
+ * before any lane runs, gemini receives only that prompt, and codex runs `--ephemeral`. Beyond the
+ * measured injection cost, the asymmetry cuts at the workflow's premise — "independent review"
+ * meant something different for the claude lane than for the other two.
  *
- * The fix guards both dispatch lines with a per-invocation
- * `env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`.
- * Two flags because these are two independently-toggled mechanisms:
+ * The fix is declared data, not a handler: the claude lane carries `invoke.env`, the resolver folds
+ * it into the plan, and the runner merges it over the inherited environment for that ONE child.
+ * Two variables because these are two independently-toggled mechanisms —
  * CLAUDE_CODE_DISABLE_CLAUDE_MDS suppresses CLAUDE.md file loading and
- * CLAUDE_CODE_DISABLE_AUTO_MEMORY suppresses the auto-memory system — one
- * without the other leaves half the injection in place. `env`, never
- * `export`: the flags must not leak into the orchestrating session (which
- * may itself be Claude Code on the SELF_CLI="auto" path) or into any later
- * spawn.
+ * CLAUDE_CODE_DISABLE_AUTO_MEMORY suppresses the auto-memory system. The pair is also robust
+ * against a host that exports `CLAUDE_CODE_DISABLE_AUTO_MEMORY=0`, which forces auto-memory back on.
  *
- * review.md IS the product the runtime loads (an AI agent reads and executes
- * these workflow instructions verbatim), so this is a static-content
- * regression against the deployed text, mirroring
- * fix-2358-review-temp-path-scoping.test.cjs and
- * fix-2194-review-timeout-guidance.test.cjs.
+ * Per-invocation, never process-wide: the guard must not reach the orchestrating session (which may
+ * itself be Claude Code on the SELF_CLI="auto" path) or any later lane in the same run. The
+ * process-env assertions below are what hold that, and they are the reason this file exercises the
+ * real runner rather than reading source text.
+ *
+ * ADR-2782 Phase 5b moved reviewer dispatch out of `review.md` prose and into the declared lane
+ * table, so this is a behavioural regression against the resolver and runner. The prior revision of
+ * this file asserted against `review.md`'s dispatch lines; that surface no longer exists.
  */
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 
-const REVIEW_MD = path.join(__dirname, '..', 'gsd-core', 'workflows', 'review.md');
+const { REVIEWER_LANES } = require('../gsd-core/bin/lib/review-lane-descriptor.cjs');
+const { resolveLanePlan } = require('../gsd-core/bin/lib/review-lane-invocation.cjs');
+const { runLane } = require('../gsd-core/bin/lib/review-lane-runner.cjs');
 
-describe('#2483 the claude reviewer leg suppresses CLAUDE.md + auto-memory injection', () => {
-  const content = fs.readFileSync(REVIEW_MD, 'utf-8');
+const GUARD = Object.freeze({
+  CLAUDE_CODE_DISABLE_CLAUDE_MDS: '1',
+  CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+});
 
-  test('both claude dispatch lines are guarded, and the guard sits between the pipe and the CLI', () => {
-    const guarded = content.match(
-      /\|\s*env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 claude\s/g
-    ) || [];
-    assert.equal(
-      guarded.length, 2,
-      'review.md must dispatch the claude reviewer exactly twice (the --model branch and the ' +
-      'bare-model branch), each through `env CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 ' +
-      'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` — the guard pair must immediately precede the ' +
-      '`claude` binary so it applies to that invocation only'
+const RUN = '/run';
+const ROOT = '/repo';
+
+function laneFor(slug) {
+  const lane = REVIEWER_LANES.find((l) => l.slug === slug);
+  assert.ok(lane, `no declared lane '${slug}'`);
+  return lane;
+}
+
+function planFor(slug) {
+  const r = resolveLanePlan({
+    lane: laneFor(slug),
+    configGet: () => undefined,
+    runDir: RUN,
+    repoRoot: ROOT,
+    effortArgs: [],
+  });
+  assert.equal(r.ok, true, `${slug} failed to resolve: ${r.ok ? '' : r.detail}`);
+  return r.plan;
+}
+
+/** Records what the runner handed spawn, so the assertions are about the real call. */
+function spyDeps(seen) {
+  return {
+    spawn: (binary, argv, opts) => {
+      seen.push({ binary, argv, opts });
+      return { status: 0, stdout: 'a review body long enough not to trip the empty guard.', stderr: '' };
+    },
+    httpJson: async () => ({ ok: false, status: 0, body: '', error: 'not used' }),
+    readFile: () => 'prompt',
+    writeFile: () => {},
+    exists: () => true,
+    hasBinary: () => true,
+    configGet: () => undefined,
+    homeDir: '/home/test',
+    warn: () => {},
+  };
+}
+
+describe('#2483 the claude reviewer lane suppresses CLAUDE.md + auto-memory injection', () => {
+  test('the claude lane declares both guard variables', () => {
+    const { env } = laneFor('claude').invoke;
+    assert.deepStrictEqual(
+      env, GUARD,
+      'the claude lane must declare BOTH CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 and ' +
+      'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 — CLAUDE.md loading and auto-memory are ' +
+      'independently-toggled mechanisms, and a lane missing either re-inherits that half of the ' +
+      'context, reintroducing the asymmetry against the prompt-fed gemini and codex lanes'
     );
   });
 
-  test('every line that invokes the claude CLI carries the guard', () => {
-    // Line-oriented rather than shape-oriented on purpose. A matcher keyed to
-    // `| claude -p` only pins the two shapes that exist today; a later
-    // `timeout 900 claude -p`, `command claude -p`, or
-    // `claude --output-format text -p` would add an unguarded dispatch while a
-    // narrower assertion stayed green. Instead: find every line that invokes the
-    // `claude` binary with flags, and require the guard on each one.
-    // `.split(/\r?\n/)`, not `.split('\n')` — Windows git-autocrlf checkouts yield
-    // "\r\n", and a literal-"\n" split leaves a trailing "\r" on every line
-    // (local/no-crlf-fragile-split).
-    // The matcher tolerates variable expansions between `claude` and its first
-    // literal flag: the effortSurface wiring (#2481) reshaped the bare-model
-    // dispatch to `claude $CLAUDE_EFFORT_ARGS -p -`, which the dash-first form
-    // of this matcher could no longer see (the count assertion below caught
-    // exactly that — a reshaped dispatch — as designed).
-    // Tokenised rather than positional, so that `claude` in *argument* position
-    // is not counted as a dispatch: a binary name directly after a flag is that
-    // flag's value, never a command. #2589 reshaped the effort-args lookup from
-    // `--host claude 2>/dev/null | jq …` to `--host claude --pick …`, which put a
-    // flag immediately after `claude` and made a purely positional matcher read
-    // that config query as a third claude invocation. The same shape is already
-    // latent one line away in `command -v claude` — both are excluded by the
-    // preceding-token rule rather than by enumerating either call site.
-    const invocations = content.split(/\r?\n/).filter((line) => {
-      const tokens = line.trim().split(/\s+/);
-      return tokens.some((token, i) => {
-        // Shell operators may abut the binary (`cat x |claude -p -`).
-        if (token.replace(/^[|;&(]+/, '') !== 'claude') return false;
-        if (/^-{1,2}[A-Za-z]/.test(tokens[i - 1] || '')) return false;
-        const [firstLiteral] = tokens.slice(i + 1).filter((t) => !/^\$\{?\w+\}?$/.test(t));
-        return /^-{1,2}\w/.test(firstLiteral || '');
-      });
+  test('the resolver carries the pair through to the plan', () => {
+    assert.deepStrictEqual(planFor('claude').env, GUARD);
+  });
+
+  test('the runner passes the pair to the spawn call', async () => {
+    const seen = [];
+    await runLane(planFor('claude'), spyDeps(seen), { repoRoot: ROOT });
+    // The probe spawns `--help` first; the dispatch is the call carrying the prompt.
+    const dispatch = seen.find((c) => !c.argv.includes('--help'));
+    assert.ok(dispatch, 'the runner never reached the claude dispatch');
+    assert.deepStrictEqual(dispatch.opts.env, GUARD);
+  });
+
+  test('the guard is per-invocation — process.env is never mutated', async () => {
+    // The load-bearing property, and the one a source-text assertion could only approximate. A
+    // guard written into this process leaks into the orchestrating session and into every later
+    // lane in the same run, suppressing memory far outside the review.
+    for (const key of Object.keys(GUARD)) delete process.env[key];
+    await runLane(planFor('claude'), spyDeps([]), { repoRoot: ROOT });
+    for (const key of Object.keys(GUARD)) {
+      assert.equal(
+        process.env[key], undefined,
+        `${key} must not be set on the orchestrating process — the lane's env is merged into the ` +
+        'child only'
+      );
+    }
+  });
+
+  test('the guard is scoped to the claude lane only', () => {
+    for (const lane of REVIEWER_LANES) {
+      if (lane.slug === 'claude' || lane.transport !== 'spawn') continue;
+      assert.equal(
+        lane.invoke.env, undefined,
+        `${lane.slug} must not carry the CLAUDE_CODE_DISABLE_* guard — no other reviewer reads ` +
+        'CLAUDE.md or auto-memory, and codex already scopes its own context with --ephemeral'
+      );
+      assert.equal(planFor(lane.slug).env, null, `${lane.slug}'s plan must resolve env to null`);
+    }
+  });
+
+  test('a manifest-declared env is not honored — only first-party lanes execute', async () => {
+    // The scope boundary this change deliberately does not cross, asserted rather than asserted-in-
+    // prose. `invoke.env` changes what a spawned binary does, so on a THIRD-PARTY manifest it would
+    // be trust-disclosure surface (`capability-trust`'s rawArgs is folded into the signature for
+    // exactly that reason, and `env` is not). That is safe only while no manifest body reaches the
+    // resolver: the registry's reviewer bodies contribute SLUGS to the parity check, and execution
+    // resolves lanes from REVIEWER_LANES. If manifest lanes are ever made executable, `env` must
+    // join the disclosed surface before that lands — and this test is what will fail first.
+    const forged = {
+      ...laneFor('gemini'),
+      invoke: { ...laneFor('gemini').invoke, env: { LD_PRELOAD: '/tmp/evil.so' } },
+    };
+    assert.ok(
+      !REVIEWER_LANES.some((l) => l.invoke && l.invoke.env && l.invoke.env.LD_PRELOAD),
+      'the forged lane must not have leaked into the shipped table'
+    );
+    // The resolver is total over any lane handed to it — that is not the guarantee. The guarantee
+    // is that nothing hands it a manifest-derived lane.
+    const r = resolveLanePlan({
+      lane: forged, configGet: () => undefined, runDir: RUN, repoRoot: ROOT, effortArgs: [],
     });
-
+    assert.deepStrictEqual(
+      r.plan.env, { LD_PRELOAD: '/tmp/evil.so' },
+      'resolveLanePlan is total and folds whatever it is given — so the boundary must be upstream'
+    );
     assert.equal(
-      invocations.length, 2,
-      'expected exactly two claude CLI invocations in review.md (the --model branch and the ' +
-      'bare-model branch); a change in this count means a dispatch was added, removed or ' +
-      `reshaped and this guard needs revisiting. Found:\n${invocations.join('\n')}`
-    );
-
-    const unguarded = invocations.filter(
-      (line) =>
-        !line.includes('CLAUDE_CODE_DISABLE_CLAUDE_MDS=1') ||
-        !line.includes('CLAUDE_CODE_DISABLE_AUTO_MEMORY=1')
-    );
-    assert.deepEqual(
-      unguarded, [],
-      'every line invoking the claude CLI in review.md must carry BOTH ' +
-      'CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 and CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 — CLAUDE.md ' +
-      'loading and auto-memory are independently-toggled mechanisms, and a leg missing either ' +
-      'flag re-inherits that half of the context, reintroducing the asymmetry against the ' +
-      'prompt-fed gemini and codex legs'
+      REVIEWER_LANES.includes(forged), false,
+      'REVIEWER_LANES is the only lane source the runtime resolves from'
     );
   });
 
-  test('the guard is per-invocation, never exported into the orchestrating session', () => {
-    assert.ok(
-      !/export\s+CLAUDE_CODE_DISABLE_(CLAUDE_MDS|AUTO_MEMORY)/.test(content),
-      'review.md must not `export` CLAUDE_CODE_DISABLE_CLAUDE_MDS or ' +
-      'CLAUDE_CODE_DISABLE_AUTO_MEMORY — exporting leaks the flag into the orchestrating ' +
-      'session (which may itself be Claude Code on the SELF_CLI="auto" path) and into every ' +
-      'subsequent spawn, suppressing memory far outside the review'
-    );
-  });
-
-  test('the guard is scoped to the claude leg only', () => {
-    const geminiDispatch = content.match(/\|\s*\S*\s*gemini\s+(-m|-p)/g) || [];
-    assert.ok(
-      geminiDispatch.length > 0,
-      'expected the gemini reviewer dispatch to still be present in review.md'
-    );
-    assert.ok(
-      !/CLAUDE_CODE_DISABLE_(?:CLAUDE_MDS|AUTO_MEMORY)=1\s+(gemini|codex)/.test(content),
-      'the CLAUDE_CODE_DISABLE_CLAUDE_MDS / CLAUDE_CODE_DISABLE_AUTO_MEMORY guards are ' +
-      'Claude-Code-specific and must not be applied to the gemini or codex dispatch — neither ' +
-      'CLI reads CLAUDE.md or auto-memory, and codex already scopes its own context with ' +
-      '--ephemeral'
-    );
+  test('an unguarded lane hands spawn no env at all', async () => {
+    // Pins the absent-vs-empty distinction: a lane with no declared env must leave the child's
+    // environment untouched rather than passing an empty object, which on some spawn wirings is
+    // the difference between inheriting and being handed a stripped environment.
+    const seen = [];
+    await runLane(planFor('gemini'), spyDeps(seen), { repoRoot: ROOT });
+    const dispatch = seen.find((c) => !c.argv.includes('--help'));
+    assert.ok(dispatch, 'the runner never reached the gemini dispatch');
+    assert.ok(!('env' in dispatch.opts), 'an unguarded lane must not pass an env key to spawn');
   });
 });
