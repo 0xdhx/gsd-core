@@ -317,9 +317,15 @@ function formatViolations(violations) {
     lines.push(`  ${label}: ${v.path}`);
   }
   lines.push('');
+  // The footer must state the mode the run is ACTUALLY in — a strict-mode
+  // failure captioned "Reporting only" sends the reader away from the very
+  // violation that just reddened their run.
   lines.push(
-    'Reporting only. Set GSD_STRICT_LIVE_CONFIG_GUARD=1 to make this fail the run, ' +
-    'or GSD_SKIP_LIVE_CONFIG_GUARD=1 to skip the check entirely.',
+    process.env.GSD_STRICT_LIVE_CONFIG_GUARD === '1'
+      ? 'STRICT MODE (GSD_STRICT_LIVE_CONFIG_GUARD=1): these violations fail the run. ' +
+        'GSD_SKIP_LIVE_CONFIG_GUARD=1 skips the check entirely.'
+      : 'Reporting only. Set GSD_STRICT_LIVE_CONFIG_GUARD=1 to make this fail the run, ' +
+        'or GSD_SKIP_LIVE_CONFIG_GUARD=1 to skip the check entirely.',
   );
   lines.push('');
   return lines.join('\n');
