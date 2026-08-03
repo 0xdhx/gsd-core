@@ -978,12 +978,12 @@
     {
       "id": "LIVE-CONFIG.GUARD.SEAM.ci-blind",
       "klass": "LIVE-CONFIG",
-      "value": "CI cannot catch the ambient-env half of this class at all — CI never has these vars set, so green CI is not evidence; the guard is the only loud signal"
+      "value": "the AMBIENT-ENV half stays CI-blind — CI never has these vars set, so green CI is not evidence for it; what strict mode catches in CI is the suite's own default-root leaks (HOME/USERPROFILE-derived), the guard remains the only loud signal for ambient-var escapes"
     },
     {
       "id": "LIVE-CONFIG.GUARD.SEAM.module",
       "klass": "LIVE-CONFIG",
-      "value": "scripts/live-config-guard.cjs (deliberately NOT scripts/lib/, which the installer copies to users wholesale while uninstall removes only an allowlist); exports [resolveLiveConfigRoots, resolveExtraWatchTargets, snapshotLiveConfig, diffLiveConfig, formatViolations, newestMtime]; driven by scripts/run-tests.cjs pre/post suite"
+      "value": "scripts/live-config-guard.cjs (deliberately NOT scripts/lib/, which the installer copies to users wholesale while uninstall removes only an allowlist; excluded from the npm tarball via package.json files[] together with its whole require chain run-tests.cjs/affected-tests-lib.cjs/run-affected-tests.cjs — a partial exclusion trips the #2858 shipped-requires-only-shipped gate); exports [resolveLiveConfigRoots, resolveExtraWatchTargets, snapshotLiveConfig, diffLiveConfig, formatViolations, newestMtime]; driven by scripts/run-tests.cjs pre/post suite"
     },
     {
       "id": "LIVE-CONFIG.GUARD.SEAM.non-root-targets",
@@ -998,7 +998,7 @@
     {
       "id": "LIVE-CONFIG.GUARD.SEAM.severity",
       "klass": "LIVE-CONFIG",
-      "value": "reports by default; fails only under GSD_STRICT_LIVE_CONFIG_GUARD=1, skipped by GSD_SKIP_LIVE_CONFIG_GUARD=1; promote to fatal once the USERPROFILE sweep lands, mirroring local/no-source-grep warn->error (ADR 452)"
+      "value": "reports by default locally; CI wires GSD_STRICT_LIVE_CONFIG_GUARD=1 on Linux/macOS lanes (test.yml, all three test jobs) so a suite-produced leak FAILS those runs; Windows lanes stay report-only pending the documented pre-existing USERPROFILE sweep (~190 test sites sandbox HOME alone) — promote once that lands; skipped by GSD_SKIP_LIVE_CONFIG_GUARD=1"
     },
     {
       "id": "LIVE-CONFIG.GUARD.SEAM.truncation",
