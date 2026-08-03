@@ -45,15 +45,16 @@ Agent(
   Return: ## OUTLINE COMPLETE with plan count.",
   subagent_type="gsd-planner",
   model="{planner_model}",
-  description="Outline Phase {phase} (chunked)"
+  description="Outline Phase {phase} (chunked)",
+  run_in_background=true
 )
 ```
 
-> **ORCHESTRATOR RULE — ALL RUNTIMES**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
+**ORCHESTRATOR RULE — ALL RUNTIMES:** `TS=$(date +%s)`; repeat `PLANNER_STALL_RESULT=$(gsd_stall_watch "$TS" "{outputFile}" "$OUTLINE_FILE" "## OUTLINE COMPLETE")` while waiting/active.
 
 Handle return:
-- **`## OUTLINE COMPLETE`:** Read `PLAN-OUTLINE.md`, extract plan list. Continue to 8.5.2.
-- **Any other return or empty:** Display error. Offer: 1) Retry outline, 2) Stop.
+- **`marker_received`:** Read `PLAN-OUTLINE.md`, extract plan list. Continue to 8.5.2.
+- **`stalled` / any other return or empty:** Display error. Offer: 1) Retry outline, 2) Stop.
 
 ### 8.5.2 Per-Plan Tasks (single-plan mode, ~3-5 min each)
 
@@ -89,11 +90,12 @@ For each plan entry extracted from `PLAN-OUTLINE.md`:
      Return: ## PLAN COMPLETE with the plan ID.",
      subagent_type="gsd-planner",
      model="{planner_model}",
-     description="Plan {plan_id} (chunked {k}/{N})"
+     description="Plan {plan_id} (chunked {k}/{N})",
+     run_in_background=true
    )
    ```
 
-   > **ORCHESTRATOR RULE — ALL RUNTIMES**: After calling Agent() above, stop working on this task immediately. Do not read more files, edit code, or run tests related to this task while the subagent is active. Wait for the subagent to return its result. This prevents duplicate work, conflicting edits, and wasted context. Only resume when the subagent result is available.
+   **ORCHESTRATOR RULE — ALL RUNTIMES:** `TS=$(date +%s)`; repeat `PLANNER_STALL_RESULT=$(gsd_stall_watch "$TS" "{outputFile}" "$PLAN_FILE" "## PLAN COMPLETE")` while waiting/active — `stalled` falls into step 4 (preserves prior committed chunks).
 
 4. **Verify disk:** Check `${PHASE_DIR}/{plan_id}-PLAN.md` exists. If missing: offer 1) Retry, 2) Stop.
 
