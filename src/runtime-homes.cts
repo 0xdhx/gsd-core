@@ -491,7 +491,7 @@ export function resolveKimiGlobalDir(opts: ResolveKimiOpts = {}): string {
  * homes: KIMI_CONFIG_DIR (registry-visible, already covered) and KIMI_SHARE_DIR
  * (this one), so a derivation keyed only on the registry looks complete and is not.
  */
-export const KIMI_HOOKS_TOML_DESCRIPTOR: ConfigHomeDescriptor = {
+export const KIMI_HOOKS_TOML_DESCRIPTOR: DotHomeDescriptor = {
   kind: 'dot-home',
   name: '.kimi',
   env: ['KIMI_SHARE_DIR'],
@@ -509,7 +509,7 @@ export const KIMI_HOOKS_TOML_DESCRIPTOR: ConfigHomeDescriptor = {
  * commit, which is the property NON_REGISTRY_CONFIG_HOME_DESCRIPTORS exists to
  * guarantee. Each product's env var stays scoped to that product (#2755).
  */
-export const KIMI_CODE_HOOKS_TOML_DESCRIPTOR: ConfigHomeDescriptor = {
+export const KIMI_CODE_HOOKS_TOML_DESCRIPTOR: DotHomeDescriptor = {
   kind: 'dot-home',
   name: '.kimi-code',
   env: ['KIMI_CODE_HOME'],
@@ -586,7 +586,7 @@ export function resolveKimiHooksTomlDir(opts: ResolveKimiHooksTomlOpts = {}): st
   // Explicit comparison rather than an object lookup keyed on `runtime`: the
   // value originates from argv, and an index would resolve inherited keys
   // (`constructor`, `__proto__`) to something that is not a descriptor.
-  const descriptor: ConfigHomeDescriptor = opts.runtime === 'kimi-code'
+  const descriptor: DotHomeDescriptor = opts.runtime === 'kimi-code'
     ? KIMI_CODE_HOOKS_TOML_DESCRIPTOR
     : KIMI_HOOKS_TOML_DESCRIPTOR;
   return resolveConfigHomeFromDescriptor(descriptor, { env, home });
