@@ -22,8 +22,11 @@
  * LOCATION — `scripts/`, deliberately NOT `scripts/lib/`. The installer copies
  * `scripts/lib/` into every user's config dir wholesale (readdirSync), while
  * uninstall removes only an explicit allowlist, so a test-only module placed
- * there would ship to users AND survive uninstall. `scripts/affected-tests-lib.cjs`
- * is the precedent for a non-shipped helper at this level.
+ * there would ship to users AND survive uninstall. This file is also excluded
+ * from the npm tarball (`package.json` `files[]` `!scripts/live-config-guard.cjs`,
+ * alongside its whole require chain: run-tests.cjs, affected-tests-lib.cjs,
+ * run-affected-tests.cjs — excluding one link alone would trip the #2858
+ * shipped-requires-only-shipped gate on the links that still shipped).
  *
  * SCOPE — ownership-based, not whole-root. It watches entries GSD unambiguously
  * owns: the top-level install footprint (`GSD_OWNED_ENTRIES`) plus `gsd-`-prefixed
