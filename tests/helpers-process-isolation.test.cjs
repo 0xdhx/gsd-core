@@ -154,6 +154,50 @@ describe('#2665: TEST_ENV_BASE config-location coverage', () => {
     );
   });
 
+  test('skillsHome env vars are walked on BOTH descriptor rungs', () => {
+    // Round 4. A configHome descriptor can nest a second, independently-resolved
+    // descriptor (skillsHome → resolveSkillsBaseFromDescriptor), which carries
+    // its own env array. Walking configHome.env alone is the identical
+    // walk-one-field gap-shape rounds 2-3 closed for the registry and the
+    // non-registry set. Inert today — only kilo declares skillsHome, with
+    // env: [] — so this asserts the DERIVATION reaches the field, not that any
+    // var currently flows from it: every skillsHome-declared var (registry and
+    // non-registry alike) must land in TEST_ENV_BASE the moment one exists.
+    const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
+    const {
+      NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+    } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+
+    const declared = [
+      ...new Set([
+        ...Object.values(runtimes).flatMap(
+          (r) => r?.runtime?.configHome?.skillsHome?.env ?? [],
+        ),
+        ...NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.flatMap(
+          (d) => d?.skillsHome?.env ?? [],
+        ),
+      ]),
+    ];
+
+    // Anti-vacuity: at least one runtime must actually DECLARE skillsHome, or a
+    // registry reshape could rename the field and retire this test silently.
+    const declaringRuntimes = Object.values(runtimes).filter(
+      (r) => r?.runtime?.configHome?.skillsHome !== undefined,
+    );
+    assert.ok(
+      declaringRuntimes.length >= 1,
+      'expected at least one registry runtime to declare configHome.skillsHome — ' +
+        'if the field moved, this derivation needs updating, not deleting',
+    );
+
+    const missing = declared.filter((k) => !(k in TEST_ENV_BASE));
+    assert.deepStrictEqual(
+      missing,
+      [],
+      `skillsHome-declared config-location vars not scrubbed: ${missing.join(', ')}`,
+    );
+  });
+
   test("GSD's OWN location vars are scrubbed (a second family, not a registry gap)", () => {
     const { GSD_LOCATION_ENV_KEYS } = require('../gsd-core/bin/lib/runtime-homes.cjs');
 

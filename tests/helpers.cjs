@@ -67,11 +67,23 @@ const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
 
 const CONFIG_LOCATION_ENV_KEYS = [
   ...new Set([
-    // 1. Every runtime descriptor the capability registry carries.
+    // 1. Every runtime descriptor the capability registry carries — including
+    //    the nested skillsHome descriptor, which resolves independently of
+    //    configHome (resolveSkillsBaseFromDescriptor) and can carry its own
+    //    env array. Inert today (only kilo declares skillsHome, with env: []),
+    //    but walking configHome.env alone is the identical gap-shape this PR
+    //    closed twice already, one field over. (#2665 round 4)
     ...Object.values(runtimes).flatMap((r) => r?.runtime?.configHome?.env ?? []),
+    ...Object.values(runtimes).flatMap(
+      (r) => r?.runtime?.configHome?.skillsHome?.env ?? [],
+    ),
     // 2. Descriptor-shaped config homes resolved OUTSIDE the registry (kimi's
     //    native config.toml home via KIMI_SHARE_DIR). Derived, not hand-listed.
-    ...NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.flatMap((d) => d?.env ?? []),
+    //    Same skillsHome walk as rung 1 — a descriptor is a descriptor.
+    ...NON_REGISTRY_CONFIG_HOME_DESCRIPTORS.flatMap((d) => [
+      ...(d?.env ?? []),
+      ...(d?.skillsHome?.env ?? []),
+    ]),
     // 3. GSD's OWN location vars — a different family: they decide where GSD keeps
     //    user-owned state ($GSD_HOME/.gsd/), not where a runtime keeps its config.
     ...GSD_LOCATION_ENV_KEYS,

@@ -116,6 +116,14 @@ function resolveLiveConfigRoots(deps = {}) {
 
   const roots = new Set();
   // 'grok' is a hardcoded branch of getGlobalConfigDir with no registry entry.
+  //
+  // DELIBERATE NON-ROOT: getGlobalSkillsBase(runtime) is NOT added here. The
+  // skills base (e.g. codex's ~/.agents/skills) is not a config ROOT, and the
+  // snapshot applies the config-root layout (GSD_OWNED_ENTRIES x
+  // GSD_PREFIXED_PARENTS) beneath every root it is given — measured on a
+  // sandboxed HOME, adding it both false-positives on `<skillsBase>/gsd-core`
+  // and misses a real `<skillsBase>/gsd-help` write. Watching skills bases
+  // needs its own layout, like resolveExtraWatchTargets — a separate change.
   for (const runtime of [...Object.keys(runtimes || {}), 'grok']) {
     try {
       const dir = getGlobalConfigDir(runtime);
