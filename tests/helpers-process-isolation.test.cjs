@@ -235,3 +235,57 @@ describe('#2665: TEST_ENV_BASE config-location coverage', () => {
     });
   });
 });
+
+describe('#2665 round 4: the skillsHome walk is reversion-sensitive', () => {
+  // The coverage tests above are enumeration-relative, and skillsHome.env is
+  // empty everywhere today — so reverting the skillsHome rungs from the
+  // derivation leaves every one of them green (measured by this round's
+  // pre-push adversarial review). This test closes that: it cold-requires
+  // helpers.cjs in a child process after injecting sentinel skillsHome env
+  // vars into BOTH enumerations (registry and non-registry), so the walk
+  // itself is what is under test, not today's empty declarations.
+  test('sentinel skillsHome vars flow into TEST_ENV_BASE on both rungs', () => {
+    const { execFileSync } = require('node:child_process');
+    const regPath = require.resolve('../gsd-core/bin/lib/capability-registry.cjs');
+    const rhPath = require.resolve('../gsd-core/bin/lib/runtime-homes.cjs');
+    const helpersPath = require.resolve('./helpers.cjs');
+
+    const script = `
+      'use strict';
+      const reg = require(${JSON.stringify(regPath)});
+      const rh = require(${JSON.stringify(rhPath)});
+      // Rung 1 (registry): give one runtime a skillsHome env var. kilo already
+      // declares skillsHome (env: []); push a sentinel into whichever runtime
+      // declares it, or graft one onto the first runtime if none does.
+      const declaring = Object.values(reg.runtimes).find(
+        (r) => r?.runtime?.configHome?.skillsHome,
+      ) ?? Object.values(reg.runtimes)[0];
+      if (!declaring.runtime.configHome.skillsHome) {
+        declaring.runtime.configHome.skillsHome = { kind: 'dot-home', name: '.x', env: [] };
+      }
+      declaring.runtime.configHome.skillsHome.env = ['GSD_TEST_SENTINEL_REGISTRY_SKILLS'];
+      // Rung 2 (non-registry): graft a skillsHome onto the first descriptor.
+      rh.NON_REGISTRY_CONFIG_HOME_DESCRIPTORS[0].skillsHome = {
+        kind: 'dot-home', name: '.x', env: ['GSD_TEST_SENTINEL_NONREG_SKILLS'],
+      };
+      const { TEST_ENV_BASE } = require(${JSON.stringify(helpersPath)});
+      const missing = [
+        'GSD_TEST_SENTINEL_REGISTRY_SKILLS',
+        'GSD_TEST_SENTINEL_NONREG_SKILLS',
+      ].filter((k) => TEST_ENV_BASE[k] !== '');
+      if (missing.length > 0) {
+        console.error('skillsHome walk missed: ' + missing.join(', '));
+        process.exit(1);
+      }
+      process.exit(0);
+    `;
+
+    const out = execFileSync(process.execPath, ['-e', script], {
+      cwd: __dirname,
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      timeout: 30_000,
+    });
+    void out; // exit 0 is the assertion; execFileSync throws on nonzero
+  });
+});

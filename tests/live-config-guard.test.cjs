@@ -410,3 +410,40 @@ describe('#2665: scan-budget truncation', () => {
     }
   });
 });
+
+describe('#2665 round 4: CI wires the guard to strict mode', () => {
+  // The reversion this guards: dropping GSD_STRICT_LIVE_CONFIG_GUARD from
+  // test.yml silently demotes the guard back to report-only, and a future
+  // leak of exactly the class #2665 closes prints a warning and CI stays
+  // green. Windows lanes are deliberately report-only until the documented
+  // pre-existing USERPROFILE leak class is swept (SEVERITY note in
+  // scripts/live-config-guard.cjs) — so the assertion is per-OS, not global.
+  test('all three test jobs set GSD_STRICT_LIVE_CONFIG_GUARD (Windows carved out)', () => {
+    const yaml = require('js-yaml');
+    const wf = yaml.load(
+      fs.readFileSync(
+        path.join(__dirname, '..', '.github', 'workflows', 'test.yml'),
+        'utf8',
+      ),
+    );
+
+    for (const job of ['test', 'test-full']) {
+      const v = String(wf.jobs?.[job]?.env?.GSD_STRICT_LIVE_CONFIG_GUARD ?? '');
+      assert.match(
+        v,
+        // The WHOLE expression, anchored — a prefix match accepted both
+        // `&& '1' || '1'` (Windows silently strict) and a malformed tail
+        // (found by this round's pre-push adversarial review).
+        /^\$\{\{\s*matrix\.os\s*!=\s*'windows-latest'\s*&&\s*'1'\s*\|\|\s*''\s*\}\}$/,
+        `jobs.${job}.env.GSD_STRICT_LIVE_CONFIG_GUARD must be strict on ` +
+          `non-Windows lanes and empty on windows-latest; got: ${JSON.stringify(v)}`,
+      );
+    }
+
+    assert.strictEqual(
+      String(wf.jobs?.['test-inert']?.env?.GSD_STRICT_LIVE_CONFIG_GUARD ?? ''),
+      '1',
+      'jobs.test-inert (ubuntu-only) must set GSD_STRICT_LIVE_CONFIG_GUARD: 1',
+    );
+  });
+});
