@@ -851,7 +851,13 @@ const VALID_LANE_HANDLERS     = new Set(['antigravity', 'openai-compatible', 'op
 // BOTH sub-shapes, or from NEITHER, has undefined meaning and fails validation.
 // The discriminator is explicit rather than inferred from field presence, which
 // is precisely the ambiguity these two sets exist to detect.
-const SPAWN_ONLY_INVOKE_FIELDS = ['binary', 'args', 'promptChannel', 'outputChannel', 'outputArg', 'modelArg'];
+// `env` added by #2483. It belongs in THIS set and not merely in validateSpawnInvoke: an environment
+// pair has no meaning for a transport that issues an HTTP POST, so a manifest declaring it alongside
+// `openai-http` fields is the undefined-meaning case the comment above describes. Registering it here
+// is what makes that case reportable — the openai-http arm rejects exactly the members of this list,
+// so a field absent from it is silently accepted on the wrong transport. Note `effortChannel` is
+// deliberately in NEITHER set: D2 defines it for both transports, so it is shared, not spawn-only.
+const SPAWN_ONLY_INVOKE_FIELDS = ['binary', 'args', 'promptChannel', 'outputChannel', 'outputArg', 'modelArg', 'env'];
 // `defaultHost` / `fallbackModel` added by Phase 5b (#2799). Phase 4 federated every
 // `review.*_host` key with a default of `""`, so the REAL fallback destination and model
 // (`http://localhost:11434` / `llama3` and friends) existed only inside the bash leg. Once the
@@ -2045,6 +2051,56 @@ function validateSpawnInvoke(ctx, invoke) {
   }
 
   errors.push(...validateEnumField(ctx, 'reviewer.invoke.effortChannel', invoke.effortChannel, VALID_LANE_EFFORT_CHANNELS));
+
+  // `env` — per-invocation environment pairs (#2483). OPTIONAL, unlike every field above: only a lane
+  // that needs to shape its child's environment declares it, and absent is the common case. Validated
+  // when present, because `resolveLanePlan` DROPS a non-string value rather than coercing it — so an
+  // unvalidated manifest declares a pair that silently never reaches the spawn, which is the failure
+  // mode a shipped env-guard can least afford. Keys are held to the portable POSIX
+  // environment-name grammar, which is a POLICY — not a claim about what an environment can physically
+  // hold. Measured: of the names refused below only NUL is actually rejected by `spawnSync`; `=`, a
+  // leading digit, a dash and a space are all carried through to the child (an `A=B` key arrives as
+  // the raw entry `A=B=value`, and reads back via `process.env['A=B']`). They are refused because a
+  // name outside the grammar is not portably addressable by the program meant to read it.
+  if (invoke.env !== undefined) {
+    if (typeof invoke.env !== 'object' || invoke.env === null || Array.isArray(invoke.env)) {
+      errors.push(
+        ctx + ' reviewer.invoke.env must be an object of environment name/value pairs ' +
+        '(got: ' + describeValue(invoke.env) + ')',
+      );
+    } else {
+      for (const key of Object.keys(invoke.env)) {
+        // `__proto__` passes the grammar below and IS a real own key once a manifest is JSON-parsed,
+        // but assigning it onto a plain accumulator goes through the inherited `__proto__` SETTER
+        // instead of creating an own property. For the string values this field permits the setter is
+        // a no-op — the prototype is not even changed — so the pair would validate and then simply
+        // vanish before the spawn: the declared-but-never-delivered failure this block exists to catch.
+        // Refused by name, because the grammar cannot see it.
+        //
+        // Only `__proto__` needs this. Sibling reserved-name guards in this file reject
+        // `constructor`/`prototype` alongside it, but those guard bracket LOOKUPS that resolve
+        // prototype members; here the read is `Object.keys` + an own-value read, and `constructor`
+        // assigns as an ordinary own key. Refusing it too would reject a name the spawn could carry.
+        if (key === '__proto__') {
+          errors.push(
+            ctx + ' reviewer.invoke.env key "__proto__" is not permitted ' +
+            '(it is silently dropped when the spawn plan is assembled, so it would never reach the child)',
+          );
+        } else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+          errors.push(
+            ctx + ' reviewer.invoke.env key ' + describeValue(key) +
+            ' is not a valid environment variable name',
+          );
+        }
+        if (typeof invoke.env[key] !== 'string') {
+          errors.push(
+            ctx + ' reviewer.invoke.env.' + key + ' must be a string ' +
+            '(got: ' + describeValue(invoke.env[key]) + ')',
+          );
+        }
+      }
+    }
+  }
 
   return errors;
 }
