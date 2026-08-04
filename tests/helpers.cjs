@@ -65,6 +65,22 @@ const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
   'GSD_WORKSTREAM',
 ];
 
+// Write-escape PERMISSIONS — deliberately its own family, and deliberately NOT
+// folded into any of the four rungs below.
+//
+// #2665 round 5: GSD_ALLOW_SYMLINKED_DEST is boolean and names no path, so it is
+// not a config-location var by any honest reading. But install-engine.cts reads it
+// env-first (`:214`) and threads it as `allowOptInFollow` into the symlink-escape
+// guard at four call sites, each gating a write (`:361/:367`, `:416/:424`,
+// `:785/:790`, `:927/:932`). That guard is what stops a write leaving the install
+// root, so an ambient `=1` disarms it for the whole suite — the #2665 hazard
+// exactly, arriving through a permission rather than a path.
+//
+// Blanking is fail-safe in the only direction that matters: '' is neither '1' nor
+// 'true', so a blanked value makes the guard STRICTER, never looser. That asymmetry
+// is why this can be scrubbed wholesale without reasoning about each call site.
+const WRITE_ESCAPE_PERMISSION_ENV_KEYS = ['GSD_ALLOW_SYMLINKED_DEST'];
+
 const CONFIG_LOCATION_ENV_KEYS = [
   ...new Set([
     // 1. Every runtime descriptor the capability registry carries — including
@@ -89,6 +105,10 @@ const CONFIG_LOCATION_ENV_KEYS = [
     ...GSD_LOCATION_ENV_KEYS,
     // 4. The residue that is neither registry-carried nor descriptor-shaped.
     ...NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS,
+    // 5. Write-escape permissions — NOT locations. Same mechanism because the
+    //    hazard is identical (ambient env lets a suite write outside the sandbox);
+    //    named separately above so the list does not misdescribe what they are.
+    ...WRITE_ESCAPE_PERMISSION_ENV_KEYS,
   ]),
 ].sort();
 

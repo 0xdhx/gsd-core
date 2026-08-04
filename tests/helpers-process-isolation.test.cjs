@@ -213,6 +213,29 @@ describe('#2665: TEST_ENV_BASE config-location coverage', () => {
     }
   });
 
+  test('write-escape PERMISSIONS are scrubbed (a fifth family — not a location var)', () => {
+    // #2665 round 5. GSD_ALLOW_SYMLINKED_DEST names no path, so every rung of the
+    // derivation above is structurally incapable of reaching it — it is not a
+    // registry configHome, not descriptor-shaped, not one of GSD's own location
+    // vars. It is still a #2665 leak vector: install-engine.cts reads it env-first
+    // and threads it into the symlink-escape guard that stops a write leaving the
+    // install root, so an ambient `=1` disarms that guard for the whole suite.
+    //
+    // Named literally rather than derived from the family constant on purpose: a
+    // test that reads WRITE_ESCAPE_PERMISSION_ENV_KEYS and asserts over it shrinks
+    // its own expectation when the family is emptied — the enumeration-relative
+    // failure this suite already documents, and the one that let the kimi-code
+    // descriptor go unwatched. Naming it is what makes removal fail loudly.
+    assert.strictEqual(
+      TEST_ENV_BASE.GSD_ALLOW_SYMLINKED_DEST,
+      '',
+      'GSD_ALLOW_SYMLINKED_DEST must be blanked: ambient =1 disarms the symlink-escape guard',
+    );
+    // Blanking must be fail-SAFE — '' is neither '1' nor 'true', so the guard gets
+    // stricter, never looser. This is what licenses scrubbing it wholesale.
+    assert.ok(!['1', 'true'].includes(TEST_ENV_BASE.GSD_ALLOW_SYMLINKED_DEST));
+  });
+
   test('scrubConfigLocationEnv clears and restores the parent process env', () => {
     // The in-process half of the fix (Blocker 1): TEST_ENV_BASE only reaches
     // children, so a test calling install() in-process needs the PARENT's env
