@@ -203,13 +203,20 @@ describe('#2483 the claude reviewer lane suppresses CLAUDE.md + auto-memory inje
   );
 
   test('a manifest-declared env is not honored — only first-party lanes execute', async () => {
-    // The scope boundary this change deliberately does not cross, asserted rather than asserted-in-
-    // prose. `invoke.env` changes what a spawned binary does, so on a THIRD-PARTY manifest it would
-    // be trust-disclosure surface (`capability-trust`'s rawArgs is folded into the signature for
-    // exactly that reason, and `env` is not). That is safe only while no manifest body reaches the
-    // resolver: the registry's reviewer bodies contribute SLUGS to the parity check, and execution
-    // resolves lanes from REVIEWER_LANES. If manifest lanes are ever made executable, `env` must
-    // join the disclosed surface before that lands — and this test is what will fail first.
+    // The scope boundary this change deliberately does not cross. `invoke.env` changes what a spawned
+    // binary does, so on a THIRD-PARTY manifest it would be trust-disclosure surface
+    // (`capability-trust`'s rawArgs is folded into the signature for exactly that reason, and `env` is
+    // not). That is safe only while no manifest body reaches the resolver: the registry's reviewer
+    // bodies contribute SLUGS to the parity check, and execution resolves lanes from REVIEWER_LANES.
+    //
+    // BE PRECISE ABOUT WHAT THIS TEST DOES. On ONE forged lane it demonstrates that the resolver folds
+    // whatever it is handed — an example, not a proof of totality — which is enough to show the
+    // boundary cannot live in the resolver, and it documents where the boundary does live.
+    // It is NOT a tripwire: a future code path that fed manifest lanes to the resolver would not make
+    // any assertion below fail, because the forged lane is constructed locally and never routed. An
+    // earlier revision of this comment claimed it "will fail first"; that was wrong, and the claim is
+    // removed rather than softened. The boundary is a property of the production call chain
+    // (`gsd-tools.cjs` builds its lane map solely from REVIEWER_LANES), not of this file.
     const forged = {
       ...laneFor('gemini'),
       invoke: { ...laneFor('gemini').invoke, env: { LD_PRELOAD: '/tmp/evil.so' } },

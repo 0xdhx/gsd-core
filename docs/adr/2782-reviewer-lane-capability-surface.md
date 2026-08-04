@@ -155,6 +155,7 @@ context (b) describes.
 | `invoke.modelDiscovery` | forbidden | closed enum: `none` \| `first-from-models-endpoint` |
 | `invoke.modelArg` | optional | forbidden (model travels in the JSON body) |
 | `invoke.effortChannel` | closed enum: `none` \| `argv` \| `env` | `none` |
+| `invoke.env` | optional: object of environment name/value pairs, string values only | forbidden (no child process to carry an environment) |
 
 A manifest declaring fields from both sub-shapes, or neither, **fails validation**. The
 discriminator is explicit rather than inferred from field presence: inference leaves a manifest with
@@ -768,3 +769,56 @@ remove, so they are replaced by **descriptor ↔ registry** parity in both direc
 what the runtime iterates once lanes are data) plus an **anti-parity** assertion that fires if a
 bespoke leg is ever re-added. That also gives #2781/Phase 6 the mechanical single source its docs and
 locale gate needs, which per-leg text could never provide.
+
+### 2026-08-03 — D2 spawn invoke vocabulary widened by #2483 (`invoke.env`)
+
+The `claude` lane was the only reviewer additionally inheriting the invoking user's global
+`CLAUDE.md`, the project `CLAUDE.md`, and Claude Code auto-memory — a context asymmetry against the
+workflow's own independent-review premise, since `gemini` sees only the assembled prompt and `codex`
+runs `--ephemeral`. Closing it needs two environment variables set for that one spawn. Additive, and
+forced by a lane that ships today.
+
+| # | Decision | Was | Is | Forced by |
+|---|---|---|---|---|
+| 1 | D2 | spawn `invoke` carried no way to shape the child's environment | adds `invoke.env` — optional, an object of environment name/value pairs with string values only; forbidden on `openai-http` | The `claude` lane must spawn with `CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` (#2483). The pairs are static per lane, so this is declared data — not a `handler`, which D6 reserves for behavior data cannot express |
+
+**Declared data rather than a handler, and D6 is the wrong authority for it.** An earlier revision of
+this change cited D6 in the source comment. D6 governs the closed `handler` enum — imperative
+behavior admitted first-party — and says nothing about the `invoke` field vocabulary, which is D2's
+territory. The citation did not cover the widening, which is why this entry exists rather than a code
+comment pointing at the wrong decision.
+
+**`env` is OPTIONAL, per D4 rule 2**, exactly as `modelConfigKey` was in the Phase 5b entry above: it
+did not exist before this change, so requiring it would fail validation on every reviewer manifest
+authored against an earlier GSD. Absent means the lane inherits the environment unchanged.
+
+**Forbidden on `openai-http`, and registered in the discriminator to make that enforceable.** An
+`openai-http` lane spawns no child, so an environment pair there has no referent. The first
+implementation validated `env`'s shape but left it out of `SPAWN_ONLY_INVOKE_FIELDS` — the list the
+openai-http arm rejects against — so it was accepted on that transport in silence, alone among the
+spawn fields. Both registrations are required; neither implies the other.
+
+**What this does not change.** No decision is reversed. `transport` remains a closed two-member
+discriminator; `effortChannel` stays in neither field list because D2 defines it for **both**
+transports, so it is shared rather than spawn-only.
+
+**Why `env` is not added to the D5 disclosure signature — and the limit of that reasoning.** As the
+production call chain stands today, a manifest's `invoke` fields never reach `resolveLanePlan`:
+`gsd-tools.cjs` builds its lane map solely from the first-party `REVIEWER_LANES` table and rejects
+any slug absent from it, so a manifest body influences *which* first-party lane runs, never what that
+lane executes with. Adding `env` to the signature would change every capability's disclosure
+signature and force re-consent across the board for a field no manifest can currently exercise.
+
+Two honest qualifications, because the reasoning above is load-bearing and easy to over-read:
+
+- **The boundary is a property of the call chain, not of a test.** `resolveLanePlan` is *total* — it
+  folds whatever lane it is handed — so the guarantee cannot live in the resolver, and the regression
+  test that documents this boundary does not enforce it: a future code path feeding manifest lanes to
+  the resolver would not make it fail. Were manifest lanes ever made executable, `env` must join the
+  disclosed surface in that change, and nothing here will trip if it does not.
+- **This ADR is internally inconsistent on that point, and #2483 did not create the inconsistency.**
+  Consequences above states that adding a reviewer is "one manifest … no core patch", and
+  `CONTEXT.md`, `gsd-core/workflows/review.md` and the resolver's own header say manifest/overlay
+  lanes reach the resolver. The traced runtime disagrees with all four. Resolving that is out of scope
+  for an approved-enhancement PR and is recorded here rather than quietly settled in this entry's
+  favour — whichever way it resolves, the `env` disclosure question resolves with it.
