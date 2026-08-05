@@ -160,6 +160,21 @@ test('cleanup still removes a real os.tmpdir()-rooted directory (control)', () =
   assert.strictEqual(fs.existsSync(dir), false, 'os.tmpdir()-rooted directory should be removed');
 });
 
+// ─── Test 6b: accepted-roots set always accepts a freshly-minted tmpdir ─────
+
+test('cleanup accepts a freshly-created os.tmpdir()-rooted dir on any platform (accepted-roots invariant)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cleanup-roots-'));
+  t.after(() => {
+    if (fs.existsSync(dir)) cleanup(dir);
+  });
+
+  assert.doesNotThrow(
+    () => cleanup(dir),
+    'cleanup must accept a directory created directly under os.tmpdir(), regardless of platform-specific canonical spelling (8.3 short/long names, /var symlink, drive-letter case)'
+  );
+  assert.strictEqual(fs.existsSync(dir), false, 'temp dir should be removed, not refused');
+});
+
 // ─── Test 6: realpath'd os.tmpdir() form is not refused (regression) ────────
 
 test('cleanup accepts a realpath()d temp dir even when it differs from the raw path (macOS /var -> /private/var)', (t) => {

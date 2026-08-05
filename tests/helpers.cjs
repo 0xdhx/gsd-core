@@ -206,6 +206,40 @@ function createTempGitProject(prefix = 'gsd-test-') {
   return createFixture({ prefix, planning: true, git: true, projectDoc: true });
 }
 
+// The OS temp root has several canonical spellings, and a path a caller
+// legitimately passes to cleanup() may arrive in any of them: macOS resolves
+// os.tmpdir() under /var/folders/... but /var is a symlink to /private/var;
+// Windows CI runners report os.tmpdir() in the 8.3 SHORT form
+// (C:\Users\RUNNER~1\AppData\Local\Temp) while the caller's path is the
+// expanded LONG form, and fs.realpathSync() does not reliably expand 8.3
+// short names there — only fs.realpathSync.native() does; drive-letter and
+// path casing can also differ (C:\ vs c:\). Collect every variant we can
+// derive from os.tmpdir() and accept a target under any of them. Each probe
+// is wrapped in its own try/catch — none of them may throw and crash
+// cleanup(), they just contribute nothing if unavailable.
+function tmpRootCandidates() {
+  const roots = [];
+  try {
+    roots.push(path.resolve(os.tmpdir()));
+  } catch (_) { /* os.tmpdir() unavailable — skip this variant */ }
+  try {
+    roots.push(fs.realpathSync(os.tmpdir()));
+  } catch (_) { /* temp root unreadable — skip this variant */ }
+  try {
+    roots.push(fs.realpathSync.native(os.tmpdir()));
+  } catch (_) { /* native realpath unavailable/unreadable — skip this variant */ }
+  const isWindows = process.platform === 'win32';
+  const seen = new Set();
+  const deduped = [];
+  for (const root of roots) {
+    const key = isWindows ? root.toLowerCase() : root;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(root);
+  }
+  return deduped;
+}
+
 function cleanup(tmpDir) {
   if (typeof tmpDir !== 'string' || tmpDir.length === 0) return;
   const target = path.resolve(tmpDir);
@@ -216,26 +250,21 @@ function cleanup(tmpDir) {
   // its own tree and get force-deleted. Hoisted above both the chdir and the
   // rmSync so an out-of-tmpdir path is refused before either can run.
   //
-  // Two acceptable roots, not one: on macOS os.tmpdir() returns a path under
-  // /var/folders/... but /var is a symlink to /private/var, and path.resolve()
-  // does not resolve symlinks. A caller that passed the REALPATH'd form of a
-  // temp dir (e.g. via fs.realpathSync(), or via process.cwd() after chdir-ing
-  // into a realpath'd dir) would resolve to /private/var/folders/... and get
-  // wrongly refused by a check against only path.resolve(os.tmpdir()). Build
-  // the accepted-roots set from both the raw and realpath'd forms of
-  // os.tmpdir() — realpathSync is wrapped in try/catch because it throws if
-  // the temp root is momentarily missing, and this guard must never crash
-  // cleanup() over that. Do NOT realpath `target` itself: cleanup() is
-  // legitimately called on already-deleted or never-created dirs, and
-  // realpathSync throws ENOENT on a missing path.
-  const tmpRoots = [path.resolve(os.tmpdir())];
-  try {
-    const realTmpRoot = fs.realpathSync(os.tmpdir());
-    if (!tmpRoots.includes(realTmpRoot)) tmpRoots.push(realTmpRoot);
-  } catch (_) { /* temp root unreadable — fall back to the resolved form only */ }
-  const isTmpPath = tmpRoots.some(
-    (root) => target === root || target.startsWith(`${root}${path.sep}`)
-  );
+  // Do NOT realpath `target` itself: cleanup() is legitimately called on
+  // already-deleted or never-created dirs, and realpathSync throws ENOENT on
+  // a missing path. Comparison is case-insensitive on Windows (drive-letter
+  // and path casing vary there) and case-sensitive everywhere else; the
+  // error message below always prints the original-case target.
+  const isWindows = process.platform === 'win32';
+  const tmpRoots = tmpRootCandidates();
+  const targetForCompare = isWindows ? target.toLowerCase() : target;
+  const isTmpPath = tmpRoots.some((root) => {
+    const rootForCompare = isWindows ? root.toLowerCase() : root;
+    return (
+      targetForCompare === rootForCompare ||
+      targetForCompare.startsWith(`${rootForCompare}${path.sep}`)
+    );
+  });
   if (!isTmpPath) {
     throw new Error(`cleanup() refused to remove a path outside os.tmpdir(): ${target}`);
   }
