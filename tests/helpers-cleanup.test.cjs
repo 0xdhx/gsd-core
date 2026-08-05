@@ -159,3 +159,29 @@ test('cleanup still removes a real os.tmpdir()-rooted directory (control)', () =
 
   assert.strictEqual(fs.existsSync(dir), false, 'os.tmpdir()-rooted directory should be removed');
 });
+
+// ─── Test 6: realpath'd os.tmpdir() form is not refused (regression) ────────
+
+test('cleanup accepts a realpath()d temp dir even when it differs from the raw path (macOS /var -> /private/var)', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cleanup-realpath-'));
+  const realPath = fs.realpathSync(dir);
+
+  if (realPath !== dir) {
+    // macOS (and any other symlinked-tmpdir platform): the realpath'd form
+    // diverges from the raw mkdtempSync() path. This is exactly the shape a
+    // caller gets from fs.realpathSync() or from process.cwd() after
+    // chdir-ing into a realpath'd dir — assert the guard does NOT refuse it.
+    cleanup(realPath);
+    assert.strictEqual(fs.existsSync(realPath), false, 'realpath()d form should be removed, not refused');
+    assert.strictEqual(fs.existsSync(dir), false, 'raw path should also be gone (same directory)');
+  } else {
+    // Linux and any platform with no tmpdir symlink indirection: realpath()
+    // equals the raw path, so this branch exercises the ordinary path and
+    // keeps the test meaningful (non-vacuous) on both platforms.
+    t.after(() => {
+      if (fs.existsSync(dir)) cleanup(dir);
+    });
+    cleanup(dir);
+    assert.strictEqual(fs.existsSync(dir), false, 'temp dir should be removed');
+  }
+});

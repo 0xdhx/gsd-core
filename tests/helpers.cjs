@@ -210,13 +210,32 @@ function cleanup(tmpDir) {
   if (typeof tmpDir !== 'string' || tmpDir.length === 0) return;
   const target = path.resolve(tmpDir);
   const cwd = path.resolve(process.cwd());
-  const tmpRoot = path.resolve(os.tmpdir());
   // isTmpPath was previously computed only inside the catch block below, so it
   // classified a transient Windows error but was never consulted by the
   // destructive rmSync call itself — a wrong `target` would still chdir out of
   // its own tree and get force-deleted. Hoisted above both the chdir and the
   // rmSync so an out-of-tmpdir path is refused before either can run.
-  const isTmpPath = target === tmpRoot || target.startsWith(`${tmpRoot}${path.sep}`);
+  //
+  // Two acceptable roots, not one: on macOS os.tmpdir() returns a path under
+  // /var/folders/... but /var is a symlink to /private/var, and path.resolve()
+  // does not resolve symlinks. A caller that passed the REALPATH'd form of a
+  // temp dir (e.g. via fs.realpathSync(), or via process.cwd() after chdir-ing
+  // into a realpath'd dir) would resolve to /private/var/folders/... and get
+  // wrongly refused by a check against only path.resolve(os.tmpdir()). Build
+  // the accepted-roots set from both the raw and realpath'd forms of
+  // os.tmpdir() — realpathSync is wrapped in try/catch because it throws if
+  // the temp root is momentarily missing, and this guard must never crash
+  // cleanup() over that. Do NOT realpath `target` itself: cleanup() is
+  // legitimately called on already-deleted or never-created dirs, and
+  // realpathSync throws ENOENT on a missing path.
+  const tmpRoots = [path.resolve(os.tmpdir())];
+  try {
+    const realTmpRoot = fs.realpathSync(os.tmpdir());
+    if (!tmpRoots.includes(realTmpRoot)) tmpRoots.push(realTmpRoot);
+  } catch (_) { /* temp root unreadable — fall back to the resolved form only */ }
+  const isTmpPath = tmpRoots.some(
+    (root) => target === root || target.startsWith(`${root}${path.sep}`)
+  );
   if (!isTmpPath) {
     throw new Error(`cleanup() refused to remove a path outside os.tmpdir(): ${target}`);
   }
