@@ -7085,6 +7085,7 @@ const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
 const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
 const { collectSection } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
+const { stripFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const TOOLS_PATH = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
@@ -7336,8 +7337,14 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['advance-plan'], dir);
       assert.ok(r.success, `advance-plan failed: ${r.error}`);
       const after = readState(dir);
-      // The Configuration-level Status must not be clobbered
-      const status = stateExtractField(after, 'Status');
+      // The Configuration-level Status must not be clobbered. Scope extraction
+      // to the body (frontmatter stripped): the frontmatter `status:` key and
+      // the body `Status:` field name collide case-insensitively under
+      // stateExtractField's plain-line pattern (#1255's landmine — see
+      // state-transition.cts), and frontmatter's `status` is a normalized
+      // enum (normalizeStateStatus), not the executor-authored prose this
+      // assertion is proving was preserved.
+      const status = stateExtractField(stripFrontmatter(after), 'Status');
       assert.ok(status, 'Status field not found after advance-plan');
       assert.strictEqual(
         status,
@@ -7357,7 +7364,14 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['advance-plan'], dir);
       assert.ok(r.success, `advance-plan failed: ${r.error}`);
       const after = readState(dir);
-      const status = stateExtractField(after, 'Status');
+      // Scope extraction to the body (frontmatter stripped): stateExtractField's
+      // plain-line pattern matches the frontmatter `status:` key before the body
+      // `Status:` field (case-insensitive collision — #1255). Frontmatter status
+      // is normalizeStateStatus's coarser enum (e.g. both "Verifying Phase N"
+      // and "Phase complete — ready for verification" normalize to the SAME
+      // 'verifying' value), so asserting it here would be a WEAKER check than
+      // the body prose this test exists to prove was replaced.
+      const status = stateExtractField(stripFrontmatter(after), 'Status');
       assert.ok(status, 'Status field not found after advance-plan');
       // 'Ready to execute' is a known default and should be replaced
       assert.notStrictEqual(
