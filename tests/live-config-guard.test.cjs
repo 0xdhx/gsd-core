@@ -172,7 +172,7 @@ describe('#2665: live-config hermeticity guard', () => {
   });
 });
 
-// ── Round 3: the two write surfaces that are not runtime config ROOTS ────────
+// ── Round 3: the write surfaces that are not runtime config ROOTS ───────────
 describe('#2665: guard watches non-root write surfaces', () => {
   test('resolveExtraWatchTargets covers $GSD_HOME/.gsd and kimi config.toml', () => {
     const home = tmpRoot();
@@ -207,7 +207,7 @@ describe('#2665: guard watches non-root write surfaces', () => {
       const targets = resolveExtraWatchTargets({ env, os: { homedir: () => home } });
 
       // Every descriptor in the array must contribute a target. Calling one
-      // named resolver instead would cover today's single entry and silently
+      // named resolver instead would cover one of today's two entries and silently
       // miss tomorrow's — the same partial-enumeration defect that put
       // KIMI_SHARE_DIR outside the scrub set, one layer over.
       for (const d of NON_REGISTRY_CONFIG_HOME_DESCRIPTORS) {

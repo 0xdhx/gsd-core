@@ -142,22 +142,26 @@ function resolveLiveConfigRoots(deps = {}) {
  * `root x GSD_OWNED_ENTRIES`.
  *
  * #2665 round 3: resolveLiveConfigRoots enumerates getGlobalConfigDir per registry
- * runtime plus grok. Two live write surfaces are invisible to that shape, so a leak
- * on either passed through this guard — the PR's own safety net — silently:
+ * runtime plus grok. A live write surface that is not a config ROOT is invisible to
+ * that shape, so a leak on one passed through this guard — the PR's own safety net —
+ * silently. There are THREE today ($GSD_HOME/.gsd, plus one config.toml per entry in
+ * NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, which #2755 took from one entry to two):
  *
  *   $GSD_HOME/.gsd  — GSD's user-owned store (consent.json, defaults.json, capability
  *                     overlays). Watched WHOLESALE: unlike ~/.claude this root is
  *                     exclusively ours, so the shared-root false-positive trap in
  *                     SCOPE above does not apply and an ownership filter would only
  *                     narrow the guard for nothing.
- *   <kimi>/config.toml — the file GSD writes its native [[hooks]] block into
- *                     (resolveKimiHooksTomlDir, KIMI_SHARE_DIR). The INVERSE case:
- *                     ~/.kimi belongs to Kimi CLI, so only the one file GSD writes is
+ *   <non-registry home>/config.toml — the file GSD writes its native [[hooks]] block
+ *                     into, one per NON_REGISTRY_CONFIG_HOME_DESCRIPTORS entry: Kimi
+ *                     CLI's ~/.kimi (KIMI_SHARE_DIR) and, since #2755, Kimi Code's
+ *                     ~/.kimi-code (KIMI_CODE_HOME). The INVERSE case: those roots
+ *                     belong to their products, so only the one file GSD writes is
  *                     watched, never the root. This is the KNOWN GAP above accepted
- *                     deliberately in one direction — GSD demonstrably writes this
- *                     file (bin/install.js calls resolveKimiHooksTomlDir at two sites),
- *                     so a concurrent Kimi CLI write is the only false positive, and
- *                     Kimi is not running during the suite.
+ *                     deliberately in one direction — GSD demonstrably writes these
+ *                     files (bin/install.js resolves the hooks-toml dir at two sites),
+ *                     so a concurrent write by those products is the only false
+ *                     positive, and neither runs during the suite.
  *
  * @returns {string[]} absolute paths; empty if the built lib is absent.
  */
@@ -175,7 +179,7 @@ function resolveExtraWatchTargets(deps = {}) {
     } = require(path.join(libDir, 'runtime-homes.cjs'));
 
     // ITERATE the descriptor array rather than naming one resolver. Calling
-    // resolveKimiHooksTomlDir directly would cover today's only entry and
+    // resolveKimiHooksTomlDir directly would cover one of today's two entries and
     // silently miss tomorrow's — the same partial-enumeration defect that put
     // KIMI_SHARE_DIR outside the scrub set in the first place, reintroduced one
     // layer over. TEST_ENV_BASE derives its keys from this array; deriving the

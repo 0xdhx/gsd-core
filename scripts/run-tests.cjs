@@ -975,15 +975,17 @@ function main() {
   // #2665: snapshot GSD's install footprint in every LIVE runtime config dir
   // before a single test runs. The suite must not write there; the check after
   // the chunk loop is what makes a violation loud instead of silent. See
-  // scripts/lib/live-config-guard.cjs for why the scope is narrow.
+  // scripts/live-config-guard.cjs for why the scope is narrow (it is deliberately
+  // NOT under scripts/lib/, which the installer copies to users wholesale).
   const liveConfigGuardEnabled = process.env.GSD_SKIP_LIVE_CONFIG_GUARD !== '1';
   let liveConfigRoots = [];
   let liveConfigExtras = [];
   let liveConfigBefore = null;
   if (liveConfigGuardEnabled) {
     liveConfigRoots = resolveLiveConfigRoots();
-    // #2665 round 3: $GSD_HOME/.gsd and kimi's native config.toml are live write
-    // surfaces that are not runtime config ROOTS, so they are invisible to the
+    // #2665 round 3: $GSD_HOME/.gsd, and one native config.toml per non-registry
+    // config-home descriptor (Kimi CLI's and, since #2755, Kimi Code's), are live
+    // write surfaces that are not runtime config ROOTS, so they are invisible to the
     // line above. Watched independently — and note the OR: the extras alone are
     // reason enough to snapshot, so an unbuilt tree that yields zero roots no
     // longer silently disables the whole guard.
