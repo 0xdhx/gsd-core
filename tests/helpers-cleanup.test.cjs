@@ -10,6 +10,8 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 
+const os = require('os');
+
 const { cleanup, createTempDir } = require('./helpers.cjs');
 
 // ─── Test 1: Real-FS happy path ──────────────────────────────────────────────
@@ -97,4 +99,63 @@ test('cleanup does not throw when cwd is inside the target dir, and removes the 
   }
 
   assert.strictEqual(fs.existsSync(dir), false, 'temp dir should not exist after cleanup');
+});
+
+// ─── Test 4: out-of-tmpdir refusal ───────────────────────────────────────────
+
+test('cleanup throws and does not chdir or delete when target is outside os.tmpdir()', () => {
+  // __dirname (this repo's tests/ directory) must never be deleted. Whether
+  // it is actually outside os.tmpdir() is environment-dependent: on Linux
+  // os.tmpdir() is /tmp, and a CI container that checks the repo out under
+  // /tmp would put __dirname INSIDE tmpdir, in which case a correctly-working
+  // cleanup() would not refuse it -- it would delete this directory. The
+  // precondition assertion below verifies the "outside tmpdir" assumption
+  // before cleanup() is ever called, so that situation fails loudly and
+  // safely instead of destructively. No scratch directory is created, so
+  // there is nothing to tear down.
+  const outsideDir = __dirname;
+  const knownFile = path.join(outsideDir, 'helpers-cleanup.test.cjs');
+
+  // Mirror cleanup()'s own out-of-tmpdir predicate (tests/helpers.cjs) so
+  // this test cannot run on a target it does not actually control.
+  const tmpRoot = path.resolve(os.tmpdir());
+  const resolvedOutsideDir = path.resolve(outsideDir);
+  const isInsideTmpdir =
+    resolvedOutsideDir === tmpRoot || resolvedOutsideDir.startsWith(`${tmpRoot}${path.sep}`);
+  assert.strictEqual(
+    isInsideTmpdir,
+    false,
+    `this test cannot run safely when the repo lives under os.tmpdir(): ` +
+      `outsideDir (${resolvedOutsideDir}) is inside os.tmpdir() (${tmpRoot})`
+  );
+
+  const cwdBefore = process.cwd();
+
+  assert.throws(
+    () => cleanup(outsideDir),
+    (err) => err instanceof Error && err.message.includes(outsideDir),
+    'cleanup must throw an Error whose message names the offending path'
+  );
+
+  assert.strictEqual(
+    process.cwd(),
+    cwdBefore,
+    'cleanup must refuse before chdir, so cwd is unchanged'
+  );
+  assert.strictEqual(fs.existsSync(outsideDir), true, 'target directory must still exist after refusal');
+  assert.strictEqual(
+    fs.existsSync(knownFile),
+    true,
+    'a known file inside the target must still exist, proving the dir was not emptied'
+  );
+});
+
+// ─── Test 5: control — a real os.tmpdir()-rooted path still cleans up ───────
+
+test('cleanup still removes a real os.tmpdir()-rooted directory (control)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cleanup-control-'));
+
+  cleanup(dir);
+
+  assert.strictEqual(fs.existsSync(dir), false, 'os.tmpdir()-rooted directory should be removed');
 });

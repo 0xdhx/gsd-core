@@ -211,6 +211,15 @@ function cleanup(tmpDir) {
   const target = path.resolve(tmpDir);
   const cwd = path.resolve(process.cwd());
   const tmpRoot = path.resolve(os.tmpdir());
+  // isTmpPath was previously computed only inside the catch block below, so it
+  // classified a transient Windows error but was never consulted by the
+  // destructive rmSync call itself — a wrong `target` would still chdir out of
+  // its own tree and get force-deleted. Hoisted above both the chdir and the
+  // rmSync so an out-of-tmpdir path is refused before either can run.
+  const isTmpPath = target === tmpRoot || target.startsWith(`${tmpRoot}${path.sep}`);
+  if (!isTmpPath) {
+    throw new Error(`cleanup() refused to remove a path outside os.tmpdir(): ${target}`);
+  }
   if (cwd === target || cwd.startsWith(`${target}${path.sep}`)) {
     // Windows cannot remove a directory that is the current working directory.
     process.chdir(path.dirname(target));
@@ -225,7 +234,6 @@ function cleanup(tmpDir) {
   } catch (error) {
     // After retries, Windows can still briefly hold temp dirs open after a timed-out
     // child exits. Ignore that teardown-only flake for temp roots, but rethrow everything else.
-    const isTmpPath = target === tmpRoot || target.startsWith(`${tmpRoot}${path.sep}`);
     const isTransientWinErr = process.platform === 'win32'
       && isTmpPath
       && ['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error && error.code);
