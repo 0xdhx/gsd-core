@@ -244,29 +244,66 @@ function cleanup(tmpDir) {
   if (typeof tmpDir !== 'string' || tmpDir.length === 0) return;
   const target = path.resolve(tmpDir);
   const cwd = path.resolve(process.cwd());
-  // isTmpPath was previously computed only inside the catch block below, so it
-  // classified a transient Windows error but was never consulted by the
+  // The temp-root check below was previously done only inside the catch block,
+  // so it classified a transient Windows error but was never consulted by the
   // destructive rmSync call itself — a wrong `target` would still chdir out of
   // its own tree and get force-deleted. Hoisted above both the chdir and the
   // rmSync so an out-of-tmpdir path is refused before either can run.
   //
-  // Do NOT realpath `target` itself: cleanup() is legitimately called on
-  // already-deleted or never-created dirs, and realpathSync throws ENOENT on
-  // a missing path. Comparison is case-insensitive on Windows (drive-letter
-  // and path casing vary there) and case-sensitive everywhere else; the
-  // error message below always prints the original-case target.
+  // `target` itself is only realpath'd below when it exists (fs.existsSync
+  // guard on the symlink-escape check) — realpathSync throws ENOENT on a
+  // missing path, and cleanup() is legitimately called on already-deleted or
+  // never-created dirs. Comparison is case-insensitive on Windows
+  // (drive-letter and path casing vary there) and case-sensitive everywhere
+  // else; the error message below always prints the original-case target.
   const isWindows = process.platform === 'win32';
   const tmpRoots = tmpRootCandidates();
-  const targetForCompare = isWindows ? target.toLowerCase() : target;
-  const isTmpPath = tmpRoots.some((root) => {
-    const rootForCompare = isWindows ? root.toLowerCase() : root;
-    return (
-      targetForCompare === rootForCompare ||
-      targetForCompare.startsWith(`${rootForCompare}${path.sep}`)
-    );
-  });
-  if (!isTmpPath) {
+  // Shared by the literal-target check and the symlink-realpath check below
+  // so the two cannot drift apart — a second, independently written copy of
+  // this comparison is how the matching precondition in the tests came to
+  // disagree with the guard it was meant to mirror.
+  function isUnderRoots(p) {
+    const pForCompare = isWindows ? p.toLowerCase() : p;
+    return tmpRoots.some((root) => {
+      const rootForCompare = isWindows ? root.toLowerCase() : root;
+      return (
+        pForCompare === rootForCompare ||
+        pForCompare.startsWith(`${rootForCompare}${path.sep}`)
+      );
+    });
+  }
+  if (!isUnderRoots(target)) {
     throw new Error(`cleanup() refused to remove a path outside os.tmpdir(): ${target}`);
+  }
+  // Symlink-escape guard: the check above is a string prefix test on `target`
+  // alone, so a symlink physically located under tmpdir but pointing OUTSIDE
+  // it would pass that check while rmSync follows the link and deletes the
+  // real, out-of-tree directory. When the target exists, also resolve its
+  // real path and require that to be under a root too.
+  //
+  // Only when it exists: cleanup() is legitimately called on already-deleted
+  // or never-created dirs, and fs.realpathSync throws ENOENT on those — a
+  // missing target is harmless anyway since rmSync({force: true}) no-ops on it.
+  //
+  // Any realpath error (including a non-ENOENT failure) fails CLOSED: refuse
+  // rather than silently proceed. This is a safety check, not a best-effort
+  // probe — an unreadable/looping symlink must not be treated as safe.
+  if (fs.existsSync(target)) {
+    let real;
+    try {
+      real = fs.realpathSync(target);
+    } catch (error) {
+      throw new Error(
+        `cleanup() refused to remove a path it could not verify via realpath ` +
+        `(${(error && error.code) || (error && error.message) || 'unknown error'}): ${target}`
+      );
+    }
+    if (!isUnderRoots(real)) {
+      throw new Error(
+        `cleanup() refused to remove a path that resolves via symlink to a ` +
+        `location outside os.tmpdir(): ${target} -> ${real}`
+      );
+    }
   }
   if (cwd === target || cwd.startsWith(`${target}${path.sep}`)) {
     // Windows cannot remove a directory that is the current working directory.
@@ -282,8 +319,9 @@ function cleanup(tmpDir) {
   } catch (error) {
     // After retries, Windows can still briefly hold temp dirs open after a timed-out
     // child exits. Ignore that teardown-only flake for temp roots, but rethrow everything else.
+    // By this point target is guaranteed under a temp root: the guard clauses above throw
+    // for any other path, so this swallow doesn't need to re-test that.
     const isTransientWinErr = process.platform === 'win32'
-      && isTmpPath
       && ['EBUSY', 'ENOTEMPTY', 'EPERM'].includes(error && error.code);
     if (!isTransientWinErr) throw error;
   }
@@ -693,4 +731,4 @@ function clearSessionEnv() {
   for (const k of SESSION_ENV_KEYS) delete process.env[k];
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH };
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH };

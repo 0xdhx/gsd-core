@@ -12,7 +12,7 @@ const path = require('path');
 
 const os = require('os');
 
-const { cleanup, createTempDir } = require('./helpers.cjs');
+const { cleanup, createTempDir, tmpRootCandidates } = require('./helpers.cjs');
 
 // ─── Test 1: Real-FS happy path ──────────────────────────────────────────────
 
@@ -116,17 +116,31 @@ test('cleanup throws and does not chdir or delete when target is outside os.tmpd
   const outsideDir = __dirname;
   const knownFile = path.join(outsideDir, 'helpers-cleanup.test.cjs');
 
-  // Mirror cleanup()'s own out-of-tmpdir predicate (tests/helpers.cjs) so
-  // this test cannot run on a target it does not actually control.
-  const tmpRoot = path.resolve(os.tmpdir());
+  // Use cleanup()'s own tmpRootCandidates() as the single source of truth
+  // for "is this path inside tmpdir" instead of a hand-mirrored predicate.
+  // The old copy here checked only path.resolve(os.tmpdir()), one of
+  // SEVERAL root spellings cleanup() actually accepts (it also accepts the
+  // realpath'd and native-realpath'd forms) — a repo checked out under a
+  // root this precondition didn't know about would compute "outside, safe"
+  // while cleanup() computed "inside, delete", turning this refusal test
+  // into the very destructive scenario it exists to prevent. Importing the
+  // real function removes that drift class entirely.
   const resolvedOutsideDir = path.resolve(outsideDir);
-  const isInsideTmpdir =
-    resolvedOutsideDir === tmpRoot || resolvedOutsideDir.startsWith(`${tmpRoot}${path.sep}`);
+  const roots = tmpRootCandidates();
+  const isWindows = process.platform === 'win32';
+  const outsideDirForCompare = isWindows ? resolvedOutsideDir.toLowerCase() : resolvedOutsideDir;
+  const isInsideTmpdir = roots.some((root) => {
+    const rootForCompare = isWindows ? root.toLowerCase() : root;
+    return (
+      outsideDirForCompare === rootForCompare ||
+      outsideDirForCompare.startsWith(`${rootForCompare}${path.sep}`)
+    );
+  });
   assert.strictEqual(
     isInsideTmpdir,
     false,
-    `this test cannot run safely when the repo lives under os.tmpdir(): ` +
-      `outsideDir (${resolvedOutsideDir}) is inside os.tmpdir() (${tmpRoot})`
+    `this test cannot run safely when the repo lives under any tmpdir root ` +
+      `cleanup() accepts: outsideDir (${resolvedOutsideDir}) is inside one of ${JSON.stringify(roots)}`
   );
 
   const cwdBefore = process.cwd();
@@ -198,5 +212,98 @@ test('cleanup accepts a realpath()d temp dir even when it differs from the raw p
     });
     cleanup(dir);
     assert.strictEqual(fs.existsSync(dir), false, 'temp dir should be removed');
+  }
+});
+
+// ─── Test 7: tmpRootCandidates() shape invariants (platform-independent) ────
+//
+// Test 6 above is coverage-identical to Test 5's control on any platform
+// where fs.realpathSync(tmpdir) does not diverge from the raw path (Linux,
+// notably — the platform the remote matrix actually runs on), so it cannot
+// verify the macOS-specific fix there. These assertions hold the exported
+// tmpRootCandidates() to a contract that is meaningful on every platform.
+
+test('tmpRootCandidates() returns a well-formed, deduplicated list of absolute paths', () => {
+  const roots = tmpRootCandidates();
+
+  assert.ok(Array.isArray(roots) && roots.length > 0, 'must return a non-empty array');
+
+  for (const root of roots) {
+    assert.strictEqual(path.isAbsolute(root), true, `root must be absolute: ${root}`);
+  }
+
+  const isWindows = process.platform === 'win32';
+  const keys = roots.map((r) => (isWindows ? r.toLowerCase() : r));
+  const uniqueKeys = new Set(keys);
+  assert.strictEqual(uniqueKeys.size, keys.length, `roots must be deduplicated: ${JSON.stringify(roots)}`);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cleanup-roots-contract-'));
+  try {
+    const resolvedDir = path.resolve(dir);
+    const dirForCompare = isWindows ? resolvedDir.toLowerCase() : resolvedDir;
+    const isUnderSomeRoot = roots.some((root) => {
+      const rootForCompare = isWindows ? root.toLowerCase() : root;
+      return (
+        dirForCompare === rootForCompare ||
+        dirForCompare.startsWith(`${rootForCompare}${path.sep}`)
+      );
+    });
+    assert.strictEqual(
+      isUnderSomeRoot,
+      true,
+      `a freshly mkdtempSync'd dir under os.tmpdir() must be under at least one returned root: ` +
+        `${resolvedDir} vs ${JSON.stringify(roots)}`
+    );
+  } finally {
+    cleanup(dir);
+  }
+});
+
+// ─── Test 8: symlink-escape refusal, all platforms ───────────────────────────
+
+test('cleanup refuses a symlink under tmpdir that resolves outside tmpdir, and the victim survives', (t) => {
+  const symlinkParent = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cleanup-symlink-'));
+  t.after(() => {
+    if (fs.existsSync(symlinkParent)) cleanup(symlinkParent);
+  });
+
+  // The victim must live OUTSIDE tmpdir (that's the whole point of the
+  // scenario) — put it under this worktree's gitignored .gsd/ directory
+  // rather than os.homedir() so the test has no dependency on the runner's
+  // home layout. cleanup() will (correctly, by design) refuse a path there,
+  // so teardown cannot route through cleanup() either; the raw rmSync below
+  // is narrowly scoped and justified inline.
+  const victimParent = path.join(__dirname, '..', '.gsd');
+  fs.mkdirSync(victimParent, { recursive: true });
+  const victim = fs.mkdtempSync(path.join(victimParent, 'cleanup-symlink-victim-'));
+  t.after(() => {
+    if (fs.existsSync(victim)) {
+      // eslint-disable-next-line local/no-raw-rmsync-in-tests -- victim is deliberately outside os.tmpdir() (that's the scenario under test), so cleanup() refuses it by design and cannot be used for its own teardown.
+      fs.rmSync(victim, { recursive: true, force: true });
+    }
+  });
+  fs.writeFileSync(path.join(victim, 'marker.txt'), 'victim');
+
+  const symlinkPath = path.join(symlinkParent, 'escape-link');
+  let symlinkCreated = true;
+  try {
+    fs.symlinkSync(victim, symlinkPath, 'dir');
+  } catch (error) {
+    symlinkCreated = false;
+    t.skip(`symlink creation not permitted in this environment (${error.code || error.message}) — likely Windows without developer mode`);
+  }
+
+  if (symlinkCreated) {
+    assert.throws(
+      () => cleanup(symlinkPath),
+      (err) => err instanceof Error && err.message.includes(symlinkPath),
+      'cleanup must throw and name the symlink path when it resolves outside os.tmpdir()'
+    );
+    assert.strictEqual(fs.existsSync(victim), true, 'victim directory must survive the refusal');
+    assert.strictEqual(
+      fs.existsSync(path.join(victim, 'marker.txt')),
+      true,
+      'victim contents must survive the refusal'
+    );
   }
 });
