@@ -156,12 +156,16 @@ function resolveLiveConfigRoots(deps = {}) {
  *                     into, one per NON_REGISTRY_CONFIG_HOME_DESCRIPTORS entry: Kimi
  *                     CLI's ~/.kimi (KIMI_SHARE_DIR) and, since #2755, Kimi Code's
  *                     ~/.kimi-code (KIMI_CODE_HOME). The INVERSE case: those roots
- *                     belong to their products, so only the one file GSD writes is
- *                     watched, never the root. This is the KNOWN GAP above accepted
- *                     deliberately in one direction — GSD demonstrably writes these
- *                     files (bin/install.js resolves the hooks-toml dir at two sites),
- *                     so a concurrent write by those products is the only false
- *                     positive, and neither runs during the suite.
+ *                     belong to their products, so the root is never watched
+ *                     wholesale. This is the KNOWN GAP above accepted deliberately
+ *                     in one direction — GSD demonstrably writes these files
+ *                     (bin/install.js resolves the hooks-toml dir at two sites), so
+ *                     a concurrent write by those products is the only false
+ *                     positive, and neither runs during the suite. NOT watched, and
+ *                     it is a real residual rather than a bound: <root>/hooks/, the
+ *                     bundle installSharedHooksBundle writes into the same roots —
+ *                     see resolveExtraWatchTargets for why closing it is a layout
+ *                     decision.
  *
  * @returns {string[]} absolute paths; empty if the built lib is absent.
  */
@@ -190,8 +194,18 @@ function resolveExtraWatchTargets(deps = {}) {
     // untestable and the targets resolved against different worlds.
     for (const descriptor of NON_REGISTRY_CONFIG_HOME_DESCRIPTORS) {
       const dir = resolveConfigHomeFromDescriptor(descriptor, { env, home: homedir() });
-      // GSD writes ONE named file into these third-party roots; the root itself
-      // belongs to the runtime, so it is never watched wholesale.
+      // The root belongs to the runtime, so it is never watched wholesale — only
+      // the named file below.
+      //
+      // NAMED RESIDUAL (#2665, found pre-push while rebasing): config.toml is NOT
+      // the only thing GSD writes here. bin/install.js also calls
+      // installSharedHooksBundle(kimiHooksRoot), which populates <root>/hooks/
+      // with GSD's hook scripts and a CommonJS marker. That subtree is UNWATCHED,
+      // so a suite-produced leak of a hook bundle into a developer's real ~/.kimi
+      // or ~/.kimi-code passes this guard silently. Closing it needs a layout
+      // decision, not one more path: the same reason getGlobalSkillsBase is a
+      // deliberate non-target above. Under-watching fails quiet, like the
+      // NON_REGISTRY_OWNED_FILE residual it sits beside.
       targets.push(path.resolve(path.join(dir, NON_REGISTRY_OWNED_FILE)));
     }
   } catch {

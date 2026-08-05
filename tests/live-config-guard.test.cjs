@@ -210,6 +210,12 @@ describe('#2665: guard watches non-root write surfaces', () => {
       // named resolver instead would cover one of today's two entries and silently
       // miss tomorrow's — the same partial-enumeration defect that put
       // KIMI_SHARE_DIR outside the scrub set, one layer over.
+      //
+      // SCOPE BOUNDARY (per round-2 Nit 7, and it bites here): this asserts one
+      // target PER DESCRIPTOR and nothing about whether one target per descriptor
+      // is ENOUGH. It is not — <root>/hooks/ is also GSD-written and unwatched
+      // (named residual in resolveExtraWatchTargets). A test whose expectation is
+      // derived from the same array it checks cannot see that class.
       for (const d of NON_REGISTRY_CONFIG_HOME_DESCRIPTORS) {
         const dir = resolveConfigHomeFromDescriptor(d, { env, home });
         assert.ok(
