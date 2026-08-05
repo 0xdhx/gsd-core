@@ -4299,7 +4299,12 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3129-validate-commit-git-bypass (consolidation epic #1969 B5 #1974)", () => {
 'use strict';
-// allow-test-rule: reads hook shell script to verify delegation pattern — structural contract test, not source-grep (see #3129)
+// allow-test-rule: structural-regression-guard (see #3129)
+// Reads the gsd-validate-commit.sh hook source to verify it delegates to
+// git-cmd.js isGitSubcommand() rather than the old regex — a specific code
+// pattern that must (and must not) exist; behavioral tests of tokenize()/
+// isGitSubcommand() cannot observe which detection strategy the hook itself
+// calls.
 
 // Regression tests for bug #3129.
 //

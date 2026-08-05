@@ -707,8 +707,6 @@ describe('bug #2638 — sub_repos canonical location', () => {
   __foldDescribe("folded:bug-3523-cjs-loadconfig-branching-strategy-warning (consolidation epic #1969 B6 #1975)", () => {
 'use strict';
 
-// allow-test-rule: validates runtime CLI stdout/stderr warning behavior, not source grep (see #3523)
-
 /**
  * Regression tests for #3523 — CJS loadConfig must not emit a false
  * "unknown config key(s)" warning for `branching_strategy` when that key
@@ -833,7 +831,7 @@ describe('bug-3523 — no warning for legacy top-level branching_strategy', () =
     );
 
     // After migration write-back, config-get should find git.branching_strategy.
-    const result = runWithStderr(['config-get', 'git.branching_strategy'], tmpDir);
+    const result = runWithStderr(['config-get', 'git.branching_strategy', '--raw'], tmpDir);
 
     assert.equal(
       result.status,
@@ -845,8 +843,9 @@ describe('bug-3523 — no warning for legacy top-level branching_strategy', () =
       '',
       `No error should fire when reading migrated branching_strategy (#3523) — got: ${result.stderr}`
     );
-    assert.ok(
-      result.stdout.includes('milestone'),
+    assert.equal(
+      result.stdout.trim(),
+      'milestone',
       `Expected git.branching_strategy to be 'milestone' but got: ${result.stdout}`
     );
   });
@@ -880,6 +879,11 @@ describe('bug-3523 — double-emission reduced to single-emission', () => {
 
     const result = runWithStderr(['resolve-model', 'planner'], tmpDir);
 
+    // allow-test-rule: pending-migration-to-typed-ir [#3090]
+    // Counts occurrences of a sentinel substring in the CLI's human-readable
+    // stderr warning text — no structured "warning count"/warning-list API is
+    // exposed yet; adding one is a production change out of scope here.
+    // Tracked under #3090.
     // Count how many times the sentinel key appears in warnings
     const warningLines = result.stderr
       .split('\n')
