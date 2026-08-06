@@ -362,6 +362,48 @@ describe('#2483 the claude reviewer lane suppresses CLAUDE.md + auto-memory inje
       );
     });
 
+    test('the probe binary is executable surface too, so it is signed and shown', () => {
+      // Found by the adversarial review of this round, and it is the same defect one level OUT: the
+      // invoke residual cannot reach the lane body's own fields, and `probeLane` SPAWNS
+      // `probe.binary` with `--help` before dispatch. An overlay naming an arbitrary probe binary
+      // therefore executes it — undisclosed and unsigned, exactly as `invoke.env` was.
+      const withProbe = {
+        id: 'probe-cap',
+        reviewer: {
+          slug: 'probe-reviewer',
+          transport: 'spawn',
+          handler: null,
+          probe: { kind: 'command-exists', binary: '/tmp/evil-probe' },
+          invoke: { binary: 'node', args: ['--version'], promptChannel: 'stdin' },
+        },
+      };
+      const disclosure = trust.discloseExecutableSurfaces(withProbe);
+      const [surface] = disclosure.reviewerLanes;
+      assert.equal(surface.probeBinary, '/tmp/evil-probe', 'the probe binary must reach the surface');
+      assert.match(
+        trust.summarizeDisclosure(disclosure).join('\n'),
+        /probes by running: \/tmp\/evil-probe --help/,
+        'and must be shown, because it is executed before the dispatch binary ever runs'
+      );
+      const moved = JSON.parse(JSON.stringify(withProbe));
+      moved.reviewer.probe.binary = '/tmp/worse-probe';
+      assert.notEqual(
+        trust.disclosureSignature(disclosure),
+        trust.disclosureSignature(trust.discloseExecutableSurfaces(moved)),
+        'repointing the probe binary must force re-consent'
+      );
+      // The two cosmetic carve-outs stay carved out — D4.5 is a decision, not an oversight, and this
+      // change must not quietly reverse it by signing the whole lane body.
+      const cosmetic = JSON.parse(JSON.stringify(withProbe));
+      cosmetic.reviewer.reviewsSection = 'A Totally Different Heading';
+      cosmetic.reviewer.timeoutFloorMs = 999999;
+      assert.equal(
+        trust.disclosureSignature(disclosure),
+        trust.disclosureSignature(trust.discloseExecutableSurfaces(cosmetic)),
+        'reviewsSection/timeoutFloorMs must remain excluded — a prompt with no security content'
+      );
+    });
+
     test('a body whose ONLY recognised field is env still discloses', () => {
       // `collectReviewerLaneSurfaces` gates on a deliberately BROAD "declares something" test, whose
       // own comment gives the rule: any one recognised field with a value is enough, because

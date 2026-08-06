@@ -243,6 +243,22 @@ interface ReviewerLaneSurface {
    */
   residualInvoke: Record<string, unknown>;
   /**
+   * The same backstop for the lane body's OUTER fields, which `invoke`'s residual cannot reach.
+   * `probe` is the reason it exists and is not a hypothetical: `probeLane` SPAWNS `probe.binary`
+   * with `--help` (`review-lane-runner.cts`, `command-exists`/`command-capability`), so an overlay
+   * naming an arbitrary probe binary executes it — the same class as `invoke.env`, one level out.
+   * `requiresBinaries`, `emptyOutput`, `promptBudgetKey` and `modelConfigKey` ride along for the
+   * same reason the invoke residual exists: enumerating "the ones that matter" is what failed.
+   *
+   * TWO fields are deliberately excluded, and the exclusion is a DECISION, not an oversight:
+   * `reviewsSection` and `timeoutFloorMs` (D4.5 / matrix A10/A13 — cosmetic, and folding them in
+   * would force a re-consent prompt carrying no security information, training click-through).
+   * `slug`/`transport`/`handler`/`invoke` are excluded because they are already bound.
+   */
+  residualLane: Record<string, unknown>;
+  /** spawn: the probe binary this lane executes with `--help` before dispatch, or '' when none. */
+  probeBinary: string;
+  /**
    * The data classes that egress to this lane on every run (`EGRESS_PAYLOAD_CLASSES`) — named
    * honestly (Kerckhoffs's Principle) rather than disclosed as an unhelpful "sends data to the tool".
    */
@@ -667,6 +683,20 @@ function collectReviewerLaneSurfaces(
       if (k === 'binary' || k === 'args' || k === 'hostConfigKey' || k === 'promptChannel') continue;
       residualInvoke[k] = v;
     }
+    // The outer half of the same backstop. `probe` is the one that matters most — its `binary` is
+    // spawned before dispatch — and the two exclusions below are ADR-2782's deliberate cosmetic
+    // carve-outs, not fields nobody got round to.
+    const residualLane: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(rec)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+      if (k === 'slug' || k === 'transport' || k === 'handler' || k === 'invoke') continue;
+      if (k === 'reviewsSection' || k === 'timeoutFloorMs') continue;
+      residualLane[k] = v;
+    }
+    const probeRaw = rec['probe'];
+    const probeBinary = (typeof probeRaw === 'object' && probeRaw !== null && !Array.isArray(probeRaw))
+      ? asString((probeRaw as Record<string, unknown>)['binary'])
+      : '';
 
     // An EMPTY (or wholly unrecognised) reviewer body declares no lane and must
     // not be treated as one. Without this, `reviewer: {}` alone flips
@@ -687,7 +717,7 @@ function collectReviewerLaneSurfaces(
     // the exact slip-through the broad test exists to refuse.
     const declaresSomething = Boolean(
       slug || transport || handler || binary || hostConfigKey || promptChannel
-      || rawArgsDeclared.length > 0 || Object.keys(env).length > 0 || defaultHost,
+      || rawArgsDeclared.length > 0 || Object.keys(env).length > 0 || defaultHost || probeBinary,
     );
     if (!declaresSomething) return [];
 
@@ -736,6 +766,8 @@ function collectReviewerLaneSurfaces(
       env,
       defaultHost,
       residualInvoke,
+      residualLane,
+      probeBinary,
       // B5: every lane receives the same named egress payload classes — a fresh copy per surface so
       // no caller can mutate the shared constant through a returned surface.
       egressPayloadClasses: [...EGRESS_PAYLOAD_CLASSES],
@@ -1137,9 +1169,10 @@ function disclosureSignature(d: Disclosure): string {
   // resolver-bearing caller and a resolver-less caller would permanently disagree on one manifest's
   // signature).
   // #2483: the eight-field enumeration above was a CLOSED list over an OPEN vocabulary, and it had
-  // already fallen behind by seven fields before `env` made the ninth — `defaultHost` (the manifest's
-  // OWN fallback egress host), `path` (appended to it to build the URL), `outputChannel`/`outputArg`,
-  // `modelArg`, `effortChannel` and `modelDiscovery` all reach `resolveLanePlan` and none was signed.
+  // already fallen behind by EIGHT fields before `env` made the ninth — `defaultHost` (the manifest's
+  // OWN fallback egress host), `path` (appended to it to build the URL), `outputChannel`, `outputArg`,
+  // `modelArg`, `effortChannel`, `modelDiscovery` and `fallbackModel` all reach `resolveLanePlan` and
+  // none was signed. (Counted: `resolveLanePlan` reads twelve `inv.*` fields; four were bound.)
   // So the fix is not a ninth name: it is a residual, the same completeness backstop `rawConfig` gives
   // the MCP line one screen up (#1459 finding 5). `env`/`defaultHost` are ALSO named explicitly,
   // mirroring that line's deliberate explicit-then-backstop overlap, because they are the two the
@@ -1154,10 +1187,16 @@ function disclosureSignature(d: Disclosure): string {
       const tuple: unknown[] = [
         'lane', l.slug, l.transport, l.binary, l.rawArgs || [], l.hostConfigKey, l.promptChannel, l.handler,
       ];
-      const extra = { env: l.env || {}, defaultHost: l.defaultHost || '', residual: l.residualInvoke || {} };
+      const extra = {
+        env: l.env || {},
+        defaultHost: l.defaultHost || '',
+        residual: l.residualInvoke || {},
+        laneResidual: l.residualLane || {},
+      };
       const declaresExtra = Object.keys(extra.env).length > 0
         || extra.defaultHost !== ''
-        || Object.keys(extra.residual).length > 0;
+        || Object.keys(extra.residual).length > 0
+        || Object.keys(extra.laneResidual).length > 0;
       if (declaresExtra) tuple.push(extra);
       return stableJson(tuple);
     })
@@ -1306,6 +1345,12 @@ function summarizeDisclosure(disclosure: Disclosure): string[] {
         lines.push(`    - ${l.slug || '(slug?)'} -> ${cmd || '(no binary declared)'}`);
       }
       if (l.handler) lines.push(`        handler: ${l.handler}`);
+      // The probe binary is EXECUTED (`probeLane` spawns it with `--help` before dispatch), so it is
+      // an executable surface in its own right and belongs in the prompt beside the dispatch binary.
+      // It is frequently the same program; showing it when it differs is the case that matters.
+      if (l.probeBinary && l.probeBinary !== l.binary) {
+        lines.push(`        probes by running: ${l.probeBinary} --help`);
+      }
       // #2483: identical treatment to the MCP `env` line above, for the identical reason stated
       // there — env changes WHAT runs without touching the command, so the user consents to this
       // exact environment or not at all.
