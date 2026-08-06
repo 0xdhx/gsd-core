@@ -802,23 +802,51 @@ spawn fields. Both registrations are required; neither implies the other.
 discriminator; `effortChannel` stays in neither field list because D2 defines it for **both**
 transports, so it is shared rather than spawn-only.
 
-**Why `env` is not added to the D5 disclosure signature — and the limit of that reasoning.** As the
-production call chain stands today, a manifest's `invoke` fields never reach `resolveLanePlan`:
-`gsd-tools.cjs` builds its lane map solely from the first-party `REVIEWER_LANES` table and rejects
-any slug absent from it, so a manifest body influences *which* first-party lane runs, never what that
-lane executes with. Adding `env` to the signature would change every capability's disclosure
-signature and force re-consent across the board for a field no manifest can currently exercise.
+**`env` IS added to the D5 disclosure signature, and to the human consent prompt.** An installed
+overlay `reviewer` body reaches `resolveLanePlan` and is executed: `routeReviewLane` builds its lane
+map from `mergeReviewerLanes(REVIEWER_LANES, loadRegistry({includeInstalled: true}))` (D8, #2927 /
+#3062), and that merge is field-identical per D1 — it admits the overlay body without deep-validating
+`invoke`, precisely because the invocation seam is where a lane is re-validated before it runs. So a
+third-party manifest can declare `env` on a reviewer lane and have those pairs applied to the spawned
+child. Undisclosed, that is arbitrary code execution behind a consent prompt that never mentioned it
+(`NODE_OPTIONS=--require ./evil.js`; `LD_PRELOAD` on POSIX). D5 already folds `env` into **MCP-server**
+disclosure and names that exact shape as the reason; reviewer lanes now carry the identical treatment.
 
-Two honest qualifications, because the reasoning above is load-bearing and easy to over-read:
+> 2026-08-05: the earlier reading — that `env` needed no disclosure because manifest `invoke` fields
+> never reach `resolveLanePlan` — is withdrawn. It was true when written and #3062 retired it. See git
+> history for the superseded text.
 
-- **The boundary is a property of the call chain, not of a test.** `resolveLanePlan` is *total* — it
-  folds whatever lane it is handed — so the guarantee cannot live in the resolver, and the regression
-  test that documents this boundary does not enforce it: a future code path feeding manifest lanes to
-  the resolver would not make it fail. Were manifest lanes ever made executable, `env` must join the
-  disclosed surface in that change, and nothing here will trip if it does not.
-- **This ADR is internally inconsistent on that point, and #2483 did not create the inconsistency.**
-  Consequences above states that adding a reviewer is "one manifest … no core patch", and
-  `CONTEXT.md`, `gsd-core/workflows/review.md` and the resolver's own header say manifest/overlay
-  lanes reach the resolver. The traced runtime disagrees with all four. Resolving that is out of scope
-  for an approved-enhancement PR and is recorded here rather than quietly settled in this entry's
-  favour — whichever way it resolves, the `env` disclosure question resolves with it.
+**The enumeration was the defect, not the missing name.** `env` was the ninth `invoke` field that
+reaches `resolveLanePlan` without being bound by the D5 lane signature; the other eight were
+`defaultHost`, `path`, `outputChannel`, `outputArg`, `modelArg`, `effortChannel`, `modelDiscovery` and
+`fallbackModel`. Two of those are egress-relevant on their own — `defaultHost` is the destination the
+**manifest itself** declares, used whenever `hostConfigKey` resolves to nothing (`configured ??
+declaredDefault`), and `path` completes the URL — so a lane with an unresolved config key disclosed
+"(unresolved …)" while shipping the D5 egress payload classes to an address of the manifest's
+choosing. Adding a ninth name would have left a tenth open, so the lane element instead carries a
+**residual** of every other declared `invoke` key, mirroring the `rawConfig` completeness backstop the
+MCP surface has carried since #1459 finding 5. `env` and `defaultHost` are additionally named
+explicitly, mirroring that same line's deliberate explicit-then-backstop overlap.
+
+**D4.5 is preserved one level down.** The residual element is appended to the lane tuple **only when
+the lane declares something beyond the eight already-bound fields**. A lane declaring none keeps a
+byte-identical signature, so this change cannot re-prompt every consented capability for a field it
+does not use — the click-through-training harm D4.5 exists to refuse. A lane that *does* declare one
+re-consents, which is the correct outcome rather than a cost: those fields were executable and
+undisclosed.
+
+**Shape validation is not a safety boundary, and this ADR does not claim it is.** `invoke.env`'s
+validator checks object shape, POSIX name grammar and string values. It carries no denylist of
+execution-primitive names, deliberately: `PATH` alone is a complete execution primitive for a spawn
+lane and can never be refused, the spawned binary is arbitrary third-party code so the true set spans
+every interpreter's injection variables, and the MCP `env` this mirrors refuses nothing and discloses
+everything. **Consent is the boundary.** Known execution-primitive names are *highlighted* in the
+prompt so the disclosure is louder where it matters; a name missing from that list costs a quieter
+line, never a boundary.
+
+**One inconsistency this entry closes, and it was real.** Consequences above states that adding a
+reviewer is "one manifest … no core patch", and `CONTEXT.md`, `gsd-core/workflows/review.md` and
+`resolveLanePlan`'s own header all describe overlay manifests reaching the resolver — while the
+runtime, until #3062, built `laneBySlug` solely from the first-party table and rejected every slug
+absent from it. Four documents on one side, the runtime on the other. #3062 resolved it in the
+documents' favour, which is what makes the disclosure above mandatory rather than defensive.
