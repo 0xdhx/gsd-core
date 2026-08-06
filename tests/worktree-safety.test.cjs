@@ -3582,10 +3582,7 @@ describe('worktree-safety: pruneOrphanedWorktrees behaviour', () => {
   test('pruneOrphanedWorktrees(temp dir) returns [] and does not throw', (t) => {
     const dir = createTempDir('gsd-prune-');
     t.after(() => cleanup(dir));
-    let result;
-    assert.doesNotThrow(() => {
-      result = worktreeSafety.pruneOrphanedWorktrees(dir);
-    });
+    const result = worktreeSafety.pruneOrphanedWorktrees(dir);
     assert.deepStrictEqual(result, []);
   });
 });
@@ -3912,10 +3909,14 @@ describe('bug-3707: reapOrphanWorktrees', () => {
     // ensuring the live-PID check is the only reason the entry is skipped.
     const result = reapOrphanWorktrees(repoDir, { mtimeSafe: () => STALE_MTIME });
 
+    // #3057: assert the SPECIFIC verdict unconditionally. The previous form
+    // guarded on `if (skipped)`, so it passed vacuously whenever the entry was
+    // absent from the results entirely — the exact failure this test exists to
+    // catch.
     const skipped = result.find((r) => canonicalPath(r.path) === canonicalPath(wtDir));
-    if (skipped) {
-      assert.notEqual(skipped.status, 'reaped', 'live-pid worktree must not be reaped');
-    }
+    assert.ok(skipped, 'live-pid worktree must appear in the results');
+    assert.equal(skipped.status, 'skipped', 'live-pid worktree must not be reaped');
+    assert.equal(skipped.reason, 'pid_alive', 'reason must be pid_alive');
     assert.ok(fs.existsSync(wtDir), 'worktree directory must still exist for live-pid worktree');
   });
 
@@ -3938,10 +3939,12 @@ describe('bug-3707: reapOrphanWorktrees', () => {
     // ensuring the unmerged-branch check is the only reason the entry is skipped.
     const result = reapOrphanWorktrees(repoDir, { mtimeSafe: () => STALE_MTIME });
 
+    // #3057: unconditional verdict assertion — the old `if (entry)` form passed
+    // vacuously when no row was produced at all.
     const entry = result.find((r) => canonicalPath(r.path) === canonicalPath(wtDir));
-    if (entry) {
-      assert.notEqual(entry.status, 'reaped', 'unmerged worktree must not be reaped (data loss guard)');
-    }
+    assert.ok(entry, 'unmerged worktree must appear in the results');
+    assert.equal(entry.status, 'skipped', 'unmerged worktree must not be reaped (data loss guard)');
+    assert.equal(entry.reason, 'branch_not_merged', 'reason must be branch_not_merged');
     assert.ok(fs.existsSync(wtDir), 'unmerged worktree directory must still exist');
   });
 
@@ -3967,10 +3970,12 @@ describe('bug-3707: reapOrphanWorktrees', () => {
     // within 5 minutes) which is fragile on heavily-loaded CI hosts.
     const result = reapOrphanWorktrees(repoDir, { mtimeSafe: () => FRESH_MTIME });
 
+    // #3057: unconditional verdict assertion — the old `if (entry)` form passed
+    // vacuously when no row was produced at all.
     const entry = result.find((r) => canonicalPath(r.path) === canonicalPath(wtDir));
-    if (entry) {
-      assert.notEqual(entry.status, 'reaped', 'fresh-mtime worktree must not be reaped (race guard)');
-    }
+    assert.ok(entry, 'fresh-mtime worktree must appear in the results');
+    assert.equal(entry.status, 'skipped', 'fresh-mtime worktree must not be reaped (race guard)');
+    assert.equal(entry.reason, 'lock_too_fresh', 'reason must be lock_too_fresh');
     assert.ok(fs.existsSync(wtDir), 'fresh-lock worktree directory must still exist');
   });
 
@@ -4189,16 +4194,12 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
     // ensuring the non-numeric content check is the only reason the entry is skipped.
     const result = reapOrphanWorktrees(repoDir, { mtimeSafe: () => STALE_MTIME });
 
+    // #3057: unconditional verdict assertion — the old `if (entry)` form passed
+    // vacuously when no row was produced at all.
     const entry = result.find((r) => canonicalPath(r.path) === canonicalPath(wtDir));
-    if (entry) {
-      assert.notEqual(
-        entry.status,
-        'reaped',
-        'non-numeric Claude Code lock must NOT be reaped (fail-closed: owner unknown)'
-      );
-      assert.equal(entry.status, 'skipped', 'non-numeric lock entry should have status=skipped');
-      assert.equal(entry.reason, 'lock_owner_unknown', 'reason must be lock_owner_unknown');
-    }
+    assert.ok(entry, 'Claude-Code-locked worktree must appear in the results');
+    assert.equal(entry.status, 'skipped', 'non-numeric lock entry should have status=skipped');
+    assert.equal(entry.reason, 'lock_owner_unknown', 'reason must be lock_owner_unknown');
     assert.ok(fs.existsSync(wtDir), 'worktree with Claude Code lock must NOT be removed');
   });
 
@@ -4232,10 +4233,13 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
       mtimeSafe: () => STALE_MTIME,
     });
 
+    // #3057: unconditional verdict assertion. An undeterminable owner takes the
+    // same fail-closed exit as a genuinely live one, so the reason string is
+    // pid_alive in both cases — production deliberately conflates them.
     const entry = result.find((r) => canonicalPath(r.path) === canonicalPath(wtDir));
-    if (entry) {
-      assert.notEqual(entry.status, 'reaped', 'EPERM from isPidAlive must be treated as ALIVE — must not reap');
-    }
+    assert.ok(entry, 'EPERM worktree must appear in the results');
+    assert.equal(entry.status, 'skipped', 'EPERM from isPidAlive must be treated as ALIVE — must not reap');
+    assert.equal(entry.reason, 'pid_alive', 'reason must be pid_alive');
     assert.ok(fs.existsSync(wtDir), 'worktree must still exist when isPidAlive throws EPERM');
   });
 
@@ -4282,11 +4286,12 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
     // OR skip it for a safe reason — it must NOT return an empty result (which
     // would mean it bailed out entirely, silently skipping all orphan detection).
     assert.ok(Array.isArray(result), 'reapOrphanWorktrees must return an array');
-    assert.ok(result.length > 0, 'reaper must not bail out entirely for trunk-default repos — must inspect the worktree');
+    assert.equal(result.length, 1, 'reaper must inspect exactly the one worktree in this trunk-default repo — not bail out entirely, and not report extras');
     const entry = result.find((r) => canonicalPath(r.path) === wtDirCanonical);
     assert.ok(entry, 'worktree must appear in results (reaped or skipped with reason)');
     // The branch IS merged into trunk, and the PID is dead, so it should be reaped.
     assert.equal(entry.status, 'reaped', 'worktree with dead pid merged into trunk must be reaped');
+    assert.equal(entry.reason, 'pid_dead_and_merged', 'reason must be pid_dead_and_merged (using trunk as the default branch)');
   });
 });
   });
@@ -4755,8 +4760,7 @@ describe('bug #260: gsd-worktree-path-guard.js', () => {
       };
       const result = runHook(worktreeDir, payload);
       assert.strictEqual(result.status, 2, `Expected exit 2 (block), got ${result.status}. stderr: ${result.stderr}`);
-      let parsed;
-      assert.doesNotThrow(() => { parsed = JSON.parse(result.stdout); }, 'stdout must be valid JSON');
+      const parsed = JSON.parse(result.stdout);
       assert.strictEqual(parsed.decision, 'block', 'Expected decision:"block" in output');
     });
 
@@ -5341,8 +5345,7 @@ describe('#1342 — GSD-activity gate + fail-open for no-repo targets', () => {
       `GSD-managed worktree targeting main repo root must be blocked (exit 2). ` +
       `Got exit ${result.status}. stderr: ${result.stderr}`
     );
-    let parsed;
-    assert.doesNotThrow(() => { parsed = JSON.parse(result.stdout); }, 'stdout must be valid JSON');
+    const parsed = JSON.parse(result.stdout);
     assert.strictEqual(parsed.decision, 'block', 'Expected decision:"block" in output');
   });
 
@@ -5407,8 +5410,7 @@ describe('#1342 — GSD-activity gate + fail-open for no-repo targets', () => {
       `GSD-managed worktree targeting .git/config of another repo must be blocked (exit 2). ` +
       `Got exit ${result.status}. stderr: ${result.stderr}`
     );
-    let parsed;
-    assert.doesNotThrow(() => { parsed = JSON.parse(result.stdout); }, 'stdout must be valid JSON');
+    const parsed = JSON.parse(result.stdout);
     assert.strictEqual(parsed.decision, 'block', 'Expected decision:"block" in output');
     assert.ok(
       parsed.reason && parsed.reason.includes('.git'),

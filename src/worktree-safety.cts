@@ -1724,8 +1724,21 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
     }
 
     // 4a. Stale-lock guard: skip if lock is too fresh (PID recycling / race).
+    //
+    // The two causes are reported SEPARATELY (#3057). A lock whose mtime could
+    // not be read is not "fresh" in any sense: `lock_too_fresh` tells an
+    // operator that waiting will resolve the skip, and waiting never resolves a
+    // stat failure — the lock could be seconds or months old and the sweep has
+    // no way to tell. Conflating them is the same defect this module already
+    // fixed for `parse_failed` vs `no_worktrees` in planWorktreePrune: a
+    // decision made on unread data must not be indistinguishable from one made
+    // on real data.
     const lockMtime = mtimeSafe(lockedFile);
-    if (!lockMtime || nowMs - lockMtime.getTime() < reapMtimeGuardMs) {
+    if (!lockMtime) {
+      results.push({ path: worktreePath, status: 'skipped', reason: 'lock_age_unknown' });
+      continue;
+    }
+    if (nowMs - lockMtime.getTime() < reapMtimeGuardMs) {
       results.push({ path: worktreePath, status: 'skipped', reason: 'lock_too_fresh' });
       continue;
     }
@@ -1737,9 +1750,26 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
       continue;
     }
     const pid = parseInt(pidStr, 10);
+    // Number.isFinite, not Number.isNaN: pidStr is captured by /^\d+/ above, so
+    // pid can never be NaN. A 309-or-more-digit string parses to Infinity.
+    //
+    // NOT LOAD-BEARING FOR SAFETY — do not delete it as redundant. Fail-closed
+    // liveness now lives in defaultIsPidAlive, which treats every non-ESRCH
+    // outcome (including the TypeError process.kill throws for Infinity) as
+    // ALIVE. This guard survives because it produces a more ACCURATE verdict
+    // for garbage input: `lock_owner_unknown` says "the lock names a PID this
+    // parse could not represent", whereas falling through would report
+    // `pid_alive` — an assertion about an owner that was never probed.
+    // Note this is an EARLIER, DIFFERENT gate than the process.kill range
+    // limit: process.kill accepts up to 2147483647 and rejects 2147483648
+    // (measured), far below the parse cliff this guard catches.
+    if (!Number.isFinite(pid)) {
+      results.push({ path: worktreePath, status: 'skipped', reason: 'lock_owner_unknown' });
+      continue;
+    }
     let pidIsAlive: boolean;
     try {
-      pidIsAlive = Number.isNaN(pid) || isPidAliveCheck(pid);
+      pidIsAlive = isPidAliveCheck(pid);
     } catch {
       pidIsAlive = true; // Cannot determine liveness — treat as alive, do not reap.
     }
@@ -1803,13 +1833,28 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
 
 // ─── reapOrphanWorktrees deps helpers ─────────────────────────────────────────
 
+/**
+ * Liveness probe for a lock-owner PID — FAILS CLOSED (#3057).
+ *
+ * `ESRCH` ("no such process") is the ONLY outcome that proves the owner is
+ * gone. Every other failure means the probe could not determine liveness:
+ *   - `EPERM` — the process exists, we just may not signal it;
+ *   - `TypeError` / `ERR_INVALID_ARG_TYPE` — `process.kill` accepts a pid up
+ *     to 2147483647 and REJECTS 2147483648 and above (measured), so a finite
+ *     but out-of-range pid never reaches the OS at all;
+ *   - anything else — an outcome this helper does not recognise.
+ *
+ * The return value feeds a DESTRUCTIVE decision (`git worktree remove
+ * --force`), so an unrecognised failure must never read as "dead". Hence the
+ * inversion: only ESRCH returns false; everything else returns true (alive,
+ * do not reap).
+ */
 function defaultIsPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (err) {
-    if (err && (err as NodeJS.ErrnoException).code === 'EPERM') return true;
-    return false;
+    return (err as NodeJS.ErrnoException | null | undefined)?.code !== 'ESRCH';
   }
 }
 
@@ -1825,21 +1870,23 @@ function defaultMtimeSafe(file: string): Date | null {
   try { return fs.statSync(file).mtime; } catch { return null; }
 }
 
-function cmdWorktreeReapOrphans(cwd: string): void {
+function cmdWorktreeReapOrphans(cwd: string, deps: RecordAgentCmdDeps & WorktreeDeps = {}): void {
+  const write = deps.write || ((s: string) => process.stdout.write(s));
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
   let result: ReapResult[];
   try {
-    result = reapOrphanWorktrees(cwd);
+    result = reapOrphanWorktrees(cwd, deps);
   } catch (err) {
     // Surface failure as a one-line warning; keep exit-zero so workflows don't break.
-    process.stderr.write(`[gsd] worktree.reap-orphans failed: ${err && (err as Error).message ? (err as Error).message : String(err)}\n`);
+    writeErr(`[gsd] worktree.reap-orphans failed: ${err && (err as Error).message ? (err as Error).message : String(err)}\n`);
     result = [];
   }
   const skippedCount = result.filter((r) => r.status === 'skipped').length;
   if (skippedCount > 0) {
     // Surface skipped entries so operators are aware of unresolved orphans.
-    process.stderr.write(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
+    writeErr(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
+  write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
 }
 
 // Unused exports kept for API compatibility
@@ -1875,16 +1922,23 @@ function resolveWorktreeRoot(cwd: string, deps: WorktreeDeps = {}): { root: stri
  *   the repository; used as `cwd` for git commands.
  * @returns list of worktree paths that were removed (always empty)
  */
-function pruneOrphanedWorktrees(repoRoot: string): string[] {
+function pruneOrphanedWorktrees(repoRoot: string, deps: WorktreeDeps & { writeErr?: (s: string) => void } = {}): string[] {
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
   try {
+    // `...deps` comes LAST deliberately: `parseWorktreePorcelain` is a declared
+    // member of WorktreeDeps and planWorktreePrune already reads
+    // `deps.parseWorktreePorcelain` before falling back to the module function,
+    // so a caller-supplied parser is an intended override, not an accident.
+    // The hard-coded key is only a restatement of that same default. Do not
+    // reorder the two — `tests/worktree-safety-reap.test.cjs` pins the override.
     const plan = planWorktreePrune(
       repoRoot,
       { allowDestructive: false },
-      { parseWorktreePorcelain }
+      { parseWorktreePorcelain, ...deps }
     );
-    const pruneResult = executeWorktreePrunePlan(plan) as { timedOut?: boolean } | null;
+    const pruneResult = executeWorktreePrunePlan(plan, deps) as { timedOut?: boolean } | null;
     if (pruneResult && pruneResult.timedOut) {
-      process.stderr.write(
+      writeErr(
         '[gsd-tools] WARNING: worktree health check degraded' +
         ' — git worktree prune timed out after 10s.' +
         ' Orphaned worktree metadata may remain until the next successful run.\n'
