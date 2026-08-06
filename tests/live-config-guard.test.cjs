@@ -230,6 +230,61 @@ describe('#2665: live-config hermeticity guard', () => {
     }
   });
 
+  test('the scan budget is PER TARGET, so one big tree cannot cascade unverified', () => {
+    // #2665 round 5: with a single running budget, target A exhausting it made
+    // target B report `truncated` -> `unverified` -- a strict-mode FAILURE caused
+    // by an unrelated directory. Each target now gets its own allotment.
+    const [big] = treeWithEntries(8);
+    const [small] = treeWithEntries(2);
+    try {
+      const snap = snapshotLiveConfig([], [big, small], { perTarget: 9, total: 1000 });
+      assert.strictEqual(snap[path.resolve(big)].truncated, false, 'big target should fit its own budget');
+      assert.strictEqual(
+        snap[path.resolve(small)].truncated,
+        false,
+        'small target must NOT inherit exhaustion from a target scanned before it',
+      );
+    } finally {
+      cleanup(big);
+      cleanup(small);
+    }
+  });
+
+  test('the truncation verdict does not depend on target ORDER', () => {
+    const [big] = treeWithEntries(8);
+    const [small] = treeWithEntries(2);
+    try {
+      const limits = { perTarget: 9, total: 1000 };
+      const a = snapshotLiveConfig([], [big, small], limits);
+      const b = snapshotLiveConfig([], [small, big], limits);
+      assert.strictEqual(a[path.resolve(small)].truncated, b[path.resolve(small)].truncated);
+      assert.strictEqual(a[path.resolve(big)].truncated, b[path.resolve(big)].truncated);
+    } finally {
+      cleanup(big);
+      cleanup(small);
+    }
+  });
+
+  test('the GLOBAL ceiling still bounds the aggregate, and reports unverified', () => {
+    // The bound the single budget was really for is kept -- but when it engages,
+    // the curtailed target is reported rather than silently attested clean.
+    const [a] = treeWithEntries(5);
+    const [b] = treeWithEntries(5);
+    try {
+      const snap = snapshotLiveConfig([], [a, b], { perTarget: 6, total: 6 });
+      assert.strictEqual(snap[path.resolve(a)].truncated, false);
+      assert.strictEqual(snap[path.resolve(b)].truncated, true, 'ceiling-curtailed target must be truncated');
+      const violations = diffLiveConfig(snap, snap);
+      assert.ok(
+        violations.some((v) => v.kind === 'unverified' && v.path === path.resolve(b)),
+        `expected an unverified violation for the curtailed target: ${JSON.stringify(violations)}`,
+      );
+    } finally {
+      cleanup(a);
+      cleanup(b);
+    }
+  });
+
   test('the report names the path and the remedy', () => {
     const out = formatViolations([{ path: '/live/.claude/gsd-core', kind: 'created' }]);
     assert.match(out, /HERMETICITY WARNING/);

@@ -92,8 +92,23 @@ const GSD_ARTIFACT_PREFIX = 'gsd-';
  */
 const NON_REGISTRY_OWNED_FILE = 'config.toml';
 
-/** Bounds on the recursive walk, so a pathological tree cannot stall the suite. */
+/**
+ * Bounds on the recursive walk, so a pathological tree cannot stall the suite.
+ *
+ * MAX_ENTRIES is PER WATCH TARGET, not per snapshot. It was a single running
+ * budget threaded across every target, which made the guard's verdict depend on
+ * directory ORDER and on unrelated local state: one large early target exhausted
+ * it, and every target scanned afterwards reported `truncated` -> `unverified`,
+ * which under GSD_STRICT_LIVE_CONFIG_GUARD=1 is a failed run. Per-target means a
+ * pathological tree truncates ITSELF and nothing else.
+ *
+ * MAX_TOTAL_ENTRIES keeps the aggregate bounded, which is what the single budget
+ * was really for. It engages only when the per-target bounds together exceed it;
+ * when it does, the targets it curtails are reported `unverified` -- never
+ * silently clean.
+ */
 const MAX_ENTRIES = 20000;
+const MAX_TOTAL_ENTRIES = 200000;
 const MAX_DEPTH = 12;
 
 /**
@@ -292,8 +307,9 @@ function newestMtime(target, budget) {
  * @returns {Record<string, {exists: boolean, newest: number, truncated: boolean}>}
  *   keyed by absolute entry path.
  */
-function snapshotLiveConfig(roots, extraTargets = []) {
-  const budget = { remaining: MAX_ENTRIES };
+function snapshotLiveConfig(roots, extraTargets = [], limits = {}) {
+  const perTarget = limits.perTarget ?? MAX_ENTRIES;
+  const total = { remaining: limits.total ?? MAX_TOTAL_ENTRIES };
   const snap = {};
 
   const record = (target) => {
@@ -301,7 +317,14 @@ function snapshotLiveConfig(roots, extraTargets = []) {
       snap[target] = { exists: false, newest: 0, truncated: false };
       return;
     }
+    // A FRESH budget per target, drawn against the global ceiling. See the
+    // MAX_ENTRIES docblock: a shared running budget let one large early target
+    // cascade `unverified` over every target scanned after it, so the verdict
+    // depended on iteration order rather than on what the run actually touched.
+    const budget = { remaining: Math.min(perTarget, total.remaining) };
+    const allotted = budget.remaining;
     const { newest, truncated } = newestMtime(target, budget);
+    total.remaining -= allotted - budget.remaining;
     snap[target] = { exists: true, newest, truncated };
   };
 
@@ -426,6 +449,7 @@ module.exports = {
   GSD_PREFIXED_PARENTS,
   GSD_ARTIFACT_PREFIX,
   MAX_ENTRIES,
+  MAX_TOTAL_ENTRIES,
   MAX_DEPTH,
   resolveLiveConfigRoots,
   resolveExtraWatchTargets,
