@@ -702,6 +702,57 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir), 'unmerged work must survive the sweep');
   });
 
+  test('reports lock_owner_unknown and leaves the worktree on disk for a 400-digit lock PID', () => {
+    const f = makeFixture(tmpBase, 'giantpid', { lock: false });
+    fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(400));
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps()));
+
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'skipped', reason: 'lock_owner_unknown' });
+    assert.ok(fs.existsSync(f.wtDir), 'a lock PID that overflows to Infinity must never be reaped');
+  });
+
+  // Parse-cliff boundary, measured empirically: `parseInt('9'.repeat(N), 10)`
+  // is finite through N=308 and becomes Infinity at N=309 (probed via
+  // `node -e`, reported in the task return).
+  test('reaches the liveness check for a 308-digit lock PID (last finite length)', () => {
+    const f = makeFixture(tmpBase, 'cliffminus1', { lock: false });
+    fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(308));
+    let seenPid;
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({
+      isPidAlive: (pid) => { seenPid = pid; return false; },
+    })));
+
+    assert.strictEqual(seenPid, Number('9'.repeat(308)), 'a finite 308-digit PID must reach isPidAlive unchanged');
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'reaped', reason: 'pid_dead_and_merged' });
+    assert.strictEqual(fs.existsSync(f.wtDir), false);
+  });
+
+  test('reports lock_owner_unknown for a 309-digit lock PID (first Infinity length)', () => {
+    const f = makeFixture(tmpBase, 'cliffexact', { lock: false });
+    fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(309));
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps()));
+
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'skipped', reason: 'lock_owner_unknown' });
+    assert.ok(fs.existsSync(f.wtDir));
+  });
+
+  test('reaches the liveness check for an ordinary small lock PID', () => {
+    const f = makeFixture(tmpBase, 'ordinarypid', { lock: false });
+    fs.writeFileSync(path.join(f.adminDir, 'locked'), '4242');
+    let seenPid;
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps({
+      isPidAlive: (pid) => { seenPid = pid; return false; },
+    })));
+
+    assert.strictEqual(seenPid, 4242, 'an ordinary PID must reach isPidAlive unchanged');
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'reaped', reason: 'pid_dead_and_merged' });
+    assert.strictEqual(fs.existsSync(f.wtDir), false);
+  });
+
   test('reports remove_failed and leaves the worktree on disk when git worktree remove fails', () => {
     const f = makeFixture(tmpBase, 'removefails');
     const faultyGit = makeFaultyGit({

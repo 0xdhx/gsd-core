@@ -1737,9 +1737,18 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
       continue;
     }
     const pid = parseInt(pidStr, 10);
+    // Number.isFinite, not Number.isNaN: pidStr is captured by /^\d+/ above, so
+    // pid can never be NaN. But a >309-digit string parses to Infinity, and
+    // process.kill(Infinity, 0) throws a TypeError that defaultIsPidAlive's
+    // errno-only catch maps to "dead" (no `.code` on a TypeError) — which
+    // would reap a worktree whose owner may well be alive. Fail closed here,
+    // before that value is ever trusted.
+    if (!Number.isFinite(pid)) {
+      results.push({ path: worktreePath, status: 'skipped', reason: 'lock_owner_unknown' });
+      continue;
+    }
     let pidIsAlive: boolean;
     try {
-      // No `Number.isNaN(pid) ||` guard: pidStr is captured by /^\d+/ above, so pid is never NaN.
       pidIsAlive = isPidAliveCheck(pid);
     } catch {
       pidIsAlive = true; // Cannot determine liveness — treat as alive, do not reap.
