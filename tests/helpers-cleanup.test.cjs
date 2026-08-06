@@ -261,7 +261,7 @@ test('tmpRootCandidates() returns a well-formed, deduplicated list of absolute p
 
 // ─── Test 8: symlink-escape refusal, all platforms ───────────────────────────
 
-test('cleanup refuses a symlink under tmpdir that resolves outside tmpdir, and the victim survives', (t) => {
+test('cleanup refuses a symlink under tmpdir that resolves outside tmpdir', (t) => {
   const symlinkParent = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cleanup-symlink-'));
   t.after(() => {
     if (fs.existsSync(symlinkParent)) cleanup(symlinkParent);
@@ -294,16 +294,27 @@ test('cleanup refuses a symlink under tmpdir that resolves outside tmpdir, and t
   }
 
   if (symlinkCreated) {
+    // The assert.throws below is the load-bearing assertion for this test:
+    // it proves the guard refuses a symlink whose target resolves outside
+    // every accepted tmp root.
     assert.throws(
       () => cleanup(symlinkPath),
       (err) => err instanceof Error && err.message.includes(symlinkPath),
       'cleanup must throw and name the symlink path when it resolves outside os.tmpdir()'
     );
-    assert.strictEqual(fs.existsSync(victim), true, 'victim directory must survive the refusal');
+    // These two assertions document the end state only — they are NOT proof
+    // the guard prevented a deletion that would otherwise have happened. A
+    // probe on node v26.5.1 showed fs.rmSync({recursive:true, force:true})
+    // does not follow a top-level symlink target regardless: it unlinks the
+    // symlink itself and leaves whatever it points at (the victim, here)
+    // untouched either way. So the victim would survive with or without this
+    // guard; the guard's own correctness is established solely by the
+    // assert.throws above.
+    assert.strictEqual(fs.existsSync(victim), true, 'victim directory still exists (rmSync would not have followed the symlink either way)');
     assert.strictEqual(
       fs.existsSync(path.join(victim, 'marker.txt')),
       true,
-      'victim contents must survive the refusal'
+      'victim contents still exist (rmSync would not have followed the symlink either way)'
     );
   }
 });

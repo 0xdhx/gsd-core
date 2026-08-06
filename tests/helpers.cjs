@@ -213,10 +213,11 @@ function createTempGitProject(prefix = 'gsd-test-') {
 // (C:\Users\RUNNER~1\AppData\Local\Temp) while the caller's path is the
 // expanded LONG form, and fs.realpathSync() does not reliably expand 8.3
 // short names there — only fs.realpathSync.native() does; drive-letter and
-// path casing can also differ (C:\ vs c:\). Collect every variant we can
-// derive from os.tmpdir() and accept a target under any of them. Each probe
-// is wrapped in its own try/catch — none of them may throw and crash
-// cleanup(), they just contribute nothing if unavailable.
+// path casing can also differ (C:\ vs c:\). This function collects the full
+// set of accepted temp roots — os.tmpdir()'s several spellings are one part
+// of that set, not the whole of it (see below). Each probe is wrapped in its
+// own try/catch — none of them may throw and crash cleanup(), they just
+// contribute nothing if unavailable.
 function tmpRootCandidates() {
   const roots = [];
   try {
@@ -229,6 +230,28 @@ function tmpRootCandidates() {
     roots.push(fs.realpathSync.native(os.tmpdir()));
   } catch (_) { /* native realpath unavailable/unreadable — skip this variant */ }
   const isWindows = process.platform === 'win32';
+  // os.tmpdir() alone is too narrow: it honors $TMPDIR, but some tests
+  // (e.g. tests/config-schema.property.test.cjs's getWritableTmp()) create
+  // fixtures directly under the conventional system temp roots instead of
+  // through $TMPDIR — on macOS that is /private/tmp, which can differ from
+  // os.tmpdir()'s /var/folders/.../T. Probe the well-known non-Windows temp
+  // roots too, each independently and only if it actually exists on this
+  // host, so the accepted set stays a bounded, explicit list rather than an
+  // open-ended patch list. macOS additionally exposes /tmp as a symlink to
+  // /private/tmp, so both the unprefixed and /private-prefixed spellings —
+  // and each one's realpath — are collected.
+  if (!isWindows) {
+    for (const candidate of ['/tmp', '/private/tmp']) {
+      try {
+        if (fs.existsSync(candidate)) {
+          roots.push(path.resolve(candidate));
+          try {
+            roots.push(fs.realpathSync(candidate));
+          } catch (_) { /* exists but unreadable via realpath — skip this variant */ }
+        }
+      } catch (_) { /* existsSync itself should not throw, but fail closed if it does */ }
+    }
+  }
   const seen = new Set();
   const deduped = [];
   for (const root of roots) {
@@ -248,7 +271,7 @@ function cleanup(tmpDir) {
   // so it classified a transient Windows error but was never consulted by the
   // destructive rmSync call itself — a wrong `target` would still chdir out of
   // its own tree and get force-deleted. Hoisted above both the chdir and the
-  // rmSync so an out-of-tmpdir path is refused before either can run.
+  // rmSync so an out-of-temp-root path is refused before either can run.
   //
   // `target` itself is only realpath'd below when it exists (fs.existsSync
   // guard on the symlink-escape check) — realpathSync throws ENOENT on a
@@ -266,20 +289,36 @@ function cleanup(tmpDir) {
     const pForCompare = isWindows ? p.toLowerCase() : p;
     return tmpRoots.some((root) => {
       const rootForCompare = isWindows ? root.toLowerCase() : root;
-      return (
-        pForCompare === rootForCompare ||
-        pForCompare.startsWith(`${rootForCompare}${path.sep}`)
-      );
+      if (pForCompare === rootForCompare) return true;
+      // A root that is itself a filesystem root (`/`, or `C:\` reachable via
+      // TMPDIR=/) already ends with path.sep — appending a second one would
+      // build `//`, which only the literal string `/` satisfies, refusing
+      // every real descendant. Only append the separator when it is not
+      // already there.
+      const prefix = rootForCompare.endsWith(path.sep)
+        ? rootForCompare
+        : `${rootForCompare}${path.sep}`;
+      return pForCompare.startsWith(prefix);
     });
   }
   if (!isUnderRoots(target)) {
-    throw new Error(`cleanup() refused to remove a path outside os.tmpdir(): ${target}`);
+    throw new Error(
+      `cleanup() refused to remove a path outside the known temp roots ` +
+      `(${tmpRoots.join(', ')}): ${target}`
+    );
   }
   // Symlink-escape guard: the check above is a string prefix test on `target`
   // alone, so a symlink physically located under tmpdir but pointing OUTSIDE
-  // it would pass that check while rmSync follows the link and deletes the
-  // real, out-of-tree directory. When the target exists, also resolve its
-  // real path and require that to be under a root too.
+  // it would pass that check on `target`'s own path. NOTE: as of this
+  // writing, `fs.rmSync` itself does not follow a top-level symlink target
+  // (it unlinks the symlink and leaves whatever it points at untouched), so
+  // this guard is not closing a live escape against the current rmSync
+  // behavior — it is defense-in-depth against a future change to the
+  // deletion mechanism (a different rm implementation, a recursive walk that
+  // does follow links, etc.) that would make `target` being a symlink
+  // dangerous. When the target exists, resolve its real path and require
+  // that to be under a root too, so the guard holds regardless of how the
+  // eventual delete is implemented.
   //
   // Only when it exists: cleanup() is legitimately called on already-deleted
   // or never-created dirs, and fs.realpathSync throws ENOENT on those — a
@@ -301,7 +340,7 @@ function cleanup(tmpDir) {
     if (!isUnderRoots(real)) {
       throw new Error(
         `cleanup() refused to remove a path that resolves via symlink to a ` +
-        `location outside os.tmpdir(): ${target} -> ${real}`
+        `location outside the known temp roots (${tmpRoots.join(', ')}): ${target} -> ${real}`
       );
     }
   }
