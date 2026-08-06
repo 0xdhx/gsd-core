@@ -216,6 +216,33 @@ interface ReviewerLaneSurface {
   /** The first-party handler module name that post-processes this lane's output, or '' when undeclared. */
   handler: string;
   /**
+   * spawn: the per-invocation environment pairs the lane declares (#2483), string-filtered for the
+   * human summary exactly as `args` is. Folded into the signature, and rendered key-by-key in the
+   * consent prompt, for the SAME reason MCP's `env` already is: env changes WHAT a command does
+   * without touching the command (`NODE_OPTIONS=--require evil.js`, `LD_PRELOAD`). Empty when the
+   * lane declares none, which keeps an env-free lane's signature byte-identical (D4.5).
+   */
+  env: Record<string, string>;
+  /**
+   * openai-http: the destination host the MANIFEST itself declares, used at runtime whenever
+   * `hostConfigKey` resolves to nothing (`resolveLanePlan`: `configured ?? declaredDefault`). It is
+   * NOT `resolvedHost` — that one is resolved from user config and is deliberately excluded from the
+   * signature (design constraint 2). This one is a pure function of the manifest, so it both signs
+   * and renders: without it a lane whose config key is unset discloses `(unresolved)` at consent
+   * time while shipping the egress payload classes to an address of the manifest's own choosing.
+   */
+  defaultHost: string;
+  /**
+   * Every OTHER own key the declared `invoke` object carries — the completeness backstop, and the
+   * direct analogue of `McpServerSurface.rawConfig` (#1459 finding 5). The explicit fields above are
+   * kept first for readability and stability; this catches the rest, so a field ADDED to the invoke
+   * vocabulary later is signed from the day it exists rather than from the day someone remembers to
+   * widen this list. The enumerated fields (`binary`/`args`/`hostConfigKey`/`promptChannel`) are
+   * excluded because they are already bound above; `env` and `defaultHost` are deliberately NOT
+   * excluded, mirroring the MCP line's own explicit-then-rawConfig overlap.
+   */
+  residualInvoke: Record<string, unknown>;
+  /**
    * The data classes that egress to this lane on every run (`EGRESS_PAYLOAD_CLASSES`) — named
    * honestly (Kerckhoffs's Principle) rather than disclosed as an unhelpful "sends data to the tool".
    */
@@ -619,6 +646,28 @@ function collectReviewerLaneSurfaces(
     const hostConfigKey = asString(invoke['hostConfigKey']);
     const promptChannel = asString(invoke['promptChannel']);
 
+    // #2483: the declared env pairs. String-filtered for the human line exactly as `args` is, and
+    // prototype-safe (own enumerable keys only, dangerous keys never copied) exactly as `rawConfig`
+    // is. Disclosure runs BEFORE validation, so a non-object or non-string-valued `env` reaches here
+    // and must degrade to "declares none" rather than throw.
+    const env: Record<string, string> = {};
+    const envRaw = invoke['env'];
+    if (typeof envRaw === 'object' && envRaw !== null && !Array.isArray(envRaw)) {
+      for (const [k, v] of Object.entries(envRaw as Record<string, unknown>)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+        if (typeof v === 'string') env[k] = v;
+      }
+    }
+    const defaultHost = asString(invoke['defaultHost']);
+    // The completeness backstop (mirrors rawConfig). Everything the invoke object declares that the
+    // explicit fields above do not already bind. Same prototype-safe copy.
+    const residualInvoke: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(invoke)) {
+      if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+      if (k === 'binary' || k === 'args' || k === 'hostConfigKey' || k === 'promptChannel') continue;
+      residualInvoke[k] = v;
+    }
+
     // An EMPTY (or wholly unrecognised) reviewer body declares no lane and must
     // not be treated as one. Without this, `reviewer: {}` alone flips
     // hasExecutable true and perturbs the disclosure signature — producing a
@@ -632,9 +681,13 @@ function collectReviewerLaneSurfaces(
     // enough. Requiring specifically a binary, or specifically a slug, would let
     // a lane declaring only the other slip through unconsented, which is the far
     // worse failure.
+    // `env`/`defaultHost` join the test for the reason the comment above gives for keeping it broad:
+    // a lane declaring ONLY an `env` pair would otherwise declare "nothing", disclose nothing, and
+    // still hand those pairs to a spawned child once #2927/#3062 made overlay lanes executable —
+    // the exact slip-through the broad test exists to refuse.
     const declaresSomething = Boolean(
       slug || transport || handler || binary || hostConfigKey || promptChannel
-      || rawArgsDeclared.length > 0,
+      || rawArgsDeclared.length > 0 || Object.keys(env).length > 0 || defaultHost,
     );
     if (!declaresSomething) return [];
 
@@ -680,6 +733,9 @@ function collectReviewerLaneSurfaces(
       isLocalDestination,
       promptChannel,
       handler,
+      env,
+      defaultHost,
+      residualInvoke,
       // B5: every lane receives the same named egress payload classes — a fresh copy per surface so
       // no caller can mutate the shared constant through a returned surface.
       egressPayloadClasses: [...EGRESS_PAYLOAD_CLASSES],
@@ -1080,10 +1136,31 @@ function disclosureSignature(d: Disclosure): string {
   // 2 — the loader has no config resolver and must compute the SAME signature as the lifecycle, or a
   // resolver-bearing caller and a resolver-less caller would permanently disagree on one manifest's
   // signature).
+  // #2483: the eight-field enumeration above was a CLOSED list over an OPEN vocabulary, and it had
+  // already fallen behind by seven fields before `env` made the ninth — `defaultHost` (the manifest's
+  // OWN fallback egress host), `path` (appended to it to build the URL), `outputChannel`/`outputArg`,
+  // `modelArg`, `effortChannel` and `modelDiscovery` all reach `resolveLanePlan` and none was signed.
+  // So the fix is not a ninth name: it is a residual, the same completeness backstop `rawConfig` gives
+  // the MCP line one screen up (#1459 finding 5). `env`/`defaultHost` are ALSO named explicitly,
+  // mirroring that line's deliberate explicit-then-backstop overlap, because they are the two the
+  // human summary renders and a reader should be able to find them in the signature by name.
+  //
+  // APPENDED ONLY WHEN NON-EMPTY, which is D4.5 one level down: a lane declaring nothing beyond the
+  // eight already-bound fields keeps a BYTE-IDENTICAL signature, so this cannot re-prompt every
+  // consented capability for a field it does not use. A lane that DOES declare one re-consents — which
+  // is the correct outcome, not a cost: those fields were executable and undisclosed.
   const lanes = d.reviewerLanes
-    .map((l) =>
-      stableJson(['lane', l.slug, l.transport, l.binary, l.rawArgs || [], l.hostConfigKey, l.promptChannel, l.handler]),
-    )
+    .map((l) => {
+      const tuple: unknown[] = [
+        'lane', l.slug, l.transport, l.binary, l.rawArgs || [], l.hostConfigKey, l.promptChannel, l.handler,
+      ];
+      const extra = { env: l.env || {}, defaultHost: l.defaultHost || '', residual: l.residualInvoke || {} };
+      const declaresExtra = Object.keys(extra.env).length > 0
+        || extra.defaultHost !== ''
+        || Object.keys(extra.residual).length > 0;
+      if (declaresExtra) tuple.push(extra);
+      return stableJson(tuple);
+    })
     .sort();
   // D4.5 (the highest-consequence line in this phase): the lane element is appended ONLY when at
   // least one lane is declared. A lane-free manifest's signature stays BYTE-IDENTICAL to before this
@@ -1119,6 +1196,21 @@ function signatureForManifest(manifest: CapabilityManifest, stagedDir?: string):
 
 /** Max characters of an env VALUE shown in the human consent prompt before it is truncated. */
 const ENV_VALUE_MAX = 60;
+
+/**
+ * Environment names that turn a declared pair into arbitrary code execution in a spawned child
+ * (#2483). Used ONLY to add a warning line beside an already-disclosed value — never to refuse one.
+ * See the call site for why this is a highlight rather than a denylist; the short version is that
+ * `PATH` belongs on any honest version of this list and can never be refused, so the list cannot be
+ * a boundary and must not be built as if it were. Incomplete by construction, and its incompleteness
+ * costs only a missing warning on a value the user is shown regardless.
+ */
+const EXECUTION_PRIMITIVE_ENV = new Set([
+  'NODE_OPTIONS', 'NODE_REPL_EXTERNAL_MODULE', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH', 'PYTHONSTARTUP', 'PYTHONPATH', 'BASH_ENV', 'ENV',
+  'PERL5OPT', 'RUBYOPT', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'CLASSPATH', 'NODE_PATH',
+  'GIT_SSH_COMMAND', 'GIT_EXTERNAL_DIFF', 'PATH',
+]);
 
 /** Truncate a long env value for the human prompt (the full value is still in the signature). */
 function truncateEnvValue(v: string): string {
@@ -1196,6 +1288,14 @@ function summarizeDisclosure(disclosure: Disclosure): string[] {
       if (l.transport === 'openai-http' || (!l.binary && l.hostConfigKey)) {
         const localTag = l.isLocalDestination ? ' [local]' : '';
         lines.push(`    - ${l.slug || '(slug?)'} -> [openai-http] ${l.hostConfigKey || '(hostConfigKey?)'} => ${l.resolvedHost}${localTag}`);
+        // #2483: the MANIFEST's own fallback host, which `resolveLanePlan` uses whenever the config
+        // key resolves to nothing (`configured ?? declaredDefault`). Without this line a lane whose
+        // key is unset renders as "(unresolved)" — which reads as "no destination" — while actually
+        // shipping the egress payload classes below to an address the manifest chose. That is the
+        // understating-the-disclosure failure the branch test one comment up already refuses.
+        if (l.defaultHost) {
+          lines.push(`        fallback destination declared by this capability: ${l.defaultHost}`);
+        }
       } else {
         // Render the RAW declared args, not the string-filtered view. The raw
         // array is what the host receives and what the consent signature binds,
@@ -1206,6 +1306,30 @@ function summarizeDisclosure(disclosure: Disclosure): string[] {
         lines.push(`    - ${l.slug || '(slug?)'} -> ${cmd || '(no binary declared)'}`);
       }
       if (l.handler) lines.push(`        handler: ${l.handler}`);
+      // #2483: identical treatment to the MCP `env` line above, for the identical reason stated
+      // there — env changes WHAT runs without touching the command, so the user consents to this
+      // exact environment or not at all.
+      const laneEnvKeys = l.env ? Object.keys(l.env) : [];
+      if (laneEnvKeys.length > 0) {
+        lines.push(`        env: ${laneEnvKeys.map((k) => `${k}=${truncateEnvValue(l.env[k])}`).join(', ')}`);
+        // Names that make an environment pair an EXECUTION primitive rather than configuration. This
+        // is an advisory HIGHLIGHT on a disclosed value, deliberately NOT a validator denylist:
+        //   - The boundary is consent, and a denylist cannot be one. `PATH` alone is a complete
+        //     execution primitive for a spawn lane (point it at a directory holding a fake binary),
+        //     and it can never be refused, so a list that stops NODE_OPTIONS while passing PATH
+        //     buys the appearance of a boundary and not the fact of one.
+        //   - The child is an arbitrary third-party binary, so the true set is every interpreter's
+        //     injection vars (BASH_ENV, PERL5OPT, RUBYOPT, JAVA_TOOL_OPTIONS, PYTHONPATH, …) —
+        //     unbounded by construction, and unbounded lists rot silently.
+        //   - MCP `env`, which this mirrors, refuses nothing and discloses everything; the inline
+        //     rationale there names NODE_OPTIONS as a reason to SHOW, not to block.
+        // Missing a name here therefore costs a louder line, never a boundary — which is the only
+        // incompleteness budget an enumeration like this can honestly carry.
+        const flagged = laneEnvKeys.filter((k) => EXECUTION_PRIMITIVE_ENV.has(k));
+        if (flagged.length > 0) {
+          lines.push(`        WARNING — ${flagged.join(', ')} can make this lane run code of the capability's choosing`);
+        }
+      }
       lines.push(`        sends: ${l.egressPayloadClasses.join(', ')}`);
     }
   }
