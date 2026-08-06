@@ -1739,7 +1739,8 @@ function reapOrphanWorktrees(repoRoot: string, deps: WorktreeDeps = {}): ReapRes
     const pid = parseInt(pidStr, 10);
     let pidIsAlive: boolean;
     try {
-      pidIsAlive = Number.isNaN(pid) || isPidAliveCheck(pid);
+      // No `Number.isNaN(pid) ||` guard: pidStr is captured by /^\d+/ above, so pid is never NaN.
+      pidIsAlive = isPidAliveCheck(pid);
     } catch {
       pidIsAlive = true; // Cannot determine liveness — treat as alive, do not reap.
     }
@@ -1825,21 +1826,23 @@ function defaultMtimeSafe(file: string): Date | null {
   try { return fs.statSync(file).mtime; } catch { return null; }
 }
 
-function cmdWorktreeReapOrphans(cwd: string): void {
+function cmdWorktreeReapOrphans(cwd: string, deps: RecordAgentCmdDeps & WorktreeDeps = {}): void {
+  const write = deps.write || ((s: string) => process.stdout.write(s));
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
   let result: ReapResult[];
   try {
-    result = reapOrphanWorktrees(cwd);
+    result = reapOrphanWorktrees(cwd, deps);
   } catch (err) {
     // Surface failure as a one-line warning; keep exit-zero so workflows don't break.
-    process.stderr.write(`[gsd] worktree.reap-orphans failed: ${err && (err as Error).message ? (err as Error).message : String(err)}\n`);
+    writeErr(`[gsd] worktree.reap-orphans failed: ${err && (err as Error).message ? (err as Error).message : String(err)}\n`);
     result = [];
   }
   const skippedCount = result.filter((r) => r.status === 'skipped').length;
   if (skippedCount > 0) {
     // Surface skipped entries so operators are aware of unresolved orphans.
-    process.stderr.write(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
+    writeErr(`[gsd] worktree.reap-orphans: ${skippedCount} orphan(s) skipped (run with DEBUG=1 for details)\n`);
   }
-  process.stdout.write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
+  write(`${JSON.stringify({ ok: true, reaped: result.filter((r) => r.status === 'reaped').length, entries: result }, null, 2)}\n`);
 }
 
 // Unused exports kept for API compatibility
@@ -1875,16 +1878,17 @@ function resolveWorktreeRoot(cwd: string, deps: WorktreeDeps = {}): { root: stri
  *   the repository; used as `cwd` for git commands.
  * @returns list of worktree paths that were removed (always empty)
  */
-function pruneOrphanedWorktrees(repoRoot: string): string[] {
+function pruneOrphanedWorktrees(repoRoot: string, deps: WorktreeDeps & { writeErr?: (s: string) => void } = {}): string[] {
+  const writeErr = deps.writeErr || ((s: string) => process.stderr.write(s));
   try {
     const plan = planWorktreePrune(
       repoRoot,
       { allowDestructive: false },
-      { parseWorktreePorcelain }
+      { parseWorktreePorcelain, ...deps }
     );
-    const pruneResult = executeWorktreePrunePlan(plan) as { timedOut?: boolean } | null;
+    const pruneResult = executeWorktreePrunePlan(plan, deps) as { timedOut?: boolean } | null;
     if (pruneResult && pruneResult.timedOut) {
-      process.stderr.write(
+      writeErr(
         '[gsd-tools] WARNING: worktree health check degraded' +
         ' — git worktree prune timed out after 10s.' +
         ' Orphaned worktree metadata may remain until the next successful run.\n'
