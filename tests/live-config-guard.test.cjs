@@ -190,6 +190,46 @@ describe('#2665: live-config hermeticity guard', () => {
     }
   });
 
+  test('detects a leaked hook script and the install marker files', () => {
+    // Self-found by re-deriving the census at round 5 rather than by a review
+    // finding. bin/install.js writes hooks/gsd-*.js, .gsd-source and .gsd-profile
+    // into the config ROOT; `hooks` was absent from GSD_PREFIXED_PARENTS and the
+    // two dot-prefixed markers from GSD_OWNED_ENTRIES, so all three leaked past
+    // the guard silently -- the same shape as the skills/gsd-dev-preferences miss
+    // that motivated the prefixed-parent scan in the first place.
+    const root = tmpRoot();
+    try {
+      fs.mkdirSync(path.join(root, 'hooks'), { recursive: true });
+      const before = snapshotLiveConfig([root]);
+      fs.writeFileSync(path.join(root, 'hooks', 'gsd-check-update.js'), '// x');
+      fs.writeFileSync(path.join(root, '.gsd-source'), 'npm');
+      fs.writeFileSync(path.join(root, '.gsd-profile'), 'default');
+
+      const created = diffLiveConfig(before, snapshotLiveConfig([root]))
+        .filter((v) => v.kind === 'created')
+        .map((v) => path.basename(v.path))
+        .sort();
+      assert.deepStrictEqual(created, ['.gsd-profile', '.gsd-source', 'gsd-check-update.js']);
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('a NON-gsd hook belonging to the host agent is still ignored', () => {
+    // Widening GSD_PREFIXED_PARENTS must not widen ownership: `hooks/` is shared
+    // with the host agent, and a guard that flags its files gets switched off.
+    const root = tmpRoot();
+    try {
+      fs.mkdirSync(path.join(root, 'hooks'), { recursive: true });
+      const before = snapshotLiveConfig([root]);
+      fs.writeFileSync(path.join(root, 'hooks', 'my-own-hook.js'), '// mine');
+
+      assert.deepStrictEqual(diffLiveConfig(before, snapshotLiveConfig([root])), []);
+    } finally {
+      cleanup(root);
+    }
+  });
+
   test('detects a DELETED top-level GSD entry', () => {
     const root = tmpRoot();
     try {

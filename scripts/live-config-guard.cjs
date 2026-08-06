@@ -61,8 +61,20 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-/** Top-level entries only a GSD install creates. See SCOPE above before widening. */
-const GSD_OWNED_ENTRIES = ['gsd-core', 'gsd-file-manifest.json', 'gsd-pristine'];
+/**
+ * Top-level entries only a GSD install creates. See SCOPE above before widening.
+ *
+ * `.gsd-source` and `.gsd-profile` were added by the round-5 census (see below):
+ * bin/install.js writes both at the config ROOT for a global install, and an
+ * exact-name list does not match a dot-prefixed name by the `gsd-` prefix rule.
+ */
+const GSD_OWNED_ENTRIES = [
+  'gsd-core',
+  'gsd-file-manifest.json',
+  'gsd-pristine',
+  '.gsd-source',
+  '.gsd-profile',
+];
 
 /**
  * Directories GSD SHARES with the host agent. Watching them wholesale would
@@ -73,8 +85,16 @@ const GSD_OWNED_ENTRIES = ['gsd-core', 'gsd-file-manifest.json', 'gsd-pristine']
  * `spawnSync` that sandboxed HOME but inherited an ambient CLAUDE_CONFIG_DIR
  * wrote `<live>/skills/gsd-dev-preferences/SKILL.md`, which sits under none of
  * the three top-level entries above.
+ *
+ * `hooks` joined them in round 5, found by re-deriving the census rather than by
+ * a review finding — the SAME shape one parent over. bin/install.js writes
+ * `hooks/gsd-check-update.js`, `hooks/gsd-context-monitor.js` and
+ * `hooks/gsd-update-banner.js` into the config root, and with `hooks` absent from
+ * this list a leak of any of them passed the guard silently. The lesson the first
+ * miss taught is that this list is the weak point, so it is re-derived from the
+ * installer's own write sites each round rather than trusted.
  */
-const GSD_PREFIXED_PARENTS = ['agents', 'commands', 'skills'];
+const GSD_PREFIXED_PARENTS = ['agents', 'commands', 'skills', 'hooks'];
 const GSD_ARTIFACT_PREFIX = 'gsd-';
 
 /**
