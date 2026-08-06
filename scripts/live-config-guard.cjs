@@ -42,8 +42,20 @@
  * entries and MISSED a real leak into `<live>/skills/gsd-dev-preferences/`.
  *
  * KNOWN GAP — a leak into a file GSD does not own (e.g. mutating the host's own
- * `.claude.json`) is outside this guard by construction. Closing it would require
- * watching shared files, which is the false-positive trap above.
+ * `.claude.json`, `settings.json`, `hooks.json`, `kilo.json`, `opencode.json`) is
+ * outside this guard by construction. Closing it would require watching shared
+ * files, which is the false-positive trap above.
+ *
+ * NAMED RESIDUALS — stated rather than implied, because round 5's adversarial
+ * review refuted a completeness claim made here and an unqualified one would
+ * simply invite the same refutation again:
+ *   - the loose generator scripts the installer copies to `<root>/scripts/*.cjs`
+ *     (`fix-slash-commands.cjs` is watched by name; the capability generators are
+ *     not, and they carry no `gsd-` prefix to scan for);
+ *   - the shared-hooks bundle written into a NON-registry root's `<root>/hooks/`
+ *     (kimi) — see resolveExtraWatchTargets, where closing it is a layout
+ *     decision rather than one more path.
+ * Both under-watch, which fails quiet: a missed leak, never a false alarm.
  *
  * SEVERITY — reports by default, fails only under GSD_STRICT_LIVE_CONFIG_GUARD=1.
  * Not timidity: on its first CI run this guard found PRE-EXISTING leaks on the
@@ -98,6 +110,79 @@ const GSD_PREFIXED_PARENTS = ['agents', 'commands', 'skills', 'hooks'];
 const GSD_ARTIFACT_PREFIX = 'gsd-';
 
 /**
+ * Artifact parents that are NOT registry-declared — the installer writes these
+ * directly rather than through a capability's artifactLayout.
+ */
+const NON_REGISTRY_ARTIFACT_PARENTS = ['hooks', 'plugins', 'scripts'];
+
+/**
+ * Paths GSD owns WHOLESALE inside a shared root, which the `gsd-` prefix rule
+ * cannot see because their names carry no prefix. Each is created and filled by
+ * the installer:
+ *   hooks/lib, hooks/package.json         -- GSD_HOOK_LIB_FILES + the CommonJS marker
+ *   scripts/lib, scripts/changeset,       -- copied wholesale into the config dir
+ *   scripts/fix-slash-commands.cjs
+ * Watched as exact paths rather than by widening the parent scan, so a host
+ * agent's own `scripts/` or `hooks/` entries are still ignored.
+ */
+const GSD_OWNED_NESTED = [
+  'hooks/lib',
+  'hooks/package.json',
+  'scripts/lib',
+  'scripts/changeset',
+  'scripts/fix-slash-commands.cjs',
+];
+
+/**
+ * DERIVE the artifact parents from the capability registry rather than naming
+ * them, for the same reason TEST_ENV_BASE derives its keys: a hand-list is only
+ * ever as complete as its author's recall, and this one was measurably not.
+ *
+ * Round 5's adversarial review found the hand-list missing Kilo's SINGULAR
+ * `command/`, `workflows/`, and Hermes' `skills/gsd` -- the last being a whole
+ * directory whose name carries no `gsd-` prefix, so no prefix rule reaches it.
+ * A capability that declares a new destSubpath now extends this set in the same
+ * commit that declares it.
+ *
+ * @returns {{parents: string[], owned: string[]}} parents = watch gsd-prefixed
+ *   children only; owned = watch the path wholesale (its own name is GSD's).
+ */
+function deriveArtifactTargets(runtimes) {
+  const parents = new Set([...GSD_PREFIXED_PARENTS, ...NON_REGISTRY_ARTIFACT_PARENTS]);
+  const owned = new Set(GSD_OWNED_NESTED);
+  for (const entry of Object.values(runtimes || {})) {
+    const layouts = entry?.runtime?.artifactLayout?.global ?? [];
+    for (const layout of layouts) {
+      const dest = layout?.destSubpath;
+      if (typeof dest !== 'string' || !dest) continue;
+      const last = dest.split('/').pop() || '';
+      // A destination whose own final segment is GSD's (e.g. hermes' `skills/gsd`)
+      // is owned wholesale; anything else is a shared parent we scan by prefix.
+      if (last.startsWith('gsd')) owned.add(dest);
+      else parents.add(dest);
+    }
+  }
+  return { parents: [...parents].sort(), owned: [...owned].sort() };
+}
+
+/** Memoized registry-derived targets; falls back to the static lists unbuilt. */
+let _artifactTargets = null;
+function artifactTargets(deps = {}) {
+  if (_artifactTargets && !deps.libDir) return _artifactTargets;
+  const libDir = deps.libDir || path.join(__dirname, '..', 'gsd-core', 'bin', 'lib');
+  let runtimes;
+  try {
+    ({ runtimes } = require(path.join(libDir, 'capability-registry.cjs')));
+  } catch {
+    // Unbuilt tree: the static lists are a strict subset, never a wrong answer.
+    return { parents: [...GSD_PREFIXED_PARENTS, ...NON_REGISTRY_ARTIFACT_PARENTS].sort(), owned: [...GSD_OWNED_NESTED] };
+  }
+  const derived = deriveArtifactTargets(runtimes);
+  if (!deps.libDir) _artifactTargets = derived;
+  return derived;
+}
+
+/**
  * The file GSD writes into a NON-REGISTRY config home.
  *
  * Both current descriptors are Kimi's — Kimi CLI's `~/.kimi` (KIMI_SHARE_DIR) and
@@ -126,6 +211,14 @@ const NON_REGISTRY_OWNED_FILE = 'config.toml';
  * was really for. It engages only when the per-target bounds together exceed it;
  * when it does, the targets it curtails are reported `unverified` -- never
  * silently clean.
+ *
+ * NAMED RESIDUAL, because the obvious stronger claim is FALSE: order-independence
+ * holds BELOW the global ceiling, not above it. Once MAX_TOTAL_ENTRIES is
+ * exhausted, which targets get curtailed still depends on iteration order -- that
+ * is inherent to any shared aggregate bound, and the fix here removes the ordinary
+ * case (one large target cascading over everything after it) rather than the
+ * pathological one. The curtailed targets are reported `unverified`, so the
+ * residual costs legibility, never a false clean.
  */
 const MAX_ENTRIES = 20000;
 const MAX_TOTAL_ENTRIES = 200000;
@@ -247,7 +340,14 @@ function resolveExtraWatchTargets(deps = {}) {
   const env = deps.env || process.env;
   const homedir = (deps.os || os).homedir;
 
-  const targets = [path.resolve(path.join(env.GSD_HOME || homedir(), '.gsd'))];
+  // BOTH resolutions, exactly as resolveLiveConfigRoots does — the ambient one and
+  // the one a child that BLANKED the var falls back to. Watching only the ambient
+  // path leaves the fallback unwatched, which is the same defect B3 closed for the
+  // registry roots; it lived here too until round 5's adversarial review found it.
+  const targets = [
+    path.resolve(path.join(env.GSD_HOME || homedir(), '.gsd')),
+    path.resolve(path.join(homedir(), '.gsd')),
+  ];
 
   try {
     const {
@@ -266,6 +366,12 @@ function resolveExtraWatchTargets(deps = {}) {
     // process.env and os.homedir() regardless of `deps`, leaving the seam
     // untestable and the targets resolved against different worlds.
     for (const descriptor of NON_REGISTRY_CONFIG_HOME_DESCRIPTORS) {
+      // The fallback leg, per the note above: a child that blanks KIMI_SHARE_DIR /
+      // KIMI_CODE_HOME writes to the HOME-derived root instead of the ambient one.
+      const fallbackDir = resolveConfigHomeFromDescriptor(descriptor, { env: {}, home: homedir() });
+      if (typeof fallbackDir === 'string' && fallbackDir.length > 0) {
+        targets.push(path.resolve(path.join(fallbackDir, NON_REGISTRY_OWNED_FILE)));
+      }
       const dir = resolveConfigHomeFromDescriptor(descriptor, { env, home: homedir() });
       // The root belongs to the runtime, so it is never watched wholesale — only
       // the named file below.
@@ -284,7 +390,9 @@ function resolveExtraWatchTargets(deps = {}) {
   } catch {
     // Unbuilt tree — same posture as resolveLiveConfigRoots: advisory, never fatal.
   }
-  return targets;
+  // Both legs can coincide when no override is set; the snapshot keys on path,
+  // but dedupe anyway so the RV-facing target count means what it says.
+  return [...new Set(targets)];
 }
 
 /**
@@ -328,8 +436,10 @@ function newestMtime(target, budget) {
  *   keyed by absolute entry path.
  */
 function snapshotLiveConfig(roots, extraTargets = [], limits = {}) {
-  const perTarget = limits.perTarget ?? MAX_ENTRIES;
-  const total = { remaining: limits.total ?? MAX_TOTAL_ENTRIES };
+  // Clamp at 0: a negative injected limit would start the ceiling below empty and
+  // make every target report truncated for a reason that is not a scan bound.
+  const perTarget = Math.max(0, limits.perTarget ?? MAX_ENTRIES);
+  const total = { remaining: Math.max(0, limits.total ?? MAX_TOTAL_ENTRIES) };
   const snap = {};
 
   const record = (target) => {
@@ -354,13 +464,18 @@ function snapshotLiveConfig(roots, extraTargets = [], limits = {}) {
   // pull the developer's real ~/.gsd into its snapshot.
   for (const target of extraTargets) record(path.resolve(target));
 
+  const { parents: watchParents, owned: watchOwned } = artifactTargets();
+
   for (const root of roots) {
     for (const entry of GSD_OWNED_ENTRIES) record(path.join(root, entry));
+    // Paths whose own name is GSD's, nested inside a shared root (hermes'
+    // `skills/gsd`, `hooks/lib`, `scripts/lib`, …) — no prefix rule sees these.
+    for (const entry of watchOwned) record(path.join(root, ...entry.split('/')));
 
     // Shared dirs: enumerate only gsd-prefixed children. A child that appears
     // between the two snapshots is absent from `before` entirely — diffLiveConfig
     // treats after-only paths as created, which is exactly the leak signal.
-    for (const parent of GSD_PREFIXED_PARENTS) {
+    for (const parent of watchParents) {
       const parentDir = path.join(root, parent);
       let children;
       try {
@@ -467,6 +582,10 @@ function formatViolations(violations) {
 module.exports = {
   GSD_OWNED_ENTRIES,
   GSD_PREFIXED_PARENTS,
+  GSD_OWNED_NESTED,
+  NON_REGISTRY_ARTIFACT_PARENTS,
+  deriveArtifactTargets,
+  artifactTargets,
   GSD_ARTIFACT_PREFIX,
   MAX_ENTRIES,
   MAX_TOTAL_ENTRIES,

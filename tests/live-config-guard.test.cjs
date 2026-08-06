@@ -10,6 +10,7 @@ const fc = require('fast-check');
 
 const {
   GSD_OWNED_ENTRIES,
+  artifactTargets,
   MAX_DEPTH,
   resolveLiveConfigRoots,
   resolveExtraWatchTargets,
@@ -147,8 +148,14 @@ describe('#2665: live-config hermeticity guard', () => {
     const root = tmpRoot();
     try {
       const snap = snapshotLiveConfig([root]);
-      const watched = Object.keys(snap).map((p) => path.basename(p)).sort();
-      assert.deepStrictEqual(watched, [...GSD_OWNED_ENTRIES].sort());
+      const watched = Object.keys(snap).map((p) => path.relative(root, p)).sort();
+      // Top-level owned entries PLUS the nested paths GSD owns wholesale inside a
+      // shared root; prefixed children contribute nothing in an empty root.
+      const expected = [
+        ...GSD_OWNED_ENTRIES,
+        ...artifactTargets().owned.map((o) => path.join(...o.split('/'))),
+      ].sort();
+      assert.deepStrictEqual(watched, expected);
     } finally {
       cleanup(root);
     }
@@ -230,6 +237,74 @@ describe('#2665: live-config hermeticity guard', () => {
     }
   });
 
+  test('artifact parents are DERIVED from the registry, not hand-listed', () => {
+    // Round 5's adversarial review refuted the completeness claim of the
+    // hand-list: it missed Kilo's SINGULAR `command/`, `workflows/`, and hermes'
+    // `skills/gsd` -- a whole directory whose name carries no `gsd-` prefix, so
+    // no prefix rule could ever reach it.
+    const { parents, owned } = artifactTargets();
+    // NB: `workflows` is declared only in LOCAL scope (windsurf), so it is
+    // deliberately NOT a global config-root parent -- the derivation walks
+    // artifactLayout.global only.
+    for (const p of ['agents', 'commands', 'command', 'skills', 'hooks', 'plugins', 'scripts']) {
+      assert.ok(parents.includes(p), `expected derived parent ${p} in ${JSON.stringify(parents)}`);
+    }
+    assert.ok(owned.includes('skills/gsd'), `expected hermes skills/gsd in ${JSON.stringify(owned)}`);
+    for (const o of ['hooks/lib', 'scripts/lib']) {
+      assert.ok(owned.includes(o), `expected owned nested ${o} in ${JSON.stringify(owned)}`);
+    }
+  });
+
+  test('detects leaks the gsd- prefix rule structurally cannot see', () => {
+    const root = tmpRoot();
+    try {
+      for (const d of ['skills/gsd', 'hooks/lib', 'plugins', 'command', 'scripts/lib']) {
+        fs.mkdirSync(path.join(root, ...d.split('/')), { recursive: true });
+      }
+      const before = snapshotLiveConfig([root]);
+      // Pre-existing dirs register as MODIFIED, so bump mtimes explicitly rather
+      // than racing a coarse filesystem clock -- same reason the `modified` test
+      // above uses utimesSync.
+      const future = new Date(Date.now() + 10000);
+      const leaks = [
+        ['skills', 'gsd', 'executor.md'],
+        ['hooks', 'lib', 'git-cmd.js'],
+        ['plugins', 'gsd-core.js'],
+        ['command', 'gsd-plan.md'],
+        ['scripts', 'lib', 'io.cjs'],
+      ];
+      for (const seg of leaks) {
+        const f = path.join(root, ...seg);
+        fs.writeFileSync(f, '// leaked');
+        fs.utimesSync(f, future, future);
+        fs.utimesSync(path.dirname(f), future, future);
+      }
+
+      const hit = diffLiveConfig(before, snapshotLiveConfig([root])).map((v) => v.path);
+      for (const expected of ['skills/gsd', 'hooks/lib', 'plugins/gsd-core.js', 'command/gsd-plan.md', 'scripts/lib']) {
+        const abs = path.join(root, ...expected.split('/'));
+        assert.ok(hit.includes(abs), `${expected} leaked undetected; got ${JSON.stringify(hit)}`);
+      }
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('extra watch targets cover the fallback root as well as the ambient one', () => {
+    // The MISSED finding from round 5's review: B3 closed this for the registry
+    // roots and left the identical hole in resolveExtraWatchTargets.
+    const targets = resolveExtraWatchTargets({
+      env: { GSD_HOME: '/ambient-gsd-home', KIMI_SHARE_DIR: '/ambient-kimi' },
+      os: { homedir: () => '/fallback-home' },
+    });
+    assert.ok(targets.includes(path.resolve('/ambient-gsd-home/.gsd')), 'ambient $GSD_HOME/.gsd');
+    assert.ok(targets.includes(path.resolve('/fallback-home/.gsd')), 'HOME-derived .gsd fallback');
+    assert.ok(
+      targets.some((t) => t === path.resolve('/fallback-home/.kimi/config.toml')),
+      `HOME-derived kimi fallback missing from ${JSON.stringify(targets)}`,
+    );
+  });
+
   test('detects a DELETED top-level GSD entry', () => {
     const root = tmpRoot();
     try {
@@ -290,7 +365,7 @@ describe('#2665: live-config hermeticity guard', () => {
     }
   });
 
-  test('the truncation verdict does not depend on target ORDER', () => {
+  test('the truncation verdict does not depend on target ORDER (below the global ceiling)', () => {
     const [big] = treeWithEntries(8);
     const [small] = treeWithEntries(2);
     try {
