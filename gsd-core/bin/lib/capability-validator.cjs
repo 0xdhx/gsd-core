@@ -870,6 +870,9 @@ const SPAWN_ONLY_INVOKE_FIELDS = ['binary', 'args', 'promptChannel', 'outputChan
 // the most complete primitive of the set (repoint it at a directory holding a fake binary) and no
 // shipped reviewer manifest declares it; a lane that needs a specific executable declares an absolute
 // `invoke.binary` rather than reshaping the child's `PATH`.
+//
+// Matched CASE-INSENSITIVELY (members stored uppercase) — Windows environment lookup is
+// case-insensitive, so an exact-case set is bypassed by declaring `Path` or `node_options`.
 const DENIED_LANE_ENV_KEYS = new Set([
   'PATH', 'NODE_OPTIONS', 'NODE_REPL_EXTERNAL_MODULE', 'NODE_PATH',
   'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH',
@@ -2101,7 +2104,11 @@ function validateSpawnInvoke(ctx, invoke) {
         // `constructor`/`prototype` alongside it, but those guard bracket LOOKUPS that resolve
         // prototype members; here the read is `Object.keys` + an own-value read, and `constructor`
         // assigns as an ordinary own key. Refusing it too would reject a name the spawn could carry.
-        if (DENIED_LANE_ENV_KEYS.has(key)) {
+        // CASE-INSENSITIVE, and that is not pedantry: Windows environment lookups are
+        // case-insensitive, so `Path` / `node_options` reach the child as `PATH` / `NODE_OPTIONS`
+        // and an exact-case set is bypassed by changing one letter. The grammar above already
+        // constrains keys to ASCII, so a plain uppercase fold is sufficient here.
+        if (DENIED_LANE_ENV_KEYS.has(key.toUpperCase())) {
           errors.push(
             ctx + ' reviewer.invoke.env key "' + key + '" is not permitted ' +
             '(it makes the spawned reviewer run code of the manifest\'s choosing; ' +

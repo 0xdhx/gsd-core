@@ -640,6 +640,20 @@ describe('C. spawn invoke fields', () => {
     }
   });
 
+  // Case folding is not pedantry: Windows environment lookup is case-insensitive, so `Path` reaches
+  // the child as `PATH`. An exact-case set is bypassed by changing one letter, which makes it worse
+  // than no list — it reads as a control while passing the exact input it names.
+  test('envDenylistIsCaseInsensitive', () => {
+    for (const bad of ['Path', 'path', 'node_options', 'Node_Options', 'Ld_Preload', 'bash_env']) {
+      const lane = laneOverride((l) => { l.invoke.env = { [bad]: '/tmp/evil' }; });
+      const errs = validateReviewerBody({ id: 'x', reviewer: lane });
+      assert.ok(
+        errs.some((e) => e.includes('is not permitted (it makes the spawned reviewer')),
+        `key=${bad} must be denied regardless of case, got: ${JSON.stringify(errs)}`,
+      );
+    }
+  });
+
   // The rejection above must not break a lane that ships today. If this ever fails, the denylist has
   // outgrown its evidence and the entry that broke it needs a decision, not a silent removal.
   test('noShippedReviewerDeclaresADeniedEnvKey', () => {
