@@ -246,32 +246,41 @@ describe('#2665: live-config hermeticity guard', () => {
     // NB: `workflows` is declared only in LOCAL scope (windsurf), so it is
     // deliberately NOT a global config-root parent -- the derivation walks
     // artifactLayout.global only.
-    for (const p of ['agents', 'commands', 'command', 'skills', 'hooks', 'plugins', 'scripts']) {
-      assert.ok(parents.includes(p), `expected derived parent ${p} in ${JSON.stringify(parents)}`);
+    for (const p of ['agents', 'commands', 'command', 'skills', 'hooks', 'plugins', 'scripts', 'extensions']) {
+      assert.ok(p in parents, `expected derived parent ${p} in ${JSON.stringify(Object.keys(parents))}`);
     }
+    // kimi's kimi-agents layout declares prefix `gsd` (no hyphen); a fixed `gsd-`
+    // scan cannot see agents/gsd.yaml, which is the defect this derivation closes.
+    assert.ok(
+      parents.agents.includes('gsd'),
+      `agents must carry kimi's bare 'gsd' prefix; got ${JSON.stringify(parents.agents)}`,
+    );
     assert.ok(owned.includes('skills/gsd'), `expected hermes skills/gsd in ${JSON.stringify(owned)}`);
-    for (const o of ['hooks/lib', 'scripts/lib']) {
+    // Exact GSD filenames only — never the shared directories that contain them.
+    for (const o of ['scripts/fix-slash-commands.cjs', 'hooks/managed-hooks-registry.cjs']) {
       assert.ok(owned.includes(o), `expected owned nested ${o} in ${JSON.stringify(owned)}`);
+    }
+    for (const shared of ['hooks/lib', 'hooks/package.json', 'scripts/lib', 'scripts/changeset']) {
+      assert.ok(!owned.includes(shared), `${shared} is shared ground and must NOT be watched wholesale`);
     }
   });
 
-  test('detects leaks the gsd- prefix rule structurally cannot see', () => {
+  test('detects leaks a single hardcoded gsd- prefix cannot see', () => {
     const root = tmpRoot();
     try {
-      for (const d of ['skills/gsd', 'hooks/lib', 'plugins', 'command', 'scripts/lib']) {
+      for (const d of ['skills/gsd', 'agents', 'plugins', 'command', 'extensions']) {
         fs.mkdirSync(path.join(root, ...d.split('/')), { recursive: true });
       }
       const before = snapshotLiveConfig([root]);
-      // Pre-existing dirs register as MODIFIED, so bump mtimes explicitly rather
-      // than racing a coarse filesystem clock -- same reason the `modified` test
-      // above uses utimesSync.
       const future = new Date(Date.now() + 10000);
+      // kimi declares prefix `gsd` (no hyphen) and writes agents/gsd.yaml;
+      // pi writes extensions/gsd.js. A fixed `gsd-` scan sees neither.
       const leaks = [
         ['skills', 'gsd', 'executor.md'],
-        ['hooks', 'lib', 'git-cmd.js'],
+        ['agents', 'gsd.yaml'],
+        ['extensions', 'gsd.js'],
         ['plugins', 'gsd-core.js'],
         ['command', 'gsd-plan.md'],
-        ['scripts', 'lib', 'io.cjs'],
       ];
       for (const seg of leaks) {
         const f = path.join(root, ...seg);
@@ -281,10 +290,46 @@ describe('#2665: live-config hermeticity guard', () => {
       }
 
       const hit = diffLiveConfig(before, snapshotLiveConfig([root])).map((v) => v.path);
-      for (const expected of ['skills/gsd', 'hooks/lib', 'plugins/gsd-core.js', 'command/gsd-plan.md', 'scripts/lib']) {
+      for (const expected of ['skills/gsd', 'agents/gsd.yaml', 'extensions/gsd.js', 'plugins/gsd-core.js', 'command/gsd-plan.md']) {
         const abs = path.join(root, ...expected.split('/'));
         assert.ok(hit.includes(abs), `${expected} leaked undetected; got ${JSON.stringify(hit)}`);
       }
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('a user editing their OWN files in a shared dir is not a violation', () => {
+    // The false-positive case a prior commit shipped: hooks/lib, hooks/package.json,
+    // scripts/lib and scripts/changeset were watched WHOLESALE, so touching a
+    // user-authored helper in any of them tripped the guard. The installer itself
+    // preserves foreign files in all four, so they are not GSD's to watch.
+    const root = tmpRoot();
+    try {
+      for (const d of ['hooks/lib', 'scripts/lib', 'scripts/changeset']) {
+        fs.mkdirSync(path.join(root, ...d.split('/')), { recursive: true });
+      }
+      const foreign = [
+        ['hooks', 'package.json'],
+        ['hooks', 'lib', 'user-helper.js'],
+        ['scripts', 'lib', 'user-helper.cjs'],
+        ['scripts', 'changeset', 'user-tool.cjs'],
+      ];
+      for (const seg of foreign) fs.writeFileSync(path.join(root, ...seg), 'mine');
+      const before = snapshotLiveConfig([root]);
+      const future = new Date(Date.now() + 10000);
+      for (const seg of foreign) {
+        const f = path.join(root, ...seg);
+        fs.writeFileSync(f, 'mine, edited');
+        fs.utimesSync(f, future, future);
+        fs.utimesSync(path.dirname(f), future, future);
+      }
+
+      assert.deepStrictEqual(
+        diffLiveConfig(before, snapshotLiveConfig([root])),
+        [],
+        'editing user-owned files in a shared dir must not trip the guard',
+      );
     } finally {
       cleanup(root);
     }
@@ -377,6 +422,26 @@ describe('#2665: live-config hermeticity guard', () => {
     } finally {
       cleanup(big);
       cleanup(small);
+    }
+  });
+
+  test('a non-finite injected limit falls back to the real bound, never fails open', () => {
+    // Math.max(0, NaN) is NaN, and every budget comparison against NaN is false,
+    // so the walk becomes unbounded — the one thing the bound exists to prevent.
+    // The discriminator has to be a case where the two behaviours DIFFER: pair a
+    // NaN perTarget with a small finite ceiling. Fixed, perTarget falls back to
+    // MAX_ENTRIES and the ceiling still bites (truncated). Broken, min(NaN, 3) is
+    // NaN and nothing truncates at all.
+    const [dir] = treeWithEntries(6);
+    try {
+      const snap = snapshotLiveConfig([], [dir], { perTarget: NaN, total: 3 });
+      assert.strictEqual(
+        snap[path.resolve(dir)].truncated,
+        true,
+        'a NaN perTarget must fall back to a real bound, not disable budgeting',
+      );
+    } finally {
+      cleanup(dir);
     }
   });
 

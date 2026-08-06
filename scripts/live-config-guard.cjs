@@ -46,16 +46,23 @@
  * outside this guard by construction. Closing it would require watching shared
  * files, which is the false-positive trap above.
  *
- * NAMED RESIDUALS — stated rather than implied, because round 5's adversarial
- * review refuted a completeness claim made here and an unqualified one would
- * simply invite the same refutation again:
- *   - the loose generator scripts the installer copies to `<root>/scripts/*.cjs`
- *     (`fix-slash-commands.cjs` is watched by name; the capability generators are
- *     not, and they carry no `gsd-` prefix to scan for);
- *   - the shared-hooks bundle written into a NON-registry root's `<root>/hooks/`
- *     (kimi) — see resolveExtraWatchTargets, where closing it is a layout
- *     decision rather than one more path.
- * Both under-watch, which fails quiet: a missed leak, never a false alarm.
+ * NAMED RESIDUALS — stated rather than implied, because two successive rounds
+ * asserted this list was complete and both were refuted. Still NOT watched:
+ *   - `agents/subagents/**` (kimi stages `subagents/gsd-executor.yaml` under an
+ *     UNPREFIXED intermediate dir, so no prefix scan of `agents/` reaches it);
+ *   - the loose capability generators copied to `<root>/scripts/*.cjs`
+ *     (`fix-slash-commands.cjs` is watched by name; the generators are not);
+ *   - `extensions/package.json` and `plugins/package.json` — CommonJS markers in
+ *     dirs GSD fills but does not own, so they fall under the shared-ground rule
+ *     below rather than being watched;
+ *   - the shared-hooks bundle in a NON-registry root's `<root>/hooks/` (kimi) —
+ *     see resolveExtraWatchTargets; closing it is a layout decision.
+ * DELIBERATELY not watched, which is a different thing from missed: `hooks/lib`,
+ * `hooks/package.json`, `scripts/lib` and `scripts/changeset`. The installer
+ * preserves foreign files in each, so watching them wholesale produces false
+ * positives — and a guard that cries wolf gets switched off.
+ * Every item above under-watches, which fails quiet: a missed leak, never a
+ * false alarm.
  *
  * SEVERITY — reports by default, fails only under GSD_STRICT_LIVE_CONFIG_GUARD=1.
  * Not timidity: on its first CI run this guard found PRE-EXISTING leaks on the
@@ -113,24 +120,31 @@ const GSD_ARTIFACT_PREFIX = 'gsd-';
  * Artifact parents that are NOT registry-declared — the installer writes these
  * directly rather than through a capability's artifactLayout.
  */
-const NON_REGISTRY_ARTIFACT_PARENTS = ['hooks', 'plugins', 'scripts'];
+const NON_REGISTRY_ARTIFACT_PARENTS = ['hooks', 'plugins', 'scripts', 'extensions'];
 
 /**
- * Paths GSD owns WHOLESALE inside a shared root, which the `gsd-` prefix rule
- * cannot see because their names carry no prefix. Each is created and filled by
- * the installer:
- *   hooks/lib, hooks/package.json         -- GSD_HOOK_LIB_FILES + the CommonJS marker
- *   scripts/lib, scripts/changeset,       -- copied wholesale into the config dir
- *   scripts/fix-slash-commands.cjs
- * Watched as exact paths rather than by widening the parent scan, so a host
- * agent's own `scripts/` or `hooks/` entries are still ignored.
+ * Prefixes used for a parent with no registry-declared one. BOTH forms are the
+ * point: GSD writes `gsd-`-hyphen artifacts (`hooks/gsd-check-update.js`) AND
+ * bare `gsd.`-dotted ones (pi's `extensions/gsd.js`), and a lone `gsd-` sees
+ * only the first.
+ */
+const DEFAULT_ARTIFACT_PREFIXES = ['gsd-', 'gsd.'];
+
+/**
+ * Files GSD owns by EXACT NAME inside a directory it shares — deliberately NOT
+ * the directories themselves.
+ *
+ * `hooks/lib`, `hooks/package.json`, `scripts/lib` and `scripts/changeset` were
+ * watched wholesale for exactly one commit, and that was wrong: the installer's
+ * own uninstall path preserves foreign files in every one of them (it removes the
+ * CommonJS marker only on an exact content match — "a user-authored package.json
+ * is never deleted"). Watching them wholesale turns a user editing their own
+ * helper into a violation, which is the false-positive trap the SCOPE note above
+ * exists to refuse. Under-watching fails quiet; over-watching disarms the guard.
  */
 const GSD_OWNED_NESTED = [
-  'hooks/lib',
-  'hooks/package.json',
-  'scripts/lib',
-  'scripts/changeset',
   'scripts/fix-slash-commands.cjs',
+  'hooks/managed-hooks-registry.cjs',
 ];
 
 /**
@@ -148,21 +162,36 @@ const GSD_OWNED_NESTED = [
  *   children only; owned = watch the path wholesale (its own name is GSD's).
  */
 function deriveArtifactTargets(runtimes) {
-  const parents = new Set([...GSD_PREFIXED_PARENTS, ...NON_REGISTRY_ARTIFACT_PARENTS]);
+  const parents = new Map();
+  const addParent = (dest, prefixes) => {
+    if (!parents.has(dest)) parents.set(dest, new Set());
+    for (const pre of prefixes) parents.get(dest).add(pre);
+  };
+  for (const dest of [...GSD_PREFIXED_PARENTS, ...NON_REGISTRY_ARTIFACT_PARENTS]) {
+    addParent(dest, DEFAULT_ARTIFACT_PREFIXES);
+  }
   const owned = new Set(GSD_OWNED_NESTED);
   for (const entry of Object.values(runtimes || {})) {
-    const layouts = entry?.runtime?.artifactLayout?.global ?? [];
-    for (const layout of layouts) {
+    for (const layout of entry?.runtime?.artifactLayout?.global ?? []) {
       const dest = layout?.destSubpath;
       if (typeof dest !== 'string' || !dest) continue;
       const last = dest.split('/').pop() || '';
-      // A destination whose own final segment is GSD's (e.g. hermes' `skills/gsd`)
-      // is owned wholesale; anything else is a shared parent we scan by prefix.
-      if (last.startsWith('gsd')) owned.add(dest);
-      else parents.add(dest);
+      // A destination whose own final segment is GSD's (hermes' `skills/gsd`) is
+      // owned wholesale — that directory is ours, not shared.
+      if (last.startsWith('gsd')) { owned.add(dest); continue; }
+      // The layout declares its OWN prefix, and it varies: kimi's `kimi-agents`
+      // layout declares `gsd` (no hyphen) and writes `agents/gsd.yaml` +
+      // `agents/gsd.md`, invisible to a fixed `gsd-` scan. The same destSubpath
+      // also carries different prefixes across runtimes, so a parent maps to a SET.
+      const declared = typeof layout?.prefix === 'string' && layout.prefix
+        ? [layout.prefix]
+        : DEFAULT_ARTIFACT_PREFIXES;
+      addParent(dest, declared);
     }
   }
-  return { parents: [...parents].sort(), owned: [...owned].sort() };
+  const out = {};
+  for (const [dest, set] of [...parents.entries()].sort()) out[dest] = [...set].sort();
+  return { parents: out, owned: [...owned].sort() };
 }
 
 /** Memoized registry-derived targets; falls back to the static lists unbuilt. */
@@ -175,7 +204,7 @@ function artifactTargets(deps = {}) {
     ({ runtimes } = require(path.join(libDir, 'capability-registry.cjs')));
   } catch {
     // Unbuilt tree: the static lists are a strict subset, never a wrong answer.
-    return { parents: [...GSD_PREFIXED_PARENTS, ...NON_REGISTRY_ARTIFACT_PARENTS].sort(), owned: [...GSD_OWNED_NESTED] };
+    return deriveArtifactTargets(null);
   }
   const derived = deriveArtifactTargets(runtimes);
   if (!deps.libDir) _artifactTargets = derived;
@@ -422,7 +451,13 @@ function newestMtime(target, budget) {
     } catch {
       return;
     }
-    for (const entry of entries) walk(path.join(current, entry), depth + 1);
+    for (const entry of entries) {
+      // RETURN, not continue: without this the loop keeps invoking walk() for
+      // every remaining sibling after the budget is gone, so the ceiling bounds
+      // what is RECORDED but not the work done getting there.
+      if (budget.remaining <= 0) { truncated = true; return; }
+      walk(path.join(current, entry), depth + 1);
+    }
   };
 
   walk(target, 0);
@@ -438,8 +473,12 @@ function newestMtime(target, budget) {
 function snapshotLiveConfig(roots, extraTargets = [], limits = {}) {
   // Clamp at 0: a negative injected limit would start the ceiling below empty and
   // make every target report truncated for a reason that is not a scan bound.
-  const perTarget = Math.max(0, limits.perTarget ?? MAX_ENTRIES);
-  const total = { remaining: Math.max(0, limits.total ?? MAX_TOTAL_ENTRIES) };
+  // Number.isFinite, NOT Math.max: `Math.max(0, NaN)` is NaN, and every budget
+  // comparison against NaN is false — the bound then fails OPEN and the walk is
+  // unbounded, which is the single thing these constants exist to prevent.
+  const finite = (v, fallback) => (Number.isFinite(v) && v >= 0 ? v : fallback);
+  const perTarget = finite(limits.perTarget, MAX_ENTRIES);
+  const total = { remaining: finite(limits.total, MAX_TOTAL_ENTRIES) };
   const snap = {};
 
   const record = (target) => {
@@ -475,8 +514,8 @@ function snapshotLiveConfig(roots, extraTargets = [], limits = {}) {
     // Shared dirs: enumerate only gsd-prefixed children. A child that appears
     // between the two snapshots is absent from `before` entirely — diffLiveConfig
     // treats after-only paths as created, which is exactly the leak signal.
-    for (const parent of watchParents) {
-      const parentDir = path.join(root, parent);
+    for (const [parent, prefixes] of Object.entries(watchParents)) {
+      const parentDir = path.join(root, ...parent.split('/'));
       let children;
       try {
         children = fs.readdirSync(parentDir);
@@ -484,7 +523,7 @@ function snapshotLiveConfig(roots, extraTargets = [], limits = {}) {
         continue; // parent absent — nothing of ours can be in it yet
       }
       for (const child of children) {
-        if (child.startsWith(GSD_ARTIFACT_PREFIX)) record(path.join(parentDir, child));
+        if (prefixes.some((pre) => child.startsWith(pre))) record(path.join(parentDir, child));
       }
     }
   }
@@ -584,6 +623,7 @@ module.exports = {
   GSD_PREFIXED_PARENTS,
   GSD_OWNED_NESTED,
   NON_REGISTRY_ARTIFACT_PARENTS,
+  DEFAULT_ARTIFACT_PREFIXES,
   deriveArtifactTargets,
   artifactTargets,
   GSD_ARTIFACT_PREFIX,
