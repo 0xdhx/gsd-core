@@ -288,8 +288,18 @@ describe('#1268 gitWorktreeInfoInternal: relocation to git-base-branch', () => {
     // exact value rather than "a non-empty string": a resolver that returned the
     // .git dir, the cwd, or any other plausible-looking path would pass the weaker
     // shape check while being wrong.
+    //
+    // git always reports POSIX forward slashes, on every platform including
+    // Windows, while `fs.realpathSync.native` returns the platform's native
+    // form (backslashes on Windows). The expected side must therefore be
+    // normalized to git's convention rather than compared to the raw native
+    // realpath, or the assertion just encodes the separator convention of
+    // whatever platform it was written on. This is separators only — POSIX's
+    // `replace` is a no-op there, so the assertion keeps its full strength on
+    // POSIX. The remote gsd-test matrix is Linux-only and cannot exercise this
+    // path; it only surfaced on the Windows GitHub Actions shard.
     assert.strictEqual(result.inside, true, 'inside must be true for a git project dir');
-    assert.strictEqual(result.worktreeRoot, fs.realpathSync.native(dir),
+    assert.strictEqual(result.worktreeRoot, fs.realpathSync.native(dir).replace(/\\/g, '/'),
       'worktreeRoot must be the resolved worktree root path');
   });
 
