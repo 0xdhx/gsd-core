@@ -1,6 +1,7 @@
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const {
   withIsolatedProcessState,
@@ -8,6 +9,35 @@ const {
   CONFIG_LOCATION_ENV_KEYS,
   scrubConfigLocationEnv,
 } = require('./helpers.cjs');
+
+describe('#2665: the built-lib require is deferred', () => {
+  // The scrub set derives from gsd-core/bin/lib, which is BUILT. Requiring it at
+  // module scope made an unbuilt tree throw inside `require('./helpers.cjs')` —
+  // before any test() registered — so one missing `npm run build:lib` became a
+  // whole-suite crash in the file ~370 test files import. A cold child is the only
+  // honest probe: this process has already loaded everything.
+  const probe = (touch) => {
+    const src = [
+      "const path = require('node:path');",
+      `require(${JSON.stringify(path.join(__dirname, 'helpers.cjs'))});`,
+      touch,
+      "const needle = path.join('gsd-core', 'bin', 'lib', 'capability-registry.cjs');",
+      'process.stdout.write(String(Object.keys(require.cache).some((m) => m.endsWith(needle))));',
+    ].join('\n');
+    const r = spawnSync(process.execPath, ['-e', src], { encoding: 'utf8' });
+    assert.strictEqual(r.status, 0, `probe failed: ${r.stderr}`);
+    return r.stdout === 'true';
+  };
+
+  test('requiring helpers.cjs alone does NOT load the built runtime lib', () => {
+    assert.strictEqual(probe(''), false, 'the built lib was loaded at import time');
+  });
+
+  test('reading TEST_ENV_BASE is what loads it', () => {
+    const touch = `require(${JSON.stringify(path.join(__dirname, 'helpers.cjs'))}).TEST_ENV_BASE;`;
+    assert.strictEqual(probe(touch), true, 'reading the scrub set must resolve the built lib');
+  });
+});
 
 describe('withIsolatedProcessState', () => {
   test('restores env, cwd, and exitCode after callback', () => {

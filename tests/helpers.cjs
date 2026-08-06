@@ -30,22 +30,35 @@ const SESSION_IDENTITY_ENV_KEYS = [
   'SSH_TTY',
 ];
 
-// Config-LOCATION vars — distinct in kind from the session-identity vars above:
-// these decide WHERE a child writes, so leaving one ambient lets a test that
-// sandboxes HOME still escape into the developer's real config dir.
+// LAZY, and memoized. These live in the BUILT runtime lib, so requiring them at
+// module scope made an unbuilt tree throw during `require('./helpers.cjs')` —
+// before a single test() had registered — which turns one missing
+// `npm run build:lib` into a whole-suite crash with no actionable message, in the
+// file ~370 test files import. `npm test` builds via its pretest hook, so the
+// shape that hits this is a direct `node --test` invocation.
 //
-// #2665: this list is DERIVED, not hand-maintained. A hand-written list is
-// exactly what reopened this bug twice — it can only ever be as complete as the
-// author's recall, and every resolver in `runtime-homes.cts` is env-FIRST, so a
-// key missing here is a live escape hatch rather than a cosmetic gap. Sourcing
-// it from the same registry the resolver reads makes the scrub list structurally
-// incapable of being narrower than the surface it guards: adding a capability
-// that declares a new configHome env var extends this set in the same commit.
-const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
-const {
-  NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
-  GSD_LOCATION_ENV_KEYS,
-} = require('../gsd-core/bin/lib/runtime-homes.cjs');
+// Deferring the require means only the tests that actually need the derived scrub
+// set pay for the build, and they fail with a message that names the remedy.
+let _builtLib = null;
+function builtLib() {
+  if (_builtLib) return _builtLib;
+  try {
+    const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
+    const {
+      NON_REGISTRY_CONFIG_HOME_DESCRIPTORS,
+      GSD_LOCATION_ENV_KEYS,
+    } = require('../gsd-core/bin/lib/runtime-homes.cjs');
+    _builtLib = { runtimes, NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, GSD_LOCATION_ENV_KEYS };
+  } catch (cause) {
+    throw new Error(
+      'tests/helpers.cjs derives the config-location scrub set from the built runtime '
+        + 'lib (gsd-core/bin/lib), which is not present. Run `npm run build:lib` first — '
+        + '`npm test` does this for you via its pretest script.',
+      { cause },
+    );
+  }
+  return _builtLib;
+}
 
 // Config-location vars that are neither in the registry nor descriptor-shaped,
 // each with its reader:
@@ -81,7 +94,22 @@ const NON_REGISTRY_CONFIG_LOCATION_ENV_KEYS = [
 // is why this can be scrubbed wholesale without reasoning about each call site.
 const WRITE_ESCAPE_PERMISSION_ENV_KEYS = ['GSD_ALLOW_SYMLINKED_DEST'];
 
-const CONFIG_LOCATION_ENV_KEYS = [
+// Config-LOCATION vars — distinct in kind from the session-identity vars above:
+// these decide WHERE a child writes, so leaving one ambient lets a test that
+// sandboxes HOME still escape into the developer's real config dir.
+//
+// #2665: this list is DERIVED, not hand-maintained. A hand-written list is
+// exactly what reopened this bug twice — it can only ever be as complete as the
+// author's recall, and every resolver in `runtime-homes.cts` is env-FIRST, so a
+// key missing here is a live escape hatch rather than a cosmetic gap. Sourcing
+// it from the same registry the resolver reads makes the scrub list structurally
+// incapable of being narrower than the surface it guards: adding a capability
+// that declares a new configHome env var extends this set in the same commit.
+let _configLocationEnvKeys = null;
+function configLocationEnvKeys() {
+  if (_configLocationEnvKeys) return _configLocationEnvKeys;
+  const { runtimes, NON_REGISTRY_CONFIG_HOME_DESCRIPTORS, GSD_LOCATION_ENV_KEYS } = builtLib();
+  _configLocationEnvKeys = [
   ...new Set([
     // 1. Every runtime descriptor the capability registry carries — including
     //    the nested skillsHome descriptor, which resolves independently of
@@ -110,11 +138,18 @@ const CONFIG_LOCATION_ENV_KEYS = [
     //    named separately above so the list does not misdescribe what they are.
     ...WRITE_ESCAPE_PERMISSION_ENV_KEYS,
   ]),
-].sort();
+  ].sort();
+  return _configLocationEnvKeys;
+}
 
-const TEST_ENV_BASE = Object.fromEntries(
-  [...SESSION_IDENTITY_ENV_KEYS, ...CONFIG_LOCATION_ENV_KEYS].map((k) => [k, '']),
-);
+let _testEnvBase = null;
+function testEnvBase() {
+  if (_testEnvBase) return _testEnvBase;
+  _testEnvBase = Object.fromEntries(
+    [...SESSION_IDENTITY_ENV_KEYS, ...configLocationEnvKeys()].map((k) => [k, '']),
+  );
+  return _testEnvBase;
+}
 
 /**
  * Save + clear every config-LOCATION env var on THIS process; returns a restorer.
@@ -134,12 +169,13 @@ const TEST_ENV_BASE = Object.fromEntries(
  */
 function scrubConfigLocationEnv() {
   const saved = {};
-  for (const key of CONFIG_LOCATION_ENV_KEYS) {
+  const keys = configLocationEnvKeys();
+  for (const key of keys) {
     saved[key] = process.env[key];
     delete process.env[key];
   }
   return function restoreConfigLocationEnv() {
-    for (const key of CONFIG_LOCATION_ENV_KEYS) {
+    for (const key of keys) {
       if (saved[key] === undefined) delete process.env[key];
       else process.env[key] = saved[key];
     }
@@ -158,7 +194,7 @@ function scrubConfigLocationEnv() {
  */
 function runGsdTools(args, cwd = process.cwd(), env = {}) {
   // Resolve argv once so both the first attempt and the retry use the same vector.
-  const childEnv = { ...process.env, ...TEST_ENV_BASE, ...env };
+  const childEnv = { ...process.env, ...testEnvBase(), ...env };
   const argv = Array.isArray(args)
     ? args
     : (args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [])
@@ -875,4 +911,13 @@ function clearSessionEnv() {
   for (const k of SESSION_ENV_KEYS) delete process.env[k];
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH, TEST_ENV_BASE, SESSION_IDENTITY_ENV_KEYS, CONFIG_LOCATION_ENV_KEYS, scrubConfigLocationEnv };
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv };
+
+// Lazy, for the reason builtLib() is lazy: reading either of these is what
+// forces the built-lib require, so a test file that needs neither can still
+// import this helper on an unbuilt tree. Enumerable, so destructuring and
+// Object.keys() behave exactly as they did when these were plain properties.
+Object.defineProperties(module.exports, {
+  TEST_ENV_BASE: { enumerable: true, get: testEnvBase },
+  CONFIG_LOCATION_ENV_KEYS: { enumerable: true, get: configLocationEnvKeys },
+});
