@@ -101,14 +101,23 @@ const MAX_DEPTH = 12;
  * resolver rather than a reimplementation — the guard must watch wherever the
  * product actually points, including through an ambient env var.
  *
+ * TWO resolutions, unioned, because the parent and its children do not resolve
+ * the same way: the AMBIENT one (what this process sees, env-first) and the
+ * FALLBACK one (what a child that BLANKED the config-location vars resolves to,
+ * i.e. HOME-derived). Watching only the first leaves the second unwatched, which
+ * is where a child that scrubs the var but not HOME actually writes.
+ *
  * @returns {string[]} deduped, sorted roots; empty if the built lib is absent.
  */
 function resolveLiveConfigRoots(deps = {}) {
   const libDir = deps.libDir || path.join(__dirname, '..', 'gsd-core', 'bin', 'lib');
+  const homedir = (deps.os || os).homedir;
   let getGlobalConfigDir;
+  let resolveConfigHomeFromDescriptor;
   let runtimes;
   try {
-    ({ getGlobalConfigDir } = require(path.join(libDir, 'runtime-homes.cjs')));
+    ({ getGlobalConfigDir, resolveConfigHomeFromDescriptor } =
+      require(path.join(libDir, 'runtime-homes.cjs')));
     ({ runtimes } = require(path.join(libDir, 'capability-registry.cjs')));
   } catch {
     // Unbuilt tree: the guard is advisory infrastructure and must never be the
@@ -117,6 +126,35 @@ function resolveLiveConfigRoots(deps = {}) {
   }
 
   const roots = new Set();
+
+  // ── The FALLBACK roots, which the ambient resolution above cannot reach ────
+  //
+  // #2665 round 5: getGlobalConfigDir is env-first, so the loop below resolves
+  // whatever THIS process sees. A spawned child does not see that — TEST_ENV_BASE
+  // blanks the config-location vars precisely so the child cannot follow them —
+  // and a blanked var is falsy, so the child falls back to its HOME-derived root
+  // instead. A child that blanks the var and does NOT also sandbox HOME therefore
+  // writes into the developer's real ~/.claude while the guard is watching the
+  // ambient path, one process shallower. That is the exact escape route this PR
+  // exists to close, taken one layer down.
+  //
+  // Derived, never re-listed: passing an EMPTY env to the real descriptor resolver
+  // IS "what a child with no config-location vars resolves to". Deriving it this
+  // way keeps the guard from carrying a second copy of the scrub set to drift
+  // against -- the defect this PR spent three rounds closing one layer up.
+  for (const entry of Object.values(runtimes || {})) {
+    const descriptor = entry?.runtime?.configHome;
+    if (!descriptor) continue;
+    try {
+      const dir = resolveConfigHomeFromDescriptor(descriptor, { env: {}, home: homedir() });
+      if (typeof dir === 'string' && dir.length > 0) roots.add(path.resolve(dir));
+    } catch {
+      // Same posture as the ambient loop below.
+    }
+  }
+  // grok resolves through a hardcoded branch rather than a descriptor, so its
+  // fallback is stated here for the same reason it is named in the loop below.
+  roots.add(path.resolve(path.join(homedir(), '.agents')));
   // 'grok' is a hardcoded branch of getGlobalConfigDir with no registry entry.
   //
   // DELIBERATE NON-ROOT: getGlobalSkillsBase(runtime) is NOT added here. The

@@ -43,6 +43,34 @@ describe('#2665: live-config hermeticity guard', () => {
     }
   });
 
+  test('watches the HOME-derived fallback root, not only the ambient one', () => {
+    // #2665 round 5: the guard resolves env-first, so it sees the AMBIENT root.
+    // A child that blanks CLAUDE_CONFIG_DIR (which is exactly what TEST_ENV_BASE
+    // does) falls back to <HOME>/.claude instead. Watching only the ambient path
+    // leaves that fallback unwatched -- the escape route this PR closes, one
+    // process deeper.
+    const ambient = tmpRoot();
+    const fakeHome = tmpRoot();
+    const saved = process.env.CLAUDE_CONFIG_DIR;
+    try {
+      process.env.CLAUDE_CONFIG_DIR = ambient;
+      const roots = resolveLiveConfigRoots({ os: { homedir: () => fakeHome } });
+      assert.ok(
+        roots.includes(path.resolve(ambient)),
+        `ambient root missing from ${JSON.stringify(roots)}`,
+      );
+      assert.ok(
+        roots.includes(path.resolve(path.join(fakeHome, '.claude'))),
+        `HOME-derived fallback root missing from ${JSON.stringify(roots)}`,
+      );
+    } finally {
+      if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = saved;
+      cleanup(ambient);
+      cleanup(fakeHome);
+    }
+  });
+
   test('a clean run produces no violations', () => {
     const root = tmpRoot();
     try {
