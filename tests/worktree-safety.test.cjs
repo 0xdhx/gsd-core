@@ -20,7 +20,8 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const childProcess = require('node:child_process');
 const fc = require('fast-check');
-const { createTempGitProject, createTempDir, cleanup } = require('./helpers.cjs');
+const { createTempDir, cleanup } = require('./helpers.cjs');
+const { createFixture } = require('./fixtures/index.cjs');
 const { makeFaultyGit } = require('./helpers/faulty-deps.cjs');
 
 const WORKTREE_SAFETY_PATH = path.join(
@@ -127,8 +128,8 @@ describe('resolveWorktreeContext', () => {
     assert.strictEqual(context.mode, 'current_directory');
   });
 
-  // Counter-test: timeout returns object with effectiveRoot (Contract 6)
-  test('returns valid result on timeout, not throw', () => {
+  // Counter-test: timeout returns the canonical degraded shape, not just an object (Contract 6)
+  test('returns effectiveRoot=cwd, mode=current_directory, reason=git_timed_out on timeout, not throw', () => {
     let threw = false;
     let result;
     try {
@@ -137,11 +138,11 @@ describe('resolveWorktreeContext', () => {
       threw = true;
     }
     assert.strictEqual(threw, false, 'must not throw on timeout');
-    assert.strictEqual(typeof result, 'object');
-    assert.ok(
-      typeof result.effectiveRoot === 'string',
-      'must return effectiveRoot string even on timeout'
-    );
+    assert.deepStrictEqual(result, {
+      effectiveRoot: '/tmp',
+      mode: 'current_directory',
+      reason: 'git_timed_out',
+    });
   });
 
   // ─── #3050 DEFECT 2: timeout must be distinguishable from not_git_repo ─────
@@ -439,7 +440,7 @@ describe('planWorktreePrune', () => {
   });
 
   // Counter-test: timeout path (Contract 6)
-  test('returns action=skip when execGit times out', () => {
+  test('returns action=skip, reason=git_timed_out when execGit times out', () => {
     let threw = false;
     let result;
     try {
@@ -450,9 +451,10 @@ describe('planWorktreePrune', () => {
     assert.strictEqual(threw, false, 'must not throw on timeout');
     assert.strictEqual(typeof result, 'object');
     assert.strictEqual(result.action, 'skip');
-    assert.ok(
-      typeof result.reason === 'string' && result.reason.length > 0,
-      'must return a non-empty reason when git times out'
+    assert.strictEqual(
+      result.reason,
+      'git_timed_out',
+      'must surface the specific git_timed_out reason, not a generic non-empty string'
     );
   });
 
@@ -524,11 +526,15 @@ describe('executeWorktreePrunePlan', () => {
   });
 
   // Counter-test: timeout path (Contract 6)
-  test('returns ok:false when plan is skip (timeout path)', () => {
+  test('returns {ok:false, action:skip, reason:git_timed_out, pruned:[]} when plan is skip (timeout path)', () => {
     const plan = planWorktreePrune('/tmp', {}, { execGit: makeTimeoutStub() });
     const result = executeWorktreePrunePlan(plan, { execGit: makeTimeoutStub() });
-    assert.strictEqual(typeof result, 'object');
-    assert.strictEqual(result.ok, false, 'must return ok:false on timeout');
+    assert.deepStrictEqual(result, {
+      ok: false,
+      action: 'skip',
+      reason: 'git_timed_out',
+      pruned: [],
+    });
   });
 
   // AC4 strict: timedOut must be surfaced as a first-class field
@@ -578,7 +584,7 @@ describe('listLinkedWorktreePaths', () => {
   });
 
   // Counter-test: failure path (Contract 6)
-  test('returns ok:false on timeout, not throw', () => {
+  test('returns ok:false, reason:git_timed_out on timeout, not throw', () => {
     let threw = false;
     let result;
     try {
@@ -588,9 +594,10 @@ describe('listLinkedWorktreePaths', () => {
     }
     assert.strictEqual(threw, false, 'must not throw on timeout');
     assert.strictEqual(result.ok, false);
-    assert.ok(
-      typeof result.reason === 'string' && result.reason.length > 0,
-      'must return non-empty reason on timeout'
+    assert.strictEqual(
+      result.reason,
+      'git_timed_out',
+      'must surface the specific git_timed_out reason, not a generic non-empty string'
     );
   });
 
@@ -641,8 +648,11 @@ describe('inspectWorktreeHealth', () => {
     ]);
   });
 
-  // Counter-test: timeout path (Contract 6)
-  test('returns ok:false when git times out', () => {
+  // Counter-test: timeout path (Contract 6). This function's own reason on
+  // timeout is not pinned by any sibling test in this file (unlike
+  // planWorktreePrune/listLinkedWorktreePaths/snapshotWorktreeInventory,
+  // which each have a dedicated "reason is git_timed_out" test) — pin it here.
+  test('returns {ok:false, reason:git_timed_out, findings:[]} when git times out', () => {
     let threw = false;
     let result;
     try {
@@ -651,13 +661,16 @@ describe('inspectWorktreeHealth', () => {
       threw = true;
     }
     assert.strictEqual(threw, false, 'must not throw on timeout');
-    assert.strictEqual(typeof result, 'object');
-    assert.strictEqual(result.ok, false);
+    assert.deepStrictEqual(result, {
+      ok: false,
+      reason: 'git_timed_out',
+      findings: [],
+    });
   });
 
-  test('findings is empty array (not undefined) on timeout', () => {
+  test('findings is an empty array, not undefined, on timeout', () => {
     const result = inspectWorktreeHealth('/tmp', {}, { execGit: makeTimeoutStub() });
-    assert.strictEqual(Array.isArray(result.findings), true, 'findings must be an array even when ok:false');
+    assert.deepStrictEqual(result.findings, [], 'findings must be [] (not undefined) even when ok:false');
   });
 
   // Counter-test (B5, #3057): a statSync throw must surface as its own
@@ -734,7 +747,7 @@ describe('snapshotWorktreeInventory', () => {
   });
 
   // Counter-test: timeout path (Contract 6)
-  test('returns ok:false with reason on timeout, not throw', () => {
+  test('returns ok:false, reason:git_timed_out on timeout, not throw', () => {
     let threw = false;
     let result;
     try {
@@ -745,9 +758,10 @@ describe('snapshotWorktreeInventory', () => {
     assert.strictEqual(threw, false, 'must not throw on timeout');
     assert.strictEqual(typeof result, 'object');
     assert.strictEqual(result.ok, false);
-    assert.ok(
-      typeof result.reason === 'string' && result.reason.length > 0,
-      'must return non-empty reason on timeout'
+    assert.strictEqual(
+      result.reason,
+      'git_timed_out',
+      'must surface the specific git_timed_out reason, not a generic non-empty string'
     );
   });
 
@@ -3536,15 +3550,20 @@ describe('worktree-safety: resolveWorktreeRoot and pruneOrphanedWorktrees reloca
 describe('worktree-safety: resolveWorktreeRoot behaviour', () => {
   const worktreeSafety = require(WORKTREE_SAFETY_PATH);
 
-  test('resolveWorktreeRoot(createTempGitProject()) returns {root, reason} with a non-empty root', (t) => {
-    const dir = createTempGitProject('gsd-wt-root-');
+  // NOTE: createTempGitProject() always seeds .planning/ (createFixture's
+  // planning:true default), which makes resolveWorktreeContext short-circuit
+  // on the has_local_planning branch (src/worktree-safety.cts:203-216) BEFORE
+  // ever calling git — so a fixture built with it can never reach the
+  // git-based main_worktree path this test's name is about. Use a git fixture
+  // WITHOUT .planning/ (and without the projectDoc PROJECT.md, which — since
+  // projectDoc defaults to `git` in createFixture — would otherwise silently
+  // recreate the .planning/ directory it's writing into) so resolveWorktreeRoot
+  // actually reaches resolveWorktreeLinkage's real git rev-parse comparison.
+  test('resolveWorktreeRoot(git repo with no local .planning) reaches the git-based main_worktree path, returns {root: dir, reason: main_worktree}', (t) => {
+    const dir = createFixture({ prefix: 'gsd-wt-root-', planning: false, git: true, projectDoc: false });
     t.after(() => cleanup(dir));
     const result = worktreeSafety.resolveWorktreeRoot(dir);
-    assert.ok(result && typeof result === 'object', 'must return an object, not a bare string');
-    assert.ok(typeof result.root === 'string' && result.root.length > 0,
-      `Expected non-empty root string, got: ${JSON.stringify(result)}`);
-    assert.ok(typeof result.reason === 'string' && result.reason.length > 0,
-      `Expected non-empty reason string, got: ${JSON.stringify(result)}`);
+    assert.deepStrictEqual(result, { root: dir, reason: 'main_worktree' });
   });
 
   test('resolveWorktreeRoot propagates git_timed_out via the injected execGit seam (#3050)', () => {
@@ -4280,7 +4299,12 @@ describe('bug-3707: reapOrphanWorktrees — adversarial edge cases', () => {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3129-validate-commit-git-bypass (consolidation epic #1969 B5 #1974)", () => {
 'use strict';
-// allow-test-rule: reads hook shell script to verify delegation pattern — structural contract test, not source-grep (see #3129)
+// allow-test-rule: structural-regression-guard (see #3129)
+// Reads the gsd-validate-commit.sh hook source to verify it delegates to
+// git-cmd.js isGitSubcommand() rather than the old regex — a specific code
+// pattern that must (and must not) exist; behavioral tests of tokenize()/
+// isGitSubcommand() cannot observe which detection strategy the hook itself
+// calls.
 
 // Regression tests for bug #3129.
 //

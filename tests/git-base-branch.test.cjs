@@ -13,11 +13,12 @@
  *   G. Anti-regression guard: five affected workflows must NOT contain the
  *      duplicated bare `:-main` / `:-master` fallback pattern that was the root cause.
  *      They must call `gsd_run query git.base-branch` instead.
- *      (allow-test-rule: runtime-contract-is-the-product — the workflow .md content IS
- *       the runtime surface; the absence of the bad pattern is what ships to agents.)
+ *      (see the source-text-is-the-product exemption declared below this docblock —
+ *       the workflow .md content IS the runtime surface; the absence of the bad
+ *       pattern is what ships to agents.)
  */
 
-// allow-test-rule: runtime-contract-is-the-product
+// allow-test-rule: source-text-is-the-product
 // Justification: the workflow .md files ARE the product surface — agents read and
 // execute them directly. Guard G asserts that the resolved command appears in all five
 // workflows, which requires reading those workflow files. Per TESTING-STANDARDS.md §6.
