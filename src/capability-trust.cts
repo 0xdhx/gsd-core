@@ -256,8 +256,15 @@ interface ReviewerLaneSurface {
    * `slug`/`transport`/`handler`/`invoke` are excluded because they are already bound.
    */
   residualLane: Record<string, unknown>;
-  /** spawn: the probe binary this lane executes with `--help` before dispatch, or '' when none. */
+  /**
+   * spawn: the binary this lane's availability probe touches, or '' when none. Paired with
+   * `probeKind` because the two probe kinds do DIFFERENT things and the prompt must not conflate
+   * them: `command-capability` SPAWNS `<binary> --help` and parses the output, while
+   * `command-exists` only asks `hasBinary` (a PATH/filesystem scan that spawns nothing).
+   */
   probeBinary: string;
+  /** The declared probe `kind`, or '' — decides how `probeBinary` is described to the human. */
+  probeKind: string;
   /**
    * The data classes that egress to this lane on every run (`EGRESS_PAYLOAD_CLASSES`) — named
    * honestly (Kerckhoffs's Principle) rather than disclosed as an unhelpful "sends data to the tool".
@@ -694,9 +701,9 @@ function collectReviewerLaneSurfaces(
       residualLane[k] = v;
     }
     const probeRaw = rec['probe'];
-    const probeBinary = (typeof probeRaw === 'object' && probeRaw !== null && !Array.isArray(probeRaw))
-      ? asString((probeRaw as Record<string, unknown>)['binary'])
-      : '';
+    const probeIsObj = typeof probeRaw === 'object' && probeRaw !== null && !Array.isArray(probeRaw);
+    const probeBinary = probeIsObj ? asString((probeRaw as Record<string, unknown>)['binary']) : '';
+    const probeKind = probeIsObj ? asString((probeRaw as Record<string, unknown>)['kind']) : '';
 
     // An EMPTY (or wholly unrecognised) reviewer body declares no lane and must
     // not be treated as one. Without this, `reviewer: {}` alone flips
@@ -768,6 +775,7 @@ function collectReviewerLaneSurfaces(
       residualInvoke,
       residualLane,
       probeBinary,
+      probeKind,
       // B5: every lane receives the same named egress payload classes — a fresh copy per surface so
       // no caller can mutate the shared constant through a returned surface.
       egressPayloadClasses: [...EGRESS_PAYLOAD_CLASSES],
@@ -1172,7 +1180,9 @@ function disclosureSignature(d: Disclosure): string {
   // already fallen behind by EIGHT fields before `env` made the ninth — `defaultHost` (the manifest's
   // OWN fallback egress host), `path` (appended to it to build the URL), `outputChannel`, `outputArg`,
   // `modelArg`, `effortChannel`, `modelDiscovery` and `fallbackModel` all reach `resolveLanePlan` and
-  // none was signed. (Counted: `resolveLanePlan` reads twelve `inv.*` fields; four were bound.)
+  // none was signed. Counted, because the number is easy to state ambiguously: `resolveLanePlan`
+  // reads THIRTEEN distinct `inv.*` fields once `env` is included (twelve before this PR added it),
+  // of which the pre-#2483 tuple bound four — so eight were unbound before `env`, nine including it.
   // So the fix is not a ninth name: it is a residual, the same completeness backstop `rawConfig` gives
   // the MCP line one screen up (#1459 finding 5). `env`/`defaultHost` are ALSO named explicitly,
   // mirroring that line's deliberate explicit-then-backstop overlap, because they are the two the
@@ -1238,11 +1248,12 @@ const ENV_VALUE_MAX = 60;
 
 /**
  * Environment names that turn a declared pair into arbitrary code execution in a spawned child
- * (#2483). Used ONLY to add a warning line beside an already-disclosed value — never to refuse one.
- * See the call site for why this is a highlight rather than a denylist; the short version is that
- * `PATH` belongs on any honest version of this list and can never be refused, so the list cannot be
- * a boundary and must not be built as if it were. Incomplete by construction, and its incompleteness
- * costs only a missing warning on a value the user is shown regardless.
+ * (#2483). This list drives the consent prompt's WARNING line. The capability validator carries its
+ * own denylist that REFUSES these names outright (`DENIED_LANE_ENV_KEYS`); the two are deliberately
+ * separate layers rather than one, because they answer different questions: the validator refuses a
+ * manifest it can reject, and this list makes sure anything that DOES reach a prompt is read loudly.
+ * Neither is the boundary — install-time consent is, since no enumeration of execution-primitive
+ * names can be complete against an arbitrary third-party child.
  */
 const EXECUTION_PRIMITIVE_ENV = new Set([
   'NODE_OPTIONS', 'NODE_REPL_EXTERNAL_MODULE', 'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH',
@@ -1345,11 +1356,15 @@ function summarizeDisclosure(disclosure: Disclosure): string[] {
         lines.push(`    - ${l.slug || '(slug?)'} -> ${cmd || '(no binary declared)'}`);
       }
       if (l.handler) lines.push(`        handler: ${l.handler}`);
-      // The probe binary is EXECUTED (`probeLane` spawns it with `--help` before dispatch), so it is
-      // an executable surface in its own right and belongs in the prompt beside the dispatch binary.
-      // It is frequently the same program; showing it when it differs is the case that matters.
+      // The probe binary belongs in the prompt beside the dispatch binary when it differs — but the
+      // two probe kinds are NOT the same disclosure and must not be rendered as one.
+      // `command-capability` SPAWNS `<binary> --help`; `command-exists` only asks `hasBinary`, which
+      // scans PATH and spawns nothing. An earlier revision of this line asserted the spawn for both,
+      // which is a FALSE statement in a consent prompt — the one place a claim must be exact.
       if (l.probeBinary && l.probeBinary !== l.binary) {
-        lines.push(`        probes by running: ${l.probeBinary} --help`);
+        lines.push(l.probeKind === 'command-capability'
+          ? `        probes by running: ${l.probeBinary} --help`
+          : `        probes for the presence of: ${l.probeBinary} (no process is started)`);
       }
       // #2483: identical treatment to the MCP `env` line above, for the identical reason stated
       // there — env changes WHAT runs without touching the command, so the user consents to this
@@ -1357,19 +1372,17 @@ function summarizeDisclosure(disclosure: Disclosure): string[] {
       const laneEnvKeys = l.env ? Object.keys(l.env) : [];
       if (laneEnvKeys.length > 0) {
         lines.push(`        env: ${laneEnvKeys.map((k) => `${k}=${truncateEnvValue(l.env[k])}`).join(', ')}`);
-        // Names that make an environment pair an EXECUTION primitive rather than configuration. This
-        // is an advisory HIGHLIGHT on a disclosed value, deliberately NOT a validator denylist:
-        //   - The boundary is consent, and a denylist cannot be one. `PATH` alone is a complete
-        //     execution primitive for a spawn lane (point it at a directory holding a fake binary),
-        //     and it can never be refused, so a list that stops NODE_OPTIONS while passing PATH
-        //     buys the appearance of a boundary and not the fact of one.
-        //   - The child is an arbitrary third-party binary, so the true set is every interpreter's
-        //     injection vars (BASH_ENV, PERL5OPT, RUBYOPT, JAVA_TOOL_OPTIONS, PYTHONPATH, …) —
-        //     unbounded by construction, and unbounded lists rot silently.
-        //   - MCP `env`, which this mirrors, refuses nothing and discloses everything; the inline
-        //     rationale there names NODE_OPTIONS as a reason to SHOW, not to block.
-        // Missing a name here therefore costs a louder line, never a boundary — which is the only
-        // incompleteness budget an enumeration like this can honestly carry.
+        // Names that make an environment pair an EXECUTION primitive rather than configuration.
+        // The validator REFUSES these on a reviewer lane (`DENIED_LANE_ENV_KEYS`), so in practice a
+        // first-party or freshly-validated manifest never reaches this line. It still earns its
+        // place, and the reason is the reason to keep both layers:
+        //   - Disclosure runs BEFORE validation, and on manifests validation would reject outright.
+        //     A user consenting to an already-installed or hand-placed capability sees this line
+        //     whether or not the validator ever ran on it.
+        //   - No enumeration of execution-primitive names is complete against an arbitrary
+        //     third-party child, so consent — not either list — is the boundary. A name missing from
+        //     both costs a quieter line on a value that is still SHOWN, which is the only
+        //     incompleteness budget an enumeration like this can honestly carry.
         const flagged = laneEnvKeys.filter((k) => EXECUTION_PRIMITIVE_ENV.has(k));
         if (flagged.length > 0) {
           lines.push(`        WARNING — ${flagged.join(', ')} can make this lane run code of the capability's choosing`);

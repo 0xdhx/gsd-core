@@ -373,18 +373,30 @@ describe('#2483 the claude reviewer lane suppresses CLAUDE.md + auto-memory inje
           slug: 'probe-reviewer',
           transport: 'spawn',
           handler: null,
-          probe: { kind: 'command-exists', binary: '/tmp/evil-probe' },
+          probe: { kind: 'command-capability', binary: '/tmp/evil-probe', needle: 'x', timeoutMs: 1000 },
           invoke: { binary: 'node', args: ['--version'], promptChannel: 'stdin' },
         },
       };
       const disclosure = trust.discloseExecutableSurfaces(withProbe);
       const [surface] = disclosure.reviewerLanes;
       assert.equal(surface.probeBinary, '/tmp/evil-probe', 'the probe binary must reach the surface');
+      // `command-capability` is the kind that SPAWNS `<binary> --help` (review-lane-runner.cts).
       assert.match(
         trust.summarizeDisclosure(disclosure).join('\n'),
         /probes by running: \/tmp\/evil-probe --help/,
         'and must be shown, because it is executed before the dispatch binary ever runs'
       );
+
+      // The OTHER kind must NOT claim a spawn. `command-exists` only asks `hasBinary`, a PATH scan
+      // that starts no process — an earlier revision of the render asserted the spawn for both, which
+      // put a false statement in a consent prompt. This is the assertion that keeps it honest.
+      const existsOnly = JSON.parse(JSON.stringify(withProbe));
+      existsOnly.reviewer.probe = { kind: 'command-exists', binary: '/tmp/evil-probe' };
+      const existsSummary = trust.summarizeDisclosure(trust.discloseExecutableSurfaces(existsOnly)).join('\n');
+      assert.match(existsSummary, /probes for the presence of: \/tmp\/evil-probe \(no process is started\)/,
+        'a command-exists probe must be described as a presence check');
+      assert.doesNotMatch(existsSummary, /probes by running/,
+        'and must never claim a spawn the runner does not perform');
       const moved = JSON.parse(JSON.stringify(withProbe));
       moved.reviewer.probe.binary = '/tmp/worse-probe';
       assert.notEqual(
@@ -433,10 +445,18 @@ describe('#2483 the claude reviewer lane suppresses CLAUDE.md + auto-memory inje
       );
     });
 
-    test('a lane declaring nothing beyond the enumerated fields keeps a byte-identical signature', () => {
-      // ADR-2782 D4.5 one level down. The residual is appended ONLY when non-empty, so this change
-      // cannot re-prompt every already-consented capability for a field it does not use. Without this
-      // property the fix would train users to click through exactly the prompt it exists to sharpen.
+    test('the residual element is appended ONLY when something extra is declared', () => {
+      // ADR-2782 D4.5 one level down: the residual is appended only when non-empty, so the encoding
+      // stays minimal and a residual element present in a signature always carries information.
+      //
+      // BE PRECISE ABOUT WHAT THIS PINS, because the obvious reading is wrong and was corrected here
+      // rather than left flattering. The fixture below is NOT a valid reviewer lane — it declares no
+      // `flags`, `probe`, `emptyOutput`, `evidenceClass`, `requiresBinaries` or `promptBudgetKey`, and
+      // the validator rejects it. Every VALID lane produces a non-empty outer residual, and measured
+      // across the twelve shipped reviewer capabilities, ZERO keep a byte-identical signature. So this
+      // is a property of the ENCODING, not a claim that anyone's signature is unchanged — and it is
+      // deliberately not the argument for the change being safe. That argument is that consent binds
+      // to the bundle contentHash, so no existing consent is invalidated at all.
       const plain = {
         id: 'plain-cap',
         reviewer: {
