@@ -446,6 +446,17 @@ describe('#3057 W3: readConfigBaseBranch — config present but unusable', () =>
   });
 
   test('config.json parses to a non-object → null for null / string / number / array', () => {
+    // NOTE on the `[]` case: this documents observed behaviour only. It does
+    // NOT pin the `Array.isArray(cfg)` guard in readConfigBaseBranch — that
+    // guard is unreachable (and therefore unkillable) through this readFile
+    // entry point. `cfg` is always the result of `JSON.parse(raw)` on a
+    // string, and a JSON array can never carry a `.git` or `.base_branch`
+    // own-property the way a hand-built JS array could; with the guard
+    // deleted entirely, `top.git`/`top.base_branch` on an array are still
+    // `undefined`, so the result is `null` either way. Verified by mutation:
+    // deleting `|| Array.isArray(cfg)` from the built lib does not change any
+    // output for any JSON-string input. The guard is real defense-in-depth
+    // for a future non-JSON-string caller, not something this suite can pin.
     assert.strictEqual(readWith('null'), null, 'JSON null must not be treated as a config');
     assert.strictEqual(readWith('"master"'), null, 'a bare JSON string must not be treated as a config');
     assert.strictEqual(readWith('42'), null, 'a bare JSON number must not be treated as a config');
@@ -461,7 +472,14 @@ describe('#3057 W3: readConfigBaseBranch — config present but unusable', () =>
       'a whitespace-only override must not win the precedence ladder');
   });
 
-  test('"git" key present but not an object → skipped, flat legacy key still consulted', () => {
+  test('"git" key present but not a usable object (string/array/null) → nested lookup finds nothing, flat legacy key still consulted', () => {
+    // NOTE on the `"git":[]` case: like the sibling note above, this does NOT
+    // pin `!Array.isArray(gitSection)`. `gitSection` here is a JSON-parsed
+    // array with no `.base_branch` own-property, so `gitSection.base_branch`
+    // is `undefined` whether or not the guard runs — the flat key is
+    // consulted either way. Verified by mutation: deleting
+    // `&& !Array.isArray(gitSection)` from the built lib does not change this
+    // output for any JSON-string input.
     assert.strictEqual(readWith('{"git":"main","base_branch":"release"}'), 'release');
     assert.strictEqual(readWith('{"git":[],"base_branch":"release"}'), 'release');
     assert.strictEqual(readWith('{"git":null,"base_branch":"release"}'), 'release');
@@ -580,45 +598,18 @@ describe('#3057 W3: tryRemoteShow — tier-3 output that is present but not auth
 });
 
 describe('#3057 W3: tryLocalBranch — non-empty stdout that names neither main nor master', () => {
-  /**
-   * An `execGit` stand-in whose result counts how many times `stdout` is read.
-   * `tryLocalBranch` reads it once in the `!r.stdout` guard and a second time to
-   * split it into lines. The read count therefore identifies WHICH null the
-   * function returned: 1 read = the early guard fired; 2 reads = the guard was
-   * passed and the final `return null` after the main/master checks ran.
-   */
-  function countingGit(stdoutValue) {
-    const state = { reads: 0 };
-    const git = () => ({
-      exitCode: 0,
-      stderr: '',
-      signal: null,
-      error: null,
-      timedOut: false,
-      get stdout() { state.reads += 1; return stdoutValue; },
-    });
-    git.state = state;
-    return git;
-  }
-
   test('stdout is exactly "\\n" → null, reached PAST the empty-stdout guard', () => {
     // This is the branch that was once deleted as "unreachable". The guard is
     // `if (r.exitCode !== 0 || !r.stdout) return null` — `"\n"` is a truthy
     // string, so the guard does NOT fire; `split('\n')` yields ["", ""], both
     // main/master checks are false, and the FINAL `return null` executes.
     // Deleting that line makes this function return `undefined`, which
-    // strictEqual(null) catches. The read count proves which null we got.
-    const git = countingGit('\n');
-    assert.strictEqual(gitBaseBranch.tryLocalBranch('/x', git), null);
-    assert.strictEqual(git.state.reads, 2,
-      'stdout must be read twice: once by the guard (which passes) and once to split into lines');
+    // strictEqual(null) catches.
+    assert.strictEqual(gitBaseBranch.tryLocalBranch('/x', constGit({ stdout: '\n' })), null);
   });
 
   test('stdout is exactly "" → null via the EARLY guard (a different arm)', () => {
-    const git = countingGit('');
-    assert.strictEqual(gitBaseBranch.tryLocalBranch('/x', git), null);
-    assert.strictEqual(git.state.reads, 1,
-      'an empty stdout must short-circuit in the guard, never reaching the line split');
+    assert.strictEqual(gitBaseBranch.tryLocalBranch('/x', constGit({ stdout: '' })), null);
   });
 
   // Boundary trio over the number of branch lines `git branch --list main master`

@@ -451,7 +451,7 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir));
   });
 
-  test('reports lock_too_fresh when the real mtime helper cannot stat the lock file', () => {
+  test('reports lock_age_unknown when the real mtime helper cannot stat the lock file', () => {
     const f = makeFixture(tmpBase, 'statfails');
 
     // No `mtimeSafe` injection: this drives the module's own default helper and
@@ -463,8 +463,12 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
     );
 
     const row = onlyRow(result);
-    assert.strictEqual(row.status, 'skipped');
-    assert.strictEqual(row.reason, 'lock_too_fresh');
+    // NOT `lock_too_fresh` (#3057): an unreadable mtime is not an age at all.
+    // Freshness tells an operator to wait; waiting never clears an EIO.
+    assert.deepStrictEqual(
+      { status: row.status, reason: row.reason },
+      { status: 'skipped', reason: 'lock_age_unknown' }
+    );
     assert.ok(fs.existsSync(f.wtDir));
   });
 
@@ -488,7 +492,7 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir));
   });
 
-  test('reports lock_too_fresh when the lock file cannot be stat-ed', () => {
+  test('reports lock_age_unknown, not lock_too_fresh, when mtimeSafe returns null', () => {
     const f = makeFixture(tmpBase, 'nomtime');
 
     // nowMs is the far future, so a REAL mtime would read as stale and the
@@ -499,23 +503,30 @@ describe('#3057 reapOrphanWorktrees: admin-entry verdicts', () => {
       nowMs: 8640000000000000,
     }));
 
-    assert.strictEqual(row.status, 'skipped');
-    assert.strictEqual(row.reason, 'lock_too_fresh');
+    assert.deepStrictEqual(
+      { status: row.status, reason: row.reason },
+      { status: 'skipped', reason: 'lock_age_unknown' }
+    );
     assert.ok(fs.existsSync(f.wtDir));
   });
 
-  test('reports lock_too_fresh for a zero-age lock under the default guard', () => {
+  test('reports lock_too_fresh, not lock_age_unknown, for a readable zero-age lock under the default guard', () => {
     const f = makeFixture(tmpBase, 'defaultguard');
     const now = 1000000;
 
+    // The other half of the split: the mtime IS readable, the lock genuinely is
+    // recent, and waiting out the guard genuinely would change the outcome.
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, {
       isPidAlive: () => false,
       mtimeSafe: () => new Date(now),
       nowMs: now,
     }));
 
-    assert.strictEqual(row.status, 'skipped');
-    assert.strictEqual(row.reason, 'lock_too_fresh');
+    assert.deepStrictEqual(
+      { status: row.status, reason: row.reason },
+      { status: 'skipped', reason: 'lock_too_fresh' }
+    );
+    assert.ok(fs.existsSync(f.wtDir));
   });
 
   test('reaps the same zero-age lock when an injected reapMtimeGuardMs of 0 retires the guard', () => {
@@ -702,7 +713,14 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir), 'unmerged work must survive the sweep');
   });
 
-  test('reports lock_owner_unknown and leaves the worktree on disk for a 400-digit lock PID', () => {
+  // ── The Number.isFinite PARSE gate ────────────────────────────────────────
+  // This gate is NOT the process.kill range limit (pinned in the next block).
+  // It fires far later, where `parseInt('9'.repeat(N), 10)` stops being
+  // representable: finite through N=308, Infinity from N=309 (measured).
+  // Reaching it means the reaper never learned a usable PID at all, so the
+  // verdict is `lock_owner_unknown`, not a liveness claim.
+
+  test('reports lock_owner_unknown for a 400-digit lock PID (parse overflows past the Number.isFinite gate)', () => {
     const f = makeFixture(tmpBase, 'giantpid', { lock: false });
     fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(400));
 
@@ -712,10 +730,7 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     assert.ok(fs.existsSync(f.wtDir), 'a lock PID that overflows to Infinity must never be reaped');
   });
 
-  // Parse-cliff boundary, measured empirically: `parseInt('9'.repeat(N), 10)`
-  // is finite through N=308 and becomes Infinity at N=309 (probed via
-  // `node -e`, reported in the task return).
-  test('reaches the liveness check for a 308-digit lock PID (last finite length)', () => {
+  test('passes a 308-digit lock PID through the Number.isFinite gate (last representable length)', () => {
     const f = makeFixture(tmpBase, 'cliffminus1', { lock: false });
     fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(308));
     let seenPid;
@@ -729,13 +744,94 @@ describe('#3057 reapOrphanWorktrees: liveness and ancestry verdicts', () => {
     assert.strictEqual(fs.existsSync(f.wtDir), false);
   });
 
-  test('reports lock_owner_unknown for a 309-digit lock PID (first Infinity length)', () => {
+  test('stops a 309-digit lock PID at the Number.isFinite gate (first unrepresentable length)', () => {
     const f = makeFixture(tmpBase, 'cliffexact', { lock: false });
     fs.writeFileSync(path.join(f.adminDir, 'locked'), '9'.repeat(309));
 
     const row = onlyRow(reapOrphanWorktrees(f.repoDir, deadOwnerDeps()));
 
     assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'skipped', reason: 'lock_owner_unknown' });
+    assert.ok(fs.existsSync(f.wtDir));
+  });
+
+  // ── The process.kill RANGE cliff — the one that actually decides a reap ───
+  // Measured with the real `process.kill(pid, 0)` on this platform:
+  //   2147483647 → Error, code ESRCH          (accepted; asks the OS)
+  //   2147483648 → TypeError ERR_INVALID_ARG_TYPE (rejected before the OS)
+  // Both tests drive the module's OWN `defaultIsPidAlive` (no `isPidAlive`
+  // injection) so the verdict is produced by the real errno classification.
+  // Each asserts the throw shape first: if a future Node moved the cliff, the
+  // probe fails loudly instead of the verdict flipping silently.
+
+  const PID_KILL_MAX = 2147483647;
+
+  test('treats the largest PID process.kill accepts as dead when the OS answers ESRCH', () => {
+    const f = makeFixture(tmpBase, 'killmax', { lock: false });
+    fs.writeFileSync(path.join(f.adminDir, 'locked'), String(PID_KILL_MAX));
+
+    // Measured cliff, lower side: this value reaches the OS, which has no such
+    // process (every platform's max PID is orders of magnitude below it).
+    assert.throws(
+      () => process.kill(PID_KILL_MAX, 0),
+      (err) => err.code === 'ESRCH',
+      `process.kill(${PID_KILL_MAX}, 0) must reach the OS and report ESRCH`
+    );
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, { mtimeSafe: () => STALE_MTIME }));
+
+    assert.deepStrictEqual(
+      { status: row.status, reason: row.reason },
+      { status: 'reaped', reason: 'pid_dead_and_merged' }
+    );
+    assert.strictEqual(fs.existsSync(f.wtDir), false);
+  });
+
+  test('treats the first PID process.kill rejects as ALIVE and leaves the worktree on disk', () => {
+    const f = makeFixture(tmpBase, 'killmaxplus1', { lock: false });
+    const overRange = PID_KILL_MAX + 1;
+    fs.writeFileSync(path.join(f.adminDir, 'locked'), String(overRange));
+
+    // Measured cliff, upper side: one past the accepted range, `process.kill`
+    // throws a TypeError with NO errno. That is "could not determine", not
+    // "dead" — the old errno-only catch read it as dead and REAPED here.
+    assert.throws(
+      () => process.kill(overRange, 0),
+      (err) => err instanceof TypeError && err.code === 'ERR_INVALID_ARG_TYPE',
+      `process.kill(${overRange}, 0) must throw TypeError ERR_INVALID_ARG_TYPE`
+    );
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, { mtimeSafe: () => STALE_MTIME }));
+
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'skipped', reason: 'pid_alive' });
+    assert.ok(fs.existsSync(f.wtDir), 'an unclassifiable liveness probe must never reap');
+  });
+
+  test('treats an unrecognised errno from process.kill as ALIVE (only ESRCH means dead)', (t) => {
+    // EPERM has its own test above; this pins the GENERAL rule for a code the
+    // helper has never heard of, which an `=== EPERM ? true : false` catch
+    // would classify as dead.
+    const f = makeFixture(tmpBase, 'defaultkill-einval');
+    const originalKill = process.kill;
+    t.after(() => { process.kill = originalKill; });
+    process.kill = () => { throw Object.assign(new Error('EINVAL'), { code: 'EINVAL' }); };
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, { mtimeSafe: () => STALE_MTIME }));
+
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'skipped', reason: 'pid_alive' });
+    assert.ok(fs.existsSync(f.wtDir));
+  });
+
+  test('treats a codeless throw from process.kill as ALIVE', (t) => {
+    // A thrown value with no `.code` at all (the TypeError case in the
+    // abstract): `undefined !== 'ESRCH'`, so it must still read as alive.
+    const f = makeFixture(tmpBase, 'defaultkill-bare');
+    const originalKill = process.kill;
+    t.after(() => { process.kill = originalKill; });
+    process.kill = () => { throw new Error('no errno on this one'); };
+
+    const row = onlyRow(reapOrphanWorktrees(f.repoDir, { mtimeSafe: () => STALE_MTIME }));
+
+    assert.deepStrictEqual({ status: row.status, reason: row.reason }, { status: 'skipped', reason: 'pid_alive' });
     assert.ok(fs.existsSync(f.wtDir));
   });
 
@@ -855,6 +951,30 @@ describe('#3057 cmdWorktreeReapOrphans / pruneOrphanedWorktrees output verdicts'
       ' — git worktree prune timed out after 10s.' +
       ' Orphaned worktree metadata may remain until the next successful run.\n',
     ]);
+  });
+
+  test('pruneOrphanedWorktrees hands the porcelain to a caller-supplied parseWorktreePorcelain', () => {
+    const f = makeFixture(tmpBase, 'pruneparser');
+    const realPorcelain = git(['worktree', 'list', '--porcelain'], f.repoDir);
+    const seen = [];
+    const faultyGit = makeFaultyGit({ passthrough: realExecGit });
+
+    // `parseWorktreePorcelain` is a declared member of the deps bag and
+    // `planWorktreePrune` reads `deps.parseWorktreePorcelain` first, defaulting
+    // to the module function only when absent. pruneOrphanedWorktrees therefore
+    // spreads `...deps` AFTER its own hard-coded default so the caller's parser
+    // wins. Ordering the two the other way round is invisible to every other
+    // test in the tree; this one fails if the spread moves.
+    const removed = pruneOrphanedWorktrees(f.repoDir, {
+      execGit: faultyGit,
+      parseWorktreePorcelain: (porcelain) => { seen.push(porcelain); return []; },
+      writeErr: () => { throw new Error('no degradation warning expected'); },
+    });
+
+    assert.deepStrictEqual(removed, []);
+    assert.strictEqual(seen.length, 1, 'the injected parser must be the one that ran, exactly once');
+    assert.strictEqual(seen[0], realPorcelain, 'it must receive the porcelain readWorktreeList obtained');
+    assert.strictEqual(calledWith(faultyGit, ['worktree', 'prune']), true, 'the metadata prune still runs');
   });
 
   test('pruneOrphanedWorktrees returns an empty list and warns nothing when git throws', () => {
