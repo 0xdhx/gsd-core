@@ -839,10 +839,13 @@ residual element is appended to the lane tuple **only when the lane declares som
 eight already-bound fields**, so a lane declaring none keeps a byte-identical signature. State the
 scope of that property honestly, because it is easy to oversell in both directions:
 
-- **It is nearly vacuous for shipped lanes.** Measured across the twelve first-party reviewer
-  capabilities, **zero** are in the byte-identical class — every real lane declares at least
-  `effortChannel`, and the three `openai-http` lanes declare `defaultHost`/`path`/`modelDiscovery`/
-  `fallbackModel`. The property is a guarantee about minimal lanes, not a description of the fleet.
+- **It is vacuous for any VALID lane, and that is the honest statement.** Once the residual covers the
+  lane body's outer fields too, a lane that produces no residual is one declaring no `flags`, no
+  `probe`, no `emptyOutput`, no `evidenceClass`, no `requiresBinaries` and no `promptBudgetKey` — i.e.
+  a body the validator rejects. Measured across the twelve first-party reviewer capabilities: **zero**
+  are in the byte-identical class. The conditional append is still correct — it keeps the signature
+  minimal and means the residual element carries information when present — but it is a property of
+  the encoding, **not** a claim that anyone's signature is unchanged.
 - **And no capability is re-prompted regardless.** A *code* change to `disclosureSignature` cannot
   invalidate an existing consent: `hasProjectConsent` matches on the recomputed bundle
   `contentHash` — the signature is explicitly "no longer the security binding" (#1459 CB-1/CB-2) —
@@ -854,14 +857,20 @@ scope of that property honestly, because it is easy to oversell in both directio
   silence. First-party capabilities never enter this path at all — the install flow blocks a
   first-party id before trust evaluation.
 
-**Shape validation is not a safety boundary, and this ADR does not claim it is.** `invoke.env`'s
-validator checks object shape, POSIX name grammar and string values. It carries no denylist of
-execution-primitive names, deliberately: `PATH` alone is a complete execution primitive for a spawn
-lane and can never be refused, the spawned binary is arbitrary third-party code so the true set spans
-every interpreter's injection variables, and the MCP `env` this mirrors refuses nothing and discloses
-everything. **Consent is the boundary.** Known execution-primitive names are *highlighted* in the
-prompt so the disclosure is louder where it matters; a name missing from that list costs a quieter
-line, never a boundary.
+**Validation is defence in depth; consent is the boundary.** `invoke.env` is validated for object
+shape, POSIX name grammar and string values, and a **denylist refuses execution-primitive names
+outright** on a reviewer lane — `PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`,
+`BASH_ENV`, `PYTHONPATH`, `PERL5OPT`, `RUBYOPT`, `GIT_SSH_COMMAND`, `JAVA_TOOL_OPTIONS` and
+siblings, matched case-insensitively because Windows environment lookup is. `PATH` is included
+deliberately: it is the most complete primitive of the set, and a lane needing a specific executable
+declares an absolute `invoke.binary` rather than reshaping the child's `PATH`.
+
+State the limit plainly, because the list invites being mistaken for the control: it **cannot** be
+complete against an arbitrary third-party child, and disclosure runs *before* validation — on
+manifests validation would reject. So the boundary remains install-time consent, which shows every
+declared pair and binds it to the signature; execution-primitive names additionally carry a warning
+line in the prompt. A name missing from both lists costs a quieter line on a value the user is still
+shown.
 
 **One inconsistency this entry closes, and it was real.** Consequences above states that adding a
 reviewer is "one manifest … no core patch", and `CONTEXT.md`, `gsd-core/workflows/review.md` and
