@@ -485,15 +485,49 @@ describe('#2665: scan-budget truncation', () => {
     }
   });
 
-  test('exceeding MAX_DEPTH truncates', () => {
+  // RULESET.TESTS.boundary-coverage asks for {limit-1, limit, limit+1}. This was
+  // exercised only at limit+2, which pins neither side of the edge: an off-by-one
+  // that truncated a legal depth would have passed. `nestedDepth(n)` builds a tree
+  // whose deepest entry sits at walk-depth n below the scanned root, and
+  // newestMtime truncates iff that depth EXCEEDS MAX_DEPTH.
+  const nestedDepth = (n) => {
     const dir = tmpRoot();
-    try {
-      let deep = dir;
-      for (let i = 0; i <= MAX_DEPTH + 1; i++) deep = path.join(deep, `d${i}`);
-      fs.mkdirSync(deep, { recursive: true });
+    let deep = dir;
+    for (let i = 0; i < n; i++) deep = path.join(deep, `d${i}`);
+    fs.mkdirSync(deep, { recursive: true });
+    return dir;
+  };
 
-      const res = newestMtime(dir, { remaining: 1e6 });
-      assert.strictEqual(res.truncated, true, 'a tree deeper than MAX_DEPTH must truncate');
+  test(`MAX_DEPTH boundary: depth ${MAX_DEPTH - 1} (limit-1) does NOT truncate`, () => {
+    const dir = nestedDepth(MAX_DEPTH - 1);
+    try {
+      assert.strictEqual(newestMtime(dir, { remaining: 1e6 }).truncated, false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test(`MAX_DEPTH boundary: depth ${MAX_DEPTH} (limit) does NOT truncate`, () => {
+    const dir = nestedDepth(MAX_DEPTH);
+    try {
+      assert.strictEqual(
+        newestMtime(dir, { remaining: 1e6 }).truncated,
+        false,
+        'a tree exactly at MAX_DEPTH is within bounds and must be attested',
+      );
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  test(`MAX_DEPTH boundary: depth ${MAX_DEPTH + 1} (limit+1) truncates`, () => {
+    const dir = nestedDepth(MAX_DEPTH + 1);
+    try {
+      assert.strictEqual(
+        newestMtime(dir, { remaining: 1e6 }).truncated,
+        true,
+        'a tree deeper than MAX_DEPTH must truncate',
+      );
     } finally {
       cleanup(dir);
     }
