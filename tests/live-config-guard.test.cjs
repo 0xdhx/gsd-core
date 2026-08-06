@@ -606,6 +606,17 @@ describe('#2665 round 4: CI wires the guard to strict mode', () => {
   // green. Windows lanes are deliberately report-only until the documented
   // pre-existing USERPROFILE leak class is swept (SEVERITY note in
   // scripts/live-config-guard.cjs) — so the assertion is per-OS, not global.
+  test('both guard env vars are documented for humans, not just in the source', () => {
+    // A skip-switch on a safety guard has to be discoverable: an undocumented
+    // bypass is one people eventually set without knowing what they turned off.
+    // The Docs Required gate gets satisfied by ANY docs/ file in the diff --
+    // including a generated index -- so it cannot stand in for this.
+    const doc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'TESTING-SUITES.md'), 'utf8');
+    for (const v of ['GSD_STRICT_LIVE_CONFIG_GUARD', 'GSD_SKIP_LIVE_CONFIG_GUARD']) {
+      assert.ok(doc.includes(v), `${v} must be documented in docs/TESTING-SUITES.md`);
+    }
+  });
+
   // DERIVED, not hand-listed. The previous version named three jobs as literals,
   // so it could not see a FOURTH lane that runs the suite — and there was one:
   // qa-loop-walk reaches run-tests.cjs through `npm run test:qa` and escaped
