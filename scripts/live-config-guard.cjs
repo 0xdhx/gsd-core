@@ -297,23 +297,47 @@ function snapshotLiveConfig(roots, extraTargets = []) {
 
 /**
  * Compare two snapshots. A path is a violation when it was created during the
- * run, or when its newest mtime advanced.
+ * run, when its newest mtime advanced, or when it was DELETED by the run.
  *
- * @returns {{path: string, kind: 'created'|'modified'|'unverified'}[]}
+ * Iterate the UNION of both key sets, never `after` alone. Deletion reaches this
+ * function in two shapes and an after-only walk sees neither:
+ *
+ *   - A FIXED owned entry (GSD_OWNED_ENTRIES x roots, and every extra target) is
+ *     recorded at both ends whether or not it exists, so a deletion reads
+ *     {exists:true} -> {exists:false} and falls through every branch — silently.
+ *   - A gsd-prefixed child is DISCOVERED by readdir, so a deleted one is absent
+ *     from `after` entirely and never enters an after-keyed loop at all.
+ *
+ * The second shape is why adding a `pre.exists && !post.exists` branch is not on
+ * its own sufficient: that branch is unreachable for exactly the discovered
+ * children the prefix scan exists to catch.
+ *
+ * @returns {{path: string, kind: 'created'|'modified'|'deleted'|'unverified'}[]}
  */
 function diffLiveConfig(before, after) {
   const violations = [];
-  for (const [target, post] of Object.entries(after)) {
+  const targets = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const target of targets) {
     const pre = before[target];
+    const post = after[target];
     // Absent from `before` entirely: a gsd-prefixed child that did not exist
     // when the run started. Both snapshots cover the same roots, so an
     // after-only path was created BY the run — never skip it.
     if (!pre) {
-      if (post.exists) violations.push({ path: target, kind: 'created' });
+      if (post && post.exists) violations.push({ path: target, kind: 'created' });
+      continue;
+    }
+    // Absent from `after` entirely: a discovered child that existed when the run
+    // started and does not now. Deletion is the least recoverable outcome in this
+    // threat model, so it is never inferred as clean.
+    if (!post) {
+      if (pre.exists) violations.push({ path: target, kind: 'deleted' });
       continue;
     }
     if (!pre.exists && post.exists) {
       violations.push({ path: target, kind: 'created' });
+    } else if (pre.exists && !post.exists) {
+      violations.push({ path: target, kind: 'deleted' });
     } else if (pre.exists && post.exists && post.newest > pre.newest) {
       violations.push({ path: target, kind: 'modified' });
     } else if (pre.truncated || post.truncated) {

@@ -162,6 +162,46 @@ describe('#2665: live-config hermeticity guard', () => {
     }
   });
 
+  test('detects a DELETED top-level GSD entry', () => {
+    const root = tmpRoot();
+    try {
+      // A fixed owned entry is recorded at BOTH ends whether or not it exists,
+      // so a deletion reads {exists:true} -> {exists:false}. Before the union
+      // walk that pair matched no branch at all and the run passed silently.
+      fs.mkdirSync(path.join(root, 'gsd-core'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'gsd-core', 'x'), 'x');
+      const before = snapshotLiveConfig([root]);
+      fs.rmSync(path.join(root, 'gsd-core'), { recursive: true, force: true });
+
+      const violations = diffLiveConfig(before, snapshotLiveConfig([root]));
+      const deleted = violations.filter((v) => v.kind === 'deleted');
+      assert.strictEqual(deleted.length, 1, JSON.stringify(violations));
+      assert.strictEqual(path.basename(deleted[0].path), 'gsd-core');
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('detects a DELETED gsd-prefixed child of a shared dir', () => {
+    const root = tmpRoot();
+    try {
+      // The shape a `pre.exists && !post.exists` branch cannot reach on its own:
+      // prefixed children are DISCOVERED by readdir, so a deleted one is absent
+      // from the `after` snapshot entirely and never enters an after-keyed loop.
+      fs.mkdirSync(path.join(root, 'skills', 'gsd-dev-preferences'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'skills', 'gsd-dev-preferences', 'SKILL.md'), '# x');
+      const before = snapshotLiveConfig([root]);
+      fs.rmSync(path.join(root, 'skills', 'gsd-dev-preferences'), { recursive: true, force: true });
+
+      const violations = diffLiveConfig(before, snapshotLiveConfig([root]));
+      const deleted = violations.filter((v) => v.kind === 'deleted');
+      assert.strictEqual(deleted.length, 1, JSON.stringify(violations));
+      assert.strictEqual(path.basename(deleted[0].path), 'gsd-dev-preferences');
+    } finally {
+      cleanup(root);
+    }
+  });
+
   test('the report names the path and the remedy', () => {
     const out = formatViolations([{ path: '/live/.claude/gsd-core', kind: 'created' }]);
     assert.match(out, /HERMETICITY WARNING/);
