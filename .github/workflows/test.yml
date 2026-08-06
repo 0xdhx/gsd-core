@@ -619,6 +619,10 @@ jobs:
     timeout-minutes: 15
     env:
       GSD_PLUGIN_ROOT: .ci-gsd-plugin-root-disabled
+      # `npm run test:qa` is `run-tests.cjs --suite qa`, so this lane runs the
+      # live-config guard like every other suite lane. ubuntu-only, so strict
+      # unconditionally — the Windows carve-out does not apply here.
+      GSD_STRICT_LIVE_CONFIG_GUARD: '1'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:

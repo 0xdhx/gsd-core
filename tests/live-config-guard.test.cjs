@@ -199,7 +199,7 @@ describe('#2665: live-config hermeticity guard', () => {
       fs.mkdirSync(path.join(root, 'gsd-core'), { recursive: true });
       fs.writeFileSync(path.join(root, 'gsd-core', 'x'), 'x');
       const before = snapshotLiveConfig([root]);
-      fs.rmSync(path.join(root, 'gsd-core'), { recursive: true, force: true });
+      cleanup(path.join(root, 'gsd-core'));
 
       const violations = diffLiveConfig(before, snapshotLiveConfig([root]));
       const deleted = violations.filter((v) => v.kind === 'deleted');
@@ -219,7 +219,7 @@ describe('#2665: live-config hermeticity guard', () => {
       fs.mkdirSync(path.join(root, 'skills', 'gsd-dev-preferences'), { recursive: true });
       fs.writeFileSync(path.join(root, 'skills', 'gsd-dev-preferences', 'SKILL.md'), '# x');
       const before = snapshotLiveConfig([root]);
-      fs.rmSync(path.join(root, 'skills', 'gsd-dev-preferences'), { recursive: true, force: true });
+      cleanup(path.join(root, 'skills', 'gsd-dev-preferences'));
 
       const violations = diffLiveConfig(before, snapshotLiveConfig([root]));
       const deleted = violations.filter((v) => v.kind === 'deleted');
@@ -606,32 +606,65 @@ describe('#2665 round 4: CI wires the guard to strict mode', () => {
   // green. Windows lanes are deliberately report-only until the documented
   // pre-existing USERPROFILE leak class is swept (SEVERITY note in
   // scripts/live-config-guard.cjs) — so the assertion is per-OS, not global.
-  test('all three test jobs set GSD_STRICT_LIVE_CONFIG_GUARD (Windows carved out)', () => {
+  // DERIVED, not hand-listed. The previous version named three jobs as literals,
+  // so it could not see a FOURTH lane that runs the suite — and there was one:
+  // qa-loop-walk reaches run-tests.cjs through `npm run test:qa` and escaped
+  // strict mode entirely while this test stayed green. A hand-list that certifies
+  // its own completeness is the exact defect this PR exists to fix, reproduced in
+  // the test that guards the fix.
+  test('EVERY job that runs the suite wires GSD_STRICT_LIVE_CONFIG_GUARD', () => {
     const yaml = require('js-yaml');
-    const wf = yaml.load(
-      fs.readFileSync(
-        path.join(__dirname, '..', '.github', 'workflows', 'test.yml'),
-        'utf8',
-      ),
+    const root = path.join(__dirname, '..');
+    const wf = yaml.load(fs.readFileSync(path.join(root, '.github', 'workflows', 'test.yml'), 'utf8'));
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+
+    // A step reaches the runner directly OR through an npm script, transitively.
+    // Grepping the filename alone misses the indirection that hid qa-loop-walk.
+    const scriptRunsSuite = (name, seen = new Set()) => {
+      if (seen.has(name)) return false;
+      seen.add(name);
+      const body = pkg.scripts?.[name];
+      if (!body) return false;
+      if (/run-tests\.cjs/.test(body)) return true;
+      return [...body.matchAll(/npm run ([\w:.-]+)/g)].some((m) => scriptRunsSuite(m[1], seen));
+    };
+    const runsSuite = (run) =>
+      /run-tests\.cjs/.test(run)
+      || [...run.matchAll(/npm run ([\w:.-]+)/g)].some((m) => scriptRunsSuite(m[1]));
+
+    const suiteJobs = Object.entries(wf.jobs ?? {})
+      .filter(([, job]) => (job?.steps ?? []).some((s) => typeof s?.run === 'string' && runsSuite(s.run)))
+      .map(([name]) => name)
+      .sort();
+
+    // Guards the guard: an empty derivation would make every assertion below
+    // vacuously true, which is the failure mode of the literal list it replaces.
+    assert.ok(
+      suiteJobs.length >= 4,
+      `expected at least 4 suite-running jobs, derived ${JSON.stringify(suiteJobs)}`,
     );
 
-    for (const job of ['test', 'test-full']) {
-      const v = String(wf.jobs?.[job]?.env?.GSD_STRICT_LIVE_CONFIG_GUARD ?? '');
-      assert.match(
-        v,
+    const windowsMatrix = (job) => JSON.stringify(job?.strategy?.matrix ?? {}).includes('windows');
+    const problems = [];
+    for (const name of suiteJobs) {
+      const job = wf.jobs[name];
+      const v = String(job?.env?.GSD_STRICT_LIVE_CONFIG_GUARD ?? '');
+      // Windows lanes stay report-only until the pre-existing USERPROFILE leak
+      // class is swept (SEVERITY note in scripts/live-config-guard.cjs), so a
+      // job whose matrix includes Windows carries the conditional; an
+      // ubuntu/macOS-only lane must be strict outright.
+      const ok = windowsMatrix(job)
         // The WHOLE expression, anchored — a prefix match accepted both
-        // `&& '1' || '1'` (Windows silently strict) and a malformed tail
-        // (found by this round's pre-push adversarial review).
-        /^\$\{\{\s*matrix\.os\s*!=\s*'windows-latest'\s*&&\s*'1'\s*\|\|\s*''\s*\}\}$/,
-        `jobs.${job}.env.GSD_STRICT_LIVE_CONFIG_GUARD must be strict on ` +
-          `non-Windows lanes and empty on windows-latest; got: ${JSON.stringify(v)}`,
-      );
+        // `&& '1' || '1'` (Windows silently strict) and a malformed tail.
+        ? /^\$\{\{\s*matrix\.os\s*!=\s*'windows-latest'\s*&&\s*'1'\s*\|\|\s*''\s*\}\}$/.test(v)
+        : v === '1';
+      if (!ok) problems.push(`jobs.${name}: ${JSON.stringify(v)}`);
     }
-
-    assert.strictEqual(
-      String(wf.jobs?.['test-inert']?.env?.GSD_STRICT_LIVE_CONFIG_GUARD ?? ''),
-      '1',
-      'jobs.test-inert (ubuntu-only) must set GSD_STRICT_LIVE_CONFIG_GUARD: 1',
+    assert.deepStrictEqual(
+      problems,
+      [],
+      `every job running run-tests.cjs must wire the guard to strict mode `
+        + `(Windows matrices carved out). Derived jobs: ${JSON.stringify(suiteJobs)}`,
     );
   });
 });
