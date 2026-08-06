@@ -828,12 +828,25 @@ choosing. Adding a ninth name would have left a tenth open, so the lane element 
 MCP surface has carried since #1459 finding 5. `env` and `defaultHost` are additionally named
 explicitly, mirroring that same line's deliberate explicit-then-backstop overlap.
 
-**D4.5 is preserved one level down.** The residual element is appended to the lane tuple **only when
-the lane declares something beyond the eight already-bound fields**. A lane declaring none keeps a
-byte-identical signature, so this change cannot re-prompt every consented capability for a field it
-does not use — the click-through-training harm D4.5 exists to refuse. A lane that *does* declare one
-re-consents, which is the correct outcome rather than a cost: those fields were executable and
-undisclosed.
+**D4.5 is preserved one level down, and the cost it guards against does not arise here anyway.** The
+residual element is appended to the lane tuple **only when the lane declares something beyond the
+eight already-bound fields**, so a lane declaring none keeps a byte-identical signature. State the
+scope of that property honestly, because it is easy to oversell in both directions:
+
+- **It is nearly vacuous for shipped lanes.** Measured across the twelve first-party reviewer
+  capabilities, **zero** are in the byte-identical class — every real lane declares at least
+  `effortChannel`, and the three `openai-http` lanes declare `defaultHost`/`path`/`modelDiscovery`/
+  `fallbackModel`. The property is a guarantee about minimal lanes, not a description of the fleet.
+- **And no capability is re-prompted regardless.** A *code* change to `disclosureSignature` cannot
+  invalidate an existing consent: `hasProjectConsent` matches on the recomputed bundle
+  `contentHash` — the signature is explicitly "no longer the security binding" (#1459 CB-1/CB-2) —
+  and the upgrade path's `executableSetChanged(old, new)` compares two disclosures both computed by
+  the *current* code, so widening the signature shifts both sides equally.
+- **What the widening actually buys** is therefore forward-looking and is the whole point: an upgrade
+  whose manifest edits `env`, `defaultHost`, or any other declared `invoke` field now registers as an
+  executable-surface change and re-consents, where previously it could change what the lane runs in
+  silence. First-party capabilities never enter this path at all — the install flow blocks a
+  first-party id before trust evaluation.
 
 **Shape validation is not a safety boundary, and this ADR does not claim it is.** `invoke.env`'s
 validator checks object shape, POSIX name grammar and string values. It carries no denylist of
