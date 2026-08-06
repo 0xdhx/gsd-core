@@ -303,8 +303,12 @@ therefore disclosed **and** signature-bound.
 
 The lane folds into `disclosureSignature` / `signatureForManifest` as stable sorted JSON, exactly as
 `env`/`cwd` do for MCP servers (#1459). `executableSetChanged` treats **any** of the following as an
-executable-set change for the auto-update re-consent trigger (ADR-1244 D5 rule 4): adding or
-removing a lane, or changing its `binary`, `args`, `hostConfigKey`, `promptChannel`, or `handler`.
+executable-set change for the auto-update re-consent trigger (ADR-1244 D5 rule 4): adding or removing
+a lane, changing its `slug`, `transport`, `binary`, `args`, `hostConfigKey`, `promptChannel` or
+`handler`, **or changing any other field of its declared `invoke` object** — the residual added by
+#2483, which is what stops this list going stale again. See the 2026-08-05 amendment: an enumeration
+of "the fields that matter" had already fallen eight fields behind by the time `env` arrived, so the
+signature no longer relies on one.
 
 #### The egress destination is re-verified at invocation, not only at install
 
@@ -344,8 +348,10 @@ mutation in this design, and it must not be reachable by editing a JSON file.
 > false-mismatch loop that re-prompts forever.
 >
 > So the binding is split, and rule 1 still holds end to end:
-> - the **signature** binds the manifest-derived lane fields (`slug`, `transport`, `binary`, `args`,
->   `hostConfigKey`, `promptChannel`, `handler`) — everything that is SHA-pinned;
+> - the **signature** binds the manifest-derived lane fields — `slug`, `transport`, `binary`, `args`,
+>   `hostConfigKey`, `promptChannel`, `handler`, **plus every other declared `invoke` field via the
+>   #2483 residual** (2026-08-05: the enumeration alone was eight fields short, including
+>   `defaultHost`, which is itself an egress destination);
 > - the **consent record** additionally stores the resolved host, which is what rule 1 requires;
 > - **Phase 5b re-resolves and compares at invocation** and blocks on mismatch, which is where rule 4
 >   already places the check.
