@@ -858,6 +858,26 @@ const VALID_LANE_HANDLERS     = new Set(['antigravity', 'openai-compatible', 'op
 // so a field absent from it is silently accepted on the wrong transport. Note `effortChannel` is
 // deliberately in NEITHER set: D2 defines it for both transports, so it is shared, not spawn-only.
 const SPAWN_ONLY_INVOKE_FIELDS = ['binary', 'args', 'promptChannel', 'outputChannel', 'outputArg', 'modelArg', 'env'];
+// Environment names refused outright on a reviewer lane (#2483): each one turns a declared pair into
+// arbitrary code execution in the spawned child. DEFENCE IN DEPTH, NOT THE BOUNDARY — say so plainly,
+// because a future reader who mistakes this for the control will under-invest in the one that is.
+// The boundary is install-time consent: `capability-trust` discloses every declared env pair, shows
+// its value, and binds it to the consent signature, so an unlisted name is still SEEN before it runs.
+//
+// Deliberately incomplete, and it cannot be otherwise: the spawned binary is arbitrary third-party
+// code, so the exhaustive set is every interpreter's injection variables. What this list buys is that
+// the highest-confidence, lowest-legitimacy routes cannot be taken quietly. `PATH` is included — it is
+// the most complete primitive of the set (repoint it at a directory holding a fake binary) and no
+// shipped reviewer manifest declares it; a lane that needs a specific executable declares an absolute
+// `invoke.binary` rather than reshaping the child's `PATH`.
+const DENIED_LANE_ENV_KEYS = new Set([
+  'PATH', 'NODE_OPTIONS', 'NODE_REPL_EXTERNAL_MODULE', 'NODE_PATH',
+  'LD_PRELOAD', 'LD_AUDIT', 'LD_LIBRARY_PATH',
+  'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH',
+  'PYTHONSTARTUP', 'PYTHONPATH', 'BASH_ENV', 'ENV',
+  'PERL5OPT', 'RUBYOPT', 'JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'CLASSPATH',
+  'GIT_SSH_COMMAND', 'GIT_EXTERNAL_DIFF',
+]);
 // `defaultHost` / `fallbackModel` added by Phase 5b (#2799). Phase 4 federated every
 // `review.*_host` key with a default of `""`, so the REAL fallback destination and model
 // (`http://localhost:11434` / `llama3` and friends) existed only inside the bash leg. Once the
@@ -2081,7 +2101,13 @@ function validateSpawnInvoke(ctx, invoke) {
         // `constructor`/`prototype` alongside it, but those guard bracket LOOKUPS that resolve
         // prototype members; here the read is `Object.keys` + an own-value read, and `constructor`
         // assigns as an ordinary own key. Refusing it too would reject a name the spawn could carry.
-        if (key === '__proto__') {
+        if (DENIED_LANE_ENV_KEYS.has(key)) {
+          errors.push(
+            ctx + ' reviewer.invoke.env key "' + key + '" is not permitted ' +
+            '(it makes the spawned reviewer run code of the manifest\'s choosing; ' +
+            'declare an absolute `invoke.binary` instead of reshaping the child\'s environment)',
+          );
+        } else if (key === '__proto__') {
           errors.push(
             ctx + ' reviewer.invoke.env key "__proto__" is not permitted ' +
             '(it is silently dropped when the spawn plan is assembled, so it would never reach the child)',

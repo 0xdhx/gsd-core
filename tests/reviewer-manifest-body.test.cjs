@@ -623,6 +623,43 @@ describe('C. spawn invoke fields', () => {
     );
   });
 
+  // Defence in depth, and the test says so: the BOUNDARY is install-time consent (capability-trust
+  // discloses every declared pair and binds it to the signature), so this list being incomplete is a
+  // known property rather than a gap. What it buys is that the highest-confidence, lowest-legitimacy
+  // routes cannot be taken quietly. `PATH` is included deliberately — it is the most complete
+  // primitive of the set and no shipped reviewer manifest declares it (asserted separately below).
+  test('envRejectsExecutionPrimitiveNames', () => {
+    for (const bad of ['PATH', 'NODE_OPTIONS', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES', 'BASH_ENV',
+      'PYTHONPATH', 'PERL5OPT', 'RUBYOPT', 'GIT_SSH_COMMAND', 'JAVA_TOOL_OPTIONS']) {
+      const lane = laneOverride((l) => { l.invoke.env = { [bad]: '/tmp/evil' }; });
+      const errs = validateReviewerBody({ id: 'x', reviewer: lane });
+      assert.ok(
+        errs.some((e) => e.includes(`reviewer.invoke.env key "${bad}" is not permitted`)),
+        `key=${bad} expected an execution-primitive rejection, got: ${JSON.stringify(errs)}`,
+      );
+    }
+  });
+
+  // The rejection above must not break a lane that ships today. If this ever fails, the denylist has
+  // outgrown its evidence and the entry that broke it needs a decision, not a silent removal.
+  test('noShippedReviewerDeclaresADeniedEnvKey', () => {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const capsDir = path.join(__dirname, '..', 'capabilities');
+    const offenders = [];
+    for (const d of fs.readdirSync(capsDir)) {
+      const f = path.join(capsDir, d, 'capability.json');
+      if (!fs.existsSync(f)) continue;
+      const m = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const env = m.reviewer && m.reviewer.invoke && m.reviewer.invoke.env;
+      if (!env) continue;
+      const errs = validateReviewerBody({ id: m.id || d, reviewer: m.reviewer });
+      const denied = errs.filter((e) => e.includes('is not permitted (it makes the spawned reviewer'));
+      if (denied.length) offenders.push(`${d}: ${denied.join('; ')}`);
+    }
+    assert.deepStrictEqual(offenders, [], 'a shipped reviewer capability declares a denied env key');
+  });
+
   test('httpTransportRejectsEnv', () => {
     const lane = httpOverride((l) => { l.invoke.env = { SNEAK: '1' }; });
     const errs = validateReviewerBody({ id: 'x', reviewer: lane });
