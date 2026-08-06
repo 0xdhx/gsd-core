@@ -218,7 +218,27 @@ function createTempGitProject(prefix = 'gsd-test-') {
 // of that set, not the whole of it (see below). Each probe is wrapped in its
 // own try/catch — none of them may throw and crash cleanup(), they just
 // contribute nothing if unavailable.
+// Memoization cache for tmpRootCandidates(), keyed on the LIVE os.tmpdir()
+// value (not hoisted to a plain module-level constant) — two test files in
+// this suite mutate TMPDIR/TEMP/TMP mid-run and restore them afterward, so
+// caching on the current os.tmpdir() read is what keeps a stale cache from
+// leaking across that override instead of a one-time computation baked in
+// at module load.
+let _tmpRootCandidatesCacheKey;
+let _tmpRootCandidatesCache;
+
 function tmpRootCandidates() {
+  const cacheKey = os.tmpdir();
+  if (cacheKey === _tmpRootCandidatesCacheKey && _tmpRootCandidatesCache) {
+    return _tmpRootCandidatesCache;
+  }
+  const deduped = _computeTmpRootCandidates();
+  _tmpRootCandidatesCacheKey = cacheKey;
+  _tmpRootCandidatesCache = Object.freeze(deduped);
+  return _tmpRootCandidatesCache;
+}
+
+function _computeTmpRootCandidates() {
   const roots = [];
   try {
     roots.push(path.resolve(os.tmpdir()));
@@ -272,19 +292,11 @@ function cleanup(tmpDir) {
   // destructive rmSync call itself — a wrong `target` would still chdir out of
   // its own tree and get force-deleted. Hoisted above both the chdir and the
   // rmSync so an out-of-temp-root path is refused before either can run.
-  //
-  // `target` itself is only realpath'd below when it exists (fs.existsSync
-  // guard on the symlink-escape check) — realpathSync throws ENOENT on a
-  // missing path, and cleanup() is legitimately called on already-deleted or
-  // never-created dirs. Comparison is case-insensitive on Windows
-  // (drive-letter and path casing vary there) and case-sensitive everywhere
-  // else; the error message below always prints the original-case target.
+  // Comparison is case-insensitive on Windows (drive-letter and path casing
+  // vary there) and case-sensitive everywhere else; the error message below
+  // always prints the original-case target.
   const isWindows = process.platform === 'win32';
   const tmpRoots = tmpRootCandidates();
-  // Shared by the literal-target check and the symlink-realpath check below
-  // so the two cannot drift apart — a second, independently written copy of
-  // this comparison is how the matching precondition in the tests came to
-  // disagree with the guard it was meant to mirror.
   function isUnderRoots(p) {
     const pForCompare = isWindows ? p.toLowerCase() : p;
     return tmpRoots.some((root) => {
@@ -307,43 +319,10 @@ function cleanup(tmpDir) {
       `(${tmpRoots.join(', ')}): ${target}`
     );
   }
-  // Symlink-escape guard: the check above is a string prefix test on `target`
-  // alone, so a symlink physically located under tmpdir but pointing OUTSIDE
-  // it would pass that check on `target`'s own path. NOTE: as of this
-  // writing, `fs.rmSync` itself does not follow a top-level symlink target
-  // (it unlinks the symlink and leaves whatever it points at untouched), so
-  // this guard is not closing a live escape against the current rmSync
-  // behavior — it is defense-in-depth against a future change to the
-  // deletion mechanism (a different rm implementation, a recursive walk that
-  // does follow links, etc.) that would make `target` being a symlink
-  // dangerous. When the target exists, resolve its real path and require
-  // that to be under a root too, so the guard holds regardless of how the
-  // eventual delete is implemented.
-  //
-  // Only when it exists: cleanup() is legitimately called on already-deleted
-  // or never-created dirs, and fs.realpathSync throws ENOENT on those — a
-  // missing target is harmless anyway since rmSync({force: true}) no-ops on it.
-  //
-  // Any realpath error (including a non-ENOENT failure) fails CLOSED: refuse
-  // rather than silently proceed. This is a safety check, not a best-effort
-  // probe — an unreadable/looping symlink must not be treated as safe.
-  if (fs.existsSync(target)) {
-    let real;
-    try {
-      real = fs.realpathSync(target);
-    } catch (error) {
-      throw new Error(
-        `cleanup() refused to remove a path it could not verify via realpath ` +
-        `(${(error && error.code) || (error && error.message) || 'unknown error'}): ${target}`
-      );
-    }
-    if (!isUnderRoots(real)) {
-      throw new Error(
-        `cleanup() refused to remove a path that resolves via symlink to a ` +
-        `location outside the known temp roots (${tmpRoots.join(', ')}): ${target} -> ${real}`
-      );
-    }
-  }
+  // No symlink-escape check here: fs.rmSync does not follow a top-level
+  // symlink — it unlinks the link itself and leaves the target intact — so
+  // there is no live hazard for the root-membership check above to guard
+  // against. That check is the one closing an actual defect.
   if (cwd === target || cwd.startsWith(`${target}${path.sep}`)) {
     // Windows cannot remove a directory that is the current working directory.
     process.chdir(path.dirname(target));
