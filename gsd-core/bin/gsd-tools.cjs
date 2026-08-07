@@ -264,6 +264,9 @@ const { resolveActiveWorkstream, applyResolvedWorkstreamEnv } = require('./lib/a
 const state = require('./lib/state.cjs');
 const phase = require('./lib/phase.cjs');
 const roadmap = require('./lib/roadmap.cjs');
+// #3024: resolve skills root for the sync-skills workflow (install.js is not
+// shipped in installed trees; gsd-tools IS shipped, so the workflow calls this).
+const { getGlobalSkillsBase, isRegisteredRuntimeId } = require('./lib/runtime-homes.cjs');
 // #1561 — assumption-delta advisory checkpoint detector (pure function).
 const { detectAssumptionDelta } = require('./lib/assumption-delta.cjs');
 const verify = require('./lib/verify.cjs');
@@ -1042,6 +1045,37 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           // in tight subprocess loops where Windows CI has shown intermittent
           // native crashes (0xC0000005 / 3221225477).
           commands.cmdCurrentTimestamp(args[1] || 'full', raw);
+  }
+
+  function routeSkillsRoot({ args, raw, error }) {
+    // #3024: resolve the global skills base directory for a runtime.
+    // The sync-skills workflow previously shelled out to install.js --skills-root,
+    // but install.js is not shipped in installed trees. gsd-tools IS shipped, so
+    // the workflow now calls `gsd-tools query skills-root <runtime>` instead.
+    const runtime = args[1];
+    if (!runtime) {
+      error('Usage: gsd-tools query skills-root <runtime>');
+    }
+    // Defect B (#3024): validate the runtime id against the shipped capability
+    // registry's canonical runtime set BEFORE resolving anything.
+    // getGlobalSkillsBase falls through getGlobalConfigDir's unknown-runtime
+    // branch to claude's skills root for ANY id it doesn't recognize, so an
+    // unknown, empty/whitespace-only, path-traversal, or shell-metacharacter
+    // runtime arg would otherwise silently resolve to claude's path instead of
+    // failing loudly. isRegisteredRuntimeId does an own-property lookup (not a
+    // bare index), rejecting `__proto__`/`constructor`/`prototype` runtime
+    // ids, and is the SAME validator install.js's `--skills-root` entry point
+    // calls, so the two shipped entry points can never diverge on which
+    // runtime ids they accept.
+    if (!isRegisteredRuntimeId(runtime)) {
+      error(`Unknown runtime "${runtime}" — must be a registered runtime id`);
+    }
+    const trimmedRuntime = typeof runtime === 'string' ? runtime.trim() : '';
+    const skillsRoot = getGlobalSkillsBase(trimmedRuntime);
+    if (skillsRoot === null) {
+      error(`No skills root found for runtime "${trimmedRuntime}"`);
+    }
+    output({ skills_root: skillsRoot }, raw, skillsRoot);
   }
 
   function routeProjectInstructionFile({ args, cwd, raw, error }) {
@@ -3345,6 +3379,7 @@ const HOST_COMMAND_ROUTERS = {
     'user-story': routeUserStory,
     'drift-guard': routeDriftGuard,
     'windows': routeWindows,
+    'skills-root': routeSkillsRoot,
 };
 
 // Returns true when consumed (suppress "Unknown command"), false to fall
@@ -3561,7 +3596,7 @@ const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <fiel
   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, profile-questionnaire, ' +
   'profile-sample, progress, project-instruction-file, prompt-budget, quick-tasks-append, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, scaffold, smart-entry, state, ' +
   'config-set-model-profile, dispatch-isolation, dispatch-should-flatten, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-dispatch-type, ' +
-  'resolve-execution, review-lane, skill-manifest, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
+  'resolve-execution, review-lane, skill-manifest, skills-root, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
   'Global flags:\n' +
   '  --raw              Emit raw output without post-processing\n' +
