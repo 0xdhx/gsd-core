@@ -335,7 +335,8 @@ const STOP_H2_ONLY = (lv: number): boolean => lv === 2;
 
 function cmdStateLoad(cwd: string, raw: boolean): void {
   const config = loadConfig(cwd);
-  const planDir = planningPaths(cwd).planning;
+  const paths = planningPaths(cwd);
+  const planDir = paths.planning;
 
   const stateRaw = platformReadSync(path.join(planDir, 'STATE.md')) || '';
 
@@ -356,7 +357,7 @@ function cmdStateLoad(cwd: string, raw: boolean): void {
     // bundle regardless: it is a shipped query surface with its own test anchor
     // (tests/state.test.cjs), so narrowing it would break unseen consumers for
     // no gain (Hyrum's Law). Both emit the SAME `planningPaths(cwd).debug`.
-    debug_dir: toPosixPath(planningPaths(cwd).debug),
+    debug_dir: toPosixPath(paths.debug),
   };
 
   // For --raw, output a condensed key=value format
