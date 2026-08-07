@@ -161,7 +161,7 @@ of the pre-existing `cmdInitNewMilestone`.
 
 An entry point can also land **ahead of** the atom it will unblock. `#3149`
 gives `debug` a dedicated `cmdInitDebug` (`init.debug`) with no vocabulary
-change at all: `/gsd:debug` previously made three separate `gsd_run`
+change at all: `/gsd-debug` previously made three separate `gsd_run`
 round-trips and had no `cmdInit*` of its own, so gate (2) could never be
 satisfied for any debug-scoped fact. Shipping the entry point first satisfies
 gate (2) on its own schedule and leaves gate (1) — a consuming section of at
