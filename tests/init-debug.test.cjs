@@ -157,6 +157,26 @@ describe('init.debug resolves identically to the three calls it replaces (matrix
     assert.equal(viaInit.tdd_mode, true, 'the root value must be inherited, not lost');
     assert.equal(String(viaInit.tdd_mode), viaConfigGet.output.trim());
   });
+
+  test('honors workflow.tdd_mode, ignores a bare top-level tdd_mode (row A9)', () => {
+    // The invariant tests/debug-session-management.test.cjs used to guard by
+    // grepping debug.md for `config-get workflow.tdd_mode`. Asserted here
+    // behaviorally instead, which is strictly stronger: a bare top-level key
+    // must NOT be honored, whatever the read mechanism.
+    writeConfig(tmpDir, { tdd_mode: true });
+    assert.equal(
+      runJson(['init', 'debug'], tmpDir).tdd_mode,
+      false,
+      'a bare top-level tdd_mode key must be ignored — the canonical key is workflow.tdd_mode'
+    );
+
+    writeConfig(tmpDir, { workflow: { tdd_mode: true } });
+    assert.equal(
+      runJson(['init', 'debug'], tmpDir).tdd_mode,
+      true,
+      'the canonical workflow.tdd_mode key must be honored'
+    );
+  });
 });
 
 // ─── Group B: bundle shape ─────────────────────────────────────────────────

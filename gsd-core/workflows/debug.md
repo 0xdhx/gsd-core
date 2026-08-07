@@ -28,7 +28,7 @@ One round-trip carries everything this workflow needs (#3149 — this call repla
 - `debug_dir` — an absolute path anchored on `project_root` (#2376: `debug_file_path` values handed to the spawned `gsd-debug-session-manager` must resolve regardless of that subagent's own cwd, which may differ from the orchestrator's — build them as `{debug_dir}/{slug}.md`, never a bare `.planning/debug/...` literal).
 - `debugger_model` — the resolved model for `gsd-debugger` spawns; used as `{debugger_model}` below and governed by the model-omission rule in step 2.
 - `tdd_mode` — used as `{TDD_MODE}` in the session parameter blocks below.
-- `section_manifest` — `null` today, because this workflow carries no `<!-- gsd:section -->` markers. **When it is `null`, read this workflow in full.** When it is present, read only the files named in its `read` array. `null` and an empty `included` array are NOT the same: `null` means "no manifest for this workflow", an empty `included` means "nothing applies".
+- `section_manifest` — `null` today, because this workflow declares no applicability-section markers of its own. **When it is `null`, read this workflow in full.** When it is present, read only the files named in its `read` array. `null` and an empty `included` array are NOT the same: `null` means "no manifest for this workflow", an empty `included` means "nothing applies".
 
 **If `response_language` is set:** All user-facing questions, prompts, and explanations in this workflow MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
 
