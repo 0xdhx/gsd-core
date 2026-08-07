@@ -417,6 +417,14 @@ bench OOM. Inject faults in-process through a module's `deps` parameter instead.
 Per-suite wrappers are still expected and encouraged: bind your fixture (cwd, env, payload) in a
 local helper and delegate the spawn to the seam.
 
+**Class-norm timeouts live in `tests/helpers/timeouts.cjs`** — `PROBE_TIMEOUT_MS`,
+`GIT_TIMEOUT_MS`, `BUILD_TIMEOUT_MS`, `INSTALL_TIMEOUT_MS`. These describe how long a whole CLASS
+of subprocess call takes (a CLI probe, git plumbing on a fixture repo, a hooks build, a full
+`bin/install.js` run), not a single suite's preference, so import them rather than re-declaring the
+same literal with the same comment in yet another file. Only write a local constant when a site
+genuinely differs from its class (a real `tsc` compile, a `regen:derived` run, ...) — and give that
+local constant its own justifying comment explaining why it departs from the norm.
+
 #### When you want git to *throw*: `gitOrThrow`
 
 `runGit` never throws — that is the whole point of it. But `execSync` and `execFileSync` **do**
@@ -475,6 +483,23 @@ Two things it deliberately rejects, because both look bounded and are not:
 
 A non-literal value (`timeout: GIT_TIMEOUT_MS`) is trusted — that is the shape you should be
 writing.
+
+When a call genuinely needs more than the 600000 ms ceiling — a full installer run, a build plus
+generators — the escape is an inline marker comment, exactly the `// allow-test-rule: <reason>`
+idiom above:
+
+```javascript
+// allow-spawn-timeout-ceiling: regen:derived chains a full build plus eight generators
+timeout: 900000,
+```
+
+The reason is required and must be non-empty; a bare `// allow-spawn-timeout-ceiling:` (or one
+with only whitespace after the colon) is not an audit trail and still reports `timeoutTooLarge`.
+The marker binds only to the call it decorates — either the line immediately above it, or
+anywhere inside that call's own source range — never to the rest of the file. Critically, the
+escape only ever raises the ceiling for a call that already resolves to a numeric timeout: it
+never waives the requirement for a bound. A marked call with no `timeout` at all still reports
+`unboundedSpawn`.
 
 `eslint-rules/no-unbounded-spawn.allowlist.json` grandfathers files that predate the rule. It only
 ratchets **down**: once a file is clean, the rule reports its allowlist line as stale and you delete
