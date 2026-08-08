@@ -30,7 +30,7 @@ const { OUTCOME } = processSeam;
 const runGitSpy = mock.method(processSeam, 'runGit');
 after(() => mock.restoreAll());
 
-const { gitOrThrow, DEFAULT_GIT_TIMEOUT_MS } = require('./helpers/git-fixture.cjs');
+const { gitOrThrow, throwIfFailed, toLegacyResult, DEFAULT_GIT_TIMEOUT_MS } = require('./helpers/git-fixture.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 /**
@@ -126,8 +126,27 @@ describe('git-fixture: E — gitOrThrow', () => {
     assert.equal(caught.outcome, OUTCOME.SPAWN_FAILED);
   });
 
-  test('E9: timeout throws and reports timedOut', () => {
-    const caught = captureThrown(() => gitOrThrow(['rev-parse', 'HEAD'], { cwd: dir, timeoutMs: 1 }));
+  test('E9: gitOrThrow propagates a TIMED_OUT seam result as a throw', () => {
+    // Not an integration timeout test: a real `git rev-parse HEAD` racing a
+    // 1ms bound is a real-race test (on a warm/unloaded container the
+    // command can finish first, spawnSync then reports a clean EXITED with
+    // no error, and gitOrThrow correctly does not throw — see #3148). This
+    // drives `gitOrThrow` with a synthetic TIMED_OUT result from the
+    // `runGit` spy installed at module scope (line 30), so it exercises the
+    // exact propagation behavior with zero timing dependence. Deterministic
+    // coverage of `throwIfFailed`'s TIMED_OUT branch itself already lives in
+    // the `throwIfFailed` describe block below (the `for (const outcome of
+    // [OUTCOME.TIMED_OUT, ...])` case).
+    runGitSpy.mock.mockImplementationOnce(() => ({
+      outcome: OUTCOME.TIMED_OUT,
+      exitCode: null,
+      stdout: '',
+      stderr: '',
+      timedOut: true,
+      signal: 'SIGTERM',
+      code: 'ETIMEDOUT',
+    }));
+    const caught = captureThrown(() => gitOrThrow(['rev-parse', 'HEAD'], { cwd: dir }));
     assert.equal(caught.timedOut, true);
     assert.equal(caught.outcome, OUTCOME.TIMED_OUT);
   });
@@ -209,5 +228,127 @@ describe('git-fixture: E — gitOrThrow', () => {
     );
     const author = gitOrThrow(['log', '-1', '--format=%an'], { cwd: dir }).trim();
     assert.equal(author, 'Env Author');
+  });
+});
+
+/**
+ * `throwIfFailed` is exercised only indirectly above (via `gitOrThrow`) and by
+ * six other per-suite wrappers elsewhere in the tree. It takes a plain
+ * process-seam result object, so it is tested directly here with literal
+ * result objects — no subprocess needed.
+ */
+describe('throwIfFailed', () => {
+  /** A minimal clean-exit result, spread over in each test below. */
+  const BASE = { stdout: '', stderr: '', signal: null, timedOut: false };
+
+  test('does not throw for outcome=EXITED, exitCode=0', () => {
+    assert.doesNotThrow(() => throwIfFailed({ ...BASE, outcome: OUTCOME.EXITED, exitCode: 0 }, 'ok'));
+  });
+
+  test('throws when outcome=EXITED but exitCode=1', () => {
+    assert.throws(() => throwIfFailed({ ...BASE, outcome: OUTCOME.EXITED, exitCode: 1 }, 'bad'));
+  });
+
+  test('throws when outcome=EXITED but exitCode=128', () => {
+    assert.throws(() => throwIfFailed({ ...BASE, outcome: OUTCOME.EXITED, exitCode: 128 }, 'bad'));
+  });
+
+  for (const outcome of [OUTCOME.TIMED_OUT, OUTCOME.KILLED, OUTCOME.BUFFER_OVERFLOW, OUTCOME.SPAWN_FAILED]) {
+    test(`throws for non-EXITED outcome: ${outcome}`, () => {
+      assert.throws(() => throwIfFailed({ ...BASE, outcome, exitCode: null }, 'bad'));
+    });
+  }
+
+  test('boundary: exitCode=0 with a non-EXITED outcome still throws (0 alone is not success)', () => {
+    assert.throws(() => throwIfFailed({ ...BASE, outcome: OUTCOME.KILLED, exitCode: 0 }, 'bad'));
+  });
+
+  test('thrown error carries .status and .exitCode as equal aliases of the same value', () => {
+    const caught = captureThrown(() => throwIfFailed({ ...BASE, outcome: OUTCOME.EXITED, exitCode: 42 }, 'bad'));
+    assert.equal(caught.status, 42);
+    assert.equal(caught.exitCode, 42);
+    assert.equal(caught.status, caught.exitCode);
+  });
+
+  test('thrown error carries stdout, stderr, signal, timedOut, outcome from the input result', () => {
+    const input = {
+      outcome: OUTCOME.KILLED,
+      exitCode: null,
+      stdout: 'input stdout',
+      stderr: 'input stderr',
+      signal: 'SIGTERM',
+      timedOut: false,
+    };
+    const caught = captureThrown(() => throwIfFailed(input, 'bad'));
+    assert.equal(caught.stdout, input.stdout);
+    assert.equal(caught.stderr, input.stderr);
+    assert.equal(caught.signal, input.signal);
+    assert.equal(caught.timedOut, input.timedOut);
+    assert.equal(caught.outcome, input.outcome);
+  });
+
+  test('exitCode: null propagates to .status as null, not coerced', () => {
+    const caught = captureThrown(() =>
+      throwIfFailed({ ...BASE, outcome: OUTCOME.TIMED_OUT, exitCode: null, timedOut: true }, 'bad')
+    );
+    assert.equal(caught.status, null);
+    assert.notEqual(caught.status, undefined);
+  });
+
+  test('displayName appears in the thrown error message', () => {
+    const caught = captureThrown(() =>
+      throwIfFailed({ ...BASE, outcome: OUTCOME.EXITED, exitCode: 1 }, 'my distinctive display name')
+    );
+    assert.ok(caught.message.includes('my distinctive display name'));
+  });
+});
+
+/**
+ * `toLegacyResult` is the non-throwing sibling of `throwIfFailed` (#3147):
+ * a bare mapping onto `{ status, stdout, stderr }`, never throwing. Tested
+ * directly with literal result objects — no subprocess needed.
+ */
+describe('toLegacyResult', () => {
+  test('never throws, unlike throwIfFailed, for a non-zero exit', () => {
+    assert.doesNotThrow(() =>
+      toLegacyResult({ outcome: OUTCOME.EXITED, exitCode: 1, stdout: '', stderr: 'boom' })
+    );
+  });
+
+  test('maps exitCode to .status (the legacy field name)', () => {
+    const r = toLegacyResult({ outcome: OUTCOME.EXITED, exitCode: 1, stdout: 'out', stderr: 'err' });
+    assert.equal(r.status, 1);
+  });
+
+  test('exitCode: 0 maps to .status: 0, not falsy-coerced', () => {
+    const r = toLegacyResult({ outcome: OUTCOME.EXITED, exitCode: 0, stdout: '', stderr: '' });
+    assert.equal(r.status, 0);
+    assert.notEqual(r.status, undefined);
+  });
+
+  test('exitCode: null (non-EXITED outcome) propagates to .status as null, not coerced', () => {
+    const r = toLegacyResult({ outcome: OUTCOME.TIMED_OUT, exitCode: null, stdout: '', stderr: '' });
+    assert.equal(r.status, null);
+    assert.notEqual(r.status, undefined);
+  });
+
+  test('stdout and stderr pass through unchanged', () => {
+    const r = toLegacyResult({ outcome: OUTCOME.EXITED, exitCode: 0, stdout: 'the stdout', stderr: 'the stderr' });
+    assert.equal(r.stdout, 'the stdout');
+    assert.equal(r.stderr, 'the stderr');
+  });
+
+  test('returns exactly the three legacy fields, nothing extra from the seam result', () => {
+    const r = toLegacyResult({
+      outcome: OUTCOME.EXITED,
+      exitCode: 0,
+      stdout: '',
+      stderr: '',
+      signal: null,
+      timedOut: false,
+      killed: false,
+      code: null,
+    });
+    assert.deepEqual(Object.keys(r).sort(), ['status', 'stderr', 'stdout']);
   });
 });
