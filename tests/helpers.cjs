@@ -911,7 +911,43 @@ function clearSessionEnv() {
   for (const k of SESSION_ENV_KEYS) delete process.env[k];
 }
 
-module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv };
+/**
+ * #3156: env for a RAW installer spawn — one that bypasses runGsdTools and so
+ * never receives TEST_ENV_BASE on its own.
+ *
+ * Blanking config-LOCATION vars is necessary but NOT sufficient here.
+ * bin/install.js writes GSD's own user-owned store through os.homedir()
+ * DIRECTLY (writeNonClaudeDefaults -> <home>/.gsd/defaults.json, #2834), and
+ * os.homedir() consults no GSD variable at all — so nothing in
+ * CONFIG_LOCATION_ENV_KEYS can reach it, and blanking GSD_HOME does not reach
+ * it either, because a blank GSD_HOME falls back to exactly that homedir().
+ * Only a sandboxed HOME/USERPROFILE contains it.
+ *
+ * HOME stays deliberately OUT of TEST_ENV_BASE — blanking it would break far
+ * more than it fixed — so it is sandboxed per spawn instead, which is the
+ * discipline the suite already applies by hand elsewhere. USERPROFILE is set
+ * with it because os.homedir() reads that one on Windows.
+ *
+ * The sandbox home is per-process and removed on exit, so a caller gets
+ * containment without having to own a lifecycle.
+ */
+let installSpawnHomeDir = null;
+function installSpawnHome() {
+  if (installSpawnHomeDir === null) {
+    installSpawnHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-install-home-'));
+    process.on('exit', () => {
+      try { fs.rmSync(installSpawnHomeDir, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+  }
+  return installSpawnHomeDir;
+}
+
+function installSpawnEnv(overrides = {}) {
+  const home = installSpawnHome();
+  return { ...process.env, ...testEnvBase(), HOME: home, USERPROFILE: home, ...overrides };
+}
+
+module.exports = { runGsdTools, createTempDir, createTempProject, createTempGitProject, cleanup, tmpRootCandidates, readFileNormalized, readWorkflowCombined, parseFrontmatter, isUsageOutput, captureConsole, toPosixPath, absPlanningPath, runNpm, isolatedNpmEnv, withIsolatedProcessState, delay, waitFor, resetRuntimeWarningCaches, SESSION_ENV_KEYS, saveSessionEnv, restoreSessionEnv, clearSessionEnv, TOOLS_PATH, SESSION_IDENTITY_ENV_KEYS, scrubConfigLocationEnv, installSpawnEnv, installSpawnHome };
 
 // Lazy, for the reason builtLib() is lazy: reading either of these is what
 // forces the built-lib require, so a test file that needs neither can still

@@ -5535,7 +5535,10 @@ function ensureHooksDist() {
  * GSD_TEST_MODE is cleared so the install() main block executes.
  */
 function runInstall(cwd, args) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   // 120s, not 60s. A full install copies and converts the whole shipped
   // payload (117 workflows, 100 references, 34 agents, ~71 skills) and
@@ -9597,7 +9600,10 @@ function ensureHooksDist() {
  * GSD_TEST_MODE is cleared so the install() main block executes.
  */
 function runInstall(cwd, args) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   // 120s, not 60s. A full install copies and converts the whole shipped
   // payload (117 workflows, 100 references, 34 agents, ~71 skills) and
@@ -10022,7 +10028,10 @@ const {
  * GSD_TEST_MODE must be cleared so the install() main block executes.
  */
 function runClaudeLocalInstall(cwd) {
-  const env = { ...process.env };
+  // #3156: sandbox HOME — the installer writes <home>/.gsd/defaults.json via
+  // os.homedir() directly, which no env scrub can reach. See installSpawnEnv.
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const env = installSpawnEnv();
   delete env.GSD_TEST_MODE;
   const r = runNode([INSTALL_PATH, '--claude', '--local', '--no-sdk'], {
     cwd,
