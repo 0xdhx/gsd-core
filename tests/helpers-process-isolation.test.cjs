@@ -24,7 +24,9 @@ describe('#2665: the built-lib require is deferred', () => {
       "const needle = path.join('gsd-core', 'bin', 'lib', 'capability-registry.cjs');",
       'process.stdout.write(String(Object.keys(require.cache).some((m) => m.endsWith(needle))));',
     ].join('\n');
-    const r = spawnSync(process.execPath, ['-e', src], { encoding: 'utf8' });
+    // Bounded per local/no-unbounded-spawn (#3143): a cold require is sub-second,
+    // so 30s is ~30x headroom and still fails loudly instead of hanging a lane.
+    const r = spawnSync(process.execPath, ['-e', src], { encoding: 'utf8', timeout: 30_000 });
     assert.strictEqual(r.status, 0, `probe failed: ${r.stderr}`);
     return r.stdout === 'true';
   };
@@ -347,7 +349,7 @@ describe('#3156: a raw installer spawn cannot write into the ambient HOME', () =
   const fs = require('node:fs');
   const os = require('node:os');
   const { execFileSync } = require('node:child_process');
-  const { installSpawnEnv } = require('./helpers.cjs');
+  const { installSpawnEnv, cleanup } = require('./helpers.cjs');
   const { installerEnv } = require('./helpers/install-shared.cjs');
   const INSTALL_PATH = path.join(__dirname, '..', 'bin', 'install.js');
 
@@ -403,8 +405,8 @@ describe('#3156: a raw installer spawn cannot write into the ambient HOME', () =
       if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
       if (realUserProfile === undefined) delete process.env.USERPROFILE;
       else process.env.USERPROFILE = realUserProfile;
-      fs.rmSync(canaryHome, { recursive: true, force: true });
-      fs.rmSync(projectDir, { recursive: true, force: true });
+      cleanup(canaryHome);
+      cleanup(projectDir);
     }
   });
 });
