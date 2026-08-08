@@ -342,3 +342,69 @@ describe('#2665 round 4: the skillsHome walk is reversion-sensitive', () => {
     void out; // exit 0 is the assertion; execFileSync throws on nonzero
   });
 });
+
+describe('#3156: a raw installer spawn cannot write into the ambient HOME', () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const { execFileSync } = require('node:child_process');
+  const { installSpawnEnv } = require('./helpers.cjs');
+  const { installerEnv } = require('./helpers/install-shared.cjs');
+  const INSTALL_PATH = path.join(__dirname, '..', 'bin', 'install.js');
+
+  // Contract half — cheap, and it names the precedence the callers depend on.
+  test('the sandbox HOME replaces the ambient one, but an explicit override still wins', () => {
+    for (const build of [installSpawnEnv, installerEnv]) {
+      const env = build();
+      assert.notStrictEqual(env.HOME, process.env.HOME,
+        'a raw installer spawn must not inherit the ambient HOME');
+      assert.strictEqual(env.USERPROFILE, env.HOME,
+        'USERPROFILE must track HOME — os.homedir() reads it on Windows');
+      assert.strictEqual(build({ HOME: '/explicit', USERPROFILE: '/explicit' }).HOME, '/explicit',
+        'an explicit HOME override must still win (overrides spread last)');
+    }
+  });
+
+  // Behavioural half — the one that actually fails pre-fix.
+  //
+  // bin/install.js writeNonClaudeDefaults() (#2834) writes
+  // <os.homedir()>/.gsd/defaults.json for every NON-Claude runtime, reading no
+  // GSD variable at all. So this is deliberately driven through the real
+  // installer against a real ambient HOME: no assertion about the scrub set can
+  // stand in for it, because no scrub set can reach os.homedir().
+  //
+  // Negative control: revert installerEnv() to `{ ...process.env, ...overrides }`
+  // and the canary gains .gsd/defaults.json.
+  test('installing a non-Claude runtime leaves the ambient HOME untouched', () => {
+    const canaryHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3156-canary-home-'));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3156-project-'));
+    const realHome = process.env.HOME;
+    const realUserProfile = process.env.USERPROFILE;
+    try {
+      // Make the AMBIENT home the canary — the vector is the parent process's
+      // own HOME, exactly as on a developer machine or a CI runner.
+      process.env.HOME = canaryHome;
+      process.env.USERPROFILE = canaryHome;
+
+      execFileSync(process.execPath, [INSTALL_PATH, '--cursor', '--local', '--no-sdk'], {
+        cwd: projectDir,
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: installerEnv(),
+        timeout: 120_000,
+      });
+
+      assert.ok(!fs.existsSync(path.join(canaryHome, '.gsd')),
+        `the installer wrote GSD's user store into the ambient HOME: ${
+          fs.existsSync(path.join(canaryHome, '.gsd'))
+            ? fs.readdirSync(path.join(canaryHome, '.gsd')).join(', ')
+            : ''
+        }`);
+    } finally {
+      if (realHome === undefined) delete process.env.HOME; else process.env.HOME = realHome;
+      if (realUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = realUserProfile;
+      fs.rmSync(canaryHome, { recursive: true, force: true });
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
