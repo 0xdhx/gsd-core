@@ -930,6 +930,14 @@ function clearSessionEnv() {
  *
  * The sandbox home is per-process and removed on exit, so a caller gets
  * containment without having to own a lifecycle.
+ *
+ * SCOPE, stated because it is a real residual rather than an oversight: this is
+ * one home per test-FILE process, not one per spawn. Two installer spawns in the
+ * same file therefore share `.gsd` state, so a prior non-Claude install can be
+ * observed by a later spawn. That is strictly better than the status quo it
+ * replaces -- which shared the developer's REAL home, and all of its state --
+ * and it closes the leak this helper exists for; it does not claim isolation
+ * BETWEEN spawns. A test needing that passes its own { HOME, USERPROFILE }.
  */
 let installSpawnHomeDir = null;
 function installSpawnHome() {
