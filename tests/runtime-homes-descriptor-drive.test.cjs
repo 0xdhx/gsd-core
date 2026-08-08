@@ -27,6 +27,7 @@ const {
   getGlobalSkillsBase,
   resolveAntigravityGlobalDir,
   resolveKimiGlobalDir,
+  resolveKimiHooksTomlDir,
   resolveConfigHomeFromDescriptor,
   resolveSkillsBaseFromDescriptor,
   detectAntigravityDirAmbiguity,
@@ -60,7 +61,7 @@ const ALL_ENV_KEYS = [
   'WINDSURF_CONFIG_DIR', 'AUGMENT_CONFIG_DIR', 'TRAE_CONFIG_DIR', 'QWEN_CONFIG_DIR',
   'HERMES_HOME', 'CODEBUDDY_CONFIG_DIR', 'CLINE_CONFIG_DIR', 'KIMI_CONFIG_DIR',
   'OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG', 'KILO_CONFIG_DIR', 'KILO_CONFIG',
-  'XDG_CONFIG_HOME',
+  'XDG_CONFIG_HOME', 'PI_CODING_AGENT_DIR',
 ];
 
 function clearAllEnvKeys() {
@@ -102,6 +103,7 @@ const GOLDEN_DEFAULTS = {
   opencode:    path.join(HOME, '.config', 'opencode'),
   kilo:        path.join(HOME, '.config', 'kilo'),
   zcode:       path.join(HOME, '.zcode'),
+  pi:          path.join(HOME, '.pi', 'agent'),  // dot-home-nested, no probe (like windsurf)
 };
 
 // ── GOLDEN DEFAULTS ────────────────────────────────────────────────────────────
@@ -157,6 +159,7 @@ describe('descriptor-driven equivalence: env-var overrides', () => {
     { runtime: 'kimi',      envKey: 'KIMI_CONFIG_DIR',      value: '/custom/kimi' },
     { runtime: 'opencode',  envKey: 'OPENCODE_CONFIG_DIR',  value: '/custom/opencode' },
     { runtime: 'kilo',      envKey: 'KILO_CONFIG_DIR',      value: '/custom/kilo' },
+    { runtime: 'pi',        envKey: 'PI_CODING_AGENT_DIR',  value: '/custom/pi-agent' },
   ];
 
   for (const { runtime, envKey, value } of cases) {
@@ -206,6 +209,293 @@ describe('descriptor-driven equivalence: tilde expansion in env overrides', () =
   test('kimi: KIMI_CONFIG_DIR=~/kimi expands to homedir/kimi', () => {
     withEnv({ KIMI_CONFIG_DIR: '~/kimi' }, () => {
       assert.strictEqual(getGlobalConfigDir('kimi'), path.join(HOME, 'kimi'));
+    });
+  });
+
+  test('pi: PI_CODING_AGENT_DIR=~/pi-agent expands to homedir/pi-agent', () => {
+    withEnv({ PI_CODING_AGENT_DIR: '~/pi-agent' }, () => {
+      assert.strictEqual(getGlobalConfigDir('pi'), path.join(HOME, 'pi-agent'));
+    });
+  });
+});
+
+// ── #3023: PI_CODING_AGENT_DIR override — pi's own upstream config-dir env var ──
+//
+// pi's real source (`packages/coding-agent/src/config.ts`) reads
+// `PI_CODING_AGENT_DIR` to override its GLOBAL agent dir outright — the whole
+// `~/.pi/agent` path, not just the `.pi` segment. That is exactly the
+// dot-home-nested env-override shape `resolveConfigHomeFromDescriptor` already
+// implements for antigravity/windsurf: `env[0]` set -> `expandTilde(value)`
+// returned directly, no join with parent/name. Adding the var to pi's
+// `capabilities/pi/capability.json` `configHome.env` was the whole fix; no new
+// resolver branch was needed.
+describe('#3023: pi PI_CODING_AGENT_DIR — dot-home-nested override semantics', () => {
+  test('unset -> default ~/.pi/agent', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] },
+      { env: {}, home: '/home/u', existsSync: () => false },
+    );
+    assert.strictEqual(result, path.join('/home/u', '.pi', 'agent'));
+  });
+
+  test('set -> full override wins outright (whole path, not joined with parent/name)', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] },
+      { env: { PI_CODING_AGENT_DIR: '/custom/pi-agent' }, home: '/home/u', existsSync: () => false },
+    );
+    assert.strictEqual(result, '/custom/pi-agent');
+  });
+
+  // Tilde expansion against an INJECTED home (not the real os.homedir()) is
+  // covered below in "expandTilde honors an injected opts.home" — the fix for
+  // the bug where `expandTilde` ignored `resolveConfigHomeFromDescriptor`'s
+  // `opts.home` and always resolved `~` against the real os.homedir(), shared
+  // by every dot-home/dot-home-nested/xdg/generic-agents-root env override.
+
+  test('empty-string env value falls back to the default, never redirects to a bogus path', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] },
+      { env: { PI_CODING_AGENT_DIR: '' }, home: '/home/u', existsSync: () => false },
+    );
+    assert.strictEqual(result, path.join('/home/u', '.pi', 'agent'));
+  });
+});
+
+// ── expandTilde honors an injected opts.home (not just the real os.homedir()) ─
+//
+// `expandTilde` used to hardcode `os.homedir()` and ignore the `home` that
+// `resolveConfigHomeFromDescriptor` had already resolved from `opts.home`.
+// Every configHome.env override (claude's CLAUDE_CONFIG_DIR, pi's
+// PI_CODING_AGENT_DIR, antigravity, windsurf, ...) routes a tilde-prefixed
+// value through this seam. A caller that injects a sandbox `home` — exactly
+// what hermetic tests do to keep installs inside a temp dir — silently got
+// the developer's REAL home directory back instead, both a correctness bug
+// and a test-escape hazard.
+describe('expandTilde honors an injected opts.home (regression)', () => {
+  const INJECTED_HOME = path.join(os.tmpdir(), 'gsd-injected-home-fixture');
+
+  test('claude (dot-home): CLAUDE_CONFIG_DIR=~/custom + injected home → resolves under injected home, not os.homedir()', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home', name: '.claude', env: ['CLAUDE_CONFIG_DIR'] },
+      { env: { CLAUDE_CONFIG_DIR: '~/custom' }, home: INJECTED_HOME },
+    );
+    assert.strictEqual(result, path.join(INJECTED_HOME, 'custom'));
+    assert.notStrictEqual(result, path.join(HOME, 'custom'));
+  });
+
+  test('pi (dot-home-nested): PI_CODING_AGENT_DIR=~/custom + injected home → resolves under injected home, not os.homedir()', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] },
+      { env: { PI_CODING_AGENT_DIR: '~/custom' }, home: INJECTED_HOME },
+    );
+    assert.strictEqual(result, path.join(INJECTED_HOME, 'custom'));
+    assert.notStrictEqual(result, path.join(HOME, 'custom'));
+  });
+
+  test('claude: absolute env override + injected home → unchanged (tilde expansion not triggered)', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home', name: '.claude', env: ['CLAUDE_CONFIG_DIR'] },
+      { env: { CLAUDE_CONFIG_DIR: '/absolute/custom' }, home: INJECTED_HOME },
+    );
+    assert.strictEqual(result, '/absolute/custom');
+  });
+
+  test('pi: absolute env override + injected home → unchanged (tilde expansion not triggered)', () => {
+    const result = resolveConfigHomeFromDescriptor(
+      { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] },
+      { env: { PI_CODING_AGENT_DIR: '/absolute/custom' }, home: INJECTED_HOME },
+    );
+    assert.strictEqual(result, '/absolute/custom');
+  });
+
+  test('claude: no injected home → still resolves under the real os.homedir() (no behavior change for production callers)', () => {
+    assert.strictEqual(
+      resolveConfigHomeFromDescriptor(
+        { kind: 'dot-home', name: '.claude', env: ['CLAUDE_CONFIG_DIR'] },
+        { env: { CLAUDE_CONFIG_DIR: '~/custom' } },
+      ),
+      path.join(HOME, 'custom'),
+    );
+  });
+
+  test('pi: no injected home → still resolves under the real os.homedir() (no behavior change for production callers)', () => {
+    assert.strictEqual(
+      resolveConfigHomeFromDescriptor(
+        { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] },
+        { env: { PI_CODING_AGENT_DIR: '~/custom' } },
+      ),
+      path.join(HOME, 'custom'),
+    );
+  });
+
+  test('claude: no injected home, via getGlobalConfigDir (real end-to-end seam) → real os.homedir()', () => {
+    withEnv({ CLAUDE_CONFIG_DIR: '~/custom' }, () => {
+      assert.strictEqual(getGlobalConfigDir('claude'), path.join(HOME, 'custom'));
+    });
+  });
+
+  test('pi: no injected home, via getGlobalConfigDir (real end-to-end seam) → real os.homedir()', () => {
+    withEnv({ PI_CODING_AGENT_DIR: '~/custom' }, () => {
+      assert.strictEqual(getGlobalConfigDir('pi'), path.join(HOME, 'custom'));
+    });
+  });
+});
+
+// ── #3023 review finding 1: whitespace-only env override must fall back ──────
+//
+// expandTilde's old call sites gated on a bare `if (val)`, which is falsy
+// only for `''`. A whitespace-only value (e.g. `PI_CODING_AGENT_DIR='   '`,
+// which a broken shell template can produce when a substitution is blank but
+// still quoted) passed the truthy check and resolved to the literal
+// three-space string instead of falling back to the descriptor default. The
+// fix gates every env-override consumption site in
+// resolveConfigHomeFromDescriptor on `hasNonBlankOverride` (real string, at
+// least one non-whitespace char) instead of bare truthiness — covering
+// dot-home, dot-home-nested, all three xdg steps, and generic-agents-root
+// alike (same class, same fix, not just pi's branch).
+//
+// Leading/trailing whitespace on an otherwise non-blank value is deliberately
+// NOT trimmed (see hasNonBlankOverride's doc comment in runtime-homes.cts):
+// this module never trims env-var path values elsewhere, so trimming here
+// would make some non-whitespace values behave differently from before this
+// fix, violating "default behavior for every non-whitespace value must stay
+// byte-identical". Only entirely-blank values are rejected.
+describe('#3023 review finding 1: whitespace-only env override falls back to default (regression)', () => {
+  const CLAUDE_DESCRIPTOR = { kind: 'dot-home', name: '.claude', env: ['CLAUDE_CONFIG_DIR'] };
+  const PI_DESCRIPTOR = { kind: 'dot-home-nested', name: 'agent', parent: '.pi', env: ['PI_CODING_AGENT_DIR'] };
+
+  describe('claude (dot-home)', () => {
+    test('whitespace-only env value falls back to the descriptor default, never the literal whitespace string', () => {
+      const result = resolveConfigHomeFromDescriptor(CLAUDE_DESCRIPTOR, {
+        env: { CLAUDE_CONFIG_DIR: '   ' },
+        home: '/home/u',
+      });
+      assert.strictEqual(result, path.join('/home/u', '.claude'));
+      assert.notStrictEqual(result, '   ');
+    });
+
+    test('empty-string env value falls back to the default (existing behavior preserved)', () => {
+      const result = resolveConfigHomeFromDescriptor(CLAUDE_DESCRIPTOR, {
+        env: { CLAUDE_CONFIG_DIR: '' },
+        home: '/home/u',
+      });
+      assert.strictEqual(result, path.join('/home/u', '.claude'));
+    });
+
+    test('unset env value falls back to the default', () => {
+      const result = resolveConfigHomeFromDescriptor(CLAUDE_DESCRIPTOR, {
+        env: {},
+        home: '/home/u',
+      });
+      assert.strictEqual(result, path.join('/home/u', '.claude'));
+    });
+
+    test('env value with interior spaces resolves under the injected home, spaces intact (guard is not over-broad)', () => {
+      const result = resolveConfigHomeFromDescriptor(CLAUDE_DESCRIPTOR, {
+        env: { CLAUDE_CONFIG_DIR: '~/My Agent Dir' },
+        home: '/home/u',
+      });
+      assert.strictEqual(result, path.join('/home/u', 'My Agent Dir'));
+    });
+
+    test('normal absolute path env value is unchanged', () => {
+      const result = resolveConfigHomeFromDescriptor(CLAUDE_DESCRIPTOR, {
+        env: { CLAUDE_CONFIG_DIR: '/custom/claude' },
+        home: '/home/u',
+      });
+      assert.strictEqual(result, '/custom/claude');
+    });
+  });
+
+  describe('pi (dot-home-nested)', () => {
+    test('whitespace-only env value falls back to the descriptor default, never the literal whitespace string', () => {
+      const result = resolveConfigHomeFromDescriptor(PI_DESCRIPTOR, {
+        env: { PI_CODING_AGENT_DIR: '   ' },
+        home: '/home/u',
+        existsSync: () => false,
+      });
+      assert.strictEqual(result, path.join('/home/u', '.pi', 'agent'));
+      assert.notStrictEqual(result, '   ');
+    });
+
+    test('empty-string env value falls back to the default (existing behavior preserved)', () => {
+      const result = resolveConfigHomeFromDescriptor(PI_DESCRIPTOR, {
+        env: { PI_CODING_AGENT_DIR: '' },
+        home: '/home/u',
+        existsSync: () => false,
+      });
+      assert.strictEqual(result, path.join('/home/u', '.pi', 'agent'));
+    });
+
+    test('unset env value falls back to the default', () => {
+      const result = resolveConfigHomeFromDescriptor(PI_DESCRIPTOR, {
+        env: {},
+        home: '/home/u',
+        existsSync: () => false,
+      });
+      assert.strictEqual(result, path.join('/home/u', '.pi', 'agent'));
+    });
+
+    test('env value with interior spaces resolves under the injected home, spaces intact (guard is not over-broad)', () => {
+      const result = resolveConfigHomeFromDescriptor(PI_DESCRIPTOR, {
+        env: { PI_CODING_AGENT_DIR: '~/My Agent Dir' },
+        home: '/home/u',
+        existsSync: () => false,
+      });
+      assert.strictEqual(result, path.join('/home/u', 'My Agent Dir'));
+    });
+
+    test('normal absolute path env value is unchanged', () => {
+      const result = resolveConfigHomeFromDescriptor(PI_DESCRIPTOR, {
+        env: { PI_CODING_AGENT_DIR: '/custom/pi-agent' },
+        home: '/home/u',
+        existsSync: () => false,
+      });
+      assert.strictEqual(result, '/custom/pi-agent');
+    });
+  });
+
+  // Full branch coverage: the same whitespace-only guard applies to every
+  // env-override consumption site in resolveConfigHomeFromDescriptor, not
+  // just dot-home/dot-home-nested. Each of these fails before the fix and
+  // passes after.
+  describe('remaining branches (xdg all 3 steps, generic-agents-root)', () => {
+    test('xdg env[0] (direct override): whitespace-only falls back to default', () => {
+      const result = resolveConfigHomeFromDescriptor(
+        { kind: 'xdg', name: 'opencode', env: ['OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG', 'XDG_CONFIG_HOME'] },
+        { env: { OPENCODE_CONFIG_DIR: '   ' }, home: '/home/u' },
+      );
+      assert.strictEqual(result, path.join('/home/u', '.config', 'opencode'));
+    });
+
+    test('xdg env[1] (file-path override): whitespace-only falls through to default (not env[2])', () => {
+      const result = resolveConfigHomeFromDescriptor(
+        { kind: 'xdg', name: 'opencode', env: ['OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG', 'XDG_CONFIG_HOME'] },
+        { env: { OPENCODE_CONFIG: '   ' }, home: '/home/u' },
+      );
+      assert.strictEqual(result, path.join('/home/u', '.config', 'opencode'));
+    });
+
+    test('xdg env[2] (XDG_CONFIG_HOME): whitespace-only falls back to default', () => {
+      const result = resolveConfigHomeFromDescriptor(
+        { kind: 'xdg', name: 'opencode', env: ['OPENCODE_CONFIG_DIR', 'OPENCODE_CONFIG', 'XDG_CONFIG_HOME'] },
+        { env: { XDG_CONFIG_HOME: '   ' }, home: '/home/u' },
+      );
+      assert.strictEqual(result, path.join('/home/u', '.config', 'opencode'));
+    });
+
+    test('generic-agents-root: whitespace-only env override falls back to probe/default', () => {
+      const result = resolveConfigHomeFromDescriptor(
+        {
+          kind: 'generic-agents-root',
+          name: 'agents',
+          env: ['KIMI_CONFIG_DIR'],
+          probe: ['~/.config/agents', '~/.agents'],
+          probeExists: 'skills',
+        },
+        { env: { KIMI_CONFIG_DIR: '   ' }, home: '/home/u', existsSync: () => false },
+      );
+      assert.strictEqual(result, path.join('/home/u', '.config', 'agents'));
     });
   });
 });
@@ -880,7 +1170,9 @@ describe('descriptor-driven parity: 13 non-probe registry runtimes × no-env-var
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3126-global-skills-base-runtime-path (consolidation epic #1969 B3 #1972)", () => {
 'use strict';
-// allow-test-rule: last three tests read init.cjs source to verify delegation contract to runtime-homes.cjs — structural guard, no behavioral IR exposed (see #3126)
+// allow-test-rule: structural-implementation-guard (see #3126)
+// Last three tests read init.cjs source to verify delegation contract to
+// runtime-homes.cjs — no behavioral IR exposed yet for this wiring point.
 
 // Regression guard for bug #3126.
 //
@@ -1226,3 +1518,95 @@ describe('bug #3126: init.cjs uses runtime-homes not hardcoded .claude', () => {
 });
   });
 }
+
+// ── resolveKimiHooksTomlDir: per-runtime hooks root (#2755) ──────────────────
+
+describe('resolveKimiHooksTomlDir — per-runtime hooks root (#2755)', () => {
+  // Pure path computation; the fixture home never needs to exist on disk.
+  const FIXTURE_HOME = path.join(os.tmpdir(), 'gsd-2755-home-fixture');
+  const at = (...seg) => path.join(FIXTURE_HOME, ...seg);
+
+  test('a bare call does not throw', () => {
+    assert.doesNotThrow(() => resolveKimiHooksTomlDir());
+  });
+
+  test('an omitted runtime still resolves Kimi CLI\'s ~/.kimi (back-compat)', () => {
+    // The function is exported; callers and tests outside this diff pass no
+    // runtime, and their destination must not move.
+    assert.equal(resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: {} }), at('.kimi'));
+  });
+
+  test('runtime "kimi" resolves ~/.kimi', () => {
+    assert.equal(
+      resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: {}, runtime: 'kimi' }),
+      at('.kimi'),
+    );
+  });
+
+  test('runtime "kimi-code" resolves ~/.kimi-code', () => {
+    assert.equal(
+      resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: {}, runtime: 'kimi-code' }),
+      at('.kimi-code'),
+    );
+  });
+
+  test('KIMI_SHARE_DIR overrides the kimi root', () => {
+    assert.equal(
+      String(resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: { KIMI_SHARE_DIR: '/share' }, runtime: 'kimi' })).replace(/\\/g, '/'),
+      '/share',
+    );
+  });
+
+  test('KIMI_CODE_HOME overrides the kimi-code root', () => {
+    assert.equal(
+      String(resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: { KIMI_CODE_HOME: '/kcode' }, runtime: 'kimi-code' })).replace(/\\/g, '/'),
+      '/kcode',
+    );
+  });
+
+  test('KIMI_SHARE_DIR does not hijack the kimi-code root', () => {
+    // KIMI_SHARE_DIR is Kimi CLI's own upstream var. Before #2755 it silently
+    // redirected kimi-code too — that accident was the issue's suggested
+    // workaround, and the fix must make it inert.
+    assert.equal(
+      resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: { KIMI_SHARE_DIR: '/share' }, runtime: 'kimi-code' }),
+      at('.kimi-code'),
+    );
+  });
+
+  test('KIMI_CODE_HOME does not hijack the kimi root', () => {
+    assert.equal(
+      resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: { KIMI_CODE_HOME: '/kcode' }, runtime: 'kimi' }),
+      at('.kimi'),
+    );
+  });
+
+  test('an unknown runtime falls back to ~/.kimi', () => {
+    assert.equal(
+      resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: {}, runtime: 'not-a-kimi' }),
+      at('.kimi'),
+    );
+  });
+
+  test('every kimi-hooks-toml runtime resolves a distinct hooks root', () => {
+    // Divergence guard (CLAUDE.md → Generative Fix Divergence). The resolver
+    // hardcodes the two Kimi roots while the capability registry independently
+    // decides which runtimes use the kimi-hooks-toml surface. If a third one is
+    // ever added without teaching the resolver its root, it silently inherits
+    // ~/.kimi — which IS the #2755 defect, re-created. This fails the moment
+    // those two surfaces drift apart.
+    const capsDir = path.join(ROOT, 'capabilities');
+    const ids = fs.readdirSync(capsDir).filter((id) => {
+      const file = path.join(capsDir, id, 'capability.json');
+      if (!fs.existsSync(file)) return false;
+      return JSON.parse(fs.readFileSync(file, 'utf8'))?.runtime?.hooksSurface === 'kimi-hooks-toml';
+    });
+
+    assert.deepEqual(ids.sort(), ['kimi', 'kimi-code'],
+      'the kimi-hooks-toml runtime set changed — teach resolveKimiHooksTomlDir the new root, then update this list');
+
+    const roots = ids.map((id) => resolveKimiHooksTomlDir({ home: FIXTURE_HOME, env: {}, runtime: id }));
+    assert.equal(new Set(roots).size, roots.length,
+      `each kimi-hooks-toml runtime must resolve its own root; got ${JSON.stringify(roots)}`);
+  });
+});

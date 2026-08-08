@@ -89,16 +89,22 @@ const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
-const { createTempDir, cleanup } = require('./helpers.cjs');
+const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+const { createTempDir, cleanup, readFileNormalized } = require('./helpers.cjs');
 
 const WORKFLOW_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'resume-project.md');
 
 // Extract the first ```bash``` code block inside the
 // `<step name="check_incomplete_work">` element. That's the snippet the
 // runtime actually executes; it's what we want to validate.
+//
+// readFileNormalized() strips \r\n -> \n before the fence match below runs —
+// the extracted snippet is spawned via spawnSync('bash', ...) in
+// runSnippet(), so an un-normalized read on a Windows checkout would break
+// bash mid-script (DEFECT.TEST-SHELL-PIPELINE-NONPORTABLE, #2650).
 function extractCheckBlock() {
-  const md = fs.readFileSync(WORKFLOW_PATH, 'utf8');
+  const md = readFileNormalized(WORKFLOW_PATH);
   const stepStart = md.indexOf('<step name="check_incomplete_work">');
   assert.ok(stepStart >= 0, 'resume-project.md must contain a check_incomplete_work step');
   const stepEnd = md.indexOf('</step>', stepStart);
@@ -115,11 +121,11 @@ function extractCheckBlock() {
 function runSnippet(cwd, snippet) {
   // has_interrupted_agent is a downstream-orchestrator variable; default it
   // to "false" so the embedded `if` branch is a no-op during this test.
-  return spawnSync('bash', ['-c', snippet], {
+  return toLegacyResult(runHookSeam('-c', [snippet], {
+    interpreter: 'bash',
     cwd,
-    encoding: 'utf8',
     env: { ...process.env, has_interrupted_agent: 'false', interrupted_agent_id: '' },
-  });
+  }));
 }
 
 describe('bug #3446: resume-project detects non-phase and legacy continue-here handoffs', () => {
@@ -237,7 +243,8 @@ const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -251,7 +258,7 @@ const FIND_SNIPPET = [
 ].join('\n');
 
 function hasShell(name) {
-  const result = spawnSync('which', [name], { encoding: 'utf8' });
+  const result = toLegacyResult(runHookSeam(name, [], { interpreter: 'which' }));
   return result.status === 0 && result.stdout.trim().length > 0;
 }
 
@@ -276,10 +283,10 @@ describe('bug #3689 — resume-project.md continue-here scan under zsh NOMATCH',
   });
 
   test('zsh -o nomatch lists the .planning/.continue-here-* checkpoint', { skip: !hasShell('zsh') }, () => {
-    const result = spawnSync('zsh', ['-o', 'nomatch', '-c', FIND_SNIPPET], {
+    const result = toLegacyResult(runHookSeam('-o', ['nomatch', '-c', FIND_SNIPPET], {
+      interpreter: 'zsh',
       cwd: tmpDir,
-      encoding: 'utf8',
-    });
+    }));
     assert.equal(result.status, 0, `zsh exited ${result.status}; stderr=${result.stderr}`);
     assert.match(
       result.stdout,
@@ -289,10 +296,10 @@ describe('bug #3689 — resume-project.md continue-here scan under zsh NOMATCH',
   });
 
   test('bash default lists the .planning/.continue-here-* checkpoint', { skip: !hasShell('bash') }, () => {
-    const result = spawnSync('bash', ['-c', FIND_SNIPPET], {
+    const result = toLegacyResult(runHookSeam('-c', [FIND_SNIPPET], {
+      interpreter: 'bash',
       cwd: tmpDir,
-      encoding: 'utf8',
-    });
+    }));
     assert.equal(result.status, 0, `bash exited ${result.status}; stderr=${result.stderr}`);
     assert.match(
       result.stdout,
@@ -315,10 +322,10 @@ describe('bug #3689 — empty workspace exits cleanly', () => {
   });
 
   test('zsh -o nomatch with no checkpoints exits 0, empty output', { skip: !hasShell('zsh') }, () => {
-    const result = spawnSync('zsh', ['-o', 'nomatch', '-c', FIND_SNIPPET], {
+    const result = toLegacyResult(runHookSeam('-o', ['nomatch', '-c', FIND_SNIPPET], {
+      interpreter: 'zsh',
       cwd: tmpDir,
-      encoding: 'utf8',
-    });
+    }));
     assert.equal(result.status, 0, `zsh exited ${result.status}; stderr=${result.stderr}`);
     assert.equal(result.stdout.trim(), '', `expected no stdout, got: ${JSON.stringify(result.stdout)}`);
   });

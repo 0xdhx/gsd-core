@@ -16,7 +16,7 @@ import configLoaderMod = require('./config-loader.cjs');
 const { loadConfig } = configLoaderMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
-const { escapeRegex, normalizePhaseName, extractPhaseToken, parsePhaseFromProse, PHASE_NUMBER_TOKEN_SOURCE } = phaseIdMod;
+const { escapeRegex, parsePhaseFromProse, PHASE_NUMBER_TOKEN_SOURCE, phaseKeyFromToken, phaseKeyFromDir } = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 const { getMilestoneInfo, getMilestonePhaseFilter, extractCurrentMilestone } = roadmapParserMod;
@@ -36,6 +36,7 @@ const { transitionCore, applyStatePreservation, sliceCurrentPositionSection } = 
 type StateTransitionIntent = stateTransitionMod.StateTransitionIntent;
 type StateTransitionDeps = stateTransitionMod.StateTransitionDeps;
 type PhaseInventoryRecord = stateTransitionMod.PhaseInventoryRecord;
+type PhaseInventoryResult = stateTransitionMod.PhaseInventoryResult;
 import {
   computeProgressPercent,
   normalizeProgressNumbers,
@@ -264,23 +265,53 @@ function _stateHolderVerifiedLive(lockPath: string): boolean {
 }
 
 /**
+ * Three-way classification of a lock body read (issue #3057 B2): a pid that
+ * parses cleanly, a body that reads but is empty/garbage/non-numeric, or a
+ * body that could not be READ at all (I/O fault — permission error, transient
+ * NFS/overlay-fs hiccup, mid-rename, etc.). The third case is NOT the same as
+ * the second: an unreadable body tells us nothing about whether the lock is
+ * fresh, stale, or actively held mid-write by a live process whose file the
+ * fault merely prevented us from reading. Collapsing it into "empty" would
+ * make it eligible for the short fresh-create-floor steal window, which can
+ * rob an active holder purely because of a transient read fault.
+ */
+type LockBodyStatus =
+  | { kind: 'pid'; pid: number }
+  | { kind: 'empty' }
+  | { kind: 'unreadable' };
+
+/**
+ * Read + classify the lock body at `lockPath`. See `LockBodyStatus` for the
+ * three-way distinction the steal decision in `acquireStateLock` relies on.
+ */
+function _stateLockBodyStatus(lockPath: string): LockBodyStatus {
+  let body: string;
+  try {
+    body = fs.readFileSync(lockPath, 'utf-8');
+  } catch {
+    return { kind: 'unreadable' };
+  }
+  const trimmed = body.trim();
+  const pid = parseInt(trimmed, 10);
+  if (!Number.isInteger(pid) || pid <= 0 || String(pid) !== trimmed) return { kind: 'empty' };
+  return { kind: 'pid', pid };
+}
+
+/**
  * Parse the lock body to its recorded pid, or null when the body is empty / non-numeric
  * / unreadable (legacy or mid-creation). Distinguishing a COMPLETE dead-pid body (steal
  * promptly) from an EMPTY/unparseable one (the create→write window — do not steal while
  * fresh) is what `_stateHolderVerifiedLive` alone cannot express, so the steal decision
  * in acquireStateLock reads the pid directly (PR #1532 review, window a).
+ *
+ * NOTE: this collapses "genuinely empty" and "unreadable" to the same `null` —
+ * that is fine for `_stateHolderVerifiedLive` (both mean "not verified-live"
+ * either way), but the STEAL-TIMING decision must not make that same
+ * collapse (#3057 B2) and reads `_stateLockBodyStatus` directly instead.
  */
 function _stateLockBodyPid(lockPath: string): number | null {
-  let body: string;
-  try {
-    body = fs.readFileSync(lockPath, 'utf-8');
-  } catch {
-    return null; // unreadable body → cannot verify
-  }
-  const trimmed = body.trim();
-  const pid = parseInt(trimmed, 10);
-  if (!Number.isInteger(pid) || pid <= 0 || String(pid) !== trimmed) return null;
-  return pid;
+  const status = _stateLockBodyStatus(lockPath);
+  return status.kind === 'pid' ? status.pid : null;
 }
 
 // Monotonic sequence for unique stale-steal rename targets (no crypto dependency).
@@ -304,7 +335,8 @@ const STOP_H2_ONLY = (lv: number): boolean => lv === 2;
 
 function cmdStateLoad(cwd: string, raw: boolean): void {
   const config = loadConfig(cwd);
-  const planDir = planningPaths(cwd).planning;
+  const paths = planningPaths(cwd);
+  const planDir = paths.planning;
 
   const stateRaw = platformReadSync(path.join(planDir, 'STATE.md')) || '';
 
@@ -320,10 +352,12 @@ function cmdStateLoad(cwd: string, raw: boolean): void {
     config_exists: configExists,
     // #2376: absolute (anchored on cwd), not orchestrator-cwd-relative — a
     // spawned subagent's own cwd may differ from the orchestrator's.
-    // debug.md has no init.* call of its own; it reads this field from
-    // `state load` to build debug_file_path for its gsd-debug-session-manager
-    // spawns instead of hardcoding '.planning/debug/{slug}.md'.
-    debug_dir: toPosixPath(path.join(planDir, 'debug')),
+    // #3149: debug.md now has its own `init.debug` entry point and reads this
+    // field from there, not from `state load`. This stays on the state.load
+    // bundle regardless: it is a shipped query surface with its own test anchor
+    // (tests/state.test.cjs), so narrowing it would break unseen consumers for
+    // no gain (Hyrum's Law). Both emit the SAME `planningPaths(cwd).debug`.
+    debug_dir: toPosixPath(paths.debug),
   };
 
   // For --raw, output a condensed key=value format
@@ -436,7 +470,7 @@ function cmdStatePatch(cwd: string, patches: Record<string, string>, raw: boolea
     // and the resync-progress decision stay in this adapter.
     let results: { updated: string[]; failed: string[] } = { updated: [], failed: [] };
     readModifyWriteStateMd(statePath, (content) => {
-      const result = transitionCore(content, { kind: 'patch', patches }, { clock: realClock, progressProvider: () => null });
+      const result = transitionCore(content, { kind: 'patch', patches }, { clock: realClock });
       results = (result.data as { updated: string[]; failed: string[] }) ?? results;
       return result.content;
     }, cwd, { resync: shouldResync });
@@ -474,7 +508,7 @@ function cmdStateUpdate(cwd: string, field: string | undefined, value: string | 
       const result = transitionCore(
         content,
         { kind: 'update', field: field as string, value: value as string },
-        { clock: realClock, progressProvider: () => null },
+        { clock: realClock },
       );
       updated = (result.data as { updated: boolean } | undefined)?.updated === true;
       return result.content;
@@ -525,7 +559,6 @@ function cmdStateAdvancePlan(cwd: string, raw: boolean): void {
   const intent: StateTransitionIntent = { kind: 'advancePlan' };
   const deps: StateTransitionDeps = {
     clock: realClock,
-    progressProvider: () => null,
     sourcePath: statePath,
   };
 
@@ -1308,6 +1341,31 @@ function matchSessionSection(body: string): string | null {
 }
 
 /**
+ * Match the "Current Position" section body from a STATE.md body. #2956: this
+ * is the Phase analogue of matchSessionSection. `Phase` canonically lives under
+ * `## Current Position` (gsd-core/templates/state.md), so — like Stopped At /
+ * Paused At under `## Session` — it must be extracted from THAT section, not
+ * from the first `Phase:` / `**Phase:**` line anywhere in the body. Without the
+ * scope, a historical `Phase:` line in an archive section silently overwrites
+ * `current_phase` on every write, and because `current_phase` is routing input
+ * for gsd-progress / --next the rewind routes work to the wrong phase.
+ *
+ * Level-flexible: the canonical template uses an h2 `## Current Position`, the
+ * bootstrap template an h3 `### Current Position` (templates/state.md). Both
+ * must match — mirroring how matchSessionSection recognises `## Session` and
+ * `## Session Continuity`. Exact 'current position' text match (case-insensitive)
+ * excludes unrelated headings. Built on the same `collectSection` seam as
+ * matchSessionSection, so it inherits that seam's CRLF tolerance (#2444 fix).
+ * Returns the section body, or null (caller falls back to full-body search).
+ */
+function matchCurrentPositionSection(body: string): string | null {
+  const isCurrentPosition = (h: HeadingToken): boolean =>
+    (h.level === 2 || h.level === 3) && h.text.trim().toLowerCase() === 'current position';
+  const section = collectSection(body, isCurrentPosition, { levelBounded: true });
+  return section ? section.body : null;
+}
+
+/**
  * #2567: prevent a stale archive "Last activity:" line from overwriting a
  * newer frontmatter value. `stateExtractField` matches the first body
  * occurrence, which may be a historical line in an archive section. Unlike
@@ -1334,6 +1392,13 @@ function preferNewerLastActivity(
   if (!/^\d{4}-\d{2}-\d{2}$/.test(exDate) || !/^\d{4}-\d{2}-\d{2}$/.test(derDate)) return;
   if (derDate < exDate) {
     derivedFm['last_activity'] = exRaw;
+    if (existingFm['last_activity_desc'] !== undefined) {
+      derivedFm['last_activity_desc'] = existingFm['last_activity_desc'];
+    }
+  } else if (derDate === exDate) {
+    // #3052: same-date — frontmatter is authoritative for this date, so
+    // preserve its last_activity_desc rather than letting the derived body
+    // prose (which may be stale) overwrite it.
     if (existingFm['last_activity_desc'] !== undefined) {
       derivedFm['last_activity_desc'] = existingFm['last_activity_desc'];
     }
@@ -1392,7 +1457,14 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   };
 
   // Extract basic fields — frontmatter keys take precedence over body
-  const prosePhase = parseProsePhaseField(stateExtractField(body, 'Phase'));
+  // #2956: scope `Phase` extraction to ## Current Position so a historical
+  // Phase: / **Phase:** line in an archive section cannot overwrite the current
+  // value. Phase canonically lives in ## Current Position (templates/state.md),
+  // so it is scopeable exactly like Stopped At under ## Session. Fall back to
+  // full-body search only when no ## Current Position section exists, so files
+  // with no section heading keep their current behaviour.
+  const currentPositionScope = matchCurrentPositionSection(body) ?? body;
+  const prosePhase = parseProsePhaseField(stateExtractField(currentPositionScope, 'Phase'));
   const currentPhase = fmScalar('current_phase') ?? stateExtractField(body, 'Current Phase') ?? prosePhase.phase;
   const currentPhaseName = fmScalar('current_phase_name') ?? stateExtractField(body, 'Current Phase Name') ?? prosePhase.name;
   const totalPhasesRaw = fmScalar('total_phases') ?? stateExtractField(body, 'Total Phases');
@@ -1404,7 +1476,12 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
   const proseLastActivity = parseProseLastActivityField(rawLastActivity);
   const lastActivity = fmScalar('last_activity') ?? proseLastActivity.date ?? rawLastActivity;
   const lastActivityDesc = fmScalar('last_activity_desc') ?? stateExtractField(body, 'Last Activity Description') ?? proseLastActivity.description;
-  const pausedAt = fmScalar('paused_at') ?? stateExtractField(body, 'Paused At');
+  // #2956: Paused At canonically lives in ## Session (see the comment above
+  // preferNewerLastActivity and the write seam in buildStateFrontmatter). The
+  // write seam already scopes it to ## Session; this read seam must agree, so a
+  // stale "Paused At:" in a Session Continuity Archive cannot win here either.
+  const sessionScope = matchSessionSection(body) ?? body;
+  const pausedAt = fmScalar('paused_at') ?? stateExtractField(sessionScope, 'Paused At');
 
   // Parse numeric fields
   const totalPhases = totalPhasesRaw ? parseInt(totalPhasesRaw, 10) : null;
@@ -1489,25 +1566,11 @@ function cmdStateSnapshot(cwd: string, raw: boolean): void {
 
 // ─── State Frontmatter Sync ──────────────────────────────────────────────────
 
-/**
- * Canonical key for matching a ROADMAP phase token against an on-disk phase
- * directory: normalizePhaseName collapses padding/case, strips the project-code
- * prefix, and handles decimals/letter-suffixes/milestone-prefixed IDs, so
- * "Phase 4"/"Phase 04"/dir "04-delta" and "Phase PROJ-42"/dir "PROJ-42-foo"
- * each map to one key. For a directory, extract its phase token first.
- *
- * Stripping the project-code prefix is GSD's canonical phase identity (a
- * project_code is a display prefix; normalizePhaseName / phaseTokenMatches treat
- * `CK-01` and `01` as the same phase, which is what lets a prefixed dir match a
- * bare ROADMAP token). A consistent project uses one scheme, so a bare numeric
- * and a same-suffix project-code phase never coexist in one milestone.
- */
-function phaseKeyFromToken(token: string): string {
-  return normalizePhaseName(token).toUpperCase();
-}
-function phaseKeyFromDir(dir: string): string {
-  return phaseKeyFromToken(extractPhaseToken(dir));
-}
+// `phaseKeyFromToken` / `phaseKeyFromDir` — the canonical key for matching a
+// ROADMAP phase token against an on-disk phase directory — moved to the
+// phase-id owner module in #2562 so every consumer derives BOTH sides of a
+// phase comparison from the same function (see phase-id.cts). Imported at the
+// top of this file; call sites below are unchanged.
 
 /**
  * Extract the set of retired/folded phase keys from a ROADMAP milestone scope
@@ -1551,8 +1614,15 @@ function extractRetiredPhaseNumbers(scope: string): Set<string> {
  * a YAML frontmatter object. Allows hooks and scripts to read state
  * reliably via `state json` instead of fragile regex parsing.
  */
-function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Record<string, unknown> {
-  const prosePhase = parseProsePhaseField(stateExtractField(bodyContent, 'Phase'));
+function buildStateFrontmatter(bodyContent: string, cwd: string | undefined, storedMilestone?: string | null): Record<string, unknown> {
+  // #2956: scope `Phase` extraction to ## Current Position (mirrors the read
+  // path in cmdStateSnapshot and the Stopped At / Paused At ## Session scoping
+  // below). Phase canonically lives in ## Current Position (templates/state.md);
+  // without the scope, a historical Phase: / **Phase:** line in an archive
+  // section overwrites current_phase here, and the next read surfaces it. Fall
+  // back to full-body search when no ## Current Position section exists.
+  const currentPositionScope = matchCurrentPositionSection(bodyContent) ?? bodyContent;
+  const prosePhase = parseProsePhaseField(stateExtractField(currentPositionScope, 'Phase'));
   const currentPhase = stateExtractField(bodyContent, 'Current Phase') ?? prosePhase.phase;
   const currentPhaseName = stateExtractField(bodyContent, 'Current Phase Name') ?? prosePhase.name;
   const currentPlan = stateExtractField(bodyContent, 'Current Plan');
@@ -1621,7 +1691,10 @@ function buildStateFrontmatter(bodyContent: string, cwd: string | undefined): Re
             }
           } catch { /* fall through: no roadmap scope → no retired exclusion */ }
 
-          const isDirInMilestone = getMilestonePhaseFilter(cwd) as (dir: string) => boolean;
+          // #3017: scope the milestone filter to the STORED milestone when available,
+          // so a state.* write doesn't auto-derive (and mis-bind) to a different
+          // milestone's heading and clobber the stored value + progress counts.
+          const isDirInMilestone = getMilestonePhaseFilter(cwd, storedMilestone ?? undefined) as (dir: string) => boolean;
           const allMatchingDirs = fs.readdirSync(phasesDir, { withFileTypes: true })
             .filter(e => e.isDirectory()).map(e => e.name)
             .filter(isDirInMilestone);
@@ -1794,7 +1867,11 @@ function syncStateFrontmatter(content: string, cwd: string | undefined, authorit
     cwd ? planningPaths(cwd).state : undefined,
   ) as Record<string, unknown>;
   const body = stripFrontmatter(content);
-  const derivedFm = buildStateFrontmatter(body, cwd);
+  // #3017: pass the stored milestone from the existing frontmatter so
+  // buildStateFrontmatter scopes its disk scan to the correct milestone
+  // instead of auto-deriving (and potentially mis-binding).
+  const storedMilestone = typeof existingFm['milestone'] === 'string' ? existingFm['milestone'] : null;
+  const derivedFm = buildStateFrontmatter(body, cwd, storedMilestone);
 
   // Preserve existing frontmatter status when body-derived status is 'unknown'.
   // This prevents a missing Status: field in the body from overwriting a
@@ -2013,17 +2090,22 @@ function acquireStateLock(statePath: string, clock?: StateLockClock): string {
       }
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err; // propagate — silent bypass causes lost updates
       // Liveness-gated steal (audit M1) + steal-safety (PR #1532 review). The steal
-      // decision is three-way on the lock body:
+      // decision is four-way on the lock body (#3057 B2 added the fourth):
       //   - VERIFIED-LIVE holder (parseable pid that signals alive): NEVER stolen until
       //     its age crosses the absolute deadman ceiling (the pid-reuse backstop) —
       //     nuking a slow-but-live writer's lock causes lost updates (#3711 / #500/#905/
       //     #1230 family).
       //   - COMPLETE DEAD pid (parseable pid, not alive): stolen PROMPTLY regardless of
       //     age — a crashed holder left a full body.
-      //   - EMPTY / unparseable body: liveness is unknowable. While FRESH (age <=
-      //     freshCreateFloorMs) it is a lock still mid-creation (O_EXCL done, pid not yet
-      //     written) and is NOT stolen (window a); only once aged past the floor is it a
-      //     genuine orphan and stealable.
+      //   - UNREADABLE body (I/O fault reading the file): NOT the same as empty — we
+      //     have no evidence this is a fresh create window, only that we could not read
+      //     it. Held to the SAME conservative ceiling as a verified-live holder rather
+      //     than the short fresh-create floor, so a transient read fault can never rob
+      //     an active holder the way stealing at 1s would.
+      //   - EMPTY / unparseable body (body WAS read, and holds no valid pid): liveness is
+      //     unknowable. While FRESH (age <= freshCreateFloorMs) it is a lock still
+      //     mid-creation (O_EXCL done, pid not yet written) and is NOT stolen (window a);
+      //     only once aged past the floor is it a genuine orphan and stealable.
       // The steal itself is an ATOMIC rename-then-recreate (only one racer can rename the
       // inode) guarded by an identity re-confirm, so a racer that recreates a fresh lock
       // in the decision→steal gap never has its replacement deleted (window b). Mirrors
@@ -2031,13 +2113,16 @@ function acquireStateLock(statePath: string, clock?: StateLockClock): string {
       try {
         const stat = fs.statSync(lockPath);
         const ageMs = clock.now() - stat.mtimeMs;
-        const bodyPid = _stateLockBodyPid(lockPath);
+        const bodyStatus = _stateLockBodyStatus(lockPath);
+        const bodyPid = bodyStatus.kind === 'pid' ? bodyStatus.pid : null;
         const holderLive = bodyPid !== null && _stateLockIsPidAlive(bodyPid);
         let steal: boolean;
         if (holderLive) {
           steal = ageMs > deadmanCeilingMs;   // pid-reuse backstop only
         } else if (bodyPid !== null) {
           steal = true;                       // complete dead pid → prompt steal
+        } else if (bodyStatus.kind === 'unreadable') {
+          steal = ageMs > deadmanCeilingMs;   // I/O fault ≠ known-fresh — do not grant the short floor
         } else {
           steal = ageMs > freshCreateFloorMs; // empty/garbage → protect the create window
         }
@@ -2169,7 +2254,7 @@ function writeStateMd(statePath: string, content: string, cwd?: string, clock?: 
  * @param clock
  *   Optional clock seam; defaults to realClock. Passed through to acquireStateLock.
  */
-function readModifyWriteStateMd(statePath: string, transformFn: (content: string) => string, cwd: string, options?: ReadModifyWriteOptions, clock?: StateLockClock): void {
+function readModifyWriteStateMd(statePath: string, transformFn: (content: string) => string, cwd: string, options?: ReadModifyWriteOptions, clock?: StateLockClock): boolean {
   const resync = !options || options.resync !== false;
   const lockPath = acquireStateLock(statePath, clock);
   try {
@@ -2217,7 +2302,7 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
     // content already returns the mutated string, and callers that detect a
     // no-op explicitly return the original content unchanged.
     if (modified === content) {
-      return;
+      return false;
     }
 
     let synced = syncStateFrontmatter(modified, cwd, options?.authoritativeFm);
@@ -2273,6 +2358,7 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
     }
 
     platformWriteSync(statePath, synced);
+    return true;
   } finally {
     releaseStateLock(lockPath);
   }
@@ -2358,7 +2444,6 @@ function cmdStateBeginPhase(cwd: string, phaseNumber: string | number, phaseName
   };
   const deps: StateTransitionDeps = {
     clock: realClock,
-    progressProvider: () => null, // beginPhase doesn't consult disk progress; syncStateFrontmatter's scan is authoritative
     sourcePath: statePath,
   };
 
@@ -2636,7 +2721,6 @@ function cmdStatePlannedPhase(cwd: string, phaseNumber: string | number, planCou
   };
   const deps: StateTransitionDeps = {
     clock: realClock,
-    progressProvider: () => null,
     sourcePath: statePath,
   };
 
@@ -2674,7 +2758,7 @@ function cmdStateMilestoneSwitch(cwd: string, version: string | undefined, name:
   // milestoneSwitch rebuilds frontmatter directly and must not run the
   // steady-state syncStateFrontmatter post-sync.
   const intent: StateTransitionIntent = { kind: 'milestoneSwitch', version, name: resolvedName };
-  const deps: StateTransitionDeps = { clock: realClock, progressProvider: () => null, sourcePath: statePath };
+  const deps: StateTransitionDeps = { clock: realClock, sourcePath: statePath };
 
   const lockPath = acquireStateLock(statePath);
   try {
@@ -2913,7 +2997,7 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   const syncResult = transitionCore(
     modified,
     { kind: 'sync', totalPlansInPhase: highestIncompletePhase ? highestIncompletePhaseplanCount : null, percent },
-    { clock: realClock, progressProvider: () => null },
+    { clock: realClock },
   );
   modified = syncResult.content;
   const coreChanges = (syncResult.data as { changes?: string[] } | undefined)?.changes ?? [];
@@ -2989,7 +3073,7 @@ function cmdStatePrune(cwd: string, options: StatePruneOptions, raw: boolean): v
   // This adapter owns currentPhase derivation (#1760 `Phase`/`Current Phase`
   // fallback above), dry-run, and STATE-ARCHIVE.md writes.
   const runPruneCore = (content: string): { newContent: string; archivedSections: PrunedSection[] } => {
-    const result = transitionCore(content, { kind: 'prune', cutoff }, { clock: realClock, progressProvider: () => null });
+    const result = transitionCore(content, { kind: 'prune', cutoff }, { clock: realClock });
     return {
       newContent: result.content,
       archivedSections: ((result.data as { archivedSections?: PrunedSection[] } | undefined)?.archivedSections) ?? [],
@@ -3072,10 +3156,19 @@ function cmdStateRebuild(cwd: string, options: StateRebuildOptions, raw: boolean
   // is the same canonical source `buildStateFrontmatter` consults; the Leaky-
   // Abstractions guard in `rebuildCore` (ADR-1817 §1) keeps the pure core
   // testable without this dep — here we provide it.
-  const phaseInventoryProvider = (): PhaseInventoryRecord[] | null => {
+  //
+  // #3057 B1: a missing `.planning/phases/` directory is genuinely "nothing
+  // to reconcile" (`ok:true, phases: []`) — but a `readdirSync`/`statSync`
+  // THROW on a directory that DOES exist (permission fault, corrupted
+  // mount, etc.) is a real scan failure (`ok:false`). The old implementation
+  // returned `null` for both, so `state rebuild` could report success while
+  // by-phase-table reconciliation silently never ran. Per-entry stat
+  // failures (an individual phase dir vanishing mid-scan) still `continue`
+  // past that one entry — that is not a whole-scan failure.
+  const phaseInventoryProvider = (): PhaseInventoryResult => {
     try {
       const phasesDir = path.join(planningPaths(cwd).planning, 'phases');
-      if (!fs.existsSync(phasesDir) || !fs.statSync(phasesDir).isDirectory()) return null;
+      if (!fs.existsSync(phasesDir) || !fs.statSync(phasesDir).isDirectory()) return { ok: true, phases: [] };
       const entries = fs.readdirSync(phasesDir);
       const records: PhaseInventoryRecord[] = [];
       for (const entry of entries) {
@@ -3091,14 +3184,13 @@ function cmdStateRebuild(cwd: string, options: StateRebuildOptions, raw: boolean
         const summaryCount = files.filter(f => /-SUMMARY\.md$/i.test(f)).length;
         records.push({ number: m[1], name: m[2], planCount, summaryCount });
       }
-      return records;
-    } catch {
-      return null;
+      return { ok: true, phases: records };
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   };
 
   const deps: StateTransitionDeps = {
-    progressProvider: () => null,
     clock: realClock,
     phaseInventoryProvider,
     // Without this, `state rebuild --dry-run` reported a truncated STATE.md anonymously: the
@@ -3119,18 +3211,36 @@ function cmdStateRebuild(cwd: string, options: StateRebuildOptions, raw: boolean
     }
   };
 
+  // #3057 B1: distinguish "nothing to rebuild" from "the phase-inventory
+  // disk scan failed, so by-phase-table reconciliation could not run" — both
+  // used to collapse to the same `mutated:false` / "Nothing to rebuild" note.
+  type RebuildData = {
+    log?: unknown[];
+    mutated?: boolean;
+    phase_inventory_scan_failed?: boolean;
+    phase_inventory_scan_reason?: string;
+  };
+  const scanFailureNote = (reason: string | undefined): string =>
+    'Nothing rebuilt: the phase-inventory disk scan failed, so by-phase-table reconciliation did not run' +
+    (reason ? ` (${reason})` : '');
+
   if (dryRun) {
     const content = fs.readFileSync(statePath, 'utf-8');
     const result = runRebuild(content);
-    const data = (result.data ?? {}) as { log?: unknown[]; mutated?: boolean };
+    const data = (result.data ?? {}) as RebuildData;
     emitVerboseLog(data.log);
     const mutated = data.mutated === true;
+    const scanFailed = data.phase_inventory_scan_failed === true;
     emit({
       rebuilt: false,
       dry_run: true,
       mutations: Array.isArray(data.log) ? data.log.length : 0,
       mutated,
-      note: mutated ? 'Run without --dry-run to apply changes' : 'Nothing to rebuild',
+      phase_inventory_scan_failed: scanFailed,
+      phase_inventory_scan_reason: scanFailed ? data.phase_inventory_scan_reason : undefined,
+      note: mutated
+        ? 'Run without --dry-run to apply changes'
+        : scanFailed ? scanFailureNote(data.phase_inventory_scan_reason) : 'Nothing to rebuild',
     }, raw, mutated ? 'true' : 'false');
     return;
   }
@@ -3140,11 +3250,15 @@ function cmdStateRebuild(cwd: string, options: StateRebuildOptions, raw: boolean
   // to STATE.md by rebuildCore itself, per ADR-1817 §3).
   let capturedLog: unknown[] = [];
   let capturedMutated = false;
+  let capturedScanFailed = false;
+  let capturedScanReason: string | undefined;
   readModifyWriteStateMd(statePath, (content: string) => {
     const result = runRebuild(content);
-    const data = (result.data ?? {}) as { log?: unknown[]; mutated?: boolean };
+    const data = (result.data ?? {}) as RebuildData;
     capturedLog = Array.isArray(data.log) ? data.log : [];
     capturedMutated = data.mutated === true;
+    capturedScanFailed = data.phase_inventory_scan_failed === true;
+    capturedScanReason = data.phase_inventory_scan_reason;
     return result.content;
   }, cwd);
 
@@ -3153,7 +3267,11 @@ function cmdStateRebuild(cwd: string, options: StateRebuildOptions, raw: boolean
   emit({
     rebuilt: capturedMutated,
     mutations: capturedLog.length,
-    note: capturedMutated ? 'STATE.md rebuilt; see ## Rebuild Log section for the audit trail' : 'Nothing to rebuild',
+    phase_inventory_scan_failed: capturedScanFailed,
+    phase_inventory_scan_reason: capturedScanFailed ? capturedScanReason : undefined,
+    note: capturedMutated
+      ? 'STATE.md rebuilt; see ## Rebuild Log section for the audit trail'
+      : capturedScanFailed ? scanFailureNote(capturedScanReason) : 'Nothing to rebuild',
   }, raw, capturedMutated ? 'true' : 'false');
 }
 

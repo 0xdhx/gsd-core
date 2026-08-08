@@ -1,4 +1,4 @@
-// allow-test-rule: runtime-contract-is-the-product see #1856
+// allow-test-rule: source-text-is-the-product see #1856
 // The orchestrator cwd-drift guard (#48) is shell EMBEDDED in execute-phase.md.
 // The shipped text IS the runtime contract, so these tests extract the block and
 // EXECUTE it against real git fixtures rather than asserting on its characters —
@@ -10,12 +10,18 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, spawnSync } = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
+const { runHook } = require('./helpers/process-seam.cjs');
+const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const WORKFLOW = path.join(ROOT, 'gsd-core', 'workflows', 'execute-phase.md');
 const GUARD_MARKER = 'gsd:guard=orchestrator-cwd-drift';
+
+// 30s: git plumbing (init/config/add/commit/checkout/rev-parse) against a
+// small mkdtemp fixture repo — already the file's calibrated bound
+// pre-migration (see runGuard below), reused here for consistency.
+const GIT_TIMEOUT_MS = 30_000;
 
 /**
  * Pull the guard's bash block out of the workflow. Anchored on a stable marker
@@ -34,8 +40,7 @@ function guardScript() {
   );
 }
 
-const git = (cwd, ...args) =>
-  execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (cwd, ...args) => gitOrThrow(args, { cwd, timeoutMs: GIT_TIMEOUT_MS });
 
 /** A real repo with a base branch and one commit. */
 function makeRepo() {
@@ -57,13 +62,15 @@ function commitFile(dir, name, msg) {
 
 /** Run the extracted guard in `dir`. Never throws — returns the observed result. */
 function runGuard(dir) {
-  const res = spawnSync('bash', ['-c', guardScript()], {
+  // 30s: already bounded pre-migration (unchanged) — the guard runs a handful
+  // of git plumbing calls (rev-parse, log, status) against a small fixture repo.
+  const res = runHook('-c', [guardScript()], {
+    interpreter: 'bash',
     cwd: dir,
-    encoding: 'utf8',
-    timeout: 30_000,
+    timeoutMs: 30_000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
   });
-  return { status: res.status, stdout: res.stdout || '', stderr: res.stderr || '' };
+  return { status: res.exitCode, stdout: res.stdout || '', stderr: res.stderr || '' };
 }
 
 test('#1856: refusal names the stranded commits and the dirty tree', () => {

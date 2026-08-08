@@ -294,15 +294,33 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 const { cleanup } = require('./helpers.cjs');
+const { runNode, runHook } = require('./helpers/process-seam.cjs');
+const { toLegacyResult } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const HELPER_PATH = path.join(__dirname, '..', 'bin', 'lib', 'ui-safety-gate.cjs');
 const PLAN_PHASE_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'plan-phase.md');
 const AUTONOMOUS_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'autonomous.md');
+const AUTONOMOUS_UI_DESIGN_CONTRACT_REF_PATH = path.join(
+  __dirname, '..', 'gsd-core', 'references', 'autonomous-ui-design-contract.md'
+);
 
 const { checkUiPresence } = require(HELPER_PATH);
+
+/**
+ * #2994 fragmentization moved §3a.5's body out of autonomous.md into
+ * gsd-core/references/autonomous-ui-design-contract.md, leaving an
+ * unconditional `Read and execute:` pointer in the host. Read host +
+ * reference file combined so the structural guards below still see the
+ * real §3a.5 body (and its absence of the retired ui-safety-gate.cjs /
+ * RUNTIME_DIR / LC_ALL=C grep patterns).
+ */
+function readAutonomousCombined() {
+  return fs.readFileSync(AUTONOMOUS_PATH, 'utf-8') +
+    '\n' + fs.readFileSync(AUTONOMOUS_UI_DESIGN_CONTRACT_REF_PATH, 'utf-8');
+}
 
 // ── Helper ────────────────────────────────────────────────────────────────────
 
@@ -319,11 +337,8 @@ function hasUiGate(text) {
  * Returns the spawnSync result object.
  */
 function spawnGate(input) {
-  return spawnSync(process.execPath, [HELPER_PATH], {
-    shell: false,
-    encoding: 'utf-8',
-    input: input,
-  });
+  const result = runNode([HELPER_PATH], { input, timeoutMs: PROBE_TIMEOUT_MS });
+  return toLegacyResult(result);
 }
 
 // ── Structural guard — workflow files now invoke Node via stdin ───────────────
@@ -362,7 +377,7 @@ describe('Workflow .md structural guard (#3718)', () => {
   // was intentionally removed — cross-shell portability is provided by the CLI layer.
   test('autonomous.md must invoke check ui-plan-gate (capability-driven UI gate — #1031)', () => {
     const label = 'autonomous.md';
-    const content = fs.readFileSync(AUTONOMOUS_PATH, 'utf-8');
+    const content = readAutonomousCombined();
 
     // §3a.5 must delegate to the capability-driven gate, not inline shell code
     assert.ok(
@@ -563,11 +578,13 @@ describe('UI gate resolves the helper against RUNTIME_DIR, not the consuming rep
   ].join('\n');
 
   function runGateFrom(consumingDir, phaseSection) {
-    return spawnSync('bash', ['-c', GATE_SNIPPET], {
+    const result = runHook('-c', [GATE_SNIPPET], {
+      interpreter: 'bash',
       cwd: consumingDir,
-      encoding: 'utf-8',
       env: { ...process.env, RUNTIME_DIR: REPO_ROOT, PHASE_SECTION: phaseSection },
+      timeoutMs: PROBE_TIMEOUT_MS,
     });
+    return toLegacyResult(result);
   }
 
   test('UI text is detected (HAS_UI=0) from a project without bin/lib', () => {
@@ -605,11 +622,14 @@ describe('UI gate resolves the helper against RUNTIME_DIR, not the consuming rep
         path.join(installedLibDir, 'ui-safety-gate.cjs')
       );
 
-      const res = spawnSync('bash', ['-c', GATE_SNIPPET], {
-        cwd: consumingProject,
-        encoding: 'utf-8',
-        env: { ...process.env, RUNTIME_DIR: fakeRuntime, PHASE_SECTION: 'Build the analytics dashboard' },
-      });
+      const res = toLegacyResult(
+        runHook('-c', [GATE_SNIPPET], {
+          interpreter: 'bash',
+          cwd: consumingProject,
+          env: { ...process.env, RUNTIME_DIR: fakeRuntime, PHASE_SECTION: 'Build the analytics dashboard' },
+          timeoutMs: PROBE_TIMEOUT_MS,
+        })
+      );
       assert.strictEqual(res.status, 0, `bash failed: ${res.stderr}`);
       assert.strictEqual(res.stdout.trim(), '0',
         'helper must be found via gsd-core/bin/lib/ in installed layout and report UI present');

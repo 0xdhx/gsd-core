@@ -18,7 +18,8 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 
 const { createTempDir, cleanup } = require('./helpers.cjs');
 const {
@@ -45,6 +46,8 @@ const {
 } = require('../gsd-core/bin/lib/install-engine.cjs');
 
 const INSTALL_SCRIPT = path.join(__dirname, '..', 'bin', 'install.js');
+// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
+const { INSTALL_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const HOOKS_SRC = path.join(__dirname, '..', 'hooks');
 const REAL_COMMANDS_DIR = path.join(__dirname, '..', 'commands', 'gsd');
 const MANIFEST = loadSkillsManifest(REAL_COMMANDS_DIR);
@@ -69,6 +72,40 @@ function stubHooksIntoDir(targetDir, hookNames) {
     try { fs.chmodSync(dest, 0o755); } catch { /* Windows */ }
   }
 }
+
+describe('#2429 regression: Codex local skills stay project-scoped', () => {
+  test('--codex --local --profile=core installs under .codex without writing to HOME', (t) => {
+    const root = createTempDir('gsd 2429 ');
+    const projectDir = path.join(root, 'project with spaces');
+    const homeDir = path.join(root, 'home with spaces');
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(homeDir, { recursive: true });
+    t.after(() => cleanup(root));
+
+    const env = { ...process.env, HOME: homeDir, USERPROFILE: homeDir };
+    delete env.GSD_TEST_MODE;
+    delete env.CODEX_HOME;
+
+    const result = runNode(
+      [INSTALL_SCRIPT, '--codex', '--local', '--profile=core'],
+      { cwd: projectDir, env, timeoutMs: 60_000 },
+    );
+
+    assert.strictEqual(
+      result.exitCode,
+      0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`,
+    );
+    assert.ok(
+      fs.existsSync(path.join(projectDir, '.codex', 'skills', 'gsd-help', 'SKILL.md')),
+      'Codex local install must write gsd-help under the project .codex directory',
+    );
+    assert.ok(
+      !fs.existsSync(path.join(homeDir, '.agents', 'skills', 'gsd-help', 'SKILL.md')),
+      'Codex local install must not write gsd-help under the global .agents directory',
+    );
+  });
+});
 
 // ─── Defect #1 — Hermes upgrade: bare-stem dirs from #3664 era become stale ──
 //
@@ -121,14 +158,13 @@ describe('Defect #2 regression (Qwen, #3664): --qwen --profile=core writes skill
     const root = createTempDir('gsd-qwen-reg2-');
     t.after(() => cleanup(root));
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--qwen', '--global', '--config-dir', root, '--profile=core'],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     const qwenSkillsDir = path.join(root, 'skills');
     assert.ok(fs.existsSync(qwenSkillsDir));
@@ -154,14 +190,13 @@ describe('Defect #2 regression (Hermes, #3664): --hermes --profile=core writes s
     const root = createTempDir('gsd-hermes-reg2-');
     t.after(() => cleanup(root));
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--hermes', '--global', '--config-dir', root, '--profile=core'],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     const hermesSkillsGsd = path.join(root, 'skills', 'gsd');
     assert.ok(fs.existsSync(hermesSkillsGsd));
@@ -192,14 +227,13 @@ describe('M1 (#2973, #947): --hermes --global --profile=core migrates dev-prefer
     fs.mkdirSync(legacyDir, { recursive: true });
     fs.writeFileSync(path.join(legacyDir, 'dev-preferences.md'), '# my hermes prefs\n');
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--hermes', '--global', '--config-dir', root, '--profile=core'],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     // #947: Hermes uses prefix='gsd-' so dev-preferences lands at gsd-dev-preferences/ (not dev-preferences/)
     const skillFile = path.join(root, 'skills', 'gsd', 'gsd-dev-preferences', 'SKILL.md');
@@ -222,14 +256,13 @@ describe('M2 (#2973): --qwen --global --profile=core migrates dev-preferences �
     fs.mkdirSync(legacyDir, { recursive: true });
     fs.writeFileSync(path.join(legacyDir, 'dev-preferences.md'), '# my qwen prefs\n');
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--qwen', '--global', '--config-dir', root, '--profile=core'],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     const skillFile = path.join(root, 'skills', 'gsd-dev-preferences', 'SKILL.md');
     assert.ok(fs.existsSync(skillFile),
@@ -250,14 +283,13 @@ describe('M3 (#2973): --claude --global --profile=core migrates dev-preferences 
     fs.mkdirSync(legacyDir, { recursive: true });
     fs.writeFileSync(path.join(legacyDir, 'dev-preferences.md'), '# my claude prefs\n');
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root, '--profile=core'],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     const skillFile = path.join(root, 'skills', 'gsd-dev-preferences', 'SKILL.md');
     assert.ok(fs.existsSync(skillFile),
@@ -614,14 +646,13 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     const root = createTempDir('gsd-claude-perm-install-');
     t.after(() => cleanup(root));
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     const settingsPath = path.join(root, 'settings.json');
     assert.ok(fs.existsSync(settingsPath), 'settings.json must exist after claude install');
@@ -644,14 +675,13 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     const root = createTempDir('gsd-antigravity-perm-install-');
     t.after(() => cleanup(root));
 
-    const result = spawnSync(
-      process.execPath,
+    const result = runNode(
       [INSTALL_SCRIPT, '--antigravity', '--global', '--config-dir', root],
-      { encoding: 'utf8', env: { ...process.env, HOME: root, USERPROFILE: root } },
+      { env: { ...process.env, HOME: root, USERPROFILE: root }, timeoutMs: INSTALL_TIMEOUT_MS },
     );
 
-    assert.strictEqual(result.status, 0,
-      `installer exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited ${result.exitCode}\n${result.stdout}\n${result.stderr}`);
 
     const settingsPath = path.join(root, 'settings.json');
     // If settings.json doesn't exist, permissions are definitely not written — pass.
@@ -667,19 +697,19 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     const root = createTempDir('gsd-claude-perm-idempotent-');
     t.after(() => cleanup(root));
 
-    const spawnOpts = {
-      encoding: 'utf8',
+    const runOpts = {
       env: { ...process.env, HOME: root, USERPROFILE: root },
+      timeoutMs: INSTALL_TIMEOUT_MS,
     };
     const args = [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root];
 
     // First install
-    const r1 = spawnSync(process.execPath, args, spawnOpts);
-    assert.strictEqual(r1.status, 0, `first install failed: ${r1.stderr}`);
+    const r1 = runNode(args, runOpts);
+    assert.strictEqual(r1.exitCode, 0, `first install failed: ${r1.stderr}`);
 
     // Second install (reinstall)
-    const r2 = spawnSync(process.execPath, args, spawnOpts);
-    assert.strictEqual(r2.status, 0, `reinstall failed: ${r2.stderr}`);
+    const r2 = runNode(args, runOpts);
+    assert.strictEqual(r2.exitCode, 0, `reinstall failed: ${r2.stderr}`);
 
     const settings = JSON.parse(fs.readFileSync(path.join(root, 'settings.json'), 'utf8'));
     for (const entry of GSD_CLAUDE_ALLOW_PERMISSIONS) {
@@ -698,18 +728,17 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     const root = createTempDir('gsd-claude-perm-uninstall-');
     t.after(() => cleanup(root));
 
-    const spawnOpts = {
-      encoding: 'utf8',
+    const runOpts = {
       env: { ...process.env, HOME: root, USERPROFILE: root },
+      timeoutMs: INSTALL_TIMEOUT_MS,
     };
 
     // Install first
-    const r1 = spawnSync(
-      process.execPath,
+    const r1 = runNode(
       [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root],
-      spawnOpts,
+      runOpts,
     );
-    assert.strictEqual(r1.status, 0, `install failed: ${r1.stderr}`);
+    assert.strictEqual(r1.exitCode, 0, `install failed: ${r1.stderr}`);
 
     // Verify permissions were written
     const settingsPath = path.join(root, 'settings.json');
@@ -723,12 +752,11 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     fs.writeFileSync(settingsPath, JSON.stringify(afterInstall, null, 2) + '\n');
 
     // Uninstall
-    const r2 = spawnSync(
-      process.execPath,
+    const r2 = runNode(
       [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root, '--uninstall'],
-      spawnOpts,
+      runOpts,
     );
-    assert.strictEqual(r2.status, 0, `uninstall failed: ${r2.stderr}`);
+    assert.strictEqual(r2.exitCode, 0, `uninstall failed: ${r2.stderr}`);
 
     const afterUninstall = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     const allow = afterUninstall.permissions?.allow ?? [];
@@ -753,18 +781,17 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     const root = createTempDir('gsd-claude-perm-uninstall-legacy-');
     t.after(() => cleanup(root));
 
-    const spawnOpts = {
-      encoding: 'utf8',
+    const runOpts = {
       env: { ...process.env, HOME: root, USERPROFILE: root },
+      timeoutMs: INSTALL_TIMEOUT_MS,
     };
 
     // Install first (writes the current Edit(...) forms).
-    const r1 = spawnSync(
-      process.execPath,
+    const r1 = runNode(
       [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root],
-      spawnOpts,
+      runOpts,
     );
-    assert.strictEqual(r1.status, 0, `install failed: ${r1.stderr}`);
+    assert.strictEqual(r1.exitCode, 0, `install failed: ${r1.stderr}`);
 
     // Simulate a pre-fix install that still carries the stale Write(...)
     // forms alongside the current Edit(...) forms and a user entry.
@@ -774,12 +801,11 @@ describe('mergeClaudePermissions (#768): end-to-end install writes permissions t
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
 
     // Uninstall
-    const r2 = spawnSync(
-      process.execPath,
+    const r2 = runNode(
       [INSTALL_SCRIPT, '--claude', '--global', '--config-dir', root, '--uninstall'],
-      spawnOpts,
+      runOpts,
     );
-    assert.strictEqual(r2.status, 0, `uninstall failed: ${r2.stderr}`);
+    assert.strictEqual(r2.exitCode, 0, `uninstall failed: ${r2.stderr}`);
 
     const afterUninstall = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
     const allow = afterUninstall.permissions?.allow ?? [];
@@ -1078,18 +1104,21 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFileSync } = require('child_process');
 
 const INSTALL_SCRIPT = path.join(__dirname, '..', 'bin', 'install.js');
 const BUILD_SCRIPT = path.join(__dirname, '..', 'scripts', 'build-hooks.js');
+// scripts/build-hooks.js copies pre-built hook files into hooks/dist and
+// syntax-checks them with vm — it does not compile/bundle anything. See
+// tests/helpers/timeouts.cjs for the class-norm justification.
+const { BUILD_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 // ─── Ensure hooks/dist/ is populated before any install test ─────────────────
 
 before(() => {
-  execFileSync(process.execPath, [BUILD_SCRIPT], {
-    encoding: 'utf-8',
-    stdio: 'pipe',
-  });
+  throwIfFailed(
+    runNode([BUILD_SCRIPT], { timeoutMs: BUILD_TIMEOUT_MS }),
+    `node ${BUILD_SCRIPT}`,
+  );
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1113,11 +1142,13 @@ function runInstaller(configDir) {
   delete env.GSD_TEST_MODE;
   // --no-sdk: this test covers user-artifact preservation only; skip SDK
   // build (covered by install-smoke.yml) to keep the test deterministic.
-  execFileSync(process.execPath, [INSTALL_SCRIPT, '--claude', '--global', '--yes', '--no-sdk'], {
-    encoding: 'utf-8',
-    stdio: 'pipe',
-    env,
-  });
+  throwIfFailed(
+    runNode(
+      [INSTALL_SCRIPT, '--claude', '--global', '--yes', '--no-sdk'],
+      { env, timeoutMs: INSTALL_TIMEOUT_MS },
+    ),
+    `node ${INSTALL_SCRIPT} --claude --global --yes --no-sdk`,
+  );
 }
 
 // ─── Test 1: USER-PROFILE.md is preserved across re-install ─────────────────

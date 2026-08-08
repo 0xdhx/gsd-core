@@ -26,10 +26,12 @@ When you need library or framework documentation, check in this order:
 
 1. If Context7 MCP tools (`mcp__context7__*, mcp__plugin_context7_context7__*`) are available in your environment, use them:
    - Resolve library ID: `mcp__context7__resolve-library-id` with `libraryName`
-   - Fetch docs: `mcp__context7__get-library-docs` with `context7CompatibleLibraryId` and `topic`
+   - Fetch docs: `mcp__context7__query-docs` with `libraryId` (the ID from step 1) and `query`
 
-2. If Context7 MCP is not available (upstream bug anthropics/claude-code#13898 strips MCP
-   tools from agents with a `tools:` frontmatter restriction), use the CLI fallback via Bash:
+2. If Context7 MCP is not available (custom subagents cannot see project-scoped
+   `.mcp.json` servers — they only inherit user-scoped `~/.claude/mcp.json`, so a
+   context7 server configured at the project scope is invisible to spawned
+   agents), use the CLI fallback via Bash:
 
    Step 1 — Resolve library ID:
    ```bash
@@ -498,8 +500,8 @@ if [ -f .git ]; then  # worktree
   # Positive allow-list: HEAD must be on a per-agent branch (`agent-<id>` or
   # legacy `worktree-agent-<id>`). This catches feature/* and any other
   # arbitrary branch that the deny-list would silently allow (#2924, #1995).
-  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^(worktree-)?agent-[A-Za-z0-9._/-]+$'; then
-    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not in the agent-* / worktree-agent-* namespace." >&2
+  if ! echo "$ACTUAL_BRANCH" | grep -Eq '^((worktree-)?agent-|worktree-wf_)[A-Za-z0-9._/-]+$'; then
+    echo "FATAL: refusing to commit — worktree HEAD '$ACTUAL_BRANCH' is not in the agent-* / worktree-agent-* / worktree-wf_* namespace." >&2
     echo "Agent commits must live on per-agent branches; surface as blocker (#2924)." >&2
     exit 1
   fi

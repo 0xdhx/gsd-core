@@ -22,8 +22,10 @@
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync } = require('node:child_process');
 const path = require('node:path');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const MATRIX_SCRIPT = path.resolve(__dirname, '../scripts/mutation-matrix.cjs');
 const matrix = require(MATRIX_SCRIPT);
@@ -116,15 +118,16 @@ describe('mutation-matrix ratchet: matrix JSON output includes minScore', () => 
     const moduleNames = Object.keys(covered);
     const stdinLines = moduleNames.map(name => `src/${name}.cts`).join('\n');
 
-    const raw = execFileSync(
-      process.execPath,
+    const spawnResult = runNode(
       [MATRIX_SCRIPT],
       {
         input: stdinLines + '\n',
-        encoding: 'utf8',
         cwd: path.resolve(__dirname, '..'),
+        timeoutMs: PROBE_TIMEOUT_MS,
       }
     );
+    throwIfFailed(spawnResult, `node ${MATRIX_SCRIPT}`);
+    const raw = spawnResult.stdout;
 
     let result;
     try {
@@ -189,6 +192,7 @@ describe('mutation-matrix ratchet: guard detects missing minScore', () => {
 // reverse: removing a module from COVERED also requires updating the baseline.
 const RATCHET_BASELINE = {
   'context-utilization':     80,
+  'context-composer':        66,  // #2929: extracted from prompt-budget; same floor as prompt-budget
   'prompt-budget':           66,  // CI 68.33% 2026-06-14; was 90 (timeout-inflated local)
   'frontmatter':             62,
   'adr-parser':              68,

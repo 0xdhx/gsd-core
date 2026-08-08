@@ -1,10 +1,10 @@
 /**
- * Broken-windows ledger — enforced cross-phase defect register (issue #1950).
+ * Broken-windows ledger — optionally enforced cross-phase defect register (issue #1950).
  *
  * Manages `.planning/WINDOWS.md`: a cross-phase ledger of small defects (stubs,
  * TODOs, skipped tests, lint warnings, unrun verifies, unmet truths, deviations).
- * `/gsd-ship` blocks while any entry is `open`; an entry can be `waived` only
- * with a recorded reason or `fixed`.
+ * When `workflow.windows_enforce` is true, `/gsd-ship` blocks while any entry is
+ * `open`; an entry can be `waived` only with a recorded reason or `fixed`.
  *
  * LEAF MODULE — imports ONLY: node:fs, node:path. No other src/ imports.
  *
@@ -401,7 +401,12 @@ function parseFrontmatterStrict(raw: string): Record<string, number | string> {
   }
   const yamlBody = raw.slice(headerEnd, closeIdx);
   const out: Record<string, number | string> = {};
-  for (const line of yamlBody.split(/\r?\n/)) {
+  for (const rawLine of yamlBody.split(/\r?\n/)) {
+    // #3116: the `\n---` scan leaves the final line's CR attached on a CRLF
+    // ledger, and `.` never matches CR, so the key: value regex below fails on
+    // it. Strip the trailing CR per line so the rest of `raw` (which
+    // parseJsonBlock also slices by byte offset) is unaffected.
+    const line = rawLine.replace(/\r$/, '');
     if (line.trim() === '') continue;
     const m = line.match(/^([a-zA-Z0-9_]+):\s*(.*)$/);
     if (!m) {
@@ -596,7 +601,7 @@ export function renderLedger(ledger: Ledger): string {
   const header = [
     '# Broken Windows Ledger',
     '',
-    '> Cross-phase defect register. `/gsd-ship` blocks while `open_count > 0`.',
+    '> Cross-phase defect register. With `workflow.windows_enforce` enabled, `/gsd-ship` blocks while `open_count > 0`.',
     '> Waive with `gsd-tools windows waive <id> "<reason>"` (reason required).',
     '> Mark fixed with `gsd-tools windows fixed <id>`.',
     '',
@@ -721,7 +726,33 @@ function writeLedgerAtomic(cwd: string, ledger: Ledger): void {
   ensurePlanningDir(cwd);
   const p = ledgerPath(cwd);
   const tmp = `${p}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, renderLedger(ledger), 'utf8');
+
+  // #2893: preserve any prose below the JSON ledger block. renderLedger
+  // reconstructs frontmatter + header + table + JSON — it does not include
+  // trailing prose that users may have written below the closing fence.
+  // Without this, every append/waive/fixed silently destroys that prose.
+  let trailingProse = '';
+  try {
+    const existing = fs.readFileSync(p, 'utf8');
+    // #2893: search for the CLOSING fence starting AFTER the opening fence,
+    // mirroring parseJsonBlock — indexOf(JSON_FENCE_CLOSE) alone would match
+    // the opening fence ('````json' starts with '````').
+    const openIdx = existing.indexOf(JSON_FENCE_OPEN);
+    if (openIdx !== -1) {
+      const fenceEnd = existing.indexOf(JSON_FENCE_CLOSE, openIdx + JSON_FENCE_OPEN.length);
+      if (fenceEnd !== -1) {
+        const afterFence = existing.slice(fenceEnd + JSON_FENCE_CLOSE.length);
+        // Drop leading newlines; keep the rest as prose.
+        trailingProse = afterFence.replace(/^\n+/, '');
+      }
+    }
+  } catch {
+    // File doesn't exist yet (first write) — no prose to preserve.
+  }
+
+  const rendered = renderLedger(ledger);
+  const content = trailingProse ? `${rendered}${trailingProse}` : rendered;
+  fs.writeFileSync(tmp, content, 'utf8');
   try {
     renameWithRetry(tmp, p);
   } catch (err) {

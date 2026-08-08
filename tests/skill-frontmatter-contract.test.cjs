@@ -174,7 +174,10 @@ describe('skill frontmatter: /gsd-plan-phase --research-phase flag absorbs the s
   });
 
   test('research-only mode auto-uses existing RESEARCH.md (no update/view/skip prompt)', () => {
-    const content = read('gsd-core/workflows/plan-phase.md');
+    // #2993 fragmentization moved §5.0 (research-only modifiers, including the
+    // existing-RESEARCH.md auto-use notice) out of plan-phase.md into
+    // gsd-core/workflows/plan-phase/steps/research-only-modifiers.md.
+    const content = read('gsd-core/workflows/plan-phase/steps/research-only-modifiers.md');
     // #159: the §5.0 existing-RESEARCH.md path no longer prompts
     // update/view/skip. When RESEARCH.md exists and neither --research nor
     // --view is set, the workflow emits a brief "using it" notice naming
@@ -241,9 +244,10 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const COMMANDS_DIR = path.join(__dirname, '../commands/gsd');
 const LINT_SCRIPT = path.join(__dirname, '../scripts/lint-descriptions.cjs');
@@ -377,11 +381,11 @@ describe('lint-descriptions.cjs', () => {
     const tmpFile = path.join(tmpDir, 'long-desc.md');
     fs.writeFileSync(tmpFile, content, 'utf-8');
 
-    const result = spawnSync(process.execPath, [LINT_SCRIPT, tmpFile], {
-      encoding: 'utf-8',
+    const result = runNode([LINT_SCRIPT, tmpFile], {
+      timeoutMs: PROBE_TIMEOUT_MS,
     });
 
-    assert.notStrictEqual(result.status, 0, [
+    assert.notStrictEqual(result.exitCode, 0, [
       'lint-descriptions.cjs should exit non-zero for description > 100 chars',
       'stdout: ' + result.stdout,
       'stderr: ' + result.stderr,
@@ -402,11 +406,11 @@ describe('lint-descriptions.cjs', () => {
     const tmpFile = path.join(tmpDir, 'short-desc.md');
     fs.writeFileSync(tmpFile, content, 'utf-8');
 
-    const result = spawnSync(process.execPath, [LINT_SCRIPT, tmpFile], {
-      encoding: 'utf-8',
+    const result = runNode([LINT_SCRIPT, tmpFile], {
+      timeoutMs: PROBE_TIMEOUT_MS,
     });
 
-    assert.strictEqual(result.status, 0, [
+    assert.strictEqual(result.exitCode, 0, [
       'lint-descriptions.cjs should exit 0 for description <= 100 chars',
       'stdout: ' + result.stdout,
       'stderr: ' + result.stderr,

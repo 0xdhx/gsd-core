@@ -17,6 +17,7 @@ const {
   FIELD_CLASSIFICATION,
   getFieldClassification,
   STATE_MD_SECTIONS,
+  sliceCurrentPositionSection,
 } = require('../gsd-core/bin/lib/state-transition.cjs');
 const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
 
@@ -25,8 +26,6 @@ const fixedClock = Object.freeze({
   localToday: () => '2026-06-27',
   nowIso: () => '2026-06-27T12:00:00.000Z',
 });
-
-const noProgress = () => null;
 
 describe('ADR-1769 substrate: field-classification table', () => {
   const allowedSources = new Set(['body', 'disk', 'external', 'curated', 'free']);
@@ -140,7 +139,7 @@ describe('ADR-1769 Phase 1: beginPhase transition — tracer bullet', () => {
     const result = transitionCore(
       input,
       { kind: 'beginPhase', phaseNumber: 3, phaseName: 'Test Phase', planCount: 5 },
-      { clock: fixedClock, progressProvider: noProgress },
+      { clock: fixedClock },
     );
 
     assert.ok(result.updated.includes('Status'), `updated should include Status; got ${JSON.stringify(result.updated)}`);
@@ -181,7 +180,7 @@ function firstTimeBody() {
 
 describe('ADR-1769 Phase 1: beginPhase first-time body field updates', () => {
   const intent = { kind: 'beginPhase', phaseNumber: 3, phaseName: 'Test Phase', planCount: 5 };
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('updates Current Phase to N', () => {
     const result = transitionCore(firstTimeBody(), intent, deps);
@@ -260,7 +259,7 @@ function resumeBody() {
 
 describe('ADR-1769 Phase 1: #3127 idempotency guard — resume path', () => {
   const intent = { kind: 'beginPhase', phaseNumber: 3, phaseName: 'Test Phase', planCount: 5 };
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('Status is still refreshed on resume (Last Activity Date tracks execute-phase runs)', () => {
     const result = transitionCore(resumeBody(), intent, deps);
@@ -299,7 +298,7 @@ describe('ADR-1769 Phase 1: #3127 idempotency guard — resume path', () => {
 
 describe('ADR-1769 Phase 1: Current Position section mutation (first-time begin)', () => {
   const intent = { kind: 'beginPhase', phaseNumber: 3, phaseName: 'Test Phase', planCount: 5 };
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('Current Position Phase line reflects the new phase (EXECUTING)', () => {
     const result = transitionCore(firstTimeBody(), intent, deps);
@@ -356,7 +355,7 @@ describe('ADR-1769 Phase 1: Current Position section mutation (first-time begin)
 
 describe('ADR-1769 Phase 1: Current Position section mutation (resume path)', () => {
   const intent = { kind: 'beginPhase', phaseNumber: 3, phaseName: 'Test Phase', planCount: 5 };
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('Resume updates only the Last activity line in Current Position (preserves Plan, Phase, Status)', () => {
     const result = transitionCore(resumeBody(), intent, deps);
@@ -372,7 +371,7 @@ describe('ADR-1769 Phase 1: Current Position section mutation (resume path)', ()
 });
 
 describe('ADR-1769 Phase 1: property tests (RULESET.TESTS.property-based-testing)', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('for any non-negative integer phaseNumber and any STATE.md body with a non-whitespace Status value, beginPhase produces content whose body Status carries "Executing Phase N"', () => {
     // Note: filters out whitespace-only statusSuffix because state-document.cjs's
@@ -419,7 +418,7 @@ describe('ADR-1769 Phase 1: property tests (RULESET.TESTS.property-based-testing
 });
 
 describe('ADR-1769 Phase 2: advancePlan transition', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('advances Current Plan from N to N+1 (legacy format)', () => {
     const input = [
@@ -483,7 +482,7 @@ describe('ADR-1769 Phase 2: advancePlan transition', () => {
 });
 
 describe('ADR-1769 Phase 2: advancePlan with frontmatter (#1255 pattern — codex review)', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('advances plan correctly when STATE.md has YAML frontmatter (body Status not YAML status)', () => {
     const input = [
@@ -560,7 +559,7 @@ const ROADMAP_3_OF_5 = [
 ].join('\n');
 
 describe('ADR-1769 Phase 3: completePhase transition — body field updates', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress, roadmapProvider: () => ROADMAP_3_OF_5 };
+  const deps = { clock: fixedClock, roadmapProvider: () => ROADMAP_3_OF_5 };
 
   test('Current Phase advances to nextPhaseNum, preserving "of total" and appending the next name', () => {
     const intent = {
@@ -645,7 +644,7 @@ describe('ADR-1769 Phase 3: completePhase transition — body field updates', ()
 });
 
 describe('ADR-1769 Phase 3: completePhase progress derivation (roadmap)', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress, roadmapProvider: () => ROADMAP_3_OF_5 };
+  const deps = { clock: fixedClock, roadmapProvider: () => ROADMAP_3_OF_5 };
 
   test('Completed Phases is re-derived from the roadmap progress table', () => {
     const result = transitionCore(
@@ -667,7 +666,7 @@ describe('ADR-1769 Phase 3: completePhase progress derivation (roadmap)', () => 
   });
 
   test('when roadmapProvider yields null, existing Completed Phases / Progress are preserved (no crash)', () => {
-    const nullDeps = { clock: fixedClock, progressProvider: noProgress, roadmapProvider: () => null };
+    const nullDeps = { clock: fixedClock, roadmapProvider: () => null };
     const result = transitionCore(
       completePhaseBody(),
       { kind: 'completePhase', phaseNum: '3', nextPhaseNum: '4', nextPhaseName: null, isLastPhase: false, planCount: 3, summaryCount: 3 },
@@ -676,10 +675,47 @@ describe('ADR-1769 Phase 3: completePhase progress derivation (roadmap)', () => 
     assert.strictEqual(stateExtractField(result.content, 'Completed Phases'), '2');
     assert.strictEqual(stateExtractField(result.content, 'Progress'), '40%');
   });
+
+  // #3057 B9: `result.updated` must let a caller tell "recomputed from the
+  // roadmap" apart from "roadmap unavailable, left as-is". Before the fix,
+  // `stateReplaceField`'s return was truthy whenever the field pattern
+  // matched — regardless of whether the substituted text actually differed
+  // from `body` — so 'Completed Phases' (and 'Progress') were marked
+  // 'updated' even when nothing changed.
+
+  test('FAILURE path (roadmap unavailable): Completed Phases / Progress are NOT marked updated — left-as-is is distinguishable from recomputed', () => {
+    const nullDeps = { clock: fixedClock, roadmapProvider: () => null };
+    const result = transitionCore(
+      completePhaseBody(),
+      { kind: 'completePhase', phaseNum: '3', nextPhaseNum: '4', nextPhaseName: null, isLastPhase: false, planCount: 3, summaryCount: 3 },
+      nullDeps,
+    );
+    assert.ok(!result.updated.includes('Completed Phases'),
+      `left-as-is 'Completed Phases' must NOT appear in updated; got ${JSON.stringify(result.updated)}`);
+    assert.ok(!result.updated.includes('Progress'),
+      `left-as-is 'Progress' must NOT appear in updated; got ${JSON.stringify(result.updated)}`);
+    // Values are unchanged (the benign-preservation contract from the test above).
+    assert.strictEqual(stateExtractField(result.content, 'Completed Phases'), '2');
+    assert.strictEqual(stateExtractField(result.content, 'Progress'), '40%');
+  });
+
+  test('BENIGN path (roadmap recomputes a different value): Completed Phases / Progress ARE marked updated — recomputed is distinguishable from left-as-is', () => {
+    const result = transitionCore(
+      completePhaseBody(),
+      { kind: 'completePhase', phaseNum: '3', nextPhaseNum: '4', nextPhaseName: null, isLastPhase: false, planCount: 3, summaryCount: 3 },
+      deps, // roadmapProvider => ROADMAP_3_OF_5, which recomputes Completed Phases 2 → 3
+    );
+    assert.ok(result.updated.includes('Completed Phases'),
+      `recomputed 'Completed Phases' must appear in updated; got ${JSON.stringify(result.updated)}`);
+    assert.ok(result.updated.includes('Progress'),
+      `recomputed 'Progress' must appear in updated; got ${JSON.stringify(result.updated)}`);
+    assert.strictEqual(stateExtractField(result.content, 'Completed Phases'), '3');
+    assert.strictEqual(stateExtractField(result.content, 'Progress'), '60%');
+  });
 });
 
 describe('ADR-1769 Phase 3: completePhase edge cases', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress, roadmapProvider: () => ROADMAP_3_OF_5 };
+  const deps = { clock: fixedClock, roadmapProvider: () => ROADMAP_3_OF_5 };
 
   test('falls back to the "Phase:" field when "Current Phase:" is absent (stateReplaceFieldWithFallback)', () => {
     const input = [
@@ -776,7 +812,7 @@ function plannedPhaseBody() {
 }
 
 describe('ADR-1769 Phase 4: plannedPhase transition — body field updates', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('Status advances to "Ready to execute" when the existing value is a template default (Planning)', () => {
     const result = transitionCore(plannedPhaseBody(), { kind: 'plannedPhase', phaseNumber: 3, planCount: 4 }, deps);
@@ -851,7 +887,7 @@ describe('ADR-1769 Phase 4: plannedPhase transition — body field updates', () 
 });
 
 describe('ADR-1769 Phase 4: milestoneSwitch transition — milestone reset', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   function milestoneBody() {
     return [
@@ -926,7 +962,7 @@ describe('ADR-1769 Phase 4: milestoneSwitch transition — milestone reset', () 
 // ADR-1769 Phase 5: milestoneComplete
 
 describe('ADR-1769 Phase 5: milestoneComplete transition — closure write', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
   const intent = { kind: 'milestoneComplete', version: 'v1.0', nextMilestoneCommand: '/gsd:new-milestone' };
 
   function preCloseBody() {
@@ -1058,7 +1094,7 @@ describe('ADR-1769 Phase 5: milestoneComplete transition — closure write', () 
 // ADR-1769 Phase 6: patch
 
 describe('ADR-1769 Phase 6: patch transition — field updates', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('applies each patched field and reports the updated set', () => {
     const input = [
@@ -1111,7 +1147,7 @@ describe('ADR-1769 Phase 6: patch transition — field updates', () => {
 // ADR-1769 Phase 7: update, prune, sync
 
 describe('ADR-1769 Phase 7: update transition — single body field', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('replaces a body field and reports updated:true', () => {
     const input = '# Project State\n\n**Status:** Planning\n**Current Plan:** 2\n';
@@ -1136,7 +1172,7 @@ describe('ADR-1769 Phase 7: update transition — single body field', () => {
 });
 
 describe('ADR-1769 Phase 7: prune transition — section pruning', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('archives Decisions entries at or below the cutoff phase', () => {
     const input = [
@@ -1186,7 +1222,7 @@ describe('ADR-1769 Phase 7: prune transition — section pruning', () => {
 });
 
 describe('ADR-1769 Phase 7: sync transition — body writes + #1761', () => {
-  const deps = { clock: fixedClock, progressProvider: noProgress };
+  const deps = { clock: fixedClock };
 
   test('updates Total Plans in Phase + Progress bar + Last Activity when bounded', () => {
     const input = [
@@ -1301,6 +1337,61 @@ describe('ADR-1769 #1796: applyStatePreservation — table-driven post-sync cons
     });
     assert.equal(r.postFm.progress.total_plans, 64,
       'total_plans equality → derived value (identity)');
+  });
+
+  test('#2969: deriveProgressKeys=true — completed_plans ratchets UP when disk count exceeds curated (gap-closure plans completed)', () => {
+    // Gap-closure scenario: a phase had 50 plans all summarized (completed_plans: 50),
+    // then 4 gap-closure plans were added (total_plans -> 54) and all 4 got SUMMARYs.
+    // Disk scan now counts 54 summaries. The curated completed_plans (50) must
+    // ratchet UP to the derived value (54), not stay pinned at 50 — otherwise
+    // completed_plans < total_plans forever even though every plan is summarized.
+    const curated = { progress: { total_plans: 54, completed_plans: 50, total_phases: 2, completed_phases: 1, percent: 93 } };
+    const r = applyStatePreservation({
+      preFm: curated,
+      preFmSnapshot: curated,
+      postFm: { progress: { total_plans: 54, completed_plans: 54, total_phases: 2, completed_phases: 1, percent: 100 } },
+      resync: false,
+      deriveProgressKeys: true,
+      ...untouched,
+    });
+    assert.equal(r.postFm.progress.total_plans, 54, 'total_plans takes derived value');
+    assert.equal(r.postFm.progress.completed_plans, 54,
+      'completed_plans must ratchet UP to derived (54 > curated 50 — gap-closure plans completed) (#2969)');
+    assert.equal(r.postFm.progress.percent, 100,
+      'percent must reflect the true completion fraction (54/54) (#2969)');
+  });
+
+  test('#2969 ratchet-down protection: deriveProgressKeys=true keeps curated when disk count < curated', () => {
+    // The ratchet must only go UP. If the disk count is somehow LOWER than
+    // curated (e.g. a SUMMARY was deleted), keep the curated value — do not
+    // derive downward. (#3242 curated-progress protection, scoped to deriveProgressKeys.)
+    const curated = { progress: { total_plans: 54, completed_plans: 50, percent: 93 } };
+    const r = applyStatePreservation({
+      preFm: curated,
+      preFmSnapshot: curated,
+      postFm: { progress: { total_plans: 54, completed_plans: 47, percent: 87 } },
+      resync: false,
+      deriveProgressKeys: true,
+      ...untouched,
+    });
+    assert.equal(r.postFm.progress.completed_plans, 50,
+      'completed_plans must NOT derive downward (47 < curated 50) — ratchet-up only (#2969/#3242)');
+  });
+
+  test('#2969 body-only write protection: deriveProgressKeys absent keeps wholesale restore', () => {
+    // state.update/patch (no deriveProgressKeys flag) must keep the full #3242
+    // wholesale curated restore — completed_plans never moves for a body-only edit.
+    const curated = { progress: { total_plans: 54, completed_plans: 50, percent: 93 } };
+    const r = applyStatePreservation({
+      preFm: curated,
+      preFmSnapshot: curated,
+      postFm: { progress: { total_plans: 54, completed_plans: 54, percent: 100 } },
+      resync: false,
+      // deriveProgressKeys NOT set — body-only write path
+      ...untouched,
+    });
+    assert.equal(r.postFm.progress.completed_plans, 50,
+      'body-only write must keep curated completed_plans (no deriveProgressKeys) (#2969/#3242)');
   });
 
   test('progress: NOT restored when transition re-derives from disk (resync=true) — sync/advancePlan/completePhase path', () => {
@@ -1568,3 +1659,375 @@ describe('bug #21 — STATE.md template must carry YAML frontmatter', () => {
 });
   });
 }
+
+// ────────────────────────────────────────────────────────────────────────
+// #3118: sliceCurrentPositionSection — locator characterization tests.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('sliceCurrentPositionSection (#3118)', () => {
+  test('slices the section up to the following heading', () => {
+    const body = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 (Test Phase) — EXECUTING',
+      '',
+      '## Accumulated Context',
+      '',
+      '- A decision worth keeping.',
+      '',
+    ].join('\n');
+    const result = sliceCurrentPositionSection(body);
+    assert.ok(result.includes('Phase: 3 (Test Phase) — EXECUTING'));
+    assert.ok(!result.includes('A decision worth keeping'));
+  });
+
+  test('slices to end of document for a trailing section', () => {
+    const body = [
+      '# Project State',
+      '',
+      '## Accumulated Context',
+      '',
+      '- Earlier decision.',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 5 (Final Phase) — EXECUTING',
+      '',
+    ].join('\n');
+    const result = sliceCurrentPositionSection(body);
+    assert.ok(result.includes('Phase: 5 (Final Phase) — EXECUTING'));
+  });
+
+  test('returns null when the section is absent', () => {
+    const body = [
+      '# Project State',
+      '',
+      '## Accumulated Context',
+      '',
+      '- Some decision.',
+      '',
+      '## Deferred Items',
+      '',
+      '- Something deferred.',
+      '',
+    ].join('\n');
+    assert.strictEqual(sliceCurrentPositionSection(body), null);
+  });
+
+  test('matches the heading case- and space-insensitively', () => {
+    const body = [
+      '# Project State',
+      '',
+      '##  CURRENT   POSITION',
+      '',
+      'Phase: 2 — EXECUTING',
+      '',
+    ].join('\n');
+    assert.notStrictEqual(sliceCurrentPositionSection(body), null);
+  });
+
+  test('ignores a Current Position heading inside a code fence', () => {
+    // The locator is fence-aware via `tokenizeHeadings` — a `##` line inside
+    // a ``` fence is not a real heading, so this document has zero *real*
+    // Current Position headings.
+    const body = [
+      '# Project State',
+      '',
+      '## Accumulated Context',
+      '',
+      '```markdown',
+      '## Current Position',
+      '',
+      'Phase: 9 — should not be seen',
+      '```',
+      '',
+    ].join('\n');
+    assert.strictEqual(sliceCurrentPositionSection(body), null);
+  });
+
+  test('distinguishes an empty section from an absent one', () => {
+    // An empty section and an absent one are different answers, and a caller
+    // that folds them together reintroduces the collapse this epic removes.
+    const body = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '## Accumulated Context',
+      '',
+      '- A decision.',
+      '',
+    ].join('\n');
+    const result = sliceCurrentPositionSection(body);
+    assert.strictEqual(typeof result, 'string');
+    assert.notStrictEqual(result, null);
+    assert.strictEqual(result.trim(), '');
+  });
+
+  test('does not match an H3 Current Position', () => {
+    const body = [
+      '# Project State',
+      '',
+      '### Current Position',
+      '',
+      'Phase: 2 — EXECUTING',
+      '',
+    ].join('\n');
+    assert.strictEqual(sliceCurrentPositionSection(body), null);
+  });
+
+  test('slices the first Current Position when the document has two', () => {
+    // `findIndex` picks the first heading match and nothing pinned that
+    // behavior down before this test.
+    const body = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 — FIRST OCCURRENCE',
+      '',
+      '## Accumulated Context',
+      '',
+      '- unrelated',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 9 — SECOND OCCURRENCE',
+      '',
+    ].join('\n');
+    const result = sliceCurrentPositionSection(body);
+    assert.ok(result.includes('FIRST OCCURRENCE'));
+    assert.ok(!result.includes('SECOND OCCURRENCE'));
+  });
+
+  test('returns null for an empty document', () => {
+    assert.strictEqual(sliceCurrentPositionSection(''), null);
+  });
+
+  test('slices a CRLF document identically', () => {
+    // Only `\n` in a regex/split is the recurring CRLF defect class in this
+    // repo (#1658 and successors) — verify the CRLF fixture, normalized back
+    // to LF, matches the LF fixture's result byte-for-byte.
+    const lines = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 (Test Phase) — EXECUTING',
+      '',
+      '## Accumulated Context',
+      '',
+      '- A decision worth keeping.',
+      '',
+    ];
+    const lfResult = sliceCurrentPositionSection(lines.join('\n'));
+    const crlfResult = sliceCurrentPositionSection(lines.join('\r\n'));
+    // Strict form (#3118): normalize CRLF->LF and require exact equality with
+    // the LF result. The looser `.replace(/\r/g, '')` form (previously used
+    // here) strips ALL `\r` bytes including a stray unpaired trailing `\r`
+    // left by the pre-fix `end = hs[j].offset - 1` slice — that loose
+    // assertion is what let the CRLF-slice-defect ship undetected.
+    assert.strictEqual(crlfResult.replace(/\r\n/g, '\n'), lfResult);
+  });
+
+  test('returns an empty string when the section is empty and the next heading follows immediately', () => {
+    const body = ['# STATE', '', '## Current Position', '## Next Section', 'content'].join('\n');
+    const result = sliceCurrentPositionSection(body);
+    assert.strictEqual(result, '');
+  });
+
+  test('does not duplicate bytes when a transition mutates an empty adjacent section', () => {
+    // Regression for #3118 review MAJOR: `locateCurrentPosition`'s newline
+    // walk-back could land `end` before `start` when the section is empty
+    // and the next heading follows with no blank line between. Every
+    // mutator's `body.slice(0, start) + sectionBody + body.slice(end)`
+    // reassembly then duplicated the bytes in the inverted `[end, start)`
+    // range — a spurious blank line (LF) or `\r\n` (CRLF) inserted into
+    // STATE.md on every transition.
+    const lfBody = ['# STATE', '', '## Current Position', '## Next Section', 'content'].join('\n');
+    const lfResult = transitionCore(
+      lfBody,
+      { kind: 'beginPhase', phaseNumber: 3, phaseName: null, planCount: null },
+      { clock: fixedClock },
+    );
+    assert.ok(
+      !lfResult.content.includes('## Current Position\n\n## Next Section'),
+      `expected no inserted blank line; got ${JSON.stringify(lfResult.content)}`,
+    );
+    assert.strictEqual(
+      lfResult.content,
+      '# STATE\n\n## Current Position\n## Next Section\ncontent',
+    );
+    assert.strictEqual(lfResult.content.length, lfBody.length);
+
+    const crlfBody = ['# STATE', '', '## Current Position', '## Next Section', 'content'].join('\r\n');
+    const crlfResult = transitionCore(
+      crlfBody,
+      { kind: 'beginPhase', phaseNumber: 3, phaseName: null, planCount: null },
+      { clock: fixedClock },
+    );
+    assert.ok(
+      !crlfResult.content.includes('## Current Position\r\n\r\n## Next Section'),
+      `expected no inserted CRLF; got ${JSON.stringify(crlfResult.content)}`,
+    );
+    assert.strictEqual(
+      crlfResult.content,
+      '# STATE\r\n\r\n## Current Position\r\n## Next Section\r\ncontent',
+    );
+    assert.strictEqual(crlfResult.content.length, crlfBody.length);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// #3118: deps.progressProvider is a required StateTransitionDeps field with
+// 33 supply sites and zero call sites, and is being removed. Prove it
+// behaviorally: no transition ever invokes it.
+// ────────────────────────────────────────────────────────────────────────
+
+describe('state transitions do not consult a progress provider (#3118)', () => {
+  test('no transition invokes deps.progressProvider', () => {
+    // An exploding stub is the behavioral form of "this field is inert";
+    // asserting the declaration is absent would be source-grep theater.
+    const exploding = () => { throw new Error('progressProvider must never be called'); };
+    const clock = fixedClock;
+
+    assert.doesNotThrow(() => transitionCore(
+      firstTimeBody(),
+      { kind: 'beginPhase', phaseNumber: 3, phaseName: 'Test Phase', planCount: 5 },
+      { clock, progressProvider: exploding },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      [
+        '# Project State',
+        '',
+        '**Current Plan:** 02',
+        '**Total Plans in Phase:** 05',
+        '**Status:** Executing Phase 3',
+        '**Last Activity:** 2026-06-26',
+        '',
+        '## Current Position',
+        '',
+        'Plan: 2 of 5',
+        'Status: Executing Phase 3',
+        '',
+      ].join('\n'),
+      { kind: 'advancePlan' },
+      { clock, progressProvider: exploding },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      completePhaseBody(),
+      { kind: 'completePhase', phaseNum: '3', nextPhaseNum: '4', nextPhaseName: 'Design Phase', isLastPhase: false, planCount: 3, summaryCount: 3 },
+      { clock, progressProvider: exploding, roadmapProvider: () => ROADMAP_3_OF_5 },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      plannedPhaseBody(),
+      { kind: 'plannedPhase', phaseNumber: 3, planCount: 4 },
+      { clock, progressProvider: exploding },
+    ));
+
+    const milestoneBody = [
+      '---',
+      'gsd_state_version: 1.0',
+      'milestone: v1.0',
+      'milestone_name: Old Milestone',
+      'status: executing',
+      'current_phase: "3"',
+      'progress:',
+      '  total_phases: 5',
+      '  completed_phases: 2',
+      '  percent: 40',
+      '---',
+      '',
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 — EXECUTING',
+      'Plan: 2 of 5',
+      'Status: Executing Phase 3',
+      'Last activity: 2026-06-20 — mid-flight',
+      '',
+    ].join('\n');
+    assert.doesNotThrow(() => transitionCore(
+      milestoneBody,
+      { kind: 'milestoneSwitch', version: 'v2.0', name: 'New Milestone' },
+      { clock, progressProvider: exploding },
+    ));
+
+    const preCloseBody = [
+      '# Project State',
+      '',
+      '**Status:** Executing Phase 5',
+      '**Last Activity:** 2026-06-20',
+      '**Last Activity Description:** mid-flight',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 5 — EXECUTING',
+      'Plan: 2 of 3',
+      'Status: Executing Phase 5',
+      'Last activity: 2026-06-20 — running',
+      '',
+      '## Operator Next Steps',
+      '',
+      '- Re-run /gsd:complete-milestone v1.0',
+      '',
+    ].join('\n');
+    assert.doesNotThrow(() => transitionCore(
+      preCloseBody,
+      { kind: 'milestoneComplete', version: 'v1.0', nextMilestoneCommand: '/gsd:new-milestone' },
+      { clock, progressProvider: exploding },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      [
+        '# Project State',
+        '',
+        '**Status:** Planning',
+        '**Current Plan:** 2',
+        '**Total Plans in Phase:** 5',
+        '',
+      ].join('\n'),
+      { kind: 'patch', patches: { Status: 'Paused', 'Current Plan': '3' } },
+      { clock, progressProvider: exploding },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      '# Project State\n\n**Status:** Planning\n**Current Plan:** 2\n',
+      { kind: 'update', field: 'Current Plan', value: '3' },
+      { clock, progressProvider: exploding },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      [
+        '# Session State',
+        '',
+        '## Decisions',
+        '',
+        '- [Phase 1]: Old',
+        '- [Phase 3]: Older',
+        '- [Phase 9]: Recent',
+        '',
+      ].join('\n'),
+      { kind: 'prune', cutoff: 7 },
+      { clock, progressProvider: exploding },
+    ));
+
+    assert.doesNotThrow(() => transitionCore(
+      [
+        '# Project State',
+        '',
+        '**Total Plans in Phase:** 2',
+        '**Last Activity:** 2026-06-20',
+        '**Progress:** [████░░░░░░] 40%',
+        '',
+      ].join('\n'),
+      { kind: 'sync', totalPlansInPhase: 5, percent: 60 },
+      { clock, progressProvider: exploding },
+    ));
+  });
+});

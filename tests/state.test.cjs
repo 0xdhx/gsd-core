@@ -162,6 +162,177 @@ describe('state-snapshot command', () => {
     assert.strictEqual(output.paused_at, 'Phase 3, Plan 1, Task 2 - mid-implementation', 'paused_at extracted');
   });
 
+  // ─── Regression: #2956 — Phase must be scoped to ## Current Position ──────
+  // Third generation of #2444 / #2567. Stopped At / Paused At were scoped to
+  // ## Session; Phase (which canonically lives in ## Current Position per
+  // gsd-core/templates/state.md) was left unscoped, so a historical Phase: /
+  // **Phase:** line in an archive section silently overwrote current_phase on
+  // every write. Because current_phase is routing input for gsd-progress / --next,
+  // the rewind routes work to the wrong phase — not merely a stale display.
+
+  test('#2956 scopes Phase to ## Current Position — bold archive line below the section (shape B)', () => {
+    // Bold **Phase:** 19 in an archive BELOW ## Current Position. The unscoped
+    // extractor's bold pattern wins outright (it is tried first, unanchored),
+    // so the read returns 19 instead of 22. Scoping to the section fixes it.
+    const stateContent = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene) — COMPLETE',
+      '',
+      '## Archive — earlier milestones',
+      '',
+ '**Phase:** 19 **complete — shipped v2.43.0**',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.current_phase, '22', 'current_phase must come from ## Current Position, not the bold archive line');
+  });
+
+  test('#2956 scopes Phase to ## Current Position — plain archive line above the section (shape C)', () => {
+    // Plain archive Phase: 19 ABOVE ## Current Position. Without scoping the
+    // plain pattern (^Phase:, /im) matches the first line-start occurrence in
+    // document order — the archive line — and returns 19 instead of 22.
+    const stateContent = [
+      '# Project State',
+      '',
+      '## Archive — earlier milestones',
+      '',
+      'Phase: 19 **complete — shipped v2.43.0**',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene) — COMPLETE',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.current_phase, '22', 'current_phase must come from ## Current Position, not the plain archive line above it');
+  });
+
+  test('#2956 scopes Phase to ### Current Position (bootstrap h3 variant)', () => {
+    // gsd-core/templates/state.md ships a bootstrap layout that uses a level-3
+    // ### Current Position heading. The section matcher must recognise BOTH h2
+    // and h3, mirroring how matchSessionSection recognises ## Session and
+    // ## Session Continuity — matching only h2 would silently drop the h3 shape.
+    const stateContent = [
+      '# Project State',
+      '',
+      '### Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene)',
+      '',
+      '### Archive',
+      '',
+ '**Phase:** 19',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.current_phase, '22', 'current_phase must resolve from the h3 ### Current Position section');
+  });
+
+  test('#2956 scopes Phase to ## Current Position under CRLF', () => {
+    // The #2444 seam was CRLF-fixed by migrating onto collectSection (which
+    // strips the trailing \r before heading-text extraction). The Phase scope
+    // must inherit that CRLF tolerance — a hand-rolled [ \t]*\n boundary would
+    // silently fail to match a ## Current Position\r\n heading.
+    const stateContent = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene)',
+      '',
+      '## Archive — earlier milestones',
+      '',
+ '**Phase:** 19',
+      '',
+    ].join('\r\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.current_phase, '22', 'current_phase must come from ## Current Position under CRLF');
+  });
+
+  test('#2956 ignores a Phase token in decisions prose outside ## Current Position', () => {
+    // A decisions-table row or prose mention of "Phase 19" elsewhere is NOT the
+    // current phase. Scoping it out is correct, not a regression — this is the
+    // over-broad-fix guard.
+    const stateContent = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene)',
+      '',
+      '### Decisions',
+      '',
+      '| Decided to defer Phase 19 to the next milestone | 2026-07-01 |',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.current_phase, '22', 'a Phase token in decisions prose must not leak into current_phase');
+  });
+
+  test('#2956 scopes Paused At to ## Session on the read path (parity with the write seam)', () => {
+    // The WRITE seam (buildStateFrontmatter src/state.cts ~1576) already scopes
+    // Paused At to ## Session. The READ seam (cmdStateSnapshot) read it
+    // unscoped — a parity gap. A stale "Paused At:" in a Session Continuity
+    // Archive below the real ## Session must not win on the read path.
+    const stateContent = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene)',
+      '',
+      '## Session',
+      '',
+      '**Paused At:** Phase 22, Plan 1, Task 2 - mid-implementation',
+      '',
+      '## Session Continuity Archive',
+      '',
+      '**Paused At:** Phase 19, Plan 3 (stale)',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const result = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.paused_at, 'Phase 22, Plan 1, Task 2 - mid-implementation', 'paused_at must come from ## Session, not the archive');
+  });
+
   describe('--cwd override', () => {
     let outsideDir;
 
@@ -586,6 +757,51 @@ describe('STATE.md frontmatter sync', () => {
     const delimiterCount = (content.match(/^---$/gm) || []).length;
     assert.strictEqual(delimiterCount, 2, 'should have exactly one frontmatter block (2 delimiters)');
     assert.ok(content.includes('status: paused'), 'frontmatter should reflect latest status');
+  });
+
+  test('#2956 write-then-read does not rewind current_phase past an archive Phase line', () => {
+    // The write seam (buildStateFrontmatter) and the read seam (cmdStateSnapshot)
+    // must agree: a state write that re-syncs frontmatter must not pick up the
+    // archive **Phase:** 19 line and write current_phase: 19, which the next
+    // state-snapshot read would then surface. Round-trip must stay at 22.
+    //
+    // The fixture carries a **Status:** field so `state update Status` performs
+    // a real field update (updated:true) and forces the frontmatter resync
+    // through buildStateFrontmatter — without an existing Status field the
+    // update is a no-op (updated:false) and no write occurs.
+    const stateContent = [
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 22 (Documentation hygiene)',
+      '',
+      '**Status:** Ready',
+      '',
+      '## Archive — earlier milestones',
+      '',
+ '**Phase:** 19 **complete — shipped v2.43.0**',
+      '',
+    ].join('\n');
+
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    // state update forces a frontmatter sync through buildStateFrontmatter.
+    const writeResult = runGsdTools('state update Status "Executing"', tmpDir);
+    assert.ok(writeResult.success, `write failed: ${writeResult.error}`);
+    const writeOutput = JSON.parse(writeResult.output);
+    assert.strictEqual(writeOutput.updated, true, 'state update must perform a real field update to force the resync');
+
+    // The persisted frontmatter must not have rewound to the archive phase.
+    const written = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(/current_phase:\s*22\b/m.test(written), 'written frontmatter current_phase must be 22 (not the archive 19)');
+    assert.ok(!/^current_phase:\s*19\b/m.test(written), 'written frontmatter must NOT carry the archive phase 19');
+
+    // And a fresh read must agree.
+    const readResult = runGsdTools('state-snapshot', tmpDir);
+    assert.ok(readResult.success, `read failed: ${readResult.error}`);
+    const output = JSON.parse(readResult.output);
+    assert.strictEqual(output.current_phase, '22', 'read-after-write current_phase must stay 22 (round-trip agreement)');
   });
 
   test('preserves frontmatter status when body Status field is missing', () => {
@@ -2676,6 +2892,63 @@ describe('state planned-phase command', () => {
     assert.ok(result.success, 'Should not crash');
     const output = JSON.parse(result.output);
     assert.ok(output.error, 'Should return error field');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #3052: state planned-phase must not overwrite authoritative same-date
+// last_activity_desc from stale body prose
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#3052: planned-phase preserves same-date last_activity_desc', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createFixture();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('same-date conflicting desc: frontmatter desc is preserved', () => {
+    // Frontmatter has authoritative desc; body has stale desc for the SAME date
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'last_activity: 2020-09-10',
+        'last_activity_desc: authoritative description',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '**Status:** Planning',
+        '**Last Activity:** 2020-09-10 — stale description',
+        '**Current Phase:** 1',
+        '',
+      ].join('\n'),
+    );
+
+    const result = runGsdTools(
+      ['state', 'planned-phase', '--phase', '1', '--plans', '3'],
+      tmpDir,
+      { GSD_NOW_MS: String(Date.parse('2020-09-10T15:00:00.000Z')) },
+    );
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    // Extract only the frontmatter (between --- fences) to check the desc
+    const fmMatch = stateContent.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+    const frontmatter = fmMatch ? fmMatch[1] : '';
+    assert.ok(
+      frontmatter.includes('authoritative description'),
+      'frontmatter last_activity_desc must be preserved when same-date body prose conflicts',
+    );
+    assert.ok(
+      !frontmatter.includes('stale description'),
+      'stale body desc must NOT appear in frontmatter (it may remain in body prose)',
+    );
   });
 });
 
@@ -6702,10 +6975,6 @@ describe('bug #3454: state mutation must preserve literal $N amounts', () => {
   __foldDescribe("folded:bug-3489-complete-phase-idempotent (consolidation epic #1969 B2 #1971)", () => {
 'use strict';
 
-// allow-test-rule: source-text-is-the-product (see #3489)
-// State.md is the deployed artifact; asserting on its literal text content
-// tests the deployed contract.
-
 /**
  * Regression test for #3489
  *
@@ -6725,6 +6994,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createTempProject, cleanup, runGsdTools } = require('./helpers.cjs');
+const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
 
 describe('bug #3489: state complete-phase must be idempotent', () => {
   let tmpDir;
@@ -6814,8 +7084,9 @@ describe('bug #3489: state complete-phase must be idempotent', () => {
     assert.ok(result.success, `command failed: ${result.error || result.output}`);
 
     const after = fs.readFileSync(statePath, 'utf8');
-    assert.ok(
-      after.includes('**Status:** Phase 03 complete'),
+    assert.equal(
+      stateExtractField(after, 'Status'),
+      'Phase 03 complete',
       `expected Status updated to "Phase 03 complete", got:\n${after}`,
     );
 
@@ -6835,7 +7106,6 @@ describe('bug #3489: state complete-phase must be idempotent', () => {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-397-state-preserve-executor-authored (consolidation epic #1969 B2 #1971)", () => {
 'use strict';
-// allow-test-rule: reads runtime STATE.md written to temp dir — behavioral output test, not source-grep (see #397)
 
 // Regression tests for bug #397.
 //
@@ -6870,6 +7140,9 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
+const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
+const { collectSection } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
+const { stripFrontmatter } = require('../gsd-core/bin/lib/frontmatter.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const TOOLS_PATH = path.join(ROOT, 'gsd-core', 'bin', 'gsd-tools.cjs');
@@ -6891,7 +7164,8 @@ function readState(dir) {
 }
 
 function runGsdState(args, cwd) {
-  const { execFileSync } = require('child_process');
+  const { runNode } = require('./helpers/process-seam.cjs');
+  const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
   const env = {
     ...process.env,
     GSD_SESSION_KEY: '',
@@ -6900,17 +7174,9 @@ function runGsdState(args, cwd) {
     CLAUDE_CODE_SSE_PORT: '',
     OPENCODE_SESSION_ID: '',
   };
-  try {
-    execFileSync(process.execPath, [TOOLS_PATH, 'state', ...args], {
-      cwd,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env,
-    });
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err.stderr?.toString().trim() || err.message };
-  }
+  const r = runNode([TOOLS_PATH, 'state', ...args], { cwd, env, timeoutMs: PROBE_TIMEOUT_MS });
+  if (r.exitCode === 0) return { success: true };
+  return { success: false, error: r.stderr.trim() || `exited with outcome=${r.outcome} exitCode=${r.exitCode}` };
 }
 
 // ---------------------------------------------------------------------------
@@ -7063,12 +7329,12 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['record-session', '--stopped-at', 'Plan 1 complete'], dir);
       assert.ok(r.success, `record-session failed: ${r.error}`);
       const after = readState(dir);
-      const rfMatch = after.match(/Resume File:\s*(.+)/i);
-      assert.ok(rfMatch, 'Resume File field not found in STATE.md after record-session');
+      const resumeFile = stateExtractField(after, 'Resume File');
+      assert.ok(resumeFile, 'Resume File field not found in STATE.md after record-session');
       assert.strictEqual(
-        rfMatch[1].trim(),
+        resumeFile,
         '/home/user/my-custom-context.md',
-        `record-session overwrote executor-authored Resume File with '${rfMatch[1].trim()}'`,
+        `record-session overwrote executor-authored Resume File with '${resumeFile}'`,
       );
     } finally {
       cleanup(dir);
@@ -7082,12 +7348,12 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['record-session', '--stopped-at', 'Plan complete'], dir);
       assert.ok(r.success, `record-session failed: ${r.error}`);
       const after = readState(dir);
-      const rfMatch = after.match(/Resume File:\s*(.+)/i);
-      assert.ok(rfMatch, 'Resume File field not found in STATE.md after record-session');
+      const resumeFile = stateExtractField(after, 'Resume File');
+      assert.ok(resumeFile, 'Resume File field not found in STATE.md after record-session');
       assert.strictEqual(
-        rfMatch[1].trim(),
+        resumeFile,
         'None',
-        `Expected 'None' to remain when it was already 'None', got: ${rfMatch[1].trim()}`,
+        `Expected 'None' to remain when it was already 'None', got: ${resumeFile}`,
       );
     } finally {
       cleanup(dir);
@@ -7101,12 +7367,12 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['record-session', '--resume-file', '/tmp/new-resume.md'], dir);
       assert.ok(r.success, `record-session failed: ${r.error}`);
       const after = readState(dir);
-      const rfMatch = after.match(/Resume File:\s*(.+)/i);
-      assert.ok(rfMatch, 'Resume File field not found in STATE.md after record-session');
+      const resumeFile = stateExtractField(after, 'Resume File');
+      assert.ok(resumeFile, 'Resume File field not found in STATE.md after record-session');
       assert.strictEqual(
-        rfMatch[1].trim(),
+        resumeFile,
         '/tmp/new-resume.md',
-        `Expected explicit --resume-file value to be written, got: ${rfMatch[1].trim()}`,
+        `Expected explicit --resume-file value to be written, got: ${resumeFile}`,
       );
     } finally {
       cleanup(dir);
@@ -7121,13 +7387,19 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['advance-plan'], dir);
       assert.ok(r.success, `advance-plan failed: ${r.error}`);
       const after = readState(dir);
-      // The Configuration-level Status must not be clobbered
-      const statusMatch = after.match(/^Status:\s*(.+)/m);
-      assert.ok(statusMatch, 'Status field not found after advance-plan');
+      // The Configuration-level Status must not be clobbered. Scope extraction
+      // to the body (frontmatter stripped): the frontmatter `status:` key and
+      // the body `Status:` field name collide case-insensitively under
+      // stateExtractField's plain-line pattern (#1255's landmine — see
+      // state-transition.cts), and frontmatter's `status` is a normalized
+      // enum (normalizeStateStatus), not the executor-authored prose this
+      // assertion is proving was preserved.
+      const status = stateExtractField(stripFrontmatter(after), 'Status');
+      assert.ok(status, 'Status field not found after advance-plan');
       assert.strictEqual(
-        statusMatch[1].trim(),
+        status,
         'Awaiting QA sign-off before proceeding',
-        `advance-plan overwrote executor-authored Status: got '${statusMatch[1].trim()}'`,
+        `advance-plan overwrote executor-authored Status: got '${status}'`,
       );
     } finally {
       cleanup(dir);
@@ -7142,17 +7414,24 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['advance-plan'], dir);
       assert.ok(r.success, `advance-plan failed: ${r.error}`);
       const after = readState(dir);
-      const statusMatch = after.match(/^Status:\s*(.+)/m);
-      assert.ok(statusMatch, 'Status field not found after advance-plan');
+      // Scope extraction to the body (frontmatter stripped): stateExtractField's
+      // plain-line pattern matches the frontmatter `status:` key before the body
+      // `Status:` field (case-insensitive collision — #1255). Frontmatter status
+      // is normalizeStateStatus's coarser enum (e.g. both "Verifying Phase N"
+      // and "Phase complete — ready for verification" normalize to the SAME
+      // 'verifying' value), so asserting it here would be a WEAKER check than
+      // the body prose this test exists to prove was replaced.
+      const status = stateExtractField(stripFrontmatter(after), 'Status');
+      assert.ok(status, 'Status field not found after advance-plan');
       // 'Ready to execute' is a known default and should be replaced
       assert.notStrictEqual(
-        statusMatch[1].trim(),
+        status,
         'Ready to execute',
         `Status should have been updated from 'Ready to execute' after phase-complete, but was not`,
       );
       assert.ok(
-        statusMatch[1].includes('Phase complete') || statusMatch[1].includes('ready for verification'),
-        `Expected phase-complete Status text, got: '${statusMatch[1].trim()}'`,
+        status.includes('Phase complete') || status.includes('ready for verification'),
+        `Expected phase-complete Status text, got: '${status}'`,
       );
     } finally {
       cleanup(dir);
@@ -7168,12 +7447,12 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       assert.ok(r.success, `advance-plan failed: ${r.error}`);
       const after = readState(dir);
       // The top-level Last Activity (in Configuration section) must be preserved
-      const laMatch = after.match(/^Last Activity:\s*(.+)/im);
-      assert.ok(laMatch, 'Last Activity field not found after advance-plan');
+      const lastActivity = stateExtractField(after, 'Last Activity');
+      assert.ok(lastActivity, 'Last Activity field not found after advance-plan');
       assert.strictEqual(
-        laMatch[1].trim(),
+        lastActivity,
         'Unblocked after infra fix — merged PR #88 manually',
-        `advance-plan overwrote executor-authored Last Activity: got '${laMatch[1].trim()}'`,
+        `advance-plan overwrote executor-authored Last Activity: got '${lastActivity}'`,
       );
     } finally {
       cleanup(dir);
@@ -7188,21 +7467,21 @@ describe('bug #397: executor-authored STATE.md fields must be preserved', () => 
       const r = runGsdState(['advance-plan'], dir);
       assert.ok(r.success, `advance-plan failed: ${r.error}`);
       const after = readState(dir);
-      const posMatch = after.match(/##\s*Current Position\s*\n([\s\S]*?)(?=\n##|$)/i);
-      assert.ok(posMatch, 'Current Position section not found after advance-plan');
-      const posBody = posMatch[1];
-      const posStatusMatch = posBody.match(/^Status:\s*(.+)/m);
-      assert.ok(posStatusMatch, 'Status field not found in Current Position section');
+      const section = collectSection(after, (h) => h.text.trim() === 'Current Position');
+      assert.ok(section, 'Current Position section not found after advance-plan');
+      const posBody = section.body;
+      const posStatus = stateExtractField(posBody, 'Status');
+      assert.ok(posStatus, 'Status field not found in Current Position section');
       assert.strictEqual(
-        posStatusMatch[1].trim(),
+        posStatus,
         'On hold — waiting for upstream dependency merge',
-        `advance-plan overwrote executor-authored Current Position Status: got '${posStatusMatch[1].trim()}'`,
+        `advance-plan overwrote executor-authored Current Position Status: got '${posStatus}'`,
       );
-      const posActivityMatch = posBody.match(/^Last activity:\s*(.+)/im);
-      assert.ok(posActivityMatch, 'Last activity field not found in Current Position section');
+      const posActivity = stateExtractField(posBody, 'Last activity');
+      assert.ok(posActivity, 'Last activity field not found in Current Position section');
       assert.ok(
-        posActivityMatch[1].includes('blocked by infra'),
-        `advance-plan overwrote executor-authored Current Position Last activity: got '${posActivityMatch[1].trim()}'`,
+        posActivity.includes('blocked by infra'),
+        `advance-plan overwrote executor-authored Current Position Last activity: got '${posActivity}'`,
       );
     } finally {
       cleanup(dir);
@@ -9762,7 +10041,6 @@ describe('buildStateFrontmatter cache invalidation (#1967)', () => {
   const { describe: __foldDescribe } = require('node:test');
   __foldDescribe("folded:bug-3127-state-begin-phase-idempotent (consolidation epic #1969 B3 #1972)", () => {
 'use strict';
-// allow-test-rule: reads runtime STATE.md written to temp dir — behavioral output test, not source-grep (see #3127)
 
 // Regression tests for bug #3127.
 //
@@ -9787,6 +10065,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
+const { stateExtractField } = require('../gsd-core/bin/lib/state-document.cjs');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -9863,9 +10142,9 @@ describe('bug #3127: state.begin-phase idempotency guard', () => {
       cmdStateBeginPhase(dir, '5', 'test-phase', 8, false);
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
       // Current Plan must not have been reset to 1
-      const planMatch = after.match(/^Current Plan:\s*(\S+)/m);
-      if (planMatch) {
-        assert.notStrictEqual(planMatch[1], '1',
+      const currentPlan = stateExtractField(after, 'Current Plan');
+      if (currentPlan !== null) {
+        assert.notStrictEqual(currentPlan, '1',
           'begin-phase reset Current Plan to 1 on a mid-flight phase — idempotency guard not applied');
       }
     } finally {
@@ -9882,9 +10161,10 @@ describe('bug #3127: state.begin-phase idempotency guard', () => {
       cmdStateBeginPhase(dir, '5', 'test-phase', 8, false);
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
       // The rich stopped_at narrative must be preserved
+      const stoppedAt = stateExtractField(after, 'stopped_at');
       assert.ok(
-        after.includes('Plan 02 SHIPPED') || after.includes('Wave 2 GREEN'),
-        'begin-phase overwrote stopped_at narrative on a mid-flight phase',
+        stoppedAt && (stoppedAt.includes('Plan 02 SHIPPED') || stoppedAt.includes('Wave 2 GREEN')),
+        `begin-phase overwrote stopped_at narrative on a mid-flight phase; got: ${stoppedAt}`,
       );
     } finally {
       cleanup(dir);
@@ -9900,9 +10180,9 @@ describe('bug #3127: state.begin-phase idempotency guard', () => {
       cmdStateBeginPhase(dir, '5', 'test-phase', 8, false);
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
       // Normal path: Current Plan should become 1 (or stay 1)
-      const planMatch = after.match(/^Current Plan:\s*(\S+)/m);
-      if (planMatch) {
-        assert.strictEqual(planMatch[1], '1',
+      const currentPlan = stateExtractField(after, 'Current Plan');
+      if (currentPlan !== null) {
+        assert.strictEqual(currentPlan, '1',
           'begin-phase should set Current Plan to 1 on a fresh phase');
       }
     } finally {
@@ -9926,9 +10206,10 @@ describe('bug #3127: state.begin-phase idempotency guard', () => {
     try {
       cmdStateBeginPhase(dir, '5', 'test-phase', 8, false);
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
+      const lastActivity = stateExtractField(after, 'Last activity');
       assert.ok(
-        after.includes(PINNED_DATE),
-        `begin-phase must update Last Activity date to the pinned date ${PINNED_DATE} even on resume (safe field)`,
+        lastActivity && lastActivity.includes(PINNED_DATE),
+        `begin-phase must update Last Activity date to the pinned date ${PINNED_DATE} even on resume (safe field); got: ${lastActivity}`,
       );
     } finally {
       // Restore env vars before cleanup to avoid leaking state to other tests.

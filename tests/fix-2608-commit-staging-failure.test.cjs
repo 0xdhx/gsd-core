@@ -43,9 +43,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync, spawnSync } = require('node:child_process');
+const { spawnSync } = require('node:child_process');
 
 const { createTempGitProject, cleanup } = require('./helpers.cjs');
+const { gitOrThrow } = require('./helpers/git-fixture.cjs');
+
+// 5000ms: git plumbing (add/commit/status/rev-parse/rev-list/diff) on a small
+// mkdtemp fixture repo — well over any observed duration for that class of call.
+const GIT_TIMEOUT_MS = 5000;
 
 const LIB = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib');
 
@@ -54,8 +59,13 @@ const LIB = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib');
  * returning the parsed JSON result and the git argv list that was actually
  * executed (so "git commit never ran" is asserted directly, not inferred).
  */
-function commitWithFailingAdd({ cwd, files, failFor = [], stderr = 'fatal: injected staging failure', timeout = false, amend = false }) {
+function commitWithFailingAdd({ cwd, files, failFor = [], stderr = 'fatal: injected staging failure', timeout = false, amend = false, gitVerb = 'add' }) {
   const callsOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2608-')), 'calls.json');
+  // `timeout` is `false` | `true` (alias for `'posix'`) | `'posix'` | `'windows'` —
+  // #3050: the shared isSpawnTimeout predicate only requires `error.code ===
+  // 'ETIMEDOUT'`, NOT `signal === 'SIGTERM'` (Windows does not reliably report
+  // SIGTERM), so both shapes must be proven to still read as a timeout.
+  const timeoutShape = timeout === true ? 'posix' : timeout;
   const script = `
 const path = require('path');
 const LIB = ${JSON.stringify(LIB)};
@@ -63,18 +73,26 @@ const projection = require(path.join(LIB, 'shell-command-projection.cjs'));
 const { cmdCommit } = require(path.join(LIB, 'commands.cjs'));
 const failFor = ${JSON.stringify(failFor)};
 const stderrText = ${JSON.stringify(stderr)};
-const timedOut = ${JSON.stringify(timeout)};
+const timeoutShape = ${JSON.stringify(timeoutShape)};
+const gitVerb = ${JSON.stringify(gitVerb)};
 const real = projection.execGit;
 const calls = [];
 projection.execGit = (args, opts) => {
   calls.push(args);
-  if (args[0] === 'add' && failFor.includes(args[args.length - 1])) {
-    if (timedOut) {
-      // The exact shape spawnSync produces on a timeout, which
+  if (args[0] === gitVerb && failFor.includes(args[args.length - 1])) {
+    if (timeoutShape === 'posix') {
+      // The exact shape spawnSync produces on a POSIX timeout, which
       // shell-command-projection surfaces as signal + error.code.
       const e = new Error('spawnSync git ETIMEDOUT');
       e.code = 'ETIMEDOUT';
       return { exitCode: 1, stdout: '', stderr: stderrText, signal: 'SIGTERM', error: e };
+    }
+    if (timeoutShape === 'windows') {
+      // Windows shape: spawnSync's timeout kill does not reliably report
+      // signal:'SIGTERM' — only error.code:'ETIMEDOUT' is guaranteed (#3050).
+      const e = new Error('spawnSync git ETIMEDOUT');
+      e.code = 'ETIMEDOUT';
+      return { exitCode: 1, stdout: '', stderr: stderrText, signal: null, error: e };
     }
     return { exitCode: 128, stdout: '', stderr: stderrText, signal: null, error: null };
   }
@@ -104,11 +122,11 @@ cmdCommit(${JSON.stringify(cwd)}, 'docs: map existing codebase', ${JSON.stringif
 }
 
 function headCount(cwd) {
-  return Number(execFileSync('git', ['rev-list', '--count', 'HEAD'], { cwd, encoding: 'utf-8' }).trim());
+  return Number(gitOrThrow(['rev-list', '--count', 'HEAD'], { cwd, timeoutMs: GIT_TIMEOUT_MS }).trim());
 }
 
 function committedFiles(cwd) {
-  return execFileSync('git', ['diff', 'HEAD~1', 'HEAD', '--name-only'], { cwd, encoding: 'utf-8' })
+  return gitOrThrow(['diff', 'HEAD~1', 'HEAD', '--name-only'], { cwd, timeoutMs: GIT_TIMEOUT_MS })
     .trim().split('\n').filter(Boolean).sort();
 }
 
@@ -117,16 +135,29 @@ function committedFiles(cwd) {
  * which carried the identical defect (failed `git add` dropped, commit proceeds
  * with the subset that staged).
  */
-function subrepoCommitWithFailingAdd({ cwd, files, failFor = [] }) {
+function subrepoCommitWithFailingAdd({ cwd, files, failFor = [], timeout = false }) {
+  // See commitWithFailingAdd above for the timeoutShape rationale (#3050).
+  const timeoutShape = timeout === true ? 'posix' : timeout;
   const script = `
 const path = require('path');
 const LIB = ${JSON.stringify(LIB)};
 const projection = require(path.join(LIB, 'shell-command-projection.cjs'));
 const { cmdCommitToSubrepo } = require(path.join(LIB, 'commands.cjs'));
 const failFor = ${JSON.stringify(failFor)};
+const timeoutShape = ${JSON.stringify(timeoutShape)};
 const real = projection.execGit;
 projection.execGit = (args, opts) => {
   if (args[0] === 'add' && failFor.includes(args[args.length - 1])) {
+    if (timeoutShape === 'posix') {
+      const e = new Error('spawnSync git ETIMEDOUT');
+      e.code = 'ETIMEDOUT';
+      return { exitCode: 1, stdout: '', stderr: 'fatal: injected subrepo staging failure', signal: 'SIGTERM', error: e };
+    }
+    if (timeoutShape === 'windows') {
+      const e = new Error('spawnSync git ETIMEDOUT');
+      e.code = 'ETIMEDOUT';
+      return { exitCode: 1, stdout: '', stderr: 'fatal: injected subrepo staging failure', signal: null, error: e };
+    }
     return { exitCode: 128, stdout: '', stderr: 'fatal: injected subrepo staging failure', signal: null, error: null };
   }
   return real(args, opts);
@@ -157,11 +188,11 @@ describe('#2608: commit-to-subrepo fails closed when git add fails', () => {
     subDir = path.join(rootDir, 'backend');
     fs.mkdirSync(subDir, { recursive: true });
     for (const [cmd, args] of [['init', []], ['config', ['user.email', 'test@example.com']], ['config', ['user.name', 'Test']]]) {
-      execFileSync('git', [cmd, ...args], { cwd: subDir, stdio: 'pipe' });
+      gitOrThrow([cmd, ...args], { cwd: subDir, timeoutMs: GIT_TIMEOUT_MS });
     }
     fs.writeFileSync(path.join(subDir, 'seed.js'), '// seed\n');
-    execFileSync('git', ['add', 'seed.js'], { cwd: subDir, stdio: 'pipe' });
-    execFileSync('git', ['commit', '-m', 'seed'], { cwd: subDir, stdio: 'pipe' });
+    gitOrThrow(['add', 'seed.js'], { cwd: subDir, timeoutMs: GIT_TIMEOUT_MS });
+    gitOrThrow(['commit', '-m', 'seed'], { cwd: subDir, timeoutMs: GIT_TIMEOUT_MS });
     fs.writeFileSync(path.join(subDir, 'a.js'), '// a\n');
     fs.writeFileSync(path.join(subDir, 'b.js'), '// b\n');
   });
@@ -185,7 +216,7 @@ describe('#2608: commit-to-subrepo fails closed when git add fails', () => {
       "git's original stderr must be preserved");
     assert.equal(headCount(subDir), before, 'no partial sub-repo commit may be created');
 
-    const status = execFileSync('git', ['status', '--porcelain'], { cwd: subDir, encoding: 'utf-8' });
+    const status = gitOrThrow(['status', '--porcelain'], { cwd: subDir, timeoutMs: GIT_TIMEOUT_MS });
     assert.deepEqual(status.split('\n').filter((l) => /^A[ \t]/.test(l)), [],
       `the sub-repo index must be rolled back, status:\n${status}`);
   });
@@ -309,6 +340,51 @@ describe('#2608: commit --files fails closed when git add fails', () => {
     assert.equal(result.failures[0].timed_out, true);
   });
 
+  // #3050 item 4: this site (commands.cts's `git add` staging loop) now routes
+  // through the shared isSpawnTimeout predicate, which drops the `signal ===
+  // 'SIGTERM'` requirement — a Windows-shaped timeout (no signal, only
+  // error.code === 'ETIMEDOUT') must still be detected.
+  test('a staging timeout is reported as staging_timeout even without SIGTERM (Windows shape, #3050)', () => {
+    const { result } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: ['.planning/ARCHITECTURE.md'],
+      failFor: ['.planning/ARCHITECTURE.md'],
+      stderr: '',
+      timeout: 'windows',
+    });
+
+    assert.equal(result.reason, 'staging_timeout');
+    assert.equal(result.failures[0].timed_out, true);
+  });
+
+  // #3050 item 4: the `git rm --cached` branch of the same staging loop (the
+  // default-mode "stage the deletion" path, distinct from `git add` above)
+  // carries its own inline copy of the timeout check pre-fix. Drive it
+  // directly: default mode (no explicit --files) stages '.planning/', and
+  // when that path is absent on disk the loop takes the `git rm --cached`
+  // branch instead of `git add`.
+  test('a `git rm --cached` timeout in default mode is reported as staging_timeout, POSIX and Windows shapes (#3050)', () => {
+    // Mid-test fixture mutation (simulating an absent '.planning/' on disk),
+    // not teardown; the outer afterEach still runs helpers.cleanup(tmpDir) on
+    // the whole tmpDir.
+    // eslint-disable-next-line local/no-raw-rmsync-in-tests -- see comment above
+    fs.rmSync(path.join(tmpDir, '.planning'), { recursive: true, force: true });
+
+    for (const shape of ['posix', 'windows']) {
+      const { result } = commitWithFailingAdd({
+        cwd: tmpDir,
+        files: undefined,
+        failFor: ['.planning/'],
+        gitVerb: 'rm',
+        stderr: '',
+        timeout: shape,
+      });
+
+      assert.equal(result.reason, 'staging_timeout', `shape=${shape}`);
+      assert.equal(result.failures[0].timed_out, true, `shape=${shape}`);
+    }
+  });
+
   test('an ordinary non-zero git add is NOT reported as a timeout', () => {
     // Boundary: the timeout carve-out must not swallow the ordinary case.
     const { result } = commitWithFailingAdd({
@@ -326,7 +402,7 @@ describe('#2608: commit --files fails closed when git add fails', () => {
   test('successful staging still commits exactly the declared scope', () => {
     const before = headCount(tmpDir);
     fs.writeFileSync(path.join(tmpDir, 'unrelated-wip.txt'), 'wip\n');
-    execFileSync('git', ['add', 'unrelated-wip.txt'], { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', 'unrelated-wip.txt'], { cwd: tmpDir, timeoutMs: GIT_TIMEOUT_MS });
 
     const { result } = commitWithFailingAdd({
       cwd: tmpDir,
@@ -372,7 +448,7 @@ describe('#2608: commit --files fails closed when git add fails', () => {
       failFor: ['.planning/CONCERNS.md'],
     });
 
-    const status = execFileSync('git', ['status', '--porcelain'], { cwd: tmpDir, encoding: 'utf-8' });
+    const status = gitOrThrow(['status', '--porcelain'], { cwd: tmpDir, timeoutMs: GIT_TIMEOUT_MS });
     const stagedAdds = status.split('\n').filter((l) => /^A[ \t]/.test(l));
     assert.deepEqual(stagedAdds, [],
       `no path may remain staged after a staging failure, status:\n${status}`);
@@ -382,7 +458,7 @@ describe('#2608: commit --files fails closed when git add fails', () => {
     // Boundary: the reset must touch only what THIS call staged. Unstaging a
     // path the caller staged themselves would destroy their work.
     fs.writeFileSync(path.join(tmpDir, 'caller-staged.txt'), 'mine\n');
-    execFileSync('git', ['add', 'caller-staged.txt'], { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', 'caller-staged.txt'], { cwd: tmpDir, timeoutMs: GIT_TIMEOUT_MS });
 
     commitWithFailingAdd({
       cwd: tmpDir,
@@ -390,7 +466,7 @@ describe('#2608: commit --files fails closed when git add fails', () => {
       failFor: ['.planning/CONCERNS.md'],
     });
 
-    const status = execFileSync('git', ['status', '--porcelain'], { cwd: tmpDir, encoding: 'utf-8' });
+    const status = gitOrThrow(['status', '--porcelain'], { cwd: tmpDir, timeoutMs: GIT_TIMEOUT_MS });
     assert.match(status, /^A[ \t]+caller-staged\.txt$/m,
       `the caller's own staged file must survive the rollback, status:\n${status}`);
   });
@@ -415,7 +491,7 @@ describe('#2608: commit --files fails closed when git add fails', () => {
   test('a failed default-mode git add blocks --amend too', () => {
     // --amend has no carve-out: amending on top of a failed staging would
     // rewrite the tip without the changes the caller asked for.
-    const before = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim();
+    const before = gitOrThrow(['rev-parse', 'HEAD'], { cwd: tmpDir, timeoutMs: GIT_TIMEOUT_MS }).trim();
     const { result, gitCalls } = commitWithFailingAdd({
       cwd: tmpDir,
       files: undefined,
@@ -426,7 +502,7 @@ describe('#2608: commit --files fails closed when git add fails', () => {
     assert.equal(result.reason, 'staging_failed');
     assert.ok(!gitCalls.some((a) => a[0] === 'commit'), 'git commit --amend must not run');
     assert.equal(
-      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: tmpDir, encoding: 'utf-8' }).trim(),
+      gitOrThrow(['rev-parse', 'HEAD'], { cwd: tmpDir, timeoutMs: GIT_TIMEOUT_MS }).trim(),
       before,
       'HEAD must not be rewritten when staging failed',
     );

@@ -12,8 +12,9 @@
  * already descriptor-driven except for two residual `isCodebuddy` branches
  * in bin/install.js:
  *   1. a duplicate `commands/` slash-command output report (byte-identical
- *      to the generic `hostBehaviors.reportCommandsDir` block already used
- *      by Cursor) — folded onto `hostBehaviors.reportCommandsDir` and deleted.
+ *      to the generic `hostBehaviors.reportCommandsDir` block) — folded onto
+ *      `hostBehaviors.reportCommandsDir` and deleted. Cursor retired that
+ *      parallel commands surface later in #2644.
  *   2. a dead legacy agent-converter dispatch arm in the inline agent-copy
  *      loop, unreachable because codebuddy is a member of
  *      `_DESCRIPTOR_AGENTS_RUNTIMES` (installRuntimeArtifacts already wrote
@@ -37,7 +38,8 @@ const { test, before } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 
 const {
   profileOf,
@@ -53,10 +55,17 @@ const { walk, runMinimalInstall, BUILD_SCRIPT } = require('./helpers/install-sha
 const DESC = path.join(__dirname, '..', 'capabilities', 'codebuddy', 'capability.json');
 const CODEBUDDY_CAP = JSON.parse(fs.readFileSync(DESC, 'utf8'));
 const CODEBUDDY_AXES = CODEBUDDY_CAP.runtime.hostIntegration;
+// scripts/build-hooks.js copies pre-built hook files into hooks/dist and
+// syntax-checks them with vm — it does not compile/bundle anything. See
+// tests/helpers/timeouts.cjs for the class-norm justification.
+const { BUILD_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 // hooks/dist is gitignored and built (mirrors golden-install-parity harness).
 before(() => {
-  execFileSync(process.execPath, [BUILD_SCRIPT], { encoding: 'utf-8', stdio: 'pipe' });
+  throwIfFailed(
+    runNode([BUILD_SCRIPT], { timeoutMs: BUILD_TIMEOUT_MS }),
+    `node ${BUILD_SCRIPT}`,
+  );
 });
 
 test('CodeBuddy classifies as the declarative-cli reference profile (profileOf)', () => {

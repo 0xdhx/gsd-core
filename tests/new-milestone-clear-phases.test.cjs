@@ -10,10 +10,11 @@
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
-const { execSync, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, createTempGitProject, cleanup } = require('./helpers.cjs');
+const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
+const { gitOrThrow, throwIfFailed } = require('./helpers/git-fixture.cjs');
+const { runGsdTools, createTempProject, createTempGitProject, cleanup, readFileNormalized } = require('./helpers.cjs');
 const { writeState } = require('./fixtures/index.cjs');
 
 describe('phases clear command', () => {
@@ -176,7 +177,7 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     fs.mkdirSync(phase1, { recursive: true });
     fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan (staged)');
     // Stage the file but do not commit
-    execSync('git add .planning/phases/', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', '.planning/phases/'], { cwd: tmpDir });
 
     const result = runGsdTools('phases clear --confirm', tmpDir);
     assert.ok(!result.success, 'phases clear should fail when staged-but-uncommitted changes exist');
@@ -207,8 +208,8 @@ describe('phases clear: uncommitted-changes guard (#1447)', () => {
     fs.mkdirSync(phase1, { recursive: true });
     fs.writeFileSync(path.join(phase1, 'PLAN.md'), '# Plan (committed)');
     // Commit the phase files
-    execSync('git add .planning/phases/', { cwd: tmpDir, stdio: 'pipe' });
-    execSync('git commit -m "add phase"', { cwd: tmpDir, stdio: 'pipe' });
+    gitOrThrow(['add', '.planning/phases/'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'add phase'], { cwd: tmpDir });
 
     const result = runGsdTools('phases clear --confirm', tmpDir);
     assert.ok(result.success, `should succeed when phase files are committed: ${result.error}`);
@@ -574,7 +575,42 @@ test('execute-phase.md: awk extracts resolves_phase from YAML frontmatter', () =
 // ────────────────────────────────────────────────────────────────────────
 describe('new-milestone.md: workstream-aware PROJECT.md guard (#2308)', () => {
   const workflowPath = path.join(__dirname, '..', 'gsd-core', 'workflows', 'new-milestone.md');
-  const content = fs.readFileSync(workflowPath, 'utf8');
+  // readFileNormalized() strips \r\n -> \n before either extractor below slices
+  // a fence out of `content` — both fences are handed to execFileSync('bash', ...)
+  // in runStep1/runStep6Commit, so an un-normalized read on a Windows checkout
+  // would break bash mid-script (DEFECT.TEST-SHELL-PIPELINE-NONPORTABLE, #2650).
+  const content = readFileNormalized(workflowPath);
+
+  // #2994 fragmentization moved the 7.5 reset-phase-safety section (including
+  // its "/gsd:new-milestone --reset-phase-numbers ${GSD_WS}" rerun hint) out
+  // of new-milestone.md into gsd-core/workflows/new-milestone/steps/reset-phase-safety.md
+  // behind a section marker. Only the routing-interpolation test below needs
+  // that moved text, so it reads host + step file combined instead of
+  // widening `content` (used for host-only fence extraction elsewhere in
+  // this describe block).
+  const contentWithSteps = content + '\n' + fs.readFileSync(
+    path.join(__dirname, '..', 'gsd-core', 'workflows', 'new-milestone', 'steps', 'reset-phase-safety.md'),
+    'utf8'
+  );
+
+  // #2994 final slice: Step 4's "Part A" milestone-state write moved out of
+  // new-milestone.md into gsd-core/workflows/new-milestone/steps/
+  // project-md-milestone-write.md behind a section marker. The
+  // "step 4 scopes the workstream skip" test below asserts on Part A's
+  // actual body (GSD_WS mentions, the workstream skip description) — rather
+  // than widen `content` for every test in this block, SPLICE the step
+  // file's content into the marker's exact position so partAIdx/partBIdx
+  // position-sensitive slicing below still works. A non-vacuity check
+  // (blank the step file, confirm the splice fails, restore) backs this.
+  const PROJECT_MD_STEP_PATH = path.join(
+    __dirname, '..', 'gsd-core', 'workflows', 'new-milestone', 'steps', 'project-md-milestone-write.md'
+  );
+  const PROJECT_MD_MARKER_RE = /<!-- gsd:section id="project-md-milestone-write"[\s\S]*?<!-- \/gsd:section -->/;
+  function contentWithProjectMdStepSpliced() {
+    const stepBody = fs.readFileSync(PROJECT_MD_STEP_PATH, 'utf8');
+    assert.match(content, PROJECT_MD_MARKER_RE, 'project-md-milestone-write marker not found in new-milestone.md');
+    return content.replace(PROJECT_MD_MARKER_RE, stepBody);
+  }
 
   // Locate the first ```bash fence strictly between two headings.
   function extractFenceBetween(markdown, startHeading, endHeading) {
@@ -610,7 +646,9 @@ describe('new-milestone.md: workstream-aware PROJECT.md guard (#2308)', () => {
     function runStep1(argumentsValue) {
       const script = `ARGUMENTS=${JSON.stringify(argumentsValue)}\n${step1Fence}\n` +
         'printf \'GSD_WS=[%s]\\nMILESTONE_ARG=[%s]\\n\' "$GSD_WS" "$MILESTONE_ARG"';
-      const out = execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+      const r = runHookSeam('-c', [script], { interpreter: 'bash' });
+      throwIfFailed(r, 'bash <step1 fence>');
+      const out = r.stdout;
       return {
         gsdWs: /GSD_WS=\[(.*)\]/.exec(out)[1],
         milestoneArg: /MILESTONE_ARG=\[(.*)\]/.exec(out)[1],
@@ -641,7 +679,9 @@ describe('new-milestone.md: workstream-aware PROJECT.md guard (#2308)', () => {
     function runStep6Commit(argumentsValue) {
       const gsdRunStub = 'gsd_run() { printf "%s\\n" "gsd_run_call:$*"; }\n';
       const script = `ARGUMENTS=${JSON.stringify(argumentsValue)}\n${gsdRunStub}${step6CommitFence}`;
-      return execFileSync('bash', ['-c', script], { encoding: 'utf8' });
+      const r = runHookSeam('-c', [script], { interpreter: 'bash' });
+      throwIfFailed(r, 'bash <step6 commit fence>');
+      return r.stdout;
     }
 
     // Step 4 Part A's guard — not this commit — is what protects the shared
@@ -673,7 +713,7 @@ describe('new-milestone.md: workstream-aware PROJECT.md guard (#2308)', () => {
 
   test('routing interpolations still propagate ${GSD_WS} at the documented lines', () => {
     assert.ok(
-      content.includes('/gsd:new-milestone --reset-phase-numbers ${GSD_WS}'),
+      contentWithSteps.includes('/gsd:new-milestone --reset-phase-numbers ${GSD_WS}'),
       'reset-phase-numbers rerun hint should propagate ${GSD_WS}'
     );
     assert.ok(
@@ -695,10 +735,11 @@ describe('new-milestone.md: workstream-aware PROJECT.md guard (#2308)', () => {
   });
 
   test('step 4 scopes the workstream skip to the milestone-state write only; Evolution repair always runs (finding 2)', () => {
-    const step4Idx = content.indexOf('## 4. Update PROJECT.md');
-    const step5Idx = content.indexOf('## 5. Update STATE.md');
+    const splicedContent = contentWithProjectMdStepSpliced();
+    const step4Idx = splicedContent.indexOf('## 4. Update PROJECT.md');
+    const step5Idx = splicedContent.indexOf('## 5. Update STATE.md');
     assert.ok(step4Idx !== -1 && step5Idx !== -1 && step4Idx < step5Idx, 'steps 4 and 5 should be locatable');
-    const step4Body = content.slice(step4Idx, step5Idx);
+    const step4Body = splicedContent.slice(step4Idx, step5Idx);
 
     const partAIdx = step4Body.indexOf('Part A');
     const partBIdx = step4Body.indexOf('Part B');

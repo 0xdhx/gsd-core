@@ -4,8 +4,9 @@
  * Shared helpers and constants for the install test suites and the
  * golden-install-parity harness. Provides the install/uninstall drivers
  * (walk, runMinimalInstall, RUNTIME_META, BUILD_SCRIPT) and the single
- * canonical golden-parity manifest builder (buildParityManifest) plus its
- * exclusion constants (VOLATILE_FILES, HOOK_CONFIG_FILES,
+ * canonical golden-parity manifest builder (buildParityManifest), its sibling
+ * byte-size builder over the same normalized walk (buildEmittedSizes, #2931),
+ * plus their shared exclusion constants (VOLATILE_FILES, HOOK_CONFIG_FILES,
  * HOOK_CONFIG_RELATIVE_PATHS, EXCLUDED_PREFIXES). Imported by many
  * tests/*.test.cjs and by scripts/gen-golden-install-parity-zcode.cjs — do
  * NOT re-declare the builder/constants inline (enforced by
@@ -16,8 +17,9 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { spawnSync } = require('node:child_process');
 const assert = require('node:assert/strict');
+
+const { runNode } = require('./process-seam.cjs');
 
 const {
   resolveRuntimeArtifactLayout,
@@ -25,6 +27,12 @@ const {
 
 const INSTALL_SCRIPT = path.join(__dirname, '..', '..', 'bin', 'install.js');
 const MANIFEST_NAME = 'gsd-file-manifest.json';
+
+// #3145: class-norm timeout (bounds the previously-unbounded spawnSync in
+// runMinimalInstall) — not a per-suite value. See helpers/timeouts.cjs for
+// the justification; every one of install-shared.cjs's 37+ importers
+// inherits this value, so it must stay generous rather than tight.
+const { INSTALL_TIMEOUT_MS } = require('./timeouts.cjs');
 
 const BUILD_SCRIPT = path.join(__dirname, '..', '..', 'scripts', 'build-hooks.js');
 const HOOKS_DIST = path.join(__dirname, '..', '..', 'hooks', 'dist');
@@ -36,6 +44,7 @@ const EXPECTED_SH_HOOKS = [
 ];
 
 const EXPECTED_ALL_HOOKS = [
+  'gsd-agent-isolation-guard.js',
   'gsd-check-update.js',
   'gsd-config-reload.js',
   'gsd-context-monitor.js',
@@ -183,7 +192,11 @@ const HOOK_CONFIG_FILES = new Set(['settings.json', 'settings.local.json', 'hook
 // same temp root used as --config-dir, collapsing the two into one directory
 // for the isolated test run. So it is excluded by its exact relative path
 // under that collapsed root, not by basename.
-const HOOK_CONFIG_RELATIVE_PATHS = new Set(['.kimi/config.toml']);
+// Both Kimi products' native config.toml embeds a platform-varying node-runner
+// command, so neither belongs in the golden-tracked emitted manifest. kimi-code
+// resolves its own root since #2755 — listing only `.kimi/config.toml` here made
+// kimi-code's config.toml newly manifest-visible and unattributable.
+const HOOK_CONFIG_RELATIVE_PATHS = new Set(['.kimi/config.toml', '.kimi-code/config.toml']);
 
 // Path prefixes excluded from the parity manifest. `gsd-core/bin/lib/` holds the
 // tsc-built runtime artifacts (compiled from src/*.cts) that the install COPIES
@@ -199,9 +212,11 @@ const EXCLUDED_PREFIXES = ['gsd-core/bin/lib/'];
 
 // ─── Helper functions ─────────────────────────────────────────────────────────
 
-function stripAnsi(str) {
+const ANSI_ESCAPE = String.fromCharCode(27);
+const ANSI_SGR_RE = new RegExp(`${ANSI_ESCAPE}\\[[0-9;]*m`, 'g');
 
-  return str.replace(/\x1b\[[0-9;]*m/g, '');
+function stripAnsi(str) {
+  return str.replace(ANSI_SGR_RE, '');
 }
 
 // A version string can itself contain regex metacharacters (`.`, and — via
@@ -308,15 +323,34 @@ function walk(dir) {
  *   (#2891 review FINDING 5).
  * @returns {{ [rel: string]: string }}
  */
-function buildParityManifest(configDir, root, opts = {}) {
-  // `opts = {}` only substitutes for an OMITTED (or explicit `undefined`) third
-  // argument — `null` and other non-object values sail past a default parameter and
-  // would otherwise reach the `in` check below and throw a raw, unhelpful
-  // `TypeError: Cannot convert undefined or null to object` (#2891 review FINDING 5).
-  // Fail with a clear, attributable message instead.
+/**
+ * Shared walk+validate+normalize core for buildParityManifest and
+ * buildEmittedSizes. Both need the EXACT same file set (VOLATILE_FILES,
+ * HOOK_CONFIG_FILES, HOOK_CONFIG_RELATIVE_PATHS, EXCLUDED_PREFIXES) and the
+ * exact same `<HOME>`/version-stamp normalized content — one hashes it, the
+ * other measures its byte length — so the coverage and the normalization live
+ * in ONE place instead of being copy-pasted across the two (the copy-paste
+ * itself is the drift risk this function exists to remove; see #2931 brief).
+ *
+ * @param {string} configDir
+ * @param {string} root
+ * @param {object} opts - same shape as buildParityManifest's `opts` (see its
+ *   JSDoc for the full pkgVersion/opts contract this validates).
+ * @param {string} callerName - used only in thrown error messages, so a
+ *   caller-facing error still names the PUBLIC function the caller invoked
+ *   (`buildParityManifest` / `buildEmittedSizes`), not this internal helper.
+ * @returns {{ [rel: string]: string }} rel -> normalized utf8 content, sorted keys.
+ */
+function collectNormalizedEmittedFiles(configDir, root, opts, callerName) {
+  // `opts = {}` at each public call site only substitutes for an OMITTED (or
+  // explicit `undefined`) third argument — `null` and other non-object values
+  // sail past that default parameter and would otherwise reach the `in` check
+  // below and throw a raw, unhelpful `TypeError: Cannot convert undefined or
+  // null to object` (#2891 review FINDING 5). Fail with a clear, attributable
+  // message instead.
   if (opts === null || typeof opts !== 'object' || Array.isArray(opts)) {
     throw new Error(
-      `buildParityManifest: opts must be a plain object or omitted, got ${JSON.stringify(opts)}.`
+      `${callerName}: opts must be a plain object or omitted, got ${JSON.stringify(opts)}.`
     );
   }
 
@@ -345,7 +379,7 @@ function buildParityManifest(configDir, root, opts = {}) {
   // exactly the cross-tree mis-attribution bug this option exists to fix (#2891).
   if (typeof pkgVersion !== 'string' || pkgVersion.length === 0 || !SEMVER_ISH_RE.test(pkgVersion)) {
     throw new Error(
-      `buildParityManifest: pkgVersion must be a non-empty semver-ish string ` +
+      `${callerName}: pkgVersion must be a non-empty semver-ish string ` +
       `(MAJOR.MINOR.PATCH, optional -prerelease/+build), got ${JSON.stringify(pkgVersion)}. ` +
       'Pass the version of the tree that produced the emitted content at configDir.'
     );
@@ -374,10 +408,10 @@ function buildParityManifest(configDir, root, opts = {}) {
     if (EXCLUDED_PREFIXES.some((p) => rel.startsWith(p))) continue;
 
     const content = fs.readFileSync(full);
-    // Normalize every occurrence of the temp root so hashes are stable across runs.
+    // Normalize every occurrence of the temp root so results are stable across runs.
     // Also normalize the PRODUCING tree's package version at its known stamp sites
     // (pkgVersion, defaulted to this checkout's own) — via the ANCHORED
-    // normalizeVersionStamps, not a blind substring replace — so the golden survives
+    // normalizeVersionStamps, not a blind substring replace — so results survive
     // `npm version` bumps (the rc release step bakes the new version into hook files
     // before running tests) and, for a cross-tree caller, so the version stamp baked
     // in by a DIFFERENT tree's installer doesn't masquerade as a real content diff,
@@ -390,8 +424,7 @@ function buildParityManifest(configDir, root, opts = {}) {
         .split(root).join('<HOME>'),
       pkgVersion,
     );
-    const hash = crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16);
-    unsorted[rel] = hash;
+    unsorted[rel] = normalized;
   }
 
   // Reconstruct with sorted keys for stable JSON serialisation
@@ -400,6 +433,56 @@ function buildParityManifest(configDir, root, opts = {}) {
     sorted[key] = unsorted[key];
   }
   return sorted;
+}
+
+function buildParityManifest(configDir, root, opts = {}) {
+  const normalizedByRel = collectNormalizedEmittedFiles(configDir, root, opts, 'buildParityManifest');
+  const out = {};
+  for (const rel of Object.keys(normalizedByRel)) {
+    out[rel] = crypto.createHash('sha256').update(normalizedByRel[rel]).digest('hex').slice(0, 16);
+  }
+  return out;
+}
+
+/**
+ * Build a deterministic byte-size map for all non-volatile files under configDir,
+ * measured on the SAME `<HOME>`/version-normalized content buildParityManifest
+ * hashes (see collectNormalizedEmittedFiles — one walk, one normalization, two
+ * projections, so the two functions can never diverge on which files they cover).
+ *
+ * Byte counting is LF-normalized (CRLF -> LF, stripped BEFORE the byte count),
+ * matching RULESET.WORKFLOW_SIZE_BUDGET ("BYTES not lines, LF-normalized" per
+ * #683/#717) and mirroring scripts/workflow-size.cjs's `lfByteCount`. That helper
+ * is NOT reused directly here: `lfByteCount(filePath)` re-reads a file from disk
+ * by path and has no `<HOME>`/version normalization, whereas this must count the
+ * already-normalized IN-MEMORY string collectNormalizedEmittedFiles produced — a
+ * re-read would both duplicate I/O and measure the wrong (unnormalized, raw
+ * temp-root-embedding) bytes. Only the one-line CRLF-strip + `Buffer.byteLength`
+ * formula is duplicated, not a file-reading helper.
+ *
+ * NOTE: this counts the NORMALIZED content (post `<HOME>` substitution and
+ * version-stamp normalization), not raw on-disk bytes. That is deliberate:
+ * determinism is the whole point of this map — a caller comparing sizes across
+ * machines/CI runs/temp dirs needs a value that does not vary with the temp
+ * root's length. Consequence: for any file whose content embeds the temp root
+ * (e.g. `@`-referenced absolute paths), this UNDERSTATES real on-disk size by
+ * roughly `(len(configDir) - len('<HOME>')) * occurrences`. A future consumer
+ * enforcing a byte cap close to a real hard limit must carry its own margin for
+ * this gap — it is not folded in here.
+ *
+ * @param {string} configDir - absolute path to the installed runtime config dir
+ * @param {string} root      - temp root path to replace with '<HOME>'
+ * @param {object} [opts]    - same shape/guards as buildParityManifest's `opts`
+ *   (see its JSDoc for the full pkgVersion/opts contract).
+ * @returns {{ [rel: string]: number }}
+ */
+function buildEmittedSizes(configDir, root, opts = {}) {
+  const normalizedByRel = collectNormalizedEmittedFiles(configDir, root, opts, 'buildEmittedSizes');
+  const out = {};
+  for (const rel of Object.keys(normalizedByRel)) {
+    out[rel] = Buffer.byteLength(normalizedByRel[rel].replace(/\r\n/g, '\n'), 'utf8');
+  }
+  return out;
 }
 
 /** Sorted list of emitted relative paths for a runtime install (file-set snapshot,
@@ -452,15 +535,25 @@ function installerEnv(overrides = {}) {
  *   measure a DIFFERENT tree's installer — e.g. the differential baseline builder
  *   pointing at a `git worktree` checked out at the base ref, so the emitted manifest it
  *   produces reflects that ref's own installer code, not the PR checkout's.
+ * @param {string} [opts.root] - Reuse an existing sandbox HOME instead of creating one.
+ *   When supplied, the caller owns its lifetime and it is NOT removed on failure.
+ * @param {object} [opts.extraEnv] - Extra environment variables merged over the
+ *   installer env (after HOME/USERPROFILE), e.g. a runtime's config-home override.
  */
-function runMinimalInstall({ runtime, scope, extraArgs = [], installScript = INSTALL_SCRIPT }) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-${runtime}-${scope}-`));
+function runMinimalInstall({ runtime, scope, extraArgs = [], installScript = INSTALL_SCRIPT, root: providedRoot = null, extraEnv = {} }) {
+  const ownsRoot = providedRoot === null;
+  const root = providedRoot ?? fs.mkdtempSync(path.join(os.tmpdir(), `gsd-${runtime}-${scope}-`));
   try {
     const LOCAL_DIR_NAME = {
       claude: '.claude', opencode: '.opencode', kilo: '.kilo',
       codex: '.codex', copilot: '.github', antigravity: '.agents', cursor: '.cursor',
       windsurf: '.windsurf', augment: '.augment', trae: '.trae', qwen: '.qwen',
       codebuddy: '.codebuddy', cline: '.',
+      // #3023: pi was in RUNTIME_META but absent here, so `scope: 'local'` for pi
+      // resolved `path.join(root, undefined)` and threw — no local-scope pi install
+      // could ever be exercised. pi's local config dir is `.pi`
+      // (capabilities/pi/capability.json runtime.localConfigDir).
+      pi: '.pi',
     };
     let configDir;
     let cwd = process.cwd();
@@ -474,19 +567,34 @@ function runMinimalInstall({ runtime, scope, extraArgs = [], installScript = INS
       configDir = runtime === 'cline' ? root : path.join(root, LOCAL_DIR_NAME[runtime]);
     }
     args.push(...extraArgs);
-    const result = spawnSync(process.execPath, args, {
-      cwd, encoding: 'utf8',
-      env: installerEnv({ HOME: root, USERPROFILE: root }),
+    const result = runNode(args, {
+      cwd,
+      env: installerEnv({ HOME: root, USERPROFILE: root, ...extraEnv }),
+      timeoutMs: INSTALL_TIMEOUT_MS,
     });
-    assert.strictEqual(result.status, 0,
-      `installer exited with status ${result.status} for ${runtime} --${scope}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
+    // Kept as a hand-rolled assert (rather than throwIfFailed from
+    // git-fixture.cjs) so the embedded stdout+stderr survives verbatim —
+    // that is the whole diagnostic value of this message for a failing
+    // install, and throwIfFailed's message only carries a trimmed stderr.
+    // `result.exitCode` (never `result.status` — the seam has no such key)
+    // is `null` for a non-EXITED outcome (TIMED_OUT/KILLED/BUFFER_OVERFLOW/
+    // SPAWN_FAILED), so `outcome`/`timedOut`/`signal` are folded into the
+    // message too: a bare "expected null to equal 0" would not tell anyone
+    // the installer never actually exited.
+    assert.strictEqual(result.exitCode, 0,
+      `installer exited with status ${result.exitCode} (outcome=${result.outcome}` +
+      `${result.timedOut ? ', timedOut=true' : ''}${result.signal ? `, signal=${result.signal}` : ''}) ` +
+      `for ${runtime} --${scope}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
     const manifestPath = path.join(configDir, MANIFEST_NAME);
     const manifest = fs.existsSync(manifestPath)
       ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
       : null;
     return { manifest, configDir, root, stdout: result.stdout, stderr: result.stderr };
   } catch (err) {
-    fs.rmSync(root, { recursive: true, force: true });
+    // Only reclaim a root this call created. A caller-supplied root may be
+    // shared across several installs (e.g. two runtimes into one HOME), so
+    // tearing it down here would destroy the caller's other fixtures.
+    if (ownsRoot) fs.rmSync(root, { recursive: true, force: true });
     throw err;
   }
 }
@@ -599,6 +707,7 @@ module.exports = {
   stripAnsi,
   walk,
   buildParityManifest,
+  buildEmittedSizes,
   buildInstallTree,
   simulateHookCopy,
   installerEnv,

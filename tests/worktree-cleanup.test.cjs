@@ -187,10 +187,11 @@ describe('bug #2924: worktree HEAD attachment + destructive recovery', () => {
       const scripts = codeBlocks.map(({ body }) => body).join('\n');
       // Allow-list must reference the canonical Claude Code worktree-agent-<id>
       // namespace via a regex assertion (grep -Eq '^worktree-agent-...').
-      const allowListRe = /grep\s+-Eq?\s+'\^\(worktree-\)\?agent-/;
+      // #3021: allow-list now includes worktree-wf_* alongside agent-*/worktree-agent-*
+      const allowListRe = /grep\s+-Eq?\s+'\^\(\(worktree-\)\?agent-\|worktree-wf_/;
       assert.ok(
         allowListRe.test(scripts),
-        'worktree_branch_check must enforce a positive allow-list matching ^(worktree-)?agent-* (#2924 hardening)'
+        'worktree_branch_check must enforce a positive allow-list matching ^((worktree-)?agent-|worktree-wf_) (#2924/#3021 hardening)'
       );
     });
 
@@ -322,16 +323,24 @@ describe('bug #2924: worktree HEAD attachment + destructive recovery', () => {
     });
 
     test('block enforces positive worktree-agent-* allow-list (#2924 hardening)', () => {
-      const allowListRe = /grep\s+-Eq?\s+'\^\(worktree-\)\?agent-/;
+      const allowListRe = /grep\s+-Eq?\s+'\^\(\(worktree-\)\?agent-\|worktree-wf_/;
       assert.ok(
         allowListRe.test(block),
-        'quick.md worktree_branch_check must enforce a positive allow-list matching ^(worktree-)?agent-* (#2924 hardening)'
+        'quick.md worktree_branch_check must enforce a positive allow-list matching ^((worktree-)?agent-|worktree-wf_) (#2924/#3021 hardening)'
       );
     });
   });
 
   describe('quick.md pre-dispatch plan commit no longer hard-codes --no-verify', () => {
-    const content = fs.readFileSync(QUICK_PATH, 'utf-8');
+    // #2994 fragmentization moved the pre-dispatch plan commit block out of
+    // quick.md into gsd-core/workflows/quick/steps/worktree-pre-dispatch-commit.md
+    // behind a section marker. Read host + step file combined so the fenced
+    // code block search below still finds it.
+    const content = fs.readFileSync(QUICK_PATH, 'utf-8') +
+      '\n' + fs.readFileSync(
+        path.join(REPO_ROOT, 'gsd-core', 'workflows', 'quick', 'steps', 'worktree-pre-dispatch-commit.md'),
+        'utf-8'
+      );
     const codeBlocks = extractFencedCodeBlocks(content);
     // Find the bash block containing the pre-dispatch plan commit
     const target = codeBlocks.find(({ body }) =>
@@ -404,10 +413,10 @@ describe('bug #2924: worktree HEAD attachment + destructive recovery', () => {
     test('step 0 enforces positive worktree-agent-* allow-list (#2924 hardening)', () => {
       const codeBlocks = extractFencedCodeBlocks(block);
       const scripts = codeBlocks.map(({ body }) => body).join('\n');
-      const allowListRe = /grep\s+-Eq?\s+'\^\(worktree-\)\?agent-/;
+      const allowListRe = /grep\s+-Eq?\s+'\^\(\(worktree-\)\?agent-\|worktree-wf_/;
       assert.ok(
         allowListRe.test(scripts),
-        'task_commit_protocol step 0 must enforce a positive allow-list matching ^(worktree-)?agent-* in addition to the protected-ref deny-list (#2924 hardening)'
+        'task_commit_protocol step 0 must enforce a positive allow-list matching ^((worktree-)?agent-|worktree-wf_) in addition to the protected-ref deny-list (#2924/#3021 hardening)'
       );
     });
   });
@@ -1300,10 +1309,17 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { gitOrThrow, throwIfFailed } = require('./helpers/git-fixture.cjs');
 
 const EXECUTE_PHASE_MD = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md');
+
+// 30000ms: git plumbing (init/config/add/commit/worktree/rev-parse) against a
+// small mkdtemp fixture repo, and a `node -e <manifest-reader>` one-liner
+// extracted from the shipped workflow — well over any observed duration for
+// either class of call in this bug-630 block.
+const BUG_630_TIMEOUT_MS = 30_000;
 
 function readMd() {
   return fs.readFileSync(EXECUTE_PHASE_MD, 'utf8');
@@ -1321,11 +1337,17 @@ function extractManifestReaderScript() {
 }
 
 function git(cwd, args) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
+  return gitOrThrow(args, { cwd, timeoutMs: BUG_630_TIMEOUT_MS }).trim();
+}
+
+// runNode never throws; the shipped manifest-reader one-liner is expected to
+// exit cleanly (it emits either a resolved path or nothing — never an
+// error), so a non-clean exit here is a genuine defect and must still abort
+// the test loudly, matching the pre-migration execFileSync throw.
+function runManifestReaderOrThrow(args, opts) {
+  const r = runNode(args, opts);
+  throwIfFailed(r, `node ${args.join(' ')}`);
+  return r.stdout;
 }
 
 // Canonicalize a path the way the OS does. On Windows, os.tmpdir() can yield an 8.3
@@ -1409,10 +1431,10 @@ describe('bug #630 — wave-cleanup pins to the orchestrator root, not git-workt
 
       // Run the EXACT shipped reader one-liner.
       const script = extractManifestReaderScript();
-      const resolved = execFileSync('node', ['-e', script], {
+      const resolved = runManifestReaderOrThrow(['-e', script], {
         cwd: laneDir,
         env: { ...process.env, MANIFEST: manifest },
-        encoding: 'utf8',
+        timeoutMs: BUG_630_TIMEOUT_MS,
       }).trim();
 
       // The buggy first-entry resolution (run from the lane) yields the MAIN checkout.
@@ -1444,9 +1466,9 @@ describe('bug #630 — wave-cleanup pins to the orchestrator root, not git-workt
       // Pre-#630 manifest shape: no orchestrator_root.
       fs.writeFileSync(manifest, JSON.stringify({ worktrees: [] }) + '\n');
       const script = extractManifestReaderScript();
-      const out = execFileSync('node', ['-e', script], {
+      const out = runManifestReaderOrThrow(['-e', script], {
         env: { ...process.env, MANIFEST: manifest },
-        encoding: 'utf8',
+        timeoutMs: BUG_630_TIMEOUT_MS,
       });
       assert.equal(out, '', 'reader must emit nothing for a manifest without orchestrator_root so the first-entry fallback engages');
     } finally {
@@ -1471,14 +1493,19 @@ describe('bug #630 — wave-cleanup pins to the orchestrator root, not git-workt
 
 const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { execSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
-const { cleanup } = require('./helpers.cjs');
+const { cleanup, readFileNormalized } = require('./helpers.cjs');
+const { runHook, runGit } = require('./helpers/process-seam.cjs');
+const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const EXECUTE_PHASE_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'execute-phase.md');
+
+// #3145: class-norm timeout, not a per-suite value — see helpers/timeouts.cjs.
+// The guard itself keeps its separately-justified 30000ms (see runGuard below).
+const { GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 // ---------------------------------------------------------------------------
 // Extract the cwd-drift guard bash block from execute-phase.md
@@ -1497,7 +1524,15 @@ const EXECUTE_PHASE_PATH = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'execut
  * Throws with a clear message if any step fails or sanity checks don't pass.
  */
 function extractCwdGuardBash() {
-  const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
+  // readFileNormalized() strips \r\n -> \n at the read boundary (helpers.cjs;
+  // DEFECT.TEST-SHELL-PIPELINE-NONPORTABLE, #1700/#2650). The `\r?\n` in the
+  // fence regex below only protects the FENCE DELIMITER match — it does
+  // nothing for `\r` characters embedded in the CAPTURED BODY between the
+  // fences, which is what actually reaches spawnSync('bash', ...) in
+  // runGuard(). A prior version of this comment claimed the regex alone was
+  // "CRLF-safe"; it was not — reading through readFileNormalized() first is
+  // what makes the extracted body itself safe to execute on a Windows checkout.
+  const content = readFileNormalized(EXECUTE_PHASE_PATH);
 
   const stepMarker = '<step name="execute_waves">';
   const stepIdx = content.indexOf(stepMarker);
@@ -1515,8 +1550,12 @@ function extractCwdGuardBash() {
 
   const afterDrift = afterStep.slice(driftIdx + driftMarker.length);
 
-  // Extract the first ```bash|sh fenced block using a CRLF-safe regex.
-  // \r?\n tolerates both LF (Unix) and CRLF (Windows autocrlf=true checkouts).
+  // Fence delimiter match. `content` is already LF-only from
+  // readFileNormalized() above, so `\r?\n` here is redundant, not load-bearing
+  // — kept anyway (harmless on already-normalized input) because a bare `\n`
+  // in a markdown-fence-shaped regex trips the local/no-crlf-fragile-split
+  // ESLint rule (it flags the pattern shape statically and cannot see that
+  // this call site's data already passed through the normalizing read).
   const fenceRe = /```(?:bash|sh)\r?\n([\s\S]*?)```/;
   const fenceMatch = fenceRe.exec(afterDrift);
   if (!fenceMatch) {
@@ -1547,11 +1586,17 @@ function extractCwdGuardBash() {
  * Returns { status, stderr }.
  */
 function runGuard(guardBash, cwd) {
-  const result = spawnSync('bash', ['-c', guardBash], {
+  // 30000ms: previously UNBOUNDED (no `timeout` option was passed to
+  // spawnSync). This is the same execute-phase.md cwd-drift guard snippet
+  // exercised by tests/execute-phase-worktree-guard.test.cjs, which already
+  // bounds the identical guard at 30s (a handful of git plumbing calls
+  // against a small fixture repo) — matched here for consistency.
+  const result = runHook('-c', [guardBash], {
+    interpreter: 'bash',
     cwd,
-    encoding: 'utf-8',
+    timeoutMs: 30_000,
   });
-  return { status: result.status, stderr: result.stderr || '' };
+  return { status: result.exitCode, stderr: result.stderr || '' };
 }
 
 // ---------------------------------------------------------------------------
@@ -1565,12 +1610,15 @@ let agentSubdir;      // subdirectory inside agentWtDir
 let legitUnderClaude; // non-agent worktree whose PATH is under .claude/worktrees/
 const dirsToCleanup = [];
 
+// Migrated off a hand-rolled shell string (naive per-arg double-quoting,
+// run through execSync) onto gitOrThrow's argv form directly — every call
+// site below passes a plain args array with no shell metacharacters, so
+// running it as direct argv is behaviorally identical and drops the
+// quoting hazard. Return value stays the RAW, un-trimmed stdout string
+// (gitOrThrow does not trim), matching what execSync returned and what
+// this block's ~10 callers expect.
 function git(cwd, args) {
-  return execSync(`git ${args.map(a => `"${a}"`).join(' ')}`, {
-    cwd,
-    encoding: 'utf-8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  return gitOrThrow(args, { cwd, timeoutMs: GIT_TIMEOUT_MS });
 }
 
 before(() => {
@@ -1677,11 +1725,11 @@ describe('bug #48: orchestrator cwd-drift guard — executable e2e', () => {
       // Verify that git rev-parse --show-toplevel actually fails here.
       // On some systems /tmp itself might be inside a git repo (e.g. if the
       // user's HOME is a git repo). If it resolves, we must skip this test.
-      const check = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+      const check = runGit(['rev-parse', '--show-toplevel'], {
         cwd: nonRepoDir,
-        encoding: 'utf-8',
+        timeoutMs: GIT_TIMEOUT_MS,
       });
-      if (check.status === 0) {
+      if (check.exitCode === 0) {
         t.skip('nonRepoDir unexpectedly resolved to a git repo — skipping');
         return;
       }

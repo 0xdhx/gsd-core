@@ -16,10 +16,11 @@ process.env.GSD_TEST_MODE = '1';
 
 const { test, describe, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const { execFileSync, execSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 
 const { cleanup } = require('./helpers.cjs');
 
@@ -27,21 +28,15 @@ const HOOK_PATH = path.join(__dirname, '..', 'hooks', 'gsd-workflow-guard.js');
 
 function runHook(payload, timeoutMs = 5000) {
   const input = JSON.stringify(payload);
-  try {
-    const stdout = execFileSync(process.execPath, [HOOK_PATH], {
-      input,
-      encoding: 'utf-8',
-      timeout: timeoutMs,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    return { exitCode: 0, stdout: stdout.trim(), stderr: '' };
-  } catch (err) {
-    return {
-      exitCode: err.status ?? 1,
-      stdout: (err.stdout || '').toString().trim(),
-      stderr: (err.stderr || '').toString().trim(),
-    };
+  const r = runHookSeam(HOOK_PATH, [], { input, timeoutMs });
+  if (r.exitCode === 0) {
+    return { exitCode: 0, stdout: r.stdout.trim(), stderr: '' };
   }
+  return {
+    exitCode: r.exitCode ?? 1,
+    stdout: r.stdout.trim(),
+    stderr: r.stderr.trim(),
+  };
 }
 
 describe('#2304: Kimi tool vocabulary engages the workflow guard', () => {
@@ -52,10 +47,12 @@ describe('#2304: Kimi tool vocabulary engages the workflow guard', () => {
 
   before(() => {
     repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-workflow-guard-'));
-    execSync(
-      'git init -q -b worktree-agent-test && git config user.email t@t && git config user.name t',
-      { cwd: repoDir, stdio: 'ignore' }
+    const initResult = runHookSeam(
+      '-c',
+      ['git init -q -b worktree-agent-test && git config user.email t@t && git config user.name t'],
+      { interpreter: 'bash', cwd: repoDir },
     );
+    throwIfFailed(initResult, 'bash -c <git init/config for gsd-workflow-guard fixture>');
     fs.mkdirSync(path.join(repoDir, '.planning'));
     fs.writeFileSync(
       path.join(repoDir, '.planning', 'config.json'),

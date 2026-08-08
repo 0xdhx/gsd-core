@@ -14,6 +14,7 @@ const {
   projectPathActionProjection,
   projectPortableHookBaseDir,
   projectPersistentPathExportActions,
+  PATH_ACTION_REASON,
   projectShellCommandText,
   projectCodexHookTomlCommand,
   shellHookOmitsBashRunner,
@@ -33,6 +34,7 @@ const {
   getGlobalConfigDir,
   getGlobalSkillsBase,
   resolveKimiHooksTomlDir,
+  isRegisteredRuntimeId,
 } = require('../gsd-core/bin/lib/runtime-homes.cjs');
 // getDirName (runtime -> local config dir name) is relocated out of this
 // installer to the runtime-name-policy leaf (ADR-1508 / #1510 Phase 1) so the
@@ -45,7 +47,18 @@ const {
 } = require('../gsd-core/bin/lib/worktree-base-ref.cjs');
 const { resolveInstallPlan } = require('../gsd-core/bin/lib/runtime-config-adapter-registry.cjs');
 const { createImperativeAdapter } = require('../gsd-core/bin/lib/adapter-imperative.cjs');
+// #2930 (epic #1671 Phase 3): strips `<!-- gsd:section -->` markers from
+// workflow .md content at emit time, before any per-runtime rewrite runs.
+const { composeWorkflow } = require('../gsd-core/bin/lib/workflow-fragments.cjs');
+// #3072: THE shared composition-scope predicate (also consumed by the served
+// MCP catalog, src/mcp-catalog.cts) — see the comment at its call site below.
+const { shouldCompose } = require('../gsd-core/bin/lib/mcp-catalog.cjs');
 const runtimeArtifactConversion = require('../gsd-core/bin/lib/runtime-artifact-conversion.cjs');
+// #2544: the CommonJS marker's single source of truth. classifyMarker() backs
+// BOTH ensureCommonJsMarker() (install) and removeCommonJsMarker() (uninstall),
+// so the write side can no longer clobber a package.json the remove side would
+// correctly refuse to delete.
+const { ensureCommonJsMarker, removeCommonJsMarker } = require('../gsd-core/bin/lib/commonjs-marker.cjs');
 // Canonical set of hook files shipped to users. Imported here so writeManifest()
 // records exactly the same set that build-hooks.js copies to hooks/dist/, making
 // the manifest and the installed hooks/ dir structurally identical. Avoids the
@@ -332,6 +345,68 @@ const GSD_WINDSURF_HOOK_SCRIPTS = [
 // here keeps uninstall and the manifest managing it for every OTHER runtime
 // that does receive hooks/lib.
 const GSD_HOOK_LIB_FILES = ['git-cmd.js', 'gsd-graphify-rebuild.sh', 'cursor-workspace.js'];
+
+/**
+ * Directory name GSD stages its shared hook bundle under, inside a runtime's
+ * install root. Defaults to 'hooks' — the name every runtime used before #3023.
+ *
+ * pi (pi.dev) reserves `hooks/` as its own now-deprecated extension location and
+ * prints a migration warning on every startup when one exists, so pi overrides
+ * this via hostBehaviors.sharedHooksDirName. Following pi's advised remediation
+ * (move it into extensions/) would break the adapter's path resolution AND expose
+ * GSD's .js helpers to pi's extension auto-discovery, so the bundle is renamed in
+ * place instead — same depth, so every `__dirname/..`-relative resolution inside
+ * the bundle (e.g. hooks/gsd-context-monitor.js reaching ../gsd-core/bin/) keeps
+ * working.
+ */
+const SHARED_HOOKS_DIR_DEFAULT = 'hooks';
+
+/**
+ * Resolve a runtime's shared-hooks directory name from its descriptor.
+ *
+ * The value is a single path SEGMENT. This string is joined onto a user's config
+ * root and then written to and recursively read, so anything that is not a plain,
+ * non-empty, separator-free, non-dot segment is rejected back to the default —
+ * a descriptor typo must never let the installer write outside the install root.
+ *
+ * The "non-dot" part of that contract is enforced beyond the literal '.' / '..'
+ * segments: an all-dot (or dot-and-whitespace-only) segment is rejected as a
+ * meaningless name, a segment with a trailing dot or space is rejected because
+ * Windows silently strips it at directory-creation time (which would split the
+ * name the installer creates from the name callers probe for), and a Windows
+ * reserved device name (CON, PRN, AUX, NUL, COM1-9, LPT1-9, with or without an
+ * extension) is rejected because it cannot exist as a directory on Windows at
+ * all. These checks are unconditional on every platform: the descriptor is
+ * authored once and shipped everywhere, so a value invalid on Windows must be
+ * rejected identically on Linux/macOS, or the install and its fixtures disagree
+ * cross-platform.
+ *
+ * @param {string} runtime
+ * @returns {string}
+ */
+function resolveSharedHooksDirName(runtime) {
+  const raw = _hostBehaviors(runtime).sharedHooksDirName;
+  if (typeof raw !== 'string') return SHARED_HOOKS_DIR_DEFAULT;
+  const name = raw.trim();
+  if (name === '') return SHARED_HOOKS_DIR_DEFAULT;
+  if (name === '.' || name === '..') return SHARED_HOOKS_DIR_DEFAULT;
+  // All-dot or dot+whitespace segments ('...', '. .') are not meaningful
+  // directory names and are almost certainly a descriptor typo.
+  if (name.replace(/[.\s]/g, '') === '') return SHARED_HOOKS_DIR_DEFAULT;
+  // Windows silently strips a trailing dot or space at creation time, so the
+  // directory the installer creates would not match the name the adapter
+  // probes for — a split-brain that only reproduces off-Linux.
+  if (/[. ]$/.test(name)) return SHARED_HOOKS_DIR_DEFAULT;
+  // Windows reserved device names cannot exist as directories.
+  if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(name)) return SHARED_HOOKS_DIR_DEFAULT;
+  if (name.includes('/') || name.includes('\\')) return SHARED_HOOKS_DIR_DEFAULT;
+  // Belt-and-braces: reject anything path.basename() would reduce, and any
+  // Windows drive/UNC-flavoured value.
+  if (path.basename(name) !== name) return SHARED_HOOKS_DIR_DEFAULT;
+  if (path.isAbsolute(name)) return SHARED_HOOKS_DIR_DEFAULT;
+  if (name.includes('\0')) return SHARED_HOOKS_DIR_DEFAULT;
+  return name;
+}
 
 const CODEX_AGENT_SANDBOX = {
   'gsd-executor': 'workspace-write',
@@ -902,7 +977,7 @@ if (hasUninstall) {
 
 // Show help if requested
 if (hasHelp) {
-  console.log(`  ${yellow}Usage:${reset} npx ${pkg.name} [options]\n\n  ${yellow}Options:${reset}\n    ${cyan}-g, --global${reset}              Install globally (to config directory)\n    ${cyan}-l, --local${reset}               Install locally (to current directory)\n    ${cyan}--claude${reset}                  Install for Claude Code only\n    ${cyan}--opencode${reset}                Install for OpenCode only\n    ${cyan}--kilo${reset}                    Install for Kilo only\n    ${cyan}--codex${reset}                   Install for Codex only\n    ${cyan}--kimi${reset}                    Install for Kimi CLI only\n    ${cyan}--copilot${reset}                 Install for Copilot only\n    ${cyan}--antigravity${reset}             Install for Antigravity only\n    ${cyan}--cursor${reset}                  Install for Cursor only\n    ${cyan}--windsurf${reset}                Install for Windsurf only\n    ${cyan}--augment${reset}                 Install for Augment only\n    ${cyan}--trae${reset}                    Install for Trae only\n    ${cyan}--qwen${reset}                    Install for Qwen Code only\n    ${cyan}--hermes${reset}                  Install for Hermes Agent only\n    ${cyan}--cline${reset}                   Install for Cline only\n    ${cyan}--codebuddy${reset}              Install for CodeBuddy only\n    ${cyan}--zcode${reset}                  Install for ZCode only\n    ${cyan}--all${reset}                     Install for all runtimes\n    ${cyan}-u, --uninstall${reset}           Uninstall GSD (remove all GSD files)\n    ${cyan}-c, --config-dir <path>${reset}   Specify custom config directory\n    ${cyan}-h, --help${reset}                Show this help message\n    ${cyan}--force-statusline${reset}        Replace existing statusline config\n    ${cyan}--portable-hooks${reset}          Emit \$HOME-relative hook paths in settings.json\n                              (for WSL/Docker bind-mount setups; also GSD_PORTABLE_HOOKS=1)\n    ${cyan}--profile=<name>${reset}         Install a named skill profile. Profiles:\n                              core     — ${PROFILES.core.length} main-loop skills incl. phase (~130 desc tokens)\n                              standard — ${PROFILES.standard.length} skills incl. phase, review, config (~700)\n                              full     — all skills (default)\n                              Composable: --profile=core,audit installs union of closures.\n                              Profile is persisted and respected by \`gsd update\`.\n    ${cyan}--minimal${reset}                 Alias for --profile=core (back-compat).\n                              Cuts cold-start overhead from ~12k tokens to ~700.\n                              Alias: --core-only.\n\n  ${yellow}Examples:${reset}\n    ${dim}# Interactive install (prompts for runtime and location)${reset}\n    npx ${pkg.name}\n\n    ${dim}# Install for Claude Code globally${reset}\n    npx ${pkg.name} --claude --global\n\n    ${dim}# Install for Kilo globally${reset}\n    npx ${pkg.name} --kilo --global\n\n    ${dim}# Install for Codex globally${reset}\n    npx ${pkg.name} --codex --global\n\n    ${dim}# Install for Kimi CLI globally${reset}\n    npx ${pkg.name} --kimi --global\n\n    ${dim}# Install for Kimi CLI under ~/.kimi-code${reset}\n    npx ${pkg.name} --kimi --global --config-dir ~/.kimi-code\n\n    ${dim}# Install for Copilot globally${reset}\n    npx ${pkg.name} --copilot --global\n\n    ${dim}# Install for Copilot locally${reset}\n    npx ${pkg.name} --copilot --local\n\n    ${dim}# Install for Antigravity globally${reset}\n    npx ${pkg.name} --antigravity --global\n\n    ${dim}# Install for Antigravity locally${reset}\n    npx ${pkg.name} --antigravity --local\n\n    ${dim}# Install for Cursor globally${reset}\n    npx ${pkg.name} --cursor --global\n\n    ${dim}# Install for Cursor locally${reset}\n    npx ${pkg.name} --cursor --local\n\n    ${dim}# Install for Windsurf globally${reset}\n    npx ${pkg.name} --windsurf --global\n\n    ${dim}# Install for Windsurf locally${reset}\n    npx ${pkg.name} --windsurf --local\n\n    ${dim}# Install for Augment globally${reset}\n    npx ${pkg.name} --augment --global\n\n    ${dim}# Install for Augment locally${reset}\n    npx ${pkg.name} --augment --local\n\n    ${dim}# Install for Trae globally${reset}\n    npx ${pkg.name} --trae --global\n\n    ${dim}# Install for Trae locally${reset}\n    npx ${pkg.name} --trae --local\n\n    ${dim}# Install for Hermes Agent globally${reset}\n    npx ${pkg.name} --hermes --global\n\n    ${dim}# Install for Hermes Agent locally${reset}\n    npx ${pkg.name} --hermes --local\n\n    ${dim}# Install for Cline globally${reset}\n    npx ${pkg.name} --cline --global\n\n    ${dim}# Install for Cline locally${reset}\n    npx ${pkg.name} --cline --local\n\n    ${dim}# Install for CodeBuddy globally${reset}\n    npx ${pkg.name} --codebuddy --global\n\n    ${dim}# Install for CodeBuddy locally${reset}\n    npx ${pkg.name} --codebuddy --local\n\n    ${dim}# Install for all runtimes globally${reset}\n    npx ${pkg.name} --all --global\n\n    ${dim}# Install to custom config directory${reset}\n    npx ${pkg.name} --kilo --global --config-dir ~/.kilo-work\n\n    ${dim}# Install to current project only${reset}\n    npx ${pkg.name} --claude --local\n\n    ${dim}# Uninstall GSD from Cursor globally${reset}\n    npx ${pkg.name} --cursor --global --uninstall\n\n  ${yellow}Notes:${reset}\n    The --config-dir option is useful when you have multiple configurations.\n    It takes priority over CLAUDE_CONFIG_DIR / OPENCODE_CONFIG_DIR / KILO_CONFIG_DIR / CODEX_HOME / KIMI_CONFIG_DIR / COPILOT_CONFIG_DIR / COPILOT_HOME / ANTIGRAVITY_CONFIG_DIR / CURSOR_CONFIG_DIR / WINDSURF_CONFIG_DIR / AUGMENT_CONFIG_DIR / TRAE_CONFIG_DIR / QWEN_CONFIG_DIR / HERMES_HOME / CLINE_CONFIG_DIR / CODEBUDDY_CONFIG_DIR environment variables.\n    Kimi CLI defaults to the first existing generic skills root: ${cyan}~/.config/agents/skills${reset}, then ${cyan}~/.agents/skills${reset}; if neither exists, GSD creates ${cyan}~/.config/agents${reset}.\n    Use ${cyan}--config-dir ~/.kimi-code${reset} or ${cyan}KIMI_CONFIG_DIR=~/.kimi-code${reset} for brand-specific Kimi installs.\n`);
+  console.log(`  ${yellow}Usage:${reset} npx ${pkg.name} [options]\n\n  ${yellow}Options:${reset}\n    ${cyan}-g, --global${reset}              Install globally (to config directory)\n    ${cyan}-l, --local${reset}               Install locally (to current directory)\n    ${cyan}--claude${reset}                  Install for Claude Code only\n    ${cyan}--opencode${reset}                Install for OpenCode only\n    ${cyan}--kilo${reset}                    Install for Kilo only\n    ${cyan}--codex${reset}                   Install for Codex only\n    ${cyan}--kimi${reset}                    Install for Kimi CLI only\n    ${cyan}--copilot${reset}                 Install for Copilot only\n    ${cyan}--antigravity${reset}             Install for Antigravity only\n    ${cyan}--cursor${reset}                  Install for Cursor only\n    ${cyan}--windsurf${reset}                Install for Windsurf only\n    ${cyan}--augment${reset}                 Install for Augment only\n    ${cyan}--trae${reset}                    Install for Trae only\n    ${cyan}--qwen${reset}                    Install for Qwen Code only\n    ${cyan}--hermes${reset}                  Install for Hermes Agent only\n    ${cyan}--cline${reset}                   Install for Cline only\n    ${cyan}--codebuddy${reset}              Install for CodeBuddy only\n    ${cyan}--zcode${reset}                  Install for ZCode only\n    ${cyan}--pi${reset}                      Install for Pi only\n    ${cyan}--gemini${reset}                  Install for Gemini CLI only\n    ${cyan}--all${reset}                     Install for all runtimes\n    ${cyan}-u, --uninstall${reset}           Uninstall GSD (remove all GSD files)\n    ${cyan}-c, --config-dir <path>${reset}   Specify custom config directory\n    ${cyan}-h, --help${reset}                Show this help message\n    ${cyan}--force-statusline${reset}        Replace existing statusline config\n    ${cyan}--portable-hooks${reset}          Emit \$HOME-relative hook paths in settings.json\n                              (for WSL/Docker bind-mount setups; also GSD_PORTABLE_HOOKS=1)\n    ${cyan}--profile=<name>${reset}         Install a named skill profile. Profiles:\n                              core     — ${PROFILES.core.length} main-loop skills incl. phase (~130 desc tokens)\n                              standard — ${PROFILES.standard.length} skills incl. phase, review, config (~700)\n                              full     — all skills (default)\n                              Composable: --profile=core,audit installs union of closures.\n                              Profile is persisted and respected by \`gsd update\`.\n    ${cyan}--minimal${reset}                 Alias for --profile=core (back-compat).\n                              Cuts cold-start overhead from ~12k tokens to ~700.\n                              Alias: --core-only.\n\n  ${yellow}Examples:${reset}\n    ${dim}# Interactive install (prompts for runtime and location)${reset}\n    npx ${pkg.name}\n\n    ${dim}# Install for Claude Code globally${reset}\n    npx ${pkg.name} --claude --global\n\n    ${dim}# Install for Kilo globally${reset}\n    npx ${pkg.name} --kilo --global\n\n    ${dim}# Install for Codex globally${reset}\n    npx ${pkg.name} --codex --global\n\n    ${dim}# Install for Kimi CLI globally${reset}\n    npx ${pkg.name} --kimi --global\n\n    ${dim}# Install for Kimi CLI under ~/.kimi-code${reset}\n    npx ${pkg.name} --kimi --global --config-dir ~/.kimi-code\n\n    ${dim}# Install for Copilot globally${reset}\n    npx ${pkg.name} --copilot --global\n\n    ${dim}# Install for Copilot locally${reset}\n    npx ${pkg.name} --copilot --local\n\n    ${dim}# Install for Antigravity globally${reset}\n    npx ${pkg.name} --antigravity --global\n\n    ${dim}# Install for Antigravity locally${reset}\n    npx ${pkg.name} --antigravity --local\n\n    ${dim}# Install for Cursor globally${reset}\n    npx ${pkg.name} --cursor --global\n\n    ${dim}# Install for Cursor locally${reset}\n    npx ${pkg.name} --cursor --local\n\n    ${dim}# Install for Windsurf globally${reset}\n    npx ${pkg.name} --windsurf --global\n\n    ${dim}# Install for Windsurf locally${reset}\n    npx ${pkg.name} --windsurf --local\n\n    ${dim}# Install for Augment globally${reset}\n    npx ${pkg.name} --augment --global\n\n    ${dim}# Install for Augment locally${reset}\n    npx ${pkg.name} --augment --local\n\n    ${dim}# Install for Trae globally${reset}\n    npx ${pkg.name} --trae --global\n\n    ${dim}# Install for Trae locally${reset}\n    npx ${pkg.name} --trae --local\n\n    ${dim}# Install for Hermes Agent globally${reset}\n    npx ${pkg.name} --hermes --global\n\n    ${dim}# Install for Hermes Agent locally${reset}\n    npx ${pkg.name} --hermes --local\n\n    ${dim}# Install for Cline globally${reset}\n    npx ${pkg.name} --cline --global\n\n    ${dim}# Install for Cline locally${reset}\n    npx ${pkg.name} --cline --local\n\n    ${dim}# Install for CodeBuddy globally${reset}\n    npx ${pkg.name} --codebuddy --global\n\n    ${dim}# Install for CodeBuddy locally${reset}\n    npx ${pkg.name} --codebuddy --local\n\n    ${dim}# Install for all runtimes globally${reset}\n    npx ${pkg.name} --all --global\n\n    ${dim}# Install to custom config directory${reset}\n    npx ${pkg.name} --kilo --global --config-dir ~/.kilo-work\n\n    ${dim}# Install to current project only${reset}\n    npx ${pkg.name} --claude --local\n\n    ${dim}# Uninstall GSD from Cursor globally${reset}\n    npx ${pkg.name} --cursor --global --uninstall\n\n  ${yellow}Notes:${reset}\n    The --config-dir option is useful when you have multiple configurations.\n    It takes priority over CLAUDE_CONFIG_DIR / OPENCODE_CONFIG_DIR / KILO_CONFIG_DIR / CODEX_HOME / KIMI_CONFIG_DIR / COPILOT_CONFIG_DIR / COPILOT_HOME / ANTIGRAVITY_CONFIG_DIR / CURSOR_CONFIG_DIR / WINDSURF_CONFIG_DIR / AUGMENT_CONFIG_DIR / TRAE_CONFIG_DIR / QWEN_CONFIG_DIR / HERMES_HOME / CLINE_CONFIG_DIR / CODEBUDDY_CONFIG_DIR environment variables.\n    Kimi CLI defaults to the first existing generic skills root: ${cyan}~/.config/agents/skills${reset}, then ${cyan}~/.agents/skills${reset}; if neither exists, GSD creates ${cyan}~/.config/agents${reset}.\n    Use ${cyan}--config-dir ~/.kimi-code${reset} or ${cyan}KIMI_CONFIG_DIR=~/.kimi-code${reset} for brand-specific Kimi installs.\n`);
   process.exit(0);
 }
 
@@ -952,6 +1027,31 @@ const applyRuntimeContentRewritesForCommandsInPlace = runtimeArtifactConversion.
 const convertClaudeToAugmentMarkdown = runtimeArtifactConversion.convertClaudeToAugmentMarkdown;
 const convertClaudeCommandToAugmentSkill = runtimeArtifactConversion.convertClaudeCommandToAugmentSkill;
 const convertClaudeAgentToAugmentAgent = runtimeArtifactConversion.convertClaudeAgentToAugmentAgent;
+// #2931 (ADR-1508): the windsurf converter family is single-sourced in the
+// conversion module, same pattern as the #1675 Augment dedup above. install.js
+// re-binds (does not re-define) these so there is exactly one body — the
+// generative-drift hazard the dedup removes. The two private helpers
+// (getWindsurfSkillAdapterHeader, convertSlashCommandsToWindsurfSkillMentions)
+// live only in the conversion module now; they are no longer duplicated here.
+// The reference-identity parity guard lives in
+// tests/install-runtime-artifacts.test.cjs (single-owner reference-identity
+// guard describe block), not tests/enh-1511-rewrite-engine-relocation.test.cjs
+// as the Augment comment above stated — that reference was stale.
+// (All call sites are below this line → no TDZ hazard.)
+const convertClaudeToWindsurfMarkdown = runtimeArtifactConversion.convertClaudeToWindsurfMarkdown;
+const convertClaudeCommandToWindsurfSkill = runtimeArtifactConversion.convertClaudeCommandToWindsurfSkill;
+const convertClaudeCommandToWindsurfWorkflow = runtimeArtifactConversion.convertClaudeCommandToWindsurfWorkflow;
+const convertClaudeAgentToWindsurfAgent = runtimeArtifactConversion.convertClaudeAgentToWindsurfAgent;
+// #2931 (ADR-1508): single-sourced in the conversion module — was a second,
+// unlinked verbatim copy here (used by the local Cursor/Trae/CodeBuddy/Cline
+// converters below), the exact drift class this PR exists to reduce. Verified
+// behaviorally identical (no block / one block / adjacent blocks / whole-
+// content block / unclosed opening tag / nested-looking tags / repeated
+// sequential calls for global-regex lastIndex leakage) before merging.
+// install.js re-binds (does not re-define) — RUNTIME_COMPATIBILITY_BLOCK_RE
+// is no longer duplicated here either. (All call sites are below this line
+// → no TDZ hazard.)
+const applyClaudeCodeBrandSwap = runtimeArtifactConversion.applyClaudeCodeBrandSwap;
 
 function rewriteLegacyManagedNodeHookCommands(settings, absoluteRunner, opts) {
   return hooksSurface.rewriteLegacyManagedNodeHookCommands(settings, absoluteRunner, opts);
@@ -1947,7 +2047,9 @@ function skillFrontmatterName(skillDirName) {
 }
 
 function normalizeClaudeSkillEffort(effort) {
-  return effort === 'xhigh' ? 'max' : effort;
+  // #3039: `max` is rejected by Anthropic models when extended thinking is disabled.
+  if (effort === 'xhigh' || effort === 'max') return 'high';
+  return effort;
 }
 
 /**
@@ -2501,56 +2603,6 @@ function extractFrontmatterField(frontmatter, fieldName) {
   return match[1].trim().replace(/^['"]|['"]$/g, '');
 }
 
-// #2284 finding (b): the `<runtime_compatibility>` block appearing in
-// gsd-core/workflows/{plan-phase,execute-phase}.md is a runtime-COMPARISON
-// table ("**Claude Code:** Uses `Agent(...)`" / "a backgrounded Claude Code
-// agent" / "top-level Claude Code") — every "Claude Code" mention inside it
-// is a COMPARED-RUNTIME LABEL, not a host self-reference. The brand swap
-// below (`Claude Code` → the installing runtime's own display name) is
-// meant only for host self-references; applying it inside this block
-// mislabels the comparison (e.g. Windsurf installs would read "**Windsurf:**
-// Uses `Agent(...)`" describing what is actually Claude Code's behavior).
-// This is cross-cutting across every runtime that brand-swaps workflow
-// content (cursor/windsurf/trae/cline/codebuddy hardcoded; qwen/hermes
-// descriptor-driven via hostBehaviors.brandingRewrites) — confirmed to
-// reproduce on unmodified Windsurf, not Hermes-specific.
-const RUNTIME_COMPATIBILITY_BLOCK_RE = /<runtime_compatibility>[\s\S]*?<\/runtime_compatibility>/g;
-
-/**
- * Rewrite bare "Claude Code" self-references in workflow content to
- * `brandName`, EXCEPT inside `<runtime_compatibility>...</runtime_compatibility>`
- * blocks, which are left byte-for-byte verbatim. Every other content
- * transform in a runtime's `.md` converter (tool-name renames, path
- * rewrites, etc.) is unaffected — only this literal brand-name swap is
- * protected-region-aware, since only it risks mislabeling a
- * runtime-comparison table.
- *
- * Implementation: SPLIT `content` on the protected-block regex, brand-swap
- * only the GAP text between (and around) matches, then rejoin gap+block
- * alternately. No placeholder/sentinel token of any kind is substituted in
- * — a prior version used a sentinel-token mask/restore, which is exactly the
- * kind of invisible landmine this rewrite eliminates (a sentinel string, no
- * matter how obscure, is a theoretical collision risk with real content and
- * is easy to silently reintroduce in a future edit without it showing in a
- * diff). Behavior-identical to the removed sentinel-token version — verified
- * via `npm run gen:golden` producing zero further diff.
- */
-function applyClaudeCodeBrandSwap(content, brandName) {
-  if (!brandName) return content;
-  let result = '';
-  let lastIndex = 0;
-  RUNTIME_COMPATIBILITY_BLOCK_RE.lastIndex = 0; // reset shared global-regex state before each use
-  let m;
-  while ((m = RUNTIME_COMPATIBILITY_BLOCK_RE.exec(content))) {
-    const gap = content.slice(lastIndex, m.index);
-    result += gap.replace(/\bClaude Code\b/g, brandName);
-    result += m[0]; // protected block, verbatim — never brand-swapped
-    lastIndex = m.index + m[0].length;
-  }
-  result += content.slice(lastIndex).replace(/\bClaude Code\b/g, brandName);
-  return result;
-}
-
 // Tool name mapping from Claude Code to Cursor CLI
 const claudeToCursorTools = {
   Bash: 'Shell',
@@ -2629,36 +2681,11 @@ function convertClaudeCommandToCursorSkill(content, skillName) {
   const shortDescription = description.length > 180 ? `${description.slice(0, 177)}...` : description;
   const adapter = getCursorSkillAdapterHeader(skillName);
 
-  // #2341: mark user-invocable:false so the skill is NOT shown in Cursor's '/'
-  // menu (it defaults to true). Cursor also writes a commands/ surface (#785),
-  // and surfacing both duplicated every /gsd-* entry. This mirrors the #789
-  // CodeBuddy de-dup: the commands/ surface is the sole '/' entry point; skills
-  // stay model-invocable background knowledge. (user-invocable:false hides from
-  // '/' while keeping model invocation — distinct from disable-model-invocation.)
-  return `---\nname: ${yamlIdentifier(skillName)}\ndescription: ${yamlQuote(shortDescription)}\nuser-invocable: false\n---\n\n${adapter}\n\n${body.trimStart()}`;
-}
-
-/**
- * Convert a Claude Code command to a Cursor 1.6 slash command (#785).
- *
- * Cursor slash commands live in `.cursor/commands/<name>.md` and are
- * plain markdown — no YAML frontmatter, no adapter header. The filename
- * becomes the command name (e.g. `gsd-help.md` → `/gsd-help`).
- *
- * Applies the same `convertClaudeToCursorMarkdown` transforms as the skill
- * converter (tool renames, brand substitution, slash-command normalisation),
- * then strips the YAML frontmatter block so only the prose body remains.
- *
- * @param {string} content   raw Claude Code command markdown (may have frontmatter)
- * @param {string} _commandName  the target command name (unused; present for
- *   API symmetry with other converters so the runtime-artifact-layout stage
- *   function can call it uniformly)
- * @returns {string} plain markdown body, no frontmatter
- */
-function convertClaudeCommandToCursorCommand(content, _commandName) {
-  const converted = convertClaudeToCursorMarkdown(content);
-  const { body } = extractFrontmatterAndBody(converted);
-  return body.trimStart();
+  // Cursor skills are both slash-invocable and model-invocable. Do not emit the
+  // unsupported `user-invocable` field: it is ignored by Cursor and previously
+  // hid the real cause of duplicate entries, the parallel commands/ surface
+  // retired in #2644.
+  return `---\nname: ${yamlIdentifier(skillName)}\ndescription: ${yamlQuote(shortDescription)}\n---\n\n${adapter}\n\n${body.trimStart()}`;
 }
 
 /**
@@ -2681,142 +2708,16 @@ function convertClaudeAgentToCursorAgent(content) {
 }
 
 // --- Windsurf converters ---
-// Windsurf uses a tool set similar to Cursor.
-// Config lives in .windsurf/ (local) and ~/.codeium/windsurf/ (global).
-
-// Tool name mapping from Claude Code to Windsurf Cascade
-const claudeToWindsurfTools = {
-  Bash: 'Shell',
-  Edit: 'StrReplace',
-  AskUserQuestion: null, // No direct equivalent — use conversational prompting
-  SlashCommand: null,    // No equivalent — skills are auto-discovered
-};
-
-function convertSlashCommandsToWindsurfSkillMentions(content) {
-  // Keep leading "/" for slash commands; only normalize gsd: -> gsd-.
-  return content.replace(/gsd:/gi, 'gsd-');
-}
-
-function convertClaudeToWindsurfMarkdown(content) {
-  let converted = convertSlashCommandsToWindsurfSkillMentions(content);
-  // Replace tool name references in body text
-  converted = converted.replace(/\bBash\(/g, 'Shell(');
-  converted = converted.replace(/\bEdit\(/g, 'StrReplace(');
-  converted = converted.replace(/\bAskUserQuestion\b/g, 'conversational prompting');
-  // Replace subagent_type from Claude to Windsurf format
-  converted = converted.replace(/subagent_type="general-purpose"/g, 'subagent_type="generalPurpose"');
-  converted = converted.replace(/\$ARGUMENTS\b/g, '{{GSD_ARGS}}');
-  // Replace project-level Claude conventions with Windsurf equivalents.
-  converted = converted.replace(/`\.\/CLAUDE\.md`/g, '`.windsurf/rules`');
-  converted = converted.replace(/\.\/CLAUDE\.md/g, '.windsurf/rules');
-  converted = converted.replace(/`CLAUDE\.md`/g, '`.windsurf/rules`');
-  converted = converted.replace(/\bCLAUDE\.md\b/g, '.windsurf/rules');
-  converted = converted.replace(/\.claude\/skills\//g, '.windsurf/skills/');
-  converted = converted.replace(/\.\/\.claude\//g, './.windsurf/');
-  converted = converted.replace(/\.claude\//g, '.windsurf/');
-  // Bare forms (no trailing slash) — after slash forms to avoid double-rewrite.
-  // Use negative lookahead (?![\w-]) to preserve .claude-plugin and .claudeignore.
-  converted = converted.replace(/~\/\.claude(?![\w-])/g, '~/.windsurf');
-  converted = converted.replace(/\$HOME\/\.claude(?![\w-])/g, '$HOME/.windsurf');
-  // Environment variable name rewrite
-  converted = converted.replace(/\bCLAUDE_CONFIG_DIR\b/g, 'WINDSURF_CONFIG_DIR');
-  // Remove Claude Code-specific bug workarounds before brand replacement
-  converted = converted.replace(/\*\*Known Claude Code bug \(classifyHandoffIfNeeded\):\*\*[^\n]*\n/g, '');
-  converted = converted.replace(/- \*\*classifyHandoffIfNeeded false failure:\*\*[^\n]*\n/g, '');
-  // Replace "Claude Code" brand references with "Windsurf" — #2284(b): skips
-  // <runtime_compatibility> comparison-table content (protected region).
-  converted = applyClaudeCodeBrandSwap(converted, 'Windsurf');
-  return converted;
-}
-
-function getWindsurfSkillAdapterHeader(skillName) {
-  return `<windsurf_skill_adapter>
-## A. Skill Invocation
-- This skill is invoked when the user mentions \`${skillName}\` or describes a task matching this skill.
-- Treat all user text after the skill mention as \`{{GSD_ARGS}}\`.
-- If no arguments are present, treat \`{{GSD_ARGS}}\` as empty.
-
-## B. User Prompting
-When the workflow needs user input, prompt the user conversationally:
-- Present options as a numbered list in your response text
-- Ask the user to reply with their choice
-- For multi-select, ask for comma-separated numbers
-
-## C. Tool Usage
-Use these Windsurf tools when executing GSD workflows:
-- \`Shell\` for running commands (terminal operations)
-- \`StrReplace\` for editing existing files
-- \`Read\`, \`Write\`, \`Glob\`, \`Grep\`, \`Task\`, \`WebSearch\`, \`WebFetch\`, \`TodoWrite\` as needed
-
-## D. Subagent Spawning
-When the workflow needs to spawn a subagent:
-- Use \`Task(subagent_type="generalPurpose", ...)\`
-- The \`model\` parameter maps to Windsurf's model options (e.g., "fast")
-</windsurf_skill_adapter>`;
-}
-
-function convertClaudeCommandToWindsurfSkill(content, skillName) {
-  const converted = convertClaudeToWindsurfMarkdown(content);
-  const { frontmatter, body } = extractFrontmatterAndBody(converted);
-  let description = `Run GSD workflow ${skillName}.`;
-  if (frontmatter) {
-    const maybeDescription = extractFrontmatterField(frontmatter, 'description');
-    if (maybeDescription) {
-      description = maybeDescription;
-    }
-  }
-  description = toSingleLine(description);
-  const shortDescription = description.length > 180 ? `${description.slice(0, 177)}...` : description;
-  const adapter = getWindsurfSkillAdapterHeader(skillName);
-
-  return `---\nname: ${yamlIdentifier(skillName)}\ndescription: ${yamlQuote(shortDescription)}\n---\n\n${adapter}\n\n${body.trimStart()}`;
-}
-
-function convertClaudeCommandToWindsurfWorkflow(content, commandName) {
-  // #1615 security: commandName flows unsanitized into a markdown body that
-  // Windsurf loads as an LLM-readable workflow. Validate at entry to prevent
-  // (a) prompt injection via newlines / markdown structure in the filename,
-  // (b) path-component injection via .., /, \ in stem → @-reference target.
-  // Pattern: optional gsd- prefix + lowercase alphanumeric + dashes; rejects
-  // everything else. See DEFECT.PROMPT-INJECTION-SCAN-COLLISION and the
-  // PR #1622 security review.
-  if (typeof commandName !== 'string' || !/^(?:gsd-)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(commandName)) {
-    const preview = typeof commandName === 'string' ? JSON.stringify(commandName.slice(0, 60)) : String(commandName);
-    throw new Error(
-      `convertClaudeCommandToWindsurfWorkflow: rejected commandName ${preview}; ` +
-      'must match /^(?:gsd-)?[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/ (no slashes, backslashes, spaces, dots, trailing dash, or control chars — prevents prompt injection and path-component injection into the workflow body)'
-    );
-  }
-  const converted = convertClaudeToWindsurfMarkdown(content);
-  const { frontmatter } = extractFrontmatterAndBody(converted);
-  const description = frontmatter ? extractFrontmatterField(frontmatter, 'description') : '';
-  const stem = commandName.startsWith('gsd-') ? commandName.slice(4) : commandName;
-  const workflow = `# ${commandName}\n\n${toSingleLine(description || `Run ${commandName}.`)}\n\nRead and execute the GSD command at @~/.claude/gsd-core/commands/gsd/${stem}.md end-to-end. Treat the user's message after /${commandName} as the command arguments.`;
-  const byteLength = Buffer.byteLength(workflow, 'utf8');
-  if (byteLength > 12000) {
-    throw new Error(`Windsurf workflow ${commandName} exceeds 12000 bytes (${byteLength}); extract references before installing`);
-  }
-  return workflow;
-}
-
-/**
- * Convert Claude Code agent markdown to Windsurf agent format.
- * Strips frontmatter fields Windsurf doesn't support (color, skills),
- * converts tool references, and adds a role context header.
- */
-function convertClaudeAgentToWindsurfAgent(content) {
-  let converted = convertClaudeToWindsurfMarkdown(content);
-
-  const { frontmatter, body } = extractFrontmatterAndBody(converted);
-  if (!frontmatter) return converted;
-
-  const name = extractFrontmatterField(frontmatter, 'name') || 'unknown';
-  const description = extractFrontmatterField(frontmatter, 'description') || '';
-
-  const cleanFrontmatter = `---\nname: ${yamlIdentifier(name)}\ndescription: ${yamlQuote(toSingleLine(description))}\n---`;
-
-  return `${cleanFrontmatter}\n${body}`;
-}
+// #2931 (ADR-1508): single-sourced in runtimeArtifactConversion, bound near
+// the top of this file alongside the #1675 Augment family. This block
+// previously carried byte-identical local duplicates of
+// convertSlashCommandsToWindsurfSkillMentions, convertClaudeToWindsurfMarkdown,
+// getWindsurfSkillAdapterHeader, convertClaudeCommandToWindsurfSkill,
+// convertClaudeCommandToWindsurfWorkflow, and convertClaudeAgentToWindsurfAgent,
+// plus an unused claudeToWindsurfTools table. Deleted here; the two
+// unexported helpers (getWindsurfSkillAdapterHeader,
+// convertSlashCommandsToWindsurfSkillMentions) now live only in the
+// conversion module, with no other caller in this file.
 
 // --- Augment converters ---
 // Augment uses a tool set similar to Cursor/Windsurf.
@@ -2844,10 +2745,55 @@ function convertClaudeToTraeMarkdown(content) {
   // Replace general-purpose subagent type with Trae's equivalent "general_purpose_task"
   converted = converted.replace(/subagent_type="general-purpose"/g, 'subagent_type="general_purpose_task"');
   converted = converted.replace(/\$ARGUMENTS\b/g, '{{GSD_ARGS}}');
-  converted = converted.replace(/`\.\/CLAUDE\.md`/g, '`.trae/rules/`');
-  converted = converted.replace(/\.\/CLAUDE\.md/g, '.trae/rules/');
-  converted = converted.replace(/`CLAUDE\.md`/g, '`.trae/rules/`');
-  converted = converted.replace(/\bCLAUDE\.md\b/g, '.trae/rules/');
+  // #2658: full-path forms (with a leading dot-claude-slash prefix) MUST be
+  // replaced before the bare Claude-instruction-file pattern and before the
+  // generic dot-claude-slash rewrite below — otherwise the bare pattern
+  // consumes only the instruction-filename tail, leaving that prefix stale
+  // in place, and the generic rewrite then mutates the stale leftover too,
+  // producing a doubled trae-prefix segment ahead of the rules path instead
+  // of a single clean one. (Deliberately never spelling the instruction
+  // filename as one contiguous "CLAUDE" + dot + "md" token, and never
+  // spelling either malformed shape out as a literal contiguous string, in
+  // ANY comment in this function: this file ships verbatim into local
+  // `--trae` installs, where it is itself run through this same class of
+  // find/replace — a literal instruction-filename token sitting in a
+  // comment gets "fixed" right along with real code, and the emitted-content
+  // regression test added alongside this fix asserts neither malformed
+  // shape appears anywhere in the installed tree, comments included; this
+  // bit the fix itself twice during development.) All forms converge on the
+  // same concrete file (never a bare directory) so this stays in parity
+  // with the `trae.js` RUNTIME_CONTENT_DISPATCH entry.
+  converted = converted.replace(/`\.\/\.claude\/CLAUDE\.md`/g, '`.trae/rules/rules.md`');
+  converted = converted.replace(/\.\/\.claude\/CLAUDE\.md/g, '.trae/rules/rules.md');
+  converted = converted.replace(/`\.claude\/CLAUDE\.md`/g, '`.trae/rules/rules.md`');
+  converted = converted.replace(/\.claude\/CLAUDE\.md/g, '.trae/rules/rules.md');
+  // #2658 (found via the end-to-end install regression test, not the static
+  // trace above): `copyWithPathReplacement` runs a GENERIC dot-claude-slash
+  // -> runtime-config-dir rewrite on every .md file before calling this
+  // converter — for `~/.claude/`, `$HOME/.claude/`, AND `./.claude/` alike —
+  // substituting a runtime-appropriate `pathPrefix` this function is never
+  // given and cannot itself compute (it differs per install invocation: a
+  // relative `./.trae/` for a project-local install, an arbitrary absolute
+  // path for a local install rooted elsewhere, `~/.trae/` for a global one).
+  // So for source using any of those prefixed forms, the patterns above
+  // never fire here — this converter only ever sees the ALREADY-rewritten
+  // "<runtime-config-dir>/" + instruction-filename shape, with whatever
+  // prefix the install actually used. The generic pattern below preserves
+  // that prefix verbatim (via the capture group) and only fixes the
+  // filename suffix, rather than assuming a fixed `./.trae/` shape — a
+  // narrower fixed-prefix version of this pattern shipped first and still
+  // left the doubled-prefix defect live for the `$HOME/.claude/` and
+  // `~/.claude/` forms specifically (found the same way, one regression-test
+  // run later). Scoped to a `.trae/` tail so it cannot also swallow the
+  // unprefixed `./CLAUDE.md` form the very next pattern handles differently
+  // (discarding the prefix entirely, not preserving it). Must run before
+  // the bare pattern for the same consume-the-full-match-first reason.
+  converted = converted.replace(/`([^\s`]*\.trae\/)CLAUDE\.md`/g, '`$1rules/rules.md`');
+  converted = converted.replace(/([^\s`]*\.trae\/)CLAUDE\.md/g, '$1rules/rules.md');
+  converted = converted.replace(/`\.\/CLAUDE\.md`/g, '`.trae/rules/rules.md`');
+  converted = converted.replace(/\.\/CLAUDE\.md/g, '.trae/rules/rules.md');
+  converted = converted.replace(/`CLAUDE\.md`/g, '`.trae/rules/rules.md`');
+  converted = converted.replace(/\bCLAUDE\.md\b/g, '.trae/rules/rules.md');
   converted = converted.replace(/\.claude\/skills\//g, '.trae/skills/');
   converted = converted.replace(/\.\/\.claude\//g, './.trae/');
   converted = converted.replace(/\.claude\//g, '.trae/');
@@ -4019,6 +3965,8 @@ Typed mapping (agent_type-capable schema only):
   inherited, or unsupported values; do not invent one-off effort literals in
   workflow prose.
 - \`fork_context: false\` by default — GSD agents load their own context via \`<files_to_read>\` blocks
+- \`task_name\` — required by the collaboration schema; provide a descriptive name for each spawned task
+- \`fork_turns\` — optional parameter controlling turn-forking depth; coexists with \`fork_context\` (not a replacement)
 - \`Task(isolation="worktree")\` / \`Agent(isolation="worktree")\` → no direct \`spawn_agent\` mapping,
   but Codex declares \`dispatch.isolation: orchestrator-worktree\` (#2584). Codex
   \`spawn_agent\` still does not create or bind a git worktree; instead GSD itself
@@ -4055,11 +4003,13 @@ Spawn restriction:
   defaulting to inline execution.
 
 Parallel fan-out:
-- Spawn multiple agents → collect agent IDs → \`wait(ids)\` for all to complete
+- Spawn multiple agents → collect agent IDs → \`collaboration.wait_agent(timeout_ms=...)\` for each to complete
+- Do NOT use \`functions.wait(cell_id=...)\` — that is an unrelated exec-cell tool, not the collaboration wait
 
 Result parsing:
 - Look for structured markers in agent output: \`CHECKPOINT\`, \`PLAN COMPLETE\`, \`SUMMARY\`, etc.
-- \`close_agent(id)\` after collecting results from each agent
+- \`close_agent(id)\` after collecting results — but only if \`close_agent\` is visible in the current
+  tool schema (check via \`tool_search\` first, same schema-detection gate as \`spawn_agent\` above)
 </codex_skill_adapter>`;
 }
 
@@ -6445,17 +6395,40 @@ function mergeCodexConfig(configPath, gsdBlock) {
   const normalizedGsdBlock = mergedGsdBlock.replace(/\r?\n/g, eol);
   const markerIndex = existing.indexOf(GSD_CODEX_MARKER);
 
-  // Case 2: Has GSD marker — truncate and re-append
+  // Case 2: Has GSD marker — preserve user content on BOTH sides, regenerate the GSD block.
+  //
+  // #2940: the marker delimits where GSD's OWN block begins, NOT where every post-marker byte
+  // is GSD-owned. A fresh install writes the GSD block as the file's entire content, so any
+  // settings the user or Codex CLI later adds ([model], [mcp_servers.*], [profiles.*]) land
+  // AFTER the block. The previous truncate-to-marker logic discarded that trailing region on
+  // every update, destroying user config. The fix routes the trailing region through the
+  // existing AST-based `stripLeakedGsdCodexSections`, which removes GSD's own managed/leaked
+  // sections (the bare [agents] table GSD regenerates, legacy [agents.gsd-*], [[agents]])
+  // while preserving genuine user TOML — so #2406's de-dup still holds AND user content survives.
   if (markerIndex !== -1) {
     let before = existing.substring(0, markerIndex).trimEnd();
     if (before) {
       // Strip any GSD-managed sections that leaked above the marker from previous installs
       before = stripLeakedGsdCodexSections(before).trimEnd();
-
-      atomicWriteFileSync(configPath, before + eol + eol + normalizedGsdBlock + eol);
-    } else {
-      atomicWriteFileSync(configPath, normalizedGsdBlock + eol);
     }
+    // Capture and preserve genuine user content AFTER the GSD-managed region. The whole
+    // post-marker region is passed through stripLeakedGsdCodexSections: GSD's own previously-
+    // emitted [agents] table (regenerated above as normalizedGsdBlock) and any leaked sections
+    // are removed, while user tables ([model], [mcp_servers.*], [profiles.*]) are kept. The
+    // marker comment line itself (and the optional codex_hooks ownership line right under it)
+    // is GSD-owned and is stripped from the trailing region so it is not duplicated alongside
+    // the freshly regenerated block.
+    const rawAfter = existing.substring(markerIndex);
+    const markerStripped = rawAfter
+      .replace(GSD_CODEX_MARKER, '')
+      .replace(/^\r?\n# GSD codex_hooks ownership: (?:section|root_dotted)\r?\n/, '');
+    const afterUser = stripLeakedGsdCodexSections(markerStripped).trim();
+
+    const parts = [];
+    if (before) parts.push(before);
+    parts.push(normalizedGsdBlock);
+    if (afterUser) parts.push(afterUser);
+    atomicWriteFileSync(configPath, parts.join(eol + eol) + eol);
     return;
   }
 
@@ -7051,7 +7024,16 @@ function installCodexConfig(targetDir, agentsSrc, sandboxTier = 'codex-agent-san
   const codexGsdPath = `${path.resolve(targetDir, 'gsd-core').replace(/\\/g, '/')}/`;
 
   for (const file of agentEntries) {
-    let content = fs.readFileSync(path.join(agentsSrc, file), 'utf8');
+    const agentTomlSourcePath = path.join(agentsSrc, file);
+    let content = fs.readFileSync(agentTomlSourcePath, 'utf8');
+    // #2995 (epic #1671 Phase 6.4): Codex embeds each agent's prompt into a
+    // per-agent `.toml`, reading the source .md independently of the inline
+    // agent loop — a separate emission path that must strip gsd:section
+    // markers too, or a marked agent ships its markers inside the TOML.
+    // Found by the exhaustive per-runtime emission sweep in
+    // tests/agent-fragments-emission.install.test.cjs, not by call-graph
+    // analysis, which is why that guard is behavioral rather than structural.
+    content = composeWorkflow(content, { sourcePath: agentTomlSourcePath });
     // Replace full .claude/gsd-core prefix so path resolves to the Codex
     // GSD install before generic .claude → .codex conversion rewrites it.
     content = content.replace(/~\/\.claude\/gsd-core\//g, codexGsdPath);
@@ -7668,7 +7650,18 @@ const RUNTIME_CONTENT_DISPATCH = {
         return `/gsd-${commandName}`;
       });
       content = content.replace(/\.claude\/skills\//g, '.trae/skills/');
-      content = content.replace(/CLAUDE\.md/g, '.trae/rules/');
+      // #2658: the full dot-claude-slash-prefixed instruction-file path must
+      // be replaced before the bare instruction-filename fallback, or the
+      // bare regex only rewrites that filename and leaves the prefix stale
+      // in place, producing a malformed doubled-prefix path (see the longer
+      // note in convertClaudeToTraeMarkdown above — the instruction filename
+      // and either malformed shape are deliberately never spelled out
+      // contiguously here either, for the same reason: this file ships
+      // verbatim). Both forms target the same concrete file (never a bare
+      // directory), matching the `.md` converter (convertClaudeToTraeMarkdown)
+      // so js/cjs and md content agree on one canonical path.
+      content = content.replace(/\.claude\/CLAUDE\.md/g, '.trae/rules/rules.md');
+      content = content.replace(/CLAUDE\.md/g, '.trae/rules/rules.md');
       content = content.replace(/\bClaude Code\b/g, 'Trae');
       return content;
     },
@@ -7786,6 +7779,42 @@ function copyWithPathReplacement(srcDir, destDir, pathPrefix, runtime, isCommand
       // Replace ~/.claude/ and $HOME/.claude/ and ./.claude/ with runtime-appropriate paths
       // Skip generic replacement for Copilot/Antigravity — their converters handle all paths
       let content = fs.readFileSync(srcPath, 'utf8');
+
+      // #2930 (epic #1671 Phase 3): strip `<!-- gsd:section -->` markers
+      // BEFORE any per-runtime rewrite so a `.claude/` -> `.windsurf/` regex
+      // (or any other converter below) never reaches inside a marker
+      // attribute and corrupts it. composeWorkflow is a no-op (byte-identical
+      // return) for the 88+ workflows and every non-workflow .md that carries
+      // no markers, and for a malformed marker it throws loudly naming
+      // srcPath — never emit a half-composed workflow.
+      //
+      // Scoped to gsd-core/workflows/ ONLY (two independent reviewers,
+      // chore/2930): copyWithPathReplacement is the emit path for every .md
+      // under gsd-core/, skills/, and commands/ (see the three call sites),
+      // not just workflows. A doc that merely DOCUMENTS the marker syntax
+      // with an unfenced example (docs/reference/workflow-fragments.md is
+      // the live instance of this class, though not under the install tree
+      // today) would otherwise get silently mis-parsed as a real marker and
+      // that line lossily dropped — a file class issue #2930 never scoped
+      // to. Path is normalized UNCONDITIONALLY (backslash paths arrive on
+      // Linux too — CONTEXT.md path-separator rule) and checked as a
+      // path-segment match so the recursive descent (srcPath may be several
+      // directory levels below gsd-core/workflows/) is still caught.
+      //
+      // #3072: the scoping predicate itself now lives in ONE place —
+      // shouldCompose (src/mcp-catalog.cts, imported above) — rather than
+      // being re-declared inline here. The MCP served catalog calls the
+      // SAME function to decide what it composes vs serves verbatim, so this
+      // install path and the catalog can never independently drift on what
+      // gets composed (ADR-1671:309, DEFECT.GENERATIVE-FIX; the parity gate
+      // is tests/mcp-catalog-parity.test.cjs). shouldCompose normalizes with
+      // the identical unconditional `.replace(/\\/g, '/')` internally, so
+      // this call is behavior-preserving byte-for-behavior with the regex it
+      // replaces.
+      if (shouldCompose(srcPath)) {
+        content = composeWorkflow(content, { sourcePath: srcPath });
+      }
+
       if (!dispatch.mdSkipGenericRewrite) {
         const globalClaudeRegex = /~\/\.claude\//g;
         const globalClaudeHomeRegex = /\$HOME\/\.claude\//g;
@@ -8168,11 +8197,12 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
 
   // 1a-kimi. Non-layout Kimi side-effect (#2095 EoS/kimi Upgrade 1): kimi's
   // native config.toml lives outside targetDir entirely (resolveKimiHooksTomlDir
-  // resolves ~/.kimi, a sibling of targetDir's ~/.config/agents), so its
+  // resolves ~/.kimi for kimi and ~/.kimi-code for kimi-code (#2755), a sibling
+  // of targetDir's ~/.config/agents), so its
   // cleanup can't be driven by anything under targetDir the way every other
   // hook surface above is.
   if (resolveInstallPlan(runtime).hooksSurface === 'kimi-hooks-toml') {
-    const kimiHooksRoot = resolveKimiHooksTomlDir();
+    const kimiHooksRoot = resolveKimiHooksTomlDir({ runtime });
     const kimiHooksTomlPath = path.join(kimiHooksRoot, 'config.toml');
     const kimiHooksCleanup = removeKimiHooksToml(kimiHooksTomlPath);
     if (kimiHooksCleanup.changed) {
@@ -8219,23 +8249,24 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
         }
       }
 
+      // #2544: the marker now lives inside kimi's hooks/ dir — remove it
+      // before the emptiness check below, or the dir would never prune.
+      if (removeCommonJsMarker(kimiHooksDir)) {
+        removedCount++;
+        console.log(`  ${green}✓${reset} Removed GSD package.json from ${kimiHooksDir}`);
+      }
+
       try {
         if (fs.readdirSync(kimiHooksDir).length === 0) fs.rmdirSync(kimiHooksDir);
       } catch (_) { /* not empty — leave it */ }
     }
 
-    const kimiPkgJsonPath = path.join(kimiHooksRoot, 'package.json');
-    if (fs.existsSync(kimiPkgJsonPath)) {
-      try {
-        const content = fs.readFileSync(kimiPkgJsonPath, 'utf8').trim();
-        if (content === '{"type":"commonjs"}') {
-          fs.unlinkSync(kimiPkgJsonPath);
-          removedCount++;
-          console.log(`  ${green}✓${reset} Removed GSD package.json from ${kimiHooksRoot}`);
-        }
-      } catch (e) {
-        // Ignore read errors
-      }
+    // Retire the pre-#2544 marker at kimi's root (~/.kimi), where the bundle
+    // used to write it. Exact content match — a user's own package.json in
+    // kimi's native config home is never touched.
+    if (removeCommonJsMarker(kimiHooksRoot)) {
+      removedCount++;
+      console.log(`  ${green}✓${reset} Removed GSD package.json from ${kimiHooksRoot} (pre-#2544 marker)`);
     }
   }
 
@@ -8501,7 +8532,8 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   }
 
   // 4. Remove GSD hooks
-  const hooksDir = path.join(targetDir, 'hooks');
+  // #3023: mirror the install site's descriptor-driven bundle dir name.
+  const hooksDir = path.join(targetDir, resolveSharedHooksDirName(runtime));
   if (fs.existsSync(hooksDir)) {
     let hookCount = 0;
     for (const hook of GSD_UNINSTALL_HOOKS) {
@@ -8543,13 +8575,18 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
       }
     }
 
-    // #2717: remove the CommonJS marker GSD wrote into hooks/ for runtimes that
-    // stage .js hooks via dedicated paths (cursor/windsurf/codex) — but ONLY if
-    // it still carries GSD's exact content (a user-authored package.json is
-    // never deleted). Safe no-op for runtimes whose marker lives at the config
-    // root (the shared-bundle path) or that never received one.
+    // Retire the CommonJS marker staged into hooks/. hooks/ is shared space and
+    // is deliberately never rmdir'd here, so the marker must be removed
+    // explicitly or it would be left behind. Removed ONLY when it still carries
+    // GSD's exact content — a user-authored package.json is never deleted.
+    //
+    // #2717 reaches the runtimes that stage .js hooks via dedicated paths
+    // (cursor/windsurf/codex); #2544 reaches the shared-bundle runtimes, whose
+    // marker this PR moves out of the config root and into hooks/. Both land in
+    // the same directory, so one guarded call covers both.
     try {
       if (hooksSurface.removeCommonJsMarkerIfGsdOwned(hooksDir)) {
+        removedCount++;
         console.log(`  ${green}✓${reset} Removed GSD hooks/package.json (CommonJS marker)`);
       }
     } catch { /* best-effort */ }
@@ -8564,12 +8601,38 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   if (_np) {
     const pluginsDir = path.join(targetDir, _np.dir);
     const pluginPath = path.join(pluginsDir, _np.file);
+    // Tracks whether GSD actually removed anything from pluginsDir. The rmdir
+    // below is gated on it: pruning a directory GSD never wrote to is the same
+    // "don't touch territory GSD didn't fill" violation this issue is about,
+    // just inverted — a user-created but empty plugin/ or extensions/ dir is
+    // theirs, and an uninstall that never removed anything has no business
+    // deleting it.
+    let removedFromPluginsDir = false;
     if (fs.existsSync(pluginPath)) {
       try {
         fs.unlinkSync(pluginPath);
         removedCount++;
+        removedFromPluginsDir = true;
         console.log(`  ${green}✓${reset} Removed native plugin adapter (${runtime})`);
       } catch (_) { /* best-effort */ }
+    }
+    // #2544: the adapter's CommonJS marker sits beside it. Cleaned up OUTSIDE
+    // the adapter-exists guard above — a partial install (or a hand-deleted
+    // adapter) would otherwise strand GSD's marker forever and keep the dir
+    // from ever pruning. Conditioned on the adapter being GONE, though: if the
+    // unlink above failed, pulling the marker out from under a still-present
+    // CommonJS adapter would leave it unloadable. The exact content match
+    // still leaves any user-authored package.json in place.
+    if (!fs.existsSync(pluginPath) && removeCommonJsMarker(pluginsDir)) {
+      removedCount++;
+      removedFromPluginsDir = true;
+      console.log(`  ${green}✓${reset} Removed GSD package.json from ${_np.dir}/`);
+    }
+    // Only prune a dir GSD emptied. Pre-fix this rmdir sat inside the
+    // adapter-exists guard, so it could never fire on a dir GSD had not
+    // written to; hoisting it out to catch the marker-only case must not
+    // silently widen it to "any empty plugin dir".
+    if (removedFromPluginsDir) {
       try { fs.rmdirSync(pluginsDir); } catch (_) { /* not empty — user plugins present */ }
     }
   }
@@ -8630,19 +8693,14 @@ function uninstall(isGlobal, runtime = DEFAULT_RUNTIME) {
   }
 
   // 5. Remove GSD package.json (CommonJS mode marker)
-  const pkgJsonPath = path.join(targetDir, 'package.json');
-  if (fs.existsSync(pkgJsonPath)) {
-    try {
-      const content = fs.readFileSync(pkgJsonPath, 'utf8').trim();
-      // Only remove if it's our minimal CommonJS marker
-      if (content === '{"type":"commonjs"}') {
-        fs.unlinkSync(pkgJsonPath);
-        removedCount++;
-        console.log(`  ${green}✓${reset} Removed GSD package.json`);
-      }
-    } catch (e) {
-      // Ignore read errors
-    }
+  // Since #2544 the marker is staged into hooks/ (and the nativePlugin dir,
+  // handled at 4z above) rather than at targetDir. The targetDir removal is
+  // retained to retire the marker written by pre-#2544 installs — same exact
+  // content match as before, so a user-authored package.json is still never
+  // touched.
+  if (removeCommonJsMarker(targetDir)) {
+    removedCount++;
+    console.log(`  ${green}✓${reset} Removed GSD package.json (pre-#2544 config-root marker)`);
   }
 
   // 6. Clean up settings.json (remove GSD hooks and statusline)
@@ -9574,7 +9632,10 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
   // #2100: Windsurf's exclusion is likewise descriptor-driven (windsurf declares
   // skipSharedHooksInstall:true) — the redundant `&& !isWindsurf` was removed.
   if (!isCodex && _hostBehaviors(runtime).skipSharedHooksInstall !== true) {
-    const hooksDir = path.join(configDir, 'hooks');
+    // #3023: manifest keys must track the bundle wherever the descriptor put it,
+    // or uninstall/saveLocalPatches silently orphan the tree.
+    const sharedHooksDirName = resolveSharedHooksDirName(runtime);
+    const hooksDir = path.join(configDir, sharedHooksDirName);
     if (fs.existsSync(hooksDir)) {
       // Drive from INSTALLED_HOOK_FILES (the canonical HOOKS_TO_COPY set from
       // scripts/build-hooks.js) rather than a prefix/extension regex, so the
@@ -9586,7 +9647,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
       for (const hook of INSTALLED_HOOK_FILES) {
         const hookPath = path.join(hooksDir, hook);
         if (fs.existsSync(hookPath)) {
-          manifest.files['hooks/' + hook] = fileHash(hookPath);
+          manifest.files[sharedHooksDirName + '/' + hook] = fileHash(hookPath);
         }
       }
       // Track hooks/lib/ helpers so saveLocalPatches() can back up user edits
@@ -9595,7 +9656,7 @@ function writeManifest(configDir, runtime = DEFAULT_RUNTIME, options = {}) {
       if (fs.existsSync(hooksLibDir)) {
         for (const file of fs.readdirSync(hooksLibDir)) {
           if (GSD_HOOK_LIB_FILES.includes(file)) {
-            manifest.files['hooks/lib/' + file] = fileHash(path.join(hooksLibDir, file));
+            manifest.files[sharedHooksDirName + '/lib/' + file] = fileHash(path.join(hooksLibDir, file));
           }
         }
       }
@@ -10655,8 +10716,9 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
         }
       }
 
-      // Descriptor-driven commands/ output report (#785 — Cursor 1.6 slash commands).
-      // Gated by hostBehaviors.reportCommandsDir, not a hardcoded `isCursor` branch (#2089).
+      // Descriptor-driven commands/ output report (currently CodeBuddy).
+      // Cursor retired this parallel surface in #2644 because its skills are
+      // already slash-menu entries as well as model-invocable context.
       if (_hostBehaviors(runtime).reportCommandsDir) {
         const commandsDir = path.join(targetDir, 'commands');
         if (fs.existsSync(commandsDir)) {
@@ -10921,7 +10983,12 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     const agentEntries = fs.readdirSync(agentsSrc, { withFileTypes: true });
     for (const entry of agentEntries) {
       if (entry.isFile() && entry.name.endsWith('.md')) {
-        let content = fs.readFileSync(path.join(agentsSrc, entry.name), 'utf8');
+        const agentSourcePath = path.join(agentsSrc, entry.name);
+        let content = fs.readFileSync(agentSourcePath, 'utf8');
+        // #2995 (epic #1671 Phase 6.4): strip `<!-- gsd:section -->` markers BEFORE
+        // the path-rewrite regexes below, so a rewrite can never reach inside a
+        // marker attribute. No-op (byte-identical) for an unmarked agent.
+        content = composeWorkflow(content, { sourcePath: agentSourcePath });
         // Replace ~/.claude/ and $HOME/.claude/ as they are the source of truth in the repo
         const dirRegex = /~\/\.claude\//g;
         const homeDirRegex = /\$HOME\/\.claude\//g;
@@ -11106,22 +11173,30 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // a safe no-op when the dir is already present.
     fs.mkdirSync(destRootDir, { recursive: true });
 
-    // Write package.json to force CommonJS mode for GSD scripts
-    // Prevents "require is not defined" errors when project has "type": "module"
-    // Node.js walks up looking for package.json - this stops inheritance from project
-    const pkgJsonDest = path.join(destRootDir, 'package.json');
-    fs.writeFileSync(pkgJsonDest, '{"type":"commonjs"}\n');
-    console.log(`  ${green}✓${reset} Wrote package.json (CommonJS mode)`);
+    // #3023: the bundle's directory NAME is descriptor-driven — a host that
+    // reserves `hooks/` (pi) must be able to opt out. Resolved once here so the
+    // stage / lib / marker sites can never disagree about where the bundle is.
+    const sharedHooksDirName = resolveSharedHooksDirName(runtime);
+
+    // #2544: the CommonJS marker is NOT written here (destRootDir is the
+    // runtime's shared config root — user-writable territory on OpenCode and
+    // Kilo, where it is the documented place to declare local-plugin npm
+    // dependencies). It is written into hooks/ below, the directory GSD
+    // creates and fills with its own .js scripts, once that directory exists.
 
     let hooksOk = true;
+    // #2544: true once GSD has actually written into destRootDir/hooks/, which
+    // is what licenses the CommonJS marker below.
+    let stagedHooks = false;
 
     // Copy hooks from dist/ (bundled with dependencies)
     // Template paths for the target runtime (replaces '.claude' with correct config dir)
     const hooksSrc = path.join(src, 'hooks', 'dist');
     if (fs.existsSync(hooksSrc)) {
-      const hooksDest = path.join(destRootDir, 'hooks');
+      const hooksDest = path.join(destRootDir, sharedHooksDirName);
       fs.mkdirSync(hooksDest, { recursive: true });
       const hookEntries = fs.readdirSync(hooksSrc);
+      if (hookEntries.some((e) => fs.statSync(path.join(hooksSrc, e)).isFile())) stagedHooks = true;
       const configDirReplacement = getConfigDirFromHome(runtime, isGlobal);
       for (const entry of hookEntries) {
         const srcFile = path.join(hooksSrc, entry);
@@ -11184,7 +11259,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
         }
       }
       if (verifyInstalled(hooksDest, 'hooks')) {
-        console.log(`  ${green}✓${reset} Installed hooks (bundled)`);
+        console.log(`  ${green}✓${reset} Installed ${sharedHooksDirName} (bundled)`);
         // Warn if expected community .sh hooks are missing (non-fatal)
         const expectedShHooks = ['gsd-session-state.sh', 'gsd-validate-commit.sh', 'gsd-phase-boundary.sh', 'gsd-graphify-update.sh'];
         for (const sh of expectedShHooks) {
@@ -11213,10 +11288,48 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // below; this helper itself only checks source presence.)
     const hooksLibSrc = path.join(src, 'hooks', 'lib');
     if (fs.existsSync(hooksLibSrc)) {
-      const hooksLibDest = path.join(destRootDir, 'hooks', 'lib');
+      const hooksLibDest = path.join(destRootDir, sharedHooksDirName, 'lib');
       fs.mkdirSync(hooksLibDest, { recursive: true });
       copyLibDir(hooksLibSrc, hooksLibDest, GSD_HOOK_LIB_FILES);
-      console.log(`  ${green}✓${reset} Installed hooks/lib/ helpers (git-cmd, graphify-rebuild, ...)`);
+      if (GSD_HOOK_LIB_FILES.some((f) => fs.existsSync(path.join(hooksLibDest, f)))) stagedHooks = true;
+      console.log(`  ${green}✓${reset} Installed ${sharedHooksDirName}/lib/ helpers (git-cmd, graphify-rebuild, ...)`);
+    }
+
+    // #2544: pin the staged hook scripts to CommonJS from inside hooks/ — the
+    // directory GSD just created and filled — instead of from destRootDir.
+    // Scoping the marker to GSD's own directory keeps `require` working in
+    // hooks/*.js and hooks/lib/*.js under any ambient "type": "module", while
+    // leaving the shared config root untouched.
+    //
+    // Gated on `stagedHooks`, NOT on the directory merely existing: hooks/ is
+    // shared space, so an existence check would drop a GSD marker into a
+    // hooks/ directory the user created and GSD never wrote to — the same
+    // write-into-someone-else's-territory this issue is about. And never
+    // written over a package.json GSD does not own.
+    //
+    // ALSO gated on `hooksOk`: `stagedHooks` is computed from the SOURCE
+    // listing before the copy loop, so it stays true when the copies land but
+    // `verifyInstalled` then fails. Marking a hooks/ GSD did not successfully
+    // populate as CommonJS claims an ownership the install did not earn — the
+    // two flags answer different questions ("did we intend to fill it" vs "is
+    // it actually filled"), and the marker needs both.
+    const hooksMarkerDir = path.join(destRootDir, sharedHooksDirName);
+    if (stagedHooks && hooksOk) {
+      switch (ensureCommonJsMarker(hooksMarkerDir)) {
+        case 'written':
+          console.log(`  ${green}✓${reset} Wrote ${sharedHooksDirName}/package.json (CommonJS mode)`);
+          break;
+        case 'preserved-foreign':
+          console.warn(`  ${yellow}⚠${reset}  Left existing ${sharedHooksDirName}/package.json untouched (not GSD's marker) — GSD hooks may not resolve as CommonJS`);
+          break;
+        case 'failed':
+          // Best-effort: a read-only or full config dir must not abort the
+          // install with a raw stack trace. The hooks themselves are staged.
+          console.warn(`  ${yellow}⚠${reset}  Could not write ${sharedHooksDirName}/package.json (CommonJS mode) — install continued; GSD hooks may not resolve as CommonJS`);
+          break;
+        default:
+          break;
+      }
     }
 
     return hooksOk;
@@ -11667,6 +11780,10 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       const codexHooksDest = path.join(targetDir, 'hooks');
       fs.mkdirSync(codexHooksDest, { recursive: true });
       const configDirReplacement = getConfigDirFromHome(runtime, isGlobal);
+      // #2544: track whether anything was actually staged. hooks/dist existing
+      // is not the same as an allowlisted file landing in it — see the marker
+      // gate below.
+      let codexStagedHooks = false;
       for (const entry of fs.readdirSync(codexHooksSrc)) {
         if (!CODEX_HOOKS_TO_COPY.includes(entry)) continue;
         const srcFile = path.join(codexHooksSrc, entry);
@@ -11700,6 +11817,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
           fs.copyFileSync(srcFile, destFile);
           try { fs.chmodSync(destFile, 0o755); } catch (e) { /* Windows */ }
         }
+        codexStagedHooks = true;
       }
       console.log(`  ${green}✓${reset} Installed hooks (Codex)`);
       // #2717: write the CommonJS marker into hooks/ alongside the staged .js
@@ -11710,7 +11828,12 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // gsd-context-monitor.js as ESM and their require() calls fail silently.
       // Reuses the same helper the Cursor/Windsurf writers call so the marker
       // content + user-file-preservation contract is identical everywhere.
-      if (hooksSurface.ensureCommonJsMarker(codexHooksDest)) {
+      //
+      // #2544: gated on codexStagedHooks, mirroring installSharedHooksBundle's
+      // `stagedHooks`. The enclosing guard only proves hooks/dist EXISTS; if it
+      // holds none of CODEX_HOOKS_TO_COPY, this block mkdirs hooks/ and stages
+      // nothing, and an ungated marker would claim a directory GSD did not fill.
+      if (codexStagedHooks && hooksSurface.ensureCommonJsMarker(codexHooksDest)) {
         console.log(`  ${green}✓${reset} Wrote hooks/package.json (CommonJS mode)`);
       }
     }
@@ -11931,7 +12054,8 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // hooks needed. Kimi is also artifact-only for its INSTALL surface (skills +
     // kimi-agents, no settings.json) but #2095 Upgrade 1 gives it its own
     // independent hooksSurface: kimi's native config.toml [[hooks]] array, which
-    // lives outside targetDir entirely (resolveKimiHooksTomlDir resolves ~/.kimi,
+    // lives outside targetDir entirely (resolveKimiHooksTomlDir resolves the
+    // per-runtime root — ~/.kimi for kimi, ~/.kimi-code for kimi-code, #2755 —
     // a sibling of targetDir's ~/.config/agents) — hence writing it here, inside
     // this early-return, rather than requiring installSurface to change.
     //
@@ -11952,7 +12076,7 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
     // ~/.kimi/hooks/<script> rather than a script that doesn't exist under
     // targetDir/hooks (which kimi no longer receives).
     if (plan.hooksSurface === 'kimi-hooks-toml' && isGlobal) {
-      const kimiHooksRoot = resolveKimiHooksTomlDir();
+      const kimiHooksRoot = resolveKimiHooksTomlDir({ runtime });
       // Note: the `failures` array's hard-fail gate (`if (failures.length > 0)
       // process.exit(1)`) runs earlier in this function, before this
       // profile-marker-only branch is ever reached — pushing to it here would
@@ -11960,6 +12084,20 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       // leaves kimi's skills/agents artifacts installed correctly.
       if (!installSharedHooksBundle(kimiHooksRoot)) {
         console.warn(`  ${yellow}⚠${reset}  Kimi hook bundle did not verify at ${path.join(kimiHooksRoot, 'hooks')} — GSD lifecycle hooks may be incomplete`);
+      }
+      // #2544: retire the pre-fix marker at kimi's root. installSharedHooksBundle
+      // used to write {"type":"commonjs"} at destRootDir itself; it now writes it
+      // under destRootDir/hooks/, so on an upgrade the old root file is stale and
+      // would keep ~/.kimi pinned to CommonJS.
+      //
+      // Done HERE rather than in installer-migration 007 (which retires the same
+      // stale marker for every other runtime) because kimi's hook root is
+      // the per-runtime Kimi root — resolved by resolveKimiHooksTomlDir, OUTSIDE the configDir.
+      // Migration relPaths are structurally confined to configDir, so the
+      // framework cannot address this path at all. Same exact-content predicate
+      // either way, so a user-authored ~/.kimi/package.json is never touched.
+      if (removeCommonJsMarker(kimiHooksRoot)) {
+        console.log(`  ${green}✓${reset} Removed stale package.json from ${kimiHooksRoot} (pre-#2544 marker)`);
       }
       const kimiHookOpts = { portableHooks: hasPortableHooks, runtime };
       const kimiHooksTomlPath = path.join(kimiHooksRoot, 'config.toml');
@@ -13073,14 +13211,26 @@ function maybeSuggestPathExport(globalBin, homeDir) {
 
   console.log('');
   console.log(`  ${yellow}⚠${reset} ${bold}${globalBin}${reset} is not on your PATH.`);
-  console.log(`    Add it with one of:`);
   const projected = projectPersistentPathExportActions({
     targetDir: globalBin,
     platform: process.platform,
   });
-  for (const action of projected.shellActions) {
-    const labelPrefix = action.label ? `${action.label}: ` : '';
-    console.log(`      ${cyan}${labelPrefix}${action.command}${reset}`);
+  if (projected.reason === PATH_ACTION_REASON.WIN32_RESERVED_QUOTE) {
+    // #3118 review MINOR: a win32 targetDir containing `"` makes
+    // projectPathActionProjection return [] (no command can quote it safely
+    // on Windows) — printing the "Add it with one of:" header with nothing
+    // under it is a silent dead-end. Name the cause instead.
+    console.log(`    No command can be suggested: the path contains a ${cyan}"${reset} character, which cannot appear in a Windows path.`);
+  } else if (projected.shellActions.length === 0) {
+    // #3118: no target directory to talk about (reason === NO_TARGET_DIR, or
+    // no reason at all) — there is nothing to print beyond the "not on your
+    // PATH" line above.
+  } else {
+    console.log(`    Add it with one of:`);
+    for (const action of projected.shellActions) {
+      const labelPrefix = action.label ? `${action.label}: ` : '';
+      console.log(`      ${cyan}${labelPrefix}${action.command}${reset}`);
+    }
   }
   console.log('');
 }
@@ -13295,7 +13445,6 @@ module.exports = {
     applyRuntimeContentRewritesInPlace,
     getCodexSkillAdapterHeader,
     convertClaudeCommandToCursorSkill,
-    convertClaudeCommandToCursorCommand,
     convertClaudeAgentToCursorAgent,
     convertClaudeAgentToCodexAgent,
     generateCodexAgentToml,
@@ -13330,6 +13479,9 @@ module.exports = {
     // #2086 — host-behavior resolution + the #338 privacy fail-safe floor (exported for tests)
     _resolveHostBehaviors,
     FALLBACK_HOST_BEHAVIORS,
+    // #3023 — shared hook bundle directory name, descriptor-driven
+    SHARED_HOOKS_DIR_DEFAULT,
+    resolveSharedHooksDirName,
     convertSlashCommandsToCodexSkillMentions,
     convertClaudeCommandToCodexSkill,
     convertClaudeCommandToKimiSkill,
@@ -13511,7 +13663,19 @@ if (require.main === module && !process.env.GSD_TEST_MODE) {
       console.error('Usage: node install.js --skills-root <runtime>');
       process.exit(1);
     }
-    const skillsRoot = getGlobalSkillsBase(runtimeArg);
+    // #3024: validate the runtime id against the shipped capability registry
+    // BEFORE resolving anything. getGlobalSkillsBase's bare `runtimes[runtime]`
+    // lookup falls through the prototype chain to claude's skills root for an
+    // unregistered/hostile id (`__proto__`, `constructor`, `prototype`, …)
+    // instead of failing loudly. isRegisteredRuntimeId is the SAME validator
+    // gsd-tools' `routeSkillsRoot` calls, so this entry point and the shipped
+    // `gsd-tools query skills-root` entry point can never diverge on which
+    // runtime ids they accept.
+    if (!isRegisteredRuntimeId(runtimeArg)) {
+      console.error(`Unknown runtime "${runtimeArg}" — must be a registered runtime id`);
+      process.exit(1);
+    }
+    const skillsRoot = getGlobalSkillsBase(runtimeArg.trim());
     if (skillsRoot === null) {
       console.error(`${runtimeArg} does not use a skills directory`);
       process.exit(1);

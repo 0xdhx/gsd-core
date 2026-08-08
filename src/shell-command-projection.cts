@@ -358,8 +358,35 @@ export function projectLegacySettingsHookCommand({
   });
 }
 
+// Implements the TOML v1.0.0 basic-string escaping grammar (toml.md, "Basic
+// strings" section, https://toml.io/en/v1.0.0#string): a basic string must
+// escape the quotation mark, backslash, and control characters other than
+// tab (U+0000-U+0008, U+000A-U+001F, U+007F). Compact escapes are used where
+// TOML defines them (\b \t \n \f \r \" \\); every other character in the
+// required ranges falls back to \uXXXX. See #3118 — an earlier version
+// escaped only backslash and quote, so a raw newline/CR/NUL in a value
+// produced an unparseable config.toml.
+const TOML_COMPACT_ESCAPES: Record<string, string> = {
+  '\x08': '\\b',
+  '\x09': '\\t',
+  '\x0A': '\\n',
+  '\x0C': '\\f',
+  '\x0D': '\\r',
+};
+
+// U+0000-U+0008, U+000A-U+001F, U+007F — control characters other than tab
+// (U+0009), which the grammar permits unescaped.
+const TOML_MUST_ESCAPE_CONTROL_CHARS = /[\x00-\x08\x0A-\x1F\x7F]/g;
+
 export function escapeTomlDoubleQuotedString(value: unknown): string {
-  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return String(value)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(TOML_MUST_ESCAPE_CONTROL_CHARS, (ch) => {
+      const compact = TOML_COMPACT_ESCAPES[ch];
+      if (compact) return compact;
+      return `\\u${ch.codePointAt(0)!.toString(16).padStart(4, '0')}`;
+    });
 }
 
 export function projectCodexHookTomlCommand({ absoluteRunner, scriptPath, platform = process.platform }: {
@@ -388,11 +415,34 @@ export function escapeSingleQuotedShellLiteral(value: unknown): string {
   return String(value).replace(/'/g, "'\\''");
 }
 
+/**
+ * The `export PATH="<dir>:$PATH"` line every persistence lane appends, plus the escaped directory
+ * token it embeds. One builder because three lanes emit this line: a lane that re-escapes it
+ * locally is how #3118 shipped a `$(…)` into ~/.bashrc, where it ran on every new shell. The
+ * escaping is for the line's FINAL context — a double-quoted string in an rc file — not for
+ * whatever transport (an `echo`, a paste) it passes through on the way there.
+ */
+export function projectPathExportLine(targetDir: unknown): { escapedDir: string; line: string } {
+  const escapedDir = escapePosixDoubleQuoted(String(targetDir));
+  return { escapedDir, line: `export PATH="${escapedDir}:$PATH"` };
+}
+
 interface ShellAction {
   label: string | null;
   shell: string;
   command: string;
 }
+
+/**
+ * Why a PATH suggestion produced no actions. An empty `shellActions` alone folds two different
+ * facts together — "no target directory was given" and "this target directory cannot be
+ * expressed as a shell command" — and a caller that cannot tell them apart prints a header with
+ * nothing under it (#3118).
+ */
+export const PATH_ACTION_REASON = Object.freeze({
+  NO_TARGET_DIR: 'no_target_dir',
+  WIN32_RESERVED_QUOTE: 'win32_reserved_quote',
+});
 
 export function renderShellActionLines(shellActions: ShellAction[] = []): string[] {
   return shellActions.map((action) => {
@@ -409,15 +459,23 @@ export function projectPathActionProjection({
   mode?: string;
   targetDir?: string | null;
   platform?: string;
-}): { shellActions: ShellAction[]; actionLines: string[] } {
-  if (!targetDir) return { shellActions: [], actionLines: [] };
+}): { shellActions: ShellAction[]; actionLines: string[]; reason?: string } {
+  if (!targetDir) return { shellActions: [], actionLines: [], reason: PATH_ACTION_REASON.NO_TARGET_DIR };
+
+  // #3118: `"` is reserved on Windows, so a path containing one cannot exist — and it would close
+  // cmd's quoted region in the `powershell -Command "…"` lane below, turning the rest into cmd
+  // input. There is no correct command to suggest for an impossible path: fail closed rather than
+  // emit one whose quoting can be broken.
+  if (platform === 'win32' && String(targetDir).includes('"')) return { shellActions: [], actionLines: [], reason: PATH_ACTION_REASON.WIN32_RESERVED_QUOTE };
 
   const isWin32 = platform === 'win32';
 
   let shellActions: ShellAction[];
   if (isWin32) {
     const psTargetDir = escapePowerShellSingleQuoted(targetDir);
-    const bashTargetDir = escapeSingleQuotedShellLiteral(posixNormalize(String(targetDir)));
+    const bashExportLine = escapeSingleQuotedShellLiteral(
+      projectPathExportLine(posixNormalize(String(targetDir))).line,
+    );
     shellActions = [
       {
         label: 'PowerShell',
@@ -432,40 +490,49 @@ export function projectPathActionProjection({
       {
         label: 'Git Bash',
         shell: 'bash',
-        command: `echo 'export PATH="${bashTargetDir}:$PATH"' >> ~/.bashrc`,
+        command: `echo '${bashExportLine}' >> ~/.bashrc`,
       },
     ];
   } else if (mode === 'persist') {
-    const bashTargetDir = escapeSingleQuotedShellLiteral(String(targetDir));
+    const exportLine = escapeSingleQuotedShellLiteral(projectPathExportLine(targetDir).line);
+    const fishTargetDir = escapeSingleQuotedShellLiteral(String(targetDir));
     shellActions = [
       {
         label: 'zsh',
         shell: 'zsh',
-        command: `echo 'export PATH="${bashTargetDir}:$PATH"' >> ~/.zshrc`,
+        command: `echo '${exportLine}' >> ~/.zshrc`,
       },
       {
         label: 'bash',
         shell: 'bash',
-        command: `echo 'export PATH="${bashTargetDir}:$PATH"' >> ~/.bashrc`,
+        command: `echo '${exportLine}' >> ~/.bashrc`,
       },
       // #323: fish has no `export`/`$PATH`-list syntax. `fish_add_path` is the
       // fish-native API (>= fish 3.2, 2021) that persists to the universal
       // variable store and de-duplicates. The directory is single-quoted with
       // the same POSIX literal escaping as the zsh/bash siblings — `'\''` is
       // also a valid escaped single quote in fish between quote spans.
+      //
+      // #3118 review MINOR: a `targetDir` with a leading `-` (e.g. `-v`) is a
+      // legal directory name, but fish's argparse-based option scanning
+      // treats a leading-dash token as a flag REGARDLESS of quoting, so
+      // `fish_add_path '-v'` misparses it and prints "No paths to add, not
+      // setting anything." (exit 1) instead of adding the path. `--` is
+      // fish's standard end-of-options separator; verified empirically
+      // against a real fish 4.8.1 install that `fish_add_path -- '-v'`
+      // succeeds where the unseparated form fails.
       {
         label: 'fish',
         shell: 'fish',
-        command: `fish_add_path '${bashTargetDir}'`,
+        command: `fish_add_path -- '${fishTargetDir}'`,
       },
     ];
   } else {
-    const posixTargetDir = escapePosixDoubleQuoted(targetDir);
     shellActions = [
       {
         label: null,
         shell: 'posix',
-        command: `export PATH="${posixTargetDir}:$PATH"`,
+        command: projectPathExportLine(targetDir).line,
       },
     ];
   }
@@ -479,36 +546,66 @@ export function projectPathActionProjection({
 export function projectPersistentPathExportActions({ targetDir, platform = process.platform }: {
   targetDir?: string | null;
   platform?: string;
-}): { shellActions: ShellAction[] } {
+}): { shellActions: ShellAction[]; reason?: string } {
   const projected = projectPathActionProjection({
     mode: 'persist',
     targetDir,
     platform,
   });
-  return { shellActions: projected.shellActions };
+  return projected.reason === undefined
+    ? { shellActions: projected.shellActions }
+    : { shellActions: projected.shellActions, reason: projected.reason };
 }
 
 
 // ─── Subprocess dispatch ──────────────────────────────────────────────────────
 
-interface SpawnResultOutput {
+export interface SpawnResultOutput {
   exitCode: number;
   stdout: string;
   stderr: string;
   signal: NodeJS.Signals | null;
   error: Error | null;
+  timedOut: boolean;
+}
+
+/**
+ * Returns true when a spawn/exec result indicates the subprocess was killed
+ * by a timeout, i.e. it never completed and reported a real answer. This is
+ * the single shared definition of "did this subprocess time out" — worktree
+ * safety (src/worktree-safety.cts) and worktree base-ref detection
+ * (src/worktree-base-ref.cts) both call this instead of maintaining their
+ * own copies (#3050 — "Generative Fix Divergence").
+ *
+ * Only `error.code === 'ETIMEDOUT'` is checked. Node.js guarantees this
+ * cross-platform when `spawnSync`'s `timeout` option fires. The `signal ===
+ * 'SIGTERM'` check some earlier code paired with it is platform-fragile —
+ * Windows does not necessarily report SIGTERM the same way — and pairing it
+ * in as a REQUIRED conjunct risks a false NEGATIVE (a timeout that silently
+ * fails to trip the guard) on that platform. There is no false-positive risk
+ * from dropping it: an externally-delivered SIGTERM (not a timeout) leaves
+ * `error` null, so `error.code === 'ETIMEDOUT'` alone still won't match it.
+ */
+export function isSpawnTimeout(result: { error?: unknown }): boolean {
+  return (result.error as NodeJS.ErrnoException | null | undefined)?.code === 'ETIMEDOUT';
 }
 
 function _spawnResult(result: { error?: NodeJS.ErrnoException | null; status?: number | null; stdout?: Buffer | string | null; stderr?: Buffer | string | null; signal?: NodeJS.Signals | null }, program: string): SpawnResultOutput {
   if (result.error && result.error.code === 'ENOENT') {
-    return { exitCode: 127, stdout: '', stderr: `${program}: not found`, signal: null, error: result.error };
+    return { exitCode: 127, stdout: '', stderr: `${program}: not found`, signal: null, error: result.error, timedOut: false };
   }
+  const signal = result.signal ?? null;
+  const error = result.error ?? null;
   return {
     exitCode: result.status ?? 1,
     stdout: (result.stdout ?? '').toString().trim(),
     stderr: (result.stderr ?? '').toString().trim(),
-    signal: result.signal ?? null,
-    error: result.error ?? null,
+    signal,
+    error,
+    // Reuse the single shared timeout predicate (isSpawnTimeout, below) rather
+    // than re-deriving it here — see that function's docstring for why only
+    // error.code === 'ETIMEDOUT' is checked (not signal === 'SIGTERM').
+    timedOut: isSpawnTimeout({ error }),
   };
 }
 
@@ -615,9 +712,9 @@ export function resolveGsdToolsPath(): string {
  * NEVER throws. Degrades to `{ ok:false, ... }` on:
  *   - a missing/invalid "family" (validated locally, no subprocess spawned)
  *   - ENOENT / a missing gsd-tools.cjs (via the injectable `gsdToolsPath`)
- *   - a wall-clock timeout (`timedOut:true`, mirroring the
- *     `signal === 'SIGTERM' && error.code === 'ETIMEDOUT'` idiom already used
- *     by worktree-safety.cts)
+ *   - a wall-clock timeout (`timedOut:true`, via the shared `isSpawnTimeout`
+ *     predicate defined above in this file — also used by worktree-safety.cts
+ *     and worktree-base-ref.cts)
  *   - any other unanticipated throw from the underlying spawn (defensive
  *     try/catch — execTool itself is spawnSync-based and does not throw).
  */
@@ -674,16 +771,9 @@ export function dispatchGsdCommand({
     };
   }
 
-  // Mirrors the established `result.error && (result.error as
-  // NodeJS.ErrnoException).code === ...` idiom (graphify.cts, worktree-safety.cts):
-  // narrow away null via `!== null` FIRST, then cast — asserting `Error | null`
-  // to `NodeJS.ErrnoException | null` directly (paired with optional chaining)
-  // trips a typescript-eslint no-unnecessary-type-assertion false positive for
-  // this exact narrowing shape (all of ErrnoException's extra fields over Error
-  // are optional).
-  const timedOut = result.signal === 'SIGTERM'
-    && result.error !== null
-    && (result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+  // Delegates to the single shared predicate defined above in this file
+  // (#3050 — "Generative Fix Divergence") instead of a local inline copy.
+  const timedOut = isSpawnTimeout(result);
 
   return {
     ok: result.exitCode === 0 && !timedOut,

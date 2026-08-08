@@ -603,6 +603,66 @@ describe('broken-windows CLI: windows append', () => {
     assert.equal(res.success, false);
     assert.match(res.error, /4-backtick|fence|invalid_text/i);
   });
+
+  // ─── #2893: append must not destroy prose below the JSON ledger ──────────
+
+  test('#2893 — append preserves prose below the JSON ledger block', (t) => {
+    const tmp = createTempDir('bw-append-prose-');
+    t.after(() => cleanup(tmp));
+
+    // Create a WINDOWS.md with a NON-EMPTY ledger + prose below the JSON block.
+    fs.mkdirSync(path.join(tmp, '.planning'), { recursive: true });
+    const lp = path.join(tmp, '.planning', LEDGER_FILE_NAME);
+    const initial = renderLedger({
+      schema_version: 1, open_count: 1, waived_count: 0, fixed_count: 0, total_count: 1,
+      last_updated: '2026-01-01T00:00:00Z',
+      entries: [{ id: 1, phase: '1', kind: 'stub', file: '', line: null, description: 'pre-existing', status: 'open', reason: '', recorded_at: '2026-01-01T00:00:00Z', resolved_at: null }],
+    });
+    const prose = [
+      '',
+      '## Investigation Notes',
+      '',
+      'This window was opened because the flaky test in thread-status.test.ts',
+      'turned out to be a real race condition against live data, not a pre-existing break.',
+      '',
+      '## ACPT-M03',
+      '',
+      'Went red on a green that PREDATED the diff — checkpoint refused, then fixed.',
+    ].join('\n');
+    fs.writeFileSync(lp, initial + prose, 'utf8');
+
+    // First append.
+    const res = runGsdTools(
+      ['windows', 'append', '--kind', 'stub', '--phase', '2', '--description', 'test entry'],
+      tmp,
+    );
+    assert.equal(res.success, true, `stderr: ${res.error || ''}`);
+    assert.equal(JSON.parse(res.output).ok, true);
+
+    // Second append — idempotency: prose must appear exactly once, not duplicated.
+    const res2 = runGsdTools(
+      ['windows', 'append', '--kind', 'todo', '--phase', '3', '--description', 'second entry'],
+      tmp,
+    );
+    assert.equal(res2.success, true);
+
+    const after = fs.readFileSync(lp, 'utf8');
+    // Prose must survive.
+    assert.match(after, /Investigation Notes/, 'prose heading must survive');
+    assert.match(after, /thread-status\.test\.ts/, 'prose body must survive');
+    assert.match(after, /ACPT-M03/, 'second prose heading must survive');
+    assert.match(after, /PREDATED the diff/, 'second prose body must survive');
+    // Prose must appear exactly once (not duplicated by the second write).
+    assert.equal((after.match(/Investigation Notes/g) || []).length, 1,
+      'prose heading must appear exactly once after two appends (idempotency)');
+    // The old JSON body must NOT be duplicated as prose (the indexOf(open-fence) bug).
+    // Count JSON fence opens — there must be exactly one.
+    assert.equal((after.match(/````json/g) || []).length, 1,
+      'exactly one JSON fence open must exist (no duplicated JSON body)');
+    // The file must re-parse cleanly with the correct entry count.
+    const reParsed = parseLedger(after);
+    assert.equal(reParsed.entries.length, 3, 'ledger must have 3 entries after two appends');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -721,5 +781,59 @@ describe('broken-windows CLI: lifecycle', () => {
     assert.equal(status.ledger.waived_count, 1);
     assert.equal(status.ledger.fixed_count, 1);
     assert.equal(status.ledger.total_count, 2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #3116: parseFrontmatterStrict throws on CRLF WINDOWS.md
+// On repos with core.autocrlf=true (Windows default), .planning/WINDOWS.md is
+// checked out CRLF. The `\n---` close-fence scan leaves the last line's CR
+// attached, and `.` doesn't match CR, so the key:value regex fails.
+// ---------------------------------------------------------------------------
+
+describe('#3116: parseLedger handles CRLF ledgers', () => {
+  // Build ledgers via renderLedger (the real writer) so the JSON fence
+  // format (4-backtick) and structure always match what production emits.
+  // parseLedger validates that frontmatter counts match the entries array,
+  // so non-zero counts require real entries (appendWindow).
+
+  test('CRLF empty ledger parses without throwing', () => {
+    const ledger = emptyLedger();
+    ledger.last_updated = '2026-08-06T09:43:08.354Z';
+    const lfLedger = renderLedger(ledger);
+    const crlfLedger = lfLedger.replace(/\n/g, '\r\n');
+
+    // Must not throw — before the fix this throws WINDOWS_LEDGER_MALFORMED
+    // on the last frontmatter key ("last_updated: ...\r")
+    const parsed = parseLedger(crlfLedger);
+    assert.equal(parsed.schema_version, 1);
+    assert.equal(parsed.open_count, 0);
+    assert.equal(parsed.last_updated, '2026-08-06T09:43:08.354Z');
+  });
+
+  test('CRLF ledger with entries parses correctly', () => {
+    let ledger = emptyLedger();
+    const { ledger: led1 } = appendWindow(ledger, makeEntry(), { now: '2026-08-06T12:00:00Z' });
+    const { ledger: led2 } = appendWindow(led1, makeEntry({ description: 'second' }), { now: '2026-08-06T12:01:00Z' });
+    ledger = led2;
+    const lfLedger = renderLedger(ledger);
+    const crlfLedger = lfLedger.replace(/\n/g, '\r\n');
+
+    const parsed = parseLedger(crlfLedger);
+    assert.equal(parsed.open_count, 2);
+    assert.equal(parsed.total_count, 2);
+    assert.equal(parsed.entries.length, 2);
+  });
+
+  test('CRLF and LF ledgers produce identical parse results', () => {
+    let ledger = emptyLedger();
+    const { ledger: led1 } = appendWindow(ledger, makeEntry(), { now: '2026-08-06T09:43:08Z' });
+    ledger = led1;
+    const lfLedger = renderLedger(ledger);
+
+    const lfParsed = parseLedger(lfLedger);
+    const crlfParsed = parseLedger(lfLedger.replace(/\n/g, '\r\n'));
+
+    assert.deepEqual(crlfParsed, lfParsed);
   });
 });

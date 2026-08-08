@@ -27,6 +27,7 @@ const VALID_CHOICES: ReadonlyArray<string> = ['keep', 'remove'];
 // on-disk `hooks/` directory in both directions: whitelist-but-missing
 // AND shipped-but-not-whitelisted both fail CI.
 export const BUNDLED_GSD_HOOK_FILES: ReadonlySet<string> = Object.freeze(new Set([
+  'hooks/gsd-agent-isolation-guard.js',
   'hooks/gsd-check-update-worker.js',
   'hooks/gsd-check-update.js',
   'hooks/gsd-config-reload.js',
@@ -52,6 +53,7 @@ export const BUNDLED_GSD_HOOK_FILES: ReadonlySet<string> = Object.freeze(new Set
   'hooks/gsd-validate-commit.sh',
   'hooks/gsd-workflow-guard.js',
   'hooks/gsd-worktree-path-guard.js',
+  'hooks/gsd-write-guard.js',
 ]));
 
 // ── Internal action types ─────────────────────────────────────────────────────
@@ -133,6 +135,7 @@ function installerMigrationActionLabel(action: MigrationAction | null | undefine
   if (action.type === 'record-baseline') return 'recorded';
   if (action.type === 'baseline-preserve-user') return 'preserved';
   if (action.type === 'preserve-user') return 'preserved';
+  if (action.type === 'remove-empty-dir') return 'removed';
   if (action.type === 'prompt-user') return 'blocked';
   return 'skipped';
 }
