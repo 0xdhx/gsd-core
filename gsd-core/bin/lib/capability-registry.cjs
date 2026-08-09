@@ -3033,6 +3033,73 @@ const capabilities = {
       "handler": null
     }
   },
+  "refactor-trigger": {
+    "id": "refactor-trigger",
+    "role": "feature",
+    "version": "1.10.0",
+    "title": "Complexity-triggered refactor",
+    "description": "Measures the complexity of the code a phase touched and, when a function crosses a configured threshold or jumps past its recorded anchor, surfaces a scoped refactor proposal at .planning/phases/<N>/<NN>-REFACTOR.md. Advisory by default — it never edits code and never blocks. Opt-in strict mode blocks /gsd-ship while a proposal is untriaged; a declined proposal is recorded in the broken-windows ledger when that capability is present. Operationalizes 'refactor early, refactor often' as continuous pressure instead of a thing you have to remember (issue #1953).",
+    "tier": "full",
+    "requires": [],
+    "engines": {
+      "gsd": ">=1.10.0"
+    },
+    "runtimeCompat": {
+      "supported": [
+        "*"
+      ],
+      "unsupported": []
+    },
+    "skills": [],
+    "agents": [],
+    "activationKey": "refactor.trigger_enabled",
+    "config": {
+      "refactor.trigger_enabled": {
+        "type": "boolean",
+        "default": false,
+        "description": "Enable the complexity-triggered refactor hook. When true, an execute:post step evaluates the complexity of the files the phase touched and writes a scoped refactor proposal if a function crosses refactor.complexity_threshold or jumps past refactor.complexity_jump_delta. Opt-in; when false the hook never runs. Issue #1953."
+      },
+      "refactor.complexity_threshold": {
+        "type": "number",
+        "default": 15,
+        "description": "Absolute per-function complexity above which a refactor proposal is surfaced. Semantics match ESLint's `complexity: {max: N}` — the trigger is STRICTLY GREATER, so a score of exactly N does not trigger. Default 15 follows SonarSource's default; ESLint's own default is 20 and radon's rank C begins at 11. Raise it if proposals feel like noise."
+      },
+      "refactor.complexity_jump_delta": {
+        "type": "number",
+        "default": 5,
+        "description": "Complexity growth above which a refactor proposal is surfaced even when the absolute threshold is not reached. Measured against the function's anchor — the score recorded the last time the function was consciously dispositioned — so it accumulates across phases and catches slow creep the absolute threshold would miss. Strictly greater, as with the threshold."
+      },
+      "refactor.trigger_strict": {
+        "type": "boolean",
+        "default": false,
+        "description": "Record an untriaged refactor proposal as an open `deviation` entry in the broken-windows ledger, so it becomes a tracked task that must be resolved before ship. Off by default and deliberately so: a blocking complexity number is a metric an executor can satisfy by splitting one coherent function into two incoherent ones, so the entry clears on the proposal being DISPOSITIONED (gsd-tools refactor accept|decline), never on the score improving. Ship blocking is the broken-windows capability's existing ship:pre gate — enable it with workflow.windows_enforce. With broken-windows absent, strict mode still records the proposal locally and says so; it cannot block on its own. Advisory mode (the default) surfaces the same proposal and tracks nothing."
+      }
+    },
+    "commands": [
+      {
+        "family": "refactor",
+        "module": "refactor-trigger-command-router.cjs",
+        "router": "routeRefactorTriggerCommand"
+      }
+    ],
+    "hooks": [],
+    "steps": [
+      {
+        "point": "execute:post",
+        "ref": {
+          "command": "refactor evaluate"
+        },
+        "produces": [
+          "REFACTOR.md"
+        ],
+        "consumes": [],
+        "when": "refactor.trigger_enabled",
+        "onError": "skip"
+      }
+    ],
+    "contributions": [],
+    "gates": []
+  },
   "research": {
     "id": "research",
     "role": "feature",
@@ -4157,6 +4224,19 @@ const byLoopPoint = {
         ],
         "when": "workflow.code_review",
         "onError": "skip"
+      },
+      {
+        "capId": "refactor-trigger",
+        "point": "execute:post",
+        "ref": {
+          "command": "refactor evaluate"
+        },
+        "produces": [
+          "REFACTOR.md"
+        ],
+        "consumes": [],
+        "when": "refactor.trigger_enabled",
+        "onError": "skip"
       }
     ],
     "contributions": [],
@@ -4360,6 +4440,10 @@ const configKeys = {
   "review.models.opencode": "opencode",
   "workflow.pattern_mapper": "pattern-mapper",
   "profile-pipeline.enabled": "profile-pipeline",
+  "refactor.trigger_enabled": "refactor-trigger",
+  "refactor.complexity_threshold": "refactor-trigger",
+  "refactor.complexity_jump_delta": "refactor-trigger",
+  "refactor.trigger_strict": "refactor-trigger",
   "workflow.research": "research",
   "workflow.schema_push_detection": "schema-gate",
   "workflow.security_enforcement": "security",
@@ -4687,6 +4771,30 @@ const configSchema = {
     "type": "boolean",
     "default": false,
     "description": "Enable the developer profiling pipeline commands (scan-sessions, extract-messages, profile-sample, write-profile, etc.)."
+  },
+  "refactor.trigger_enabled": {
+    "owner": "refactor-trigger",
+    "type": "boolean",
+    "default": false,
+    "description": "Enable the complexity-triggered refactor hook. When true, an execute:post step evaluates the complexity of the files the phase touched and writes a scoped refactor proposal if a function crosses refactor.complexity_threshold or jumps past refactor.complexity_jump_delta. Opt-in; when false the hook never runs. Issue #1953."
+  },
+  "refactor.complexity_threshold": {
+    "owner": "refactor-trigger",
+    "type": "number",
+    "default": 15,
+    "description": "Absolute per-function complexity above which a refactor proposal is surfaced. Semantics match ESLint's `complexity: {max: N}` — the trigger is STRICTLY GREATER, so a score of exactly N does not trigger. Default 15 follows SonarSource's default; ESLint's own default is 20 and radon's rank C begins at 11. Raise it if proposals feel like noise."
+  },
+  "refactor.complexity_jump_delta": {
+    "owner": "refactor-trigger",
+    "type": "number",
+    "default": 5,
+    "description": "Complexity growth above which a refactor proposal is surfaced even when the absolute threshold is not reached. Measured against the function's anchor — the score recorded the last time the function was consciously dispositioned — so it accumulates across phases and catches slow creep the absolute threshold would miss. Strictly greater, as with the threshold."
+  },
+  "refactor.trigger_strict": {
+    "owner": "refactor-trigger",
+    "type": "boolean",
+    "default": false,
+    "description": "Record an untriaged refactor proposal as an open `deviation` entry in the broken-windows ledger, so it becomes a tracked task that must be resolved before ship. Off by default and deliberately so: a blocking complexity number is a metric an executor can satisfy by splitting one coherent function into two incoherent ones, so the entry clears on the proposal being DISPOSITIONED (gsd-tools refactor accept|decline), never on the score improving. Ship blocking is the broken-windows capability's existing ship:pre gate — enable it with workflow.windows_enforce. With broken-windows absent, strict mode still records the proposal locally and says so; it cannot block on its own. Advisory mode (the default) surfaces the same proposal and tracks nothing."
   },
   "workflow.research": {
     "owner": "research",
@@ -6897,6 +7005,11 @@ const commandFamilies = {
     "module": "profile-pipeline-command-router.cjs",
     "router": "routeProfileSample"
   },
+  "refactor": {
+    "capId": "refactor-trigger",
+    "module": "refactor-trigger-command-router.cjs",
+    "router": "routeRefactorTriggerCommand"
+  },
   "scan-sessions": {
     "capId": "profile-pipeline",
     "module": "profile-pipeline-command-router.cjs",
@@ -7027,6 +7140,7 @@ const _requiresGraph = {
   "pi": [],
   "profile-pipeline": [],
   "qwen": [],
+  "refactor-trigger": [],
   "research": [],
   "schema-gate": [],
   "security": [],
