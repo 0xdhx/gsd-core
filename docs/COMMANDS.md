@@ -1770,6 +1770,17 @@ Detect drift between STATE.md and the actual filesystem.
 node gsd-tools.cjs state validate
 ```
 
+The report also carries a `scope` field reporting whether the drift derivation could actually run:
+
+| `scope` | Meaning |
+|---|---|
+| `complete` | The derivation ran over usable input — a resolvable phase, a readable disk scan. `valid`/`warnings`/`drift` are a real answer. |
+| `truncated` | Part of the input was cut short (e.g. the phase's plan/summary scan hit its cap) — the answer may be incomplete. |
+| `unscoped` | `Current Phase` could not be resolved from either frontmatter or body — there was nothing to scope the disk lookup to, so the derivation never ran. |
+| `unreadable` | The frontmatter parse or a filesystem read (the phases directory scan) failed — the derivation could not consult its input. |
+
+`valid` is **not** routed from `scope`: `valid` still means "no drift warnings were found," and `scope` says whether the scan could actually run. A freshly-initialized project reports `{valid:true, warnings:[], drift:{}, scope:'unscoped'}` — nothing was wrong, and the phase could not be checked. See [Interpret `state validate` results](how-to/interpret-state-validate-results.md) for how to act on each `scope` value.
+
 ---
 
 ### `state sync [--verify]`
@@ -1826,6 +1837,21 @@ Record state transition after plan-phase completes (Planned/Ready to execute).
 
 ```bash
 node gsd-tools.cjs state planned-phase --phase 3 --plans 2
+```
+
+---
+
+### `state complete-phase [--phase N]`
+
+Mark the current phase as COMPLETE in STATE.md — updates the body `Status`, `Last Activity`, and `## Current Position` fields. `--phase` is optional; when omitted, the phase is resolved from STATE.md's `Current Phase`/`Phase` fields (frontmatter `current_phase` preferred, falling back to the body).
+
+**Idempotency guard (#3489):** if STATE.md's canonical current phase already names a phase distinct from the one being marked complete — including when that phase lives only in frontmatter `current_phase`, not the body — the command is a no-op (`idempotent: true`) rather than rolling STATE.md back to the requested phase's moment-of-completion. If the frontmatter cannot be parsed at all, the command refuses outright (`Unable to read STATE.md frontmatter; refusing to run complete-phase to avoid a destructive rollback`) instead of guessing.
+
+**Prerequisites:** `.planning/STATE.md` exists
+**Produces:** Updated `STATE.md` marking the resolved phase complete, or a no-op when the guard determines the phase was already superseded
+
+```bash
+node gsd-tools.cjs state complete-phase --phase 3
 ```
 
 ---
