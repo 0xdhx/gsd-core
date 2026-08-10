@@ -1466,7 +1466,8 @@ function summarizeInstructionSurfaces(disclosure: Disclosure): string[] {
  *
  * #3248: every manifest-supplied value interpolated into a line (hook event/script, command
  * family/module/router, MCP name/transport/url/command/argv/header-keys/env-keys+values/cwd,
- * reviewer-lane slug/hostConfigKey/resolvedHost/binary/rawArgs/handler, missingArtifacts entries)
+ * reviewer-lane slug/hostConfigKey/resolvedHost/defaultHost/binary/rawArgs/handler/probe-binary/
+ * env-keys+values, missingArtifacts entries)
  * goes through `renderValueForPrompt` first, which escapes forging/rewriting control characters and
  * bounds the length. These lines are joined with `\n` and written RAW to stderr on the
  * needs-consent path (`capability-command-router.cjs`), so an unescaped value could forge a line or
