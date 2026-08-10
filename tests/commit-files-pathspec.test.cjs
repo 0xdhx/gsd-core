@@ -866,7 +866,40 @@ describe('workflow call sites declare --files (#2269)', () => {
   // whatever binary follows it, so `(sh -c "gsd_run commit a"` hid the invoker
   // from the -c pass exactly as `(gsd_run …` hid the binary from the anchor.
   // One strip, one helper — a second copy is how the two drift apart.
-  const BINARY_LEAD_MARKUP_RE = /^\(+/;
+  //
+  // A COMMAND SUBSTITUTION GLUES THE SAME WAY, and it is the shape the tree
+  // actually uses: `$(gsd_run …)` is the dominant invocation idiom repo-wide —
+  // 443 live occurrences across the six roots against 2287 backticked ones —
+  // and `$(` left `$(gsd_run` as one token that no command-name test could
+  // match, so `$(gsd_run query commit "docs: x")` scored ZERO candidates in
+  // both directions. Same silent false negative `(` produced, on the shape a
+  // contributor is most likely to reach for.
+  //
+  // WHAT PRECEDES THE OPENER IS NOT ENUMERABLE, so it is not enumerated. The
+  // first cut of this rule keyed on an assignment prefix, because 437 of the
+  // 443 live substitution sites are `VAR=$(gsd_run …)`. That is the majority
+  // and it is the wrong generalisation — the remaining six are neither, and
+  // they are live today:
+  //   for REVIEW_FLAG in $(gsd_run review-lane flags)          (×3)
+  //   ${PLAN_PRE_HOOKS_JSON:-$(gsd_run loop render-hooks …)}   (×3)
+  // A parameter-expansion default glues just as hard as an assignment, and so
+  // does ordinary text (`pre$(…)`) and an indexed assignment (`A[0]=$(…)`).
+  // Enumerating prefixes means a new one every time the shell is used
+  // idiomatically, and each miss is silent. So the rule is positional instead:
+  // strip everything up to and including the LAST substitution opener in the
+  // token. Whatever preceded it was, by construction, not the command.
+  //
+  // ARITHMETIC IS EXCLUDED BY THE SAME MECHANISM, not by a special case.
+  // `$((x))` leaves a `(` in front of the name after the strip, and a leading
+  // `(` is not part of any binary name — so it is refused. That mirrors the
+  // shell, which also requires `$( (` with a space before it will read a nested
+  // subshell rather than an arithmetic expansion.
+  //
+  // The ARRAY LITERAL stays invisible for free: `arr=(a b c)` contains no `$(`
+  // at all, so neither alternative fires and the token is left whole. It is
+  // pinned as a zero-candidate case regardless, because that is a property of
+  // this regex rather than of the grammar and the next edit could lose it.
+  const BINARY_LEAD_MARKUP_RE = /^.*\$\(|^\(+/;
   const bareCommandName = (value) => value.replace(BINARY_LEAD_MARKUP_RE, '');
   const isGsdBinary = (value) => GSD_BINARY_RE.test(bareCommandName(value));
 
@@ -1241,6 +1274,12 @@ describe('workflow call sites declare --files (#2269)', () => {
         'then', 'else', 'do', '$', '-', '*', '&&', '||',
         'time', 'exec', 'nohup', 'env', 'command',
       ]);
+      // AN ASSIGNMENT IS A SKIPPABLE PREFIX ONLY WHEN IT IS NOT A SUBSTITUTION.
+      // `FOO=1 bash -c "…"` prefixes the command; `V=$(bash -c "…")` IS the
+      // command, and skipping it walks the search past the invoker onto `-c`,
+      // which is not one — so the payload is never reached. Found by sweeping
+      // the substitution-glues-to-the-binary class across every command-name
+      // test rather than only the one the finding named.
       const skippable = (t) => t.redir
         || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t.value)
         || NON_COMMAND_PREFIX.has(t.value);
@@ -2053,6 +2092,79 @@ describe('workflow call sites declare --files (#2269)', () => {
     const subshell = invocationCandidates('(gsd_run query commit "docs: x")');
     assert.strictEqual(subshell.length, 1, 'a subshell-wrapped invocation is still an invocation');
     assert.strictEqual(hasScopedFiles(subshell[0]), false, 'and it is unscoped');
+
+    // A COMMAND SUBSTITUTION glues to the binary exactly as `(` does, and it is
+    // the dominant live idiom (443 occurrences across the six roots). Pinned in
+    // BOTH directions, because a guard that only proves it can flag is silent
+    // about whether it can clear.
+    const cmdSubUnscoped = invocationCandidates('$(gsd_run query commit "docs: x")');
+    assert.strictEqual(cmdSubUnscoped.length, 1, 'a command substitution is still an invocation');
+    assert.strictEqual(hasScopedFiles(cmdSubUnscoped[0]), false, 'and unscoped, it is an offender');
+    const cmdSubScoped = invocationCandidates('$(gsd_run query commit "docs: x" --files a.md)');
+    assert.strictEqual(cmdSubScoped.length, 1, 'the scoped direction is scanned too');
+    assert.strictEqual(hasScopedFiles(cmdSubScoped[0]), true, 'and it passes');
+
+    // THE ASSIGNMENT-CAPTURE FORM is the shape the tree actually writes —
+    // `VAR=$(gsd_run …)` — so a fix pinned only on the bare form above would
+    // pass while missing every live site.
+    const captured = invocationCandidates('RESULT=$(gsd_run query commit "docs: x")');
+    assert.strictEqual(captured.length, 1, 'an assignment-captured invocation is an invocation');
+    assert.strictEqual(hasScopedFiles(captured[0]), false, 'and it is unscoped');
+    assert.strictEqual(
+      hasScopedFiles(invocationCandidates('OUT=$(gsd_run query commit "docs: x" --files a.md)')[0]),
+      true,
+      'and its scoped direction passes',
+    );
+
+    // THE TWO LIVE PREFIXES THAT ARE NOT ASSIGNMENTS. Keying the strip on an
+    // assignment covers 437 of the 443 live substitution sites and misses these
+    // six, which is why the rule is positional instead of an enumeration.
+    for (const live of [
+      'for REVIEW_FLAG in $(gsd_run query commit "docs: x"); do :; done',
+      'PLAN_PRE_HOOKS_JSON=${PLAN_PRE_HOOKS_JSON:-$(gsd_run query commit "docs: x")}',
+    ]) {
+      const cands = invocationCandidates(live);
+      assert.strictEqual(cands.length, 1, `a non-assignment substitution prefix is still reached: ${live}`);
+      assert.strictEqual(hasScopedFiles(cands[0]), false, `and it is unscoped: ${live}`);
+    }
+    assert.strictEqual(
+      hasScopedFiles(invocationCandidates(
+        'X=${Y:-$(gsd_run query commit "docs: x" --files a.md)}',
+      )[0]),
+      true,
+      'and the scoped direction of the same shape passes',
+    );
+
+    // GLUED AFTER ORDINARY TEXT, and after an INDEXED assignment. Both are
+    // executable and both were invisible while the strip was anchored to a
+    // leading opener.
+    for (const glued of [
+      'echo pre$(gsd_run query commit "docs: x")',
+      'RESULT[0]=$(gsd_run query commit "docs: x")',
+    ]) {
+      assert.strictEqual(
+        invocationCandidates(glued).length, 1,
+        `a substitution glued to preceding text is still a command: ${glued}`,
+      );
+    }
+
+    // ARITHMETIC EXPANSION IS NOT A COMMAND CONTEXT. `$((…))` evaluates an
+    // expression; nothing in it runs. The strip leaves a `(` in front of the
+    // name, which no binary carries — the same reason the shell itself needs
+    // `$( (` spaced before it will read a nested subshell here.
+    assert.deepEqual(
+      invocationCandidates('$((gsd_run query commit "docs: x"))'), [],
+      'arithmetic expansion is not an invocation',
+    );
+
+    // THE NEGATIVE THAT KEEPS THE WIDENING HONEST: `V=(a b c)` is an array
+    // literal, not a substitution — it runs nothing, so it must stay invisible.
+    // It carries no `$(` at all, so the positional strip cannot reach it; this
+    // is pinned because that is a property of the regex, not of the grammar.
+    assert.deepEqual(
+      invocationCandidates('arr=(gsd_run query commit "docs: x")'), [],
+      'an array literal is not a command',
+    );
 
     // A SHELL INVOKED WITH -c runs its next argument as a command, so the
     // invocation lives inside a quoted token that no markup rule reaches.
