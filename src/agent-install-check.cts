@@ -84,7 +84,7 @@ function truncatePostureValue(value: string): string {
  *   2. For claude runtime: __dirname-relative path (agents/ sibling of
  *      gsd-core/) — correct for repo runs and runtime-config-dir installs,
  *      where the sibling agents/ IS the user's agents dir — UNLESS that path
- *      lies inside a node_modules tree. gsd-tools.cjs lives inside
+ *      carries an exact node_modules segment. gsd-tools.cjs lives inside
  *      gsd-core/bin/ in every install shape, but on an npm-global install
  *      gsd-core/ sits inside the package (not the runtime config dir) and the
  *      package ships its own agents/, so the install-relative path resolves
@@ -109,8 +109,11 @@ function getAgentsDir(runtime?: string, projectRoot?: string): string {
   const resolved = runtime ?? (process.env['GSD_RUNTIME'] || 'claude');
   if (resolved === 'claude') {
     const installRelative = path.join(__dirname, '..', '..', '..', 'agents');
-    // #3203: inside a node_modules tree this is the package's own bundled
-    // agents/, so the install check would validate the package against itself.
+    // #3203: a lexical guard, not an install-shape test. It targets the
+    // layouts where the sibling agents/ is the package's own bundled copy and
+    // the check would otherwise validate the package against itself; a path
+    // merely carrying a directory of that name resolves the same way, and a
+    // non-empty GSD_AGENTS_DIR overrides both.
     if (installRelative.split(path.sep).includes('node_modules')) {
       return path.join(getGlobalConfigDir('claude'), 'agents');
     }
