@@ -1281,7 +1281,7 @@ describe('workflow call sites declare --files (#2269)', () => {
       // the substitution-glues-to-the-binary class across every command-name
       // test rather than only the one the finding named.
       const skippable = (t) => t.redir
-        || /^[A-Za-z_][A-Za-z0-9_]*=/.test(t.value)
+        || (/^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?=/.test(t.value) && !t.value.includes('$('))
         || NON_COMMAND_PREFIX.has(t.value);
       const gi = group.findIndex((t) => !skippable(t));
       if (gi !== -1 && SHELL_INVOKER_RE.test(bareCommandName(group[gi].value))) {
@@ -2115,6 +2115,13 @@ describe('workflow call sites declare --files (#2269)', () => {
       true,
       'and its scoped direction passes',
     );
+
+    // The same glue in the INVOKER position — `V=$(bash -c "…")` IS the command
+    // rather than a prefix to one, so the -c pass must not skip it as an
+    // ordinary assignment.
+    const capturedInvoker = invocationCandidates('V=$(bash -c "gsd_run query commit fixup")');
+    assert.strictEqual(capturedInvoker.length, 1, 'an assignment-captured shell -c payload is reached');
+    assert.strictEqual(hasScopedFiles(capturedInvoker[0]), false, 'and it is unscoped');
 
     // THE TWO LIVE PREFIXES THAT ARE NOT ASSIGNMENTS. Keying the strip on an
     // assignment covers 437 of the 443 live substitution sites and misses these
