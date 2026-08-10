@@ -899,9 +899,35 @@ describe('workflow call sites declare --files (#2269)', () => {
   // at all, so neither alternative fires and the token is left whole. It is
   // pinned as a zero-candidate case regardless, because that is a property of
   // this regex rather than of the grammar and the next edit could lose it.
-  const BINARY_LEAD_MARKUP_RE = /^.*\$\(|^\(+/;
-  const bareCommandName = (value) => value.replace(BINARY_LEAD_MARKUP_RE, '');
-  const isGsdBinary = (value) => GSD_BINARY_RE.test(bareCommandName(value));
+  // THE STRIP IS REFUSED ON A TOKEN THAT CARRIED A QUOTE, because quoting is
+  // exactly what decides whether an opener is syntax or data. `printf %s
+  // '$(gsd_run' query commit fixup` runs no gsd command — the opener is
+  // single-quoted literal text — but quote removal leaves the token `$(gsd_run`
+  // and a strip would then read it as a binary, fabricating an invocation out
+  // of a string. The tokenizer already knows; it just was not saying.
+  //
+  // RESIDUAL, named rather than implied: this closes the strip's exposure, not
+  // the tokenizer's quote-blindness in general. `printf %s 'gsd_run' query
+  // commit fixup` still reads as an invocation, because no markup is stripped
+  // there — the token's value simply IS the binary name. That predates this
+  // rule and is unchanged by it; closing it needs quote provenance carried
+  // through the command-shape test, not just through the strip. The direction
+  // is a visible false positive with a declared remedy, not a silent miss.
+  const bareCommandName = (t) => {
+    const mask = t.qmask || '0'.repeat(t.value.length);
+    // The LAST opener whose own two characters were unquoted. Per-character,
+    // not per-token: a quote elsewhere in the word protects only itself, and
+    // `echo "pre"$(gsd_run …)` really does run.
+    for (let i = t.value.length - 2; i >= 0; i -= 1) {
+      if (t.value[i] === '$' && t.value[i + 1] === '(' && mask[i] === '0' && mask[i + 1] === '0') {
+        return t.value.slice(i + 2);
+      }
+    }
+    let j = 0;
+    while (j < t.value.length && t.value[j] === '(' && mask[j] === '0') j += 1;
+    return t.value.slice(j);
+  };
+  const isGsdBinary = (t) => GSD_BINARY_RE.test(bareCommandName(t));
 
   // Shell-like word splitting. Honours BOTH quote characters (the previous
   // parity walk counted only `"`, so a single-quoted message was transparent
@@ -947,23 +973,35 @@ describe('workflow call sites declare --files (#2269)', () => {
     let started = false;
     let start = 0;
     let quote = null;
+    // A PER-CHARACTER quote mask, parallel to `cur`: '1' where the character was
+    // quoted or backslash-escaped (i.e. protected, therefore data), '0' where it
+    // was bare syntax. A per-TOKEN boolean is the obvious shape and it is wrong
+    // in the unaffordable direction — `echo "pre"$(gsd_run …)` executes, and a
+    // token-wide flag suppresses the strip on it, turning a false positive into
+    // a silent false negative.
+    let curMask = '';
+    const add = (text, protectedChar) => {
+      cur += text;
+      curMask += (protectedChar ? '1' : '0').repeat(text.length);
+    };
     const begin = (i) => {
       if (!started) { started = true; start = i; }
     };
     const flush = (end) => {
-      if (started) tokens.push({ value: cur, start, end });
+      if (started) tokens.push({ value: cur, start, end, qmask: curMask });
       cur = '';
+      curMask = '';
       started = false;
     };
     for (let i = 0; i < str.length; i += 1) {
       const ch = str[i];
       if (quote) {
-        if (ch === '\\' && quote === '"' && i + 1 < str.length) { cur += str[i + 1]; i += 1; continue; }
+        if (ch === '\\' && quote === '"' && i + 1 < str.length) { add(str[i + 1], true); i += 1; continue; }
         if (ch === quote) { quote = null; continue; }
-        cur += ch;
+        add(ch, true);
         continue;
       }
-      if (ch === '\\' && i + 1 < str.length) { begin(i); cur += str[i + 1]; i += 1; continue; }
+      if (ch === '\\' && i + 1 < str.length) { begin(i); add(str[i + 1], true); i += 1; continue; }
       if (ch === '"' || ch === "'") { begin(i); quote = ch; continue; }
       if (/\s/.test(ch)) { flush(i); continue; }
       // An unquoted # at the start of a word ends the command line — the rest
@@ -973,7 +1011,7 @@ describe('workflow call sites declare --files (#2269)', () => {
       // not passed as arguments. A glued all-digit word is an IO number
       // (`2>&1`) and belongs to the redirection, not to argv.
       if (ch === '>' || ch === '<') {
-        if (started && /^[0-9]+$/.test(cur)) { cur = ''; started = false; } else { flush(i); }
+        if (started && /^[0-9]+$/.test(cur)) { cur = ''; curMask = ''; started = false; } else { flush(i); }
         let j = i + 1;
         if (str[j] === ch) j += 1;                                   // >> / <<
         if (str[j] === '&') j += 1;                                  // >& (2>&1)
@@ -987,7 +1025,7 @@ describe('workflow call sites declare --files (#2269)', () => {
       if (pair === '&&' || pair === '||') { flush(i); tokens.push({ value: pair, start: i, end: i + 2, op: true }); i += 1; continue; }
       if (ch === ';' || ch === '|' || ch === '&') { flush(i); tokens.push({ value: ch, start: i, end: i + 1, op: true }); continue; }
       begin(i);
-      cur += ch;
+      add(ch, false);
     }
     flush(str.length);
     return tokens;
@@ -1035,7 +1073,7 @@ describe('workflow call sites declare --files (#2269)', () => {
     // (`FOO=1 gsd_run …`), a `then`/`else` keyword, a shell prompt (`$ `), or
     // an interpreter (`node gsd-tools.cjs …`, live in docs/CLI-TOOLS.md) all
     // precede it, and all are still the command being run.
-    const bi = tokens.findIndex((t) => !t.redir && isGsdBinary(t.value));
+    const bi = tokens.findIndex((t) => !t.redir && isGsdBinary(t));
     if (bi === -1) return false;
     // Between the binary and the command, only the optional `query` meta-prefix
     // and flags-with-values may intervene. `gsd_run --cwd "$ROOT" query commit`
@@ -1284,7 +1322,7 @@ describe('workflow call sites declare --files (#2269)', () => {
         || (/^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?=/.test(t.value) && !t.value.includes('$('))
         || NON_COMMAND_PREFIX.has(t.value);
       const gi = group.findIndex((t) => !skippable(t));
-      if (gi !== -1 && SHELL_INVOKER_RE.test(bareCommandName(group[gi].value))) {
+      if (gi !== -1 && SHELL_INVOKER_RE.test(bareCommandName(group[gi]))) {
         const ci = group.findIndex((t, k) => k > gi && !t.redir && t.value === '-c');
         const payload = ci !== -1 ? group.slice(ci + 1).find((t) => !t.redir) : undefined;
         if (payload) payloads.push(payload.value);
@@ -2163,6 +2201,39 @@ describe('workflow call sites declare --files (#2269)', () => {
       invocationCandidates('$((gsd_run query commit "docs: x"))'), [],
       'arithmetic expansion is not an invocation',
     );
+
+    // A QUOTED OPENER IS DATA, NOT SYNTAX. The strip must not run on a token
+    // that carried a quote: in `printf %s '$(gsd_run' query commit fixup` the
+    // opener is single-quoted literal text and no gsd command executes, but
+    // quote removal leaves the token `$(gsd_run` and an unconditional strip
+    // would fabricate an invocation out of a string argument. Both directions
+    // of quoting reach it.
+    for (const quoted of [
+      "printf %s '$(gsd_run' query commit fixup",
+      'echo "--files=x$(gsd_run" query commit fixup',
+      "printf %s '(gsd_run' query commit fixup",
+    ]) {
+      assert.deepEqual(
+        invocationCandidates(quoted), [],
+        `a quoted opener is data, not a command: ${quoted}`,
+      );
+    }
+
+    // AND THE OTHER DIRECTION, which is the one that matters more. A quote
+    // elsewhere in the word protects only itself: `echo "pre"$(gsd_run …)` runs,
+    // and so does an invocation with an empty quote wedged into the binary name.
+    // A per-TOKEN "was anything quoted" flag suppresses the strip on both and
+    // turns this file's tolerable failure (a visible false positive) into its
+    // intolerable one (a silent miss) — so the mask is per-character.
+    for (const executable of [
+      'echo "pre"$(gsd_run query commit fixup)',
+      '$(gsd_""run query commit fixup)',
+    ]) {
+      assert.strictEqual(
+        invocationCandidates(executable).length, 1,
+        `a quote elsewhere in the word does not protect the opener: ${executable}`,
+      );
+    }
 
     // THE NEGATIVE THAT KEEPS THE WIDENING HONEST: `V=(a b c)` is an array
     // literal, not a substitution — it runs nothing, so it must stay invisible.
