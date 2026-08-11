@@ -43,6 +43,14 @@
       ],
       "issue": "3216"
     },
+    "phase": {
+      "files": [
+        "phase-completion-single-owner.test.cjs",
+        "phase-dependency-levels.test.cjs",
+        "phase.test.cjs"
+      ],
+      "issue": "3186"
+    },
     "roadmap": {
       "files": [
         "roadmap-mode-field.test.cjs",
@@ -138,14 +146,6 @@
         "prompt-budget.test.cjs"
       ],
       "issue": "2929"
-    },
-    "audit": {
-      "files": [
-        "audit-command-cutover.test.cjs",
-        "audit-fix-command.test.cjs",
-        "fix-2766-audit-uat-archived-and-table-shapes.test.cjs"
-      ],
-      "issue": "2766"
     }
   }
 }

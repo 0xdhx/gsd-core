@@ -674,6 +674,8 @@ Show status, next steps, and automatically advance to the next logical workflow 
 
 Status reporting is scoped to the current milestone's `ROADMAP.md` window and sentinel-filtered: `999.*` backlog directories and `0-*` pre-milestone directories are not counted as current-milestone phases, so the reported progress percentage no longer holds at `100` while phases in the active window are still outstanding.
 
+> **Nullable percentage.** The reported completion percentage is `null` — never a fabricated `0`, `100`, or stale value — when the current milestone's phase set is not fully readable/scoped. See [CLI-TOOLS.md → A non-COMPLETE scope withholds the percentage entirely](CLI-TOOLS.md#a-non-complete-scope-withholds-the-percentage-entirely-3217).
+
 ```bash
 /gsd-progress                       # "Where am I? What's next?" with auto-routing
 /gsd-progress --next                # Advance to next step automatically
@@ -720,6 +722,8 @@ Interactive command center for managing multiple phases from one terminal.
 /gsd-manager                        # Open command center dashboard
 /gsd-manager --analyze-deps         # Scan ROADMAP phases for dependency relationships before parallel execution
 ```
+
+**Phase completion is disk-strict (ADR-3180 §7.4, issue #3186).** A phase's status here — and in `roadmap analyze`, `roadmap update-plan-progress`, and `phase complete` — is decided by one rule: a passing `*-VERIFICATION.md` on disk, checked unconditionally (plan count is never a precondition, so a zero-plan phase with a passing verification reports complete). A ticked `- [x]` checkbox in `ROADMAP.md` is a human annotation only; it carries no machine authority and is never consulted for these commands' completion verdicts. `roadmap update-plan-progress` additionally withholds writing the checkbox/completion date while any plan in the phase has no matching `*-SUMMARY.md`, mirroring `phase complete`'s own coverage gate.
 
 **Checkpoint Heartbeats (#2410):**
 
@@ -958,6 +962,8 @@ Display project statistics.
 
 Scoped to the current milestone's `ROADMAP.md` window and sentinel-filtered: `999.*` backlog directories and `0-*` pre-milestone directories are not counted as current-milestone phases.
 
+> **Nullable percentage.** The reported completion percentage is `null` — never a fabricated `0`, `100`, or stale value — when the current milestone's phase set is not fully readable/scoped (e.g. a truncated or unresolvable milestone window, or an unreadable `.planning/phases` directory). See [CLI-TOOLS.md → A non-COMPLETE scope withholds the percentage entirely](CLI-TOOLS.md#a-non-complete-scope-withholds-the-percentage-entirely-3217).
+
 ### `/gsd-profile-user`
 
 Generate a developer behavioral profile from Claude Code session analysis across 8 dimensions (communication style, decision patterns, debugging approach, UX preferences, vendor choices, frustration triggers, learning style, explanation depth). Produces artifacts that personalize Claude's responses.
@@ -993,6 +999,18 @@ v1.40.0, [#2792](https://github.com/open-gsd/gsd-core/issues/2792)).
 /gsd-health --repair                # Check and fix
 /gsd-health --context               # Context-utilization triage
 ```
+
+**STATE.md freshness (`W024`).** STATE.md records the commit it was last written
+against (`state_head` in its frontmatter). When the codebase has moved a long way
+since — 20 commits or more — health adds an advisory noting that STATE.md's
+contents should be treated as approximate.
+
+This is a *freshness proxy, not a drift measurement*: the count includes commits
+that never touched anything STATE.md describes, and the stamp is refreshed by any
+command that writes STATE.md, so a low count means STATE.md was written recently
+rather than that its contents are correct. The advisory never changes health's
+pass/fail status, and stays silent when the stamp is absent or the project isn't
+a git repo — "unknown" is reported as unknown, not as fresh.
 
 ### `/gsd-cleanup`
 

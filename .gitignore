@@ -199,6 +199,7 @@ build/
 /gsd-core/bin/lib/runtime-artifact-conversion.cjs
 /gsd-core/bin/lib/runtime-artifact-layout.cjs
 /gsd-core/bin/lib/install-scope.cjs
+/gsd-core/bin/lib/installed-surface-resolver.cjs
 /gsd-core/bin/lib/runtime-config-adapter-registry.cjs
 /gsd-core/bin/lib/runtime-hooks-surface.cjs
 /gsd-core/bin/lib/command-routing-hub.cjs
@@ -262,6 +263,7 @@ build/
 /gsd-core/bin/lib/roadmap.cjs
 /gsd-core/bin/lib/audit.cjs
 /gsd-core/bin/lib/git-base-branch.cjs
+/gsd-core/bin/lib/host-runtime-detection.cjs
 __pycache__/
 *.pyc
 .venv/
