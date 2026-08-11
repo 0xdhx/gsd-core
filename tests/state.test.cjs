@@ -59,6 +59,19 @@ function captureStdout(fn) {
   return chunks.join('');
 }
 
+function readShippedStateTemplateBody(replacements) {
+  const templatePath = path.join(__dirname, '..', 'gsd-core', 'templates', 'state.md');
+  const template = fs.readFileSync(templatePath, 'utf-8');
+  const fencedDocument = template.match(/```markdown\r?\n([\s\S]*?)```/);
+  assert.ok(fencedDocument, 'gsd-core/templates/state.md must contain a fenced markdown document');
+
+  let body = fencedDocument[1];
+  for (const [target, replacement] of replacements) {
+    assert.ok(body.includes(target), `shipped state template must contain replacement target: ${target}`);
+    body = body.replace(target, replacement);
+  }
+  return body;
+}
 describe('state-snapshot command', () => {
   let tmpDir;
 
@@ -3192,6 +3205,233 @@ describe('state validate command', () => {
     cleanup(tmpDir);
   });
 
+  test('template frontmatter phase reaches passed-verification drift on disk', () => {
+    const stateContent = readShippedStateTemplateBody([
+      ['status: planning', ['current_phase: 2', 'status: executing'].join('\n')],
+      ['Phase: [X] of [Y] ([Phase name])', 'Phase: 2 of 2 (State Validation Drift Diagnostics)'],
+      ['Status: [Ready to plan / Planning / Ready to execute / In progress / Phase complete]', 'Status: Executing Phase 2'],
+    ]);
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '02-state-validation-drift-diagnostics');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    writePassedVerification(tmpDir, '02-state-validation-drift-diagnostics', '02');
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'passed verification must invalidate executing state');
+    assert.ok(output.warnings.length > 0, 'passed verification drift must emit a warning');
+    assert.deepStrictEqual(
+      output.drift.verification_status,
+      { state_status: 'executing', verification: 'passed' },
+      'template frontmatter phase must reach the existing disk-backed verification drift check',
+    );
+  });
+
+  test('template-equivalent phase identities remain clean without disk drift', () => {
+    const stateContent = readShippedStateTemplateBody([
+      ['status: planning', ['current_phase: 2', 'status: planning'].join('\n')],
+      ['Phase: [X] of [Y] ([Phase name])', 'Phase: 02 of 2 (State Validation Drift Diagnostics)'],
+      ['Status: [Ready to plan / Planning / Ready to execute / In progress / Phase complete]', 'Status: Planning'],
+    ]);
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), stateContent);
+    fs.mkdirSync(
+      path.join(tmpDir, '.planning', 'phases', '02-state-validation-drift-diagnostics'),
+      { recursive: true },
+    );
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, true, 'equivalent phase identities without disk drift must stay valid');
+    assert.deepStrictEqual(output.warnings, [], 'clean control must not emit warnings');
+    assert.deepStrictEqual(output.drift, {}, 'clean control must not report drift');
+  });
+
+  test('legacy Current Phase fallback reaches passed-verification drift on disk', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '# Project State',
+        '',
+        '**Current Phase:** 2',
+        '**Status:** Executing Phase 2',
+        '',
+      ].join('\n'),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-legacy'), { recursive: true });
+    writePassedVerification(tmpDir, '02-legacy', '02');
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'legacy phase fallback must expose verification drift');
+    assert.deepStrictEqual(
+      output.drift.verification_status,
+      { state_status: 'Executing Phase 2', verification: 'passed' },
+    );
+  });
+
+  test('Current Position Phase fallback reaches passed-verification drift on disk', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '# Project State',
+        '',
+        '## Current Position',
+        '',
+        'Phase: 2 of 2 (State Validation Drift Diagnostics)',
+        'Status: Executing Phase 2',
+        '',
+      ].join('\n'),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-canonical'), { recursive: true });
+    writePassedVerification(tmpDir, '02-canonical', '02');
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'canonical phase fallback must expose verification drift');
+    assert.deepStrictEqual(
+      output.drift.verification_status,
+      { state_status: 'Executing Phase 2', verification: 'passed' },
+    );
+  });
+
+  test('frontmatter phase wins conflicts and scans its selected directory', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'current_phase: 2',
+        'status: executing',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Current Position',
+        '',
+        'Phase: 1 of 2 (Foundation)',
+        'Status: Executing Phase 2',
+        '',
+      ].join('\n'),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '01-foundation'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-state-validation'), { recursive: true });
+    writePassedVerification(tmpDir, '02-state-validation', '02');
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'conflicting sources must invalidate the result');
+    assert.strictEqual(output.drift.phase_reference.reason, 'conflict');
+    assert.strictEqual(output.drift.phase_reference.selected, '2');
+    assert.strictEqual(output.drift.phase_reference.sources.frontmatter, '2');
+    assert.strictEqual(output.drift.phase_reference.sources.current_position_phase, '1');
+    assert.deepStrictEqual(
+      output.drift.verification_status,
+      { state_status: 'executing', verification: 'passed' },
+      'disk evidence must come from the authoritative frontmatter phase',
+    );
+  });
+
+  test('missing phase sources fail closed with phase-reference drift', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      ['# Project State', '', 'Status: Planning', ''].join('\n'),
+    );
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'missing phase source must not validate cleanly');
+    assert.strictEqual(output.drift.phase_reference.reason, 'unresolved');
+    assert.strictEqual(output.drift.phase_reference.selected, null);
+    assert.ok(output.warnings.some(warning => /phase/i.test(warning)), 'warning must identify phase resolution');
+  });
+
+  test('non-scalar frontmatter phase fails closed without a body fallback', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'current_phase:',
+        '  nested: 2',
+        'status: planning',
+        '---',
+        '',
+        '# Project State',
+        '',
+      ].join('\n'),
+    );
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'non-scalar phase source must not validate cleanly');
+    assert.strictEqual(output.drift.phase_reference.reason, 'unresolved');
+    assert.strictEqual(output.drift.phase_reference.sources.frontmatter, null);
+  });
+
+  test('missing phases root fails closed with phase-directory drift', () => {
+    cleanup(tmpDir);
+    tmpDir = createFixture({ planning: false, projectDoc: true });
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      ['---', 'current_phase: 2', 'status: planning', '---', '', '# Project State', ''].join('\n'),
+    );
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'missing phases root must not validate cleanly');
+    assert.strictEqual(output.drift.phase_directory.reason, 'missing_root');
+    assert.ok(output.warnings.some(warning => /director/i.test(warning)), 'warning must identify the missing directory');
+  });
+
+  test('missing canonical phase-directory match fails closed', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      ['---', 'current_phase: 2', 'status: planning', '---', '', '# Project State', ''].join('\n'),
+    );
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'missing phase-directory match must not validate cleanly');
+    assert.strictEqual(output.drift.phase_directory.reason, 'not_found');
+    assert.strictEqual(output.drift.phase_directory.selected, '2');
+  });
+
+  test('crafted path-like phase cannot scan verification evidence outside phases root', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'current_phase: ../outside',
+        'status: executing',
+        '---',
+        '',
+        '# Project State',
+        '',
+      ].join('\n'),
+    );
+    const outsideDir = path.join(tmpDir, '.planning', 'outside');
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(outsideDir, '02-VERIFICATION.md'),
+      ['---', 'status: passed', '---', '', '# Outside verification', ''].join('\n'),
+    );
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, false, 'crafted phase reference must fail closed');
+    assert.strictEqual(output.drift.phase_reference.reason, 'unresolved');
+    assert.ok(!output.drift.verification_status, 'outside-root verification evidence must not be scanned');
+  });
+
   test('STATE says executing + VERIFICATION.md shows passed emits warning', () => {
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'STATE.md'),
@@ -3251,6 +3491,22 @@ describe('state validate command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.valid, true, 'Should be valid');
     assert.strictEqual(output.warnings.length, 0, 'Should have no warnings');
+  });
+
+  test('archived "Current Phase:" line does not trigger false-positive conflict when frontmatter is correct', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `---\ncurrent_phase: 2\n---\n# Project State\n\n## Current Position\n**Phase:** 2\n\n## Archive\n**Current Phase:** 1 (completed last week)\n`
+    );
+
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '02-core');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    const result = runGsdTools('state validate', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.valid, true, 'Should be valid, legacy extractor should not read the archive');
+    assert.strictEqual(output.warnings.length, 0, 'Should have no phase_reference conflict warnings');
   });
 
   test('missing STATE.md returns graceful error', () => {
@@ -3373,11 +3629,8 @@ describe('#3187 state validate — scope field (matrix section B)', () => {
     );
 
     const output = JSON.parse(runGsdTools('state validate', tmpDir).output);
-    // ⛔ Rejected #2: a non-COMPLETE scope must NEVER be routed to valid:false.
-    assert.strictEqual(output.valid, true);
-    assert.strictEqual(output.warnings.length, 0);
-    assert.notStrictEqual(output.scope, SCOPE.COMPLETE, 'scope must be distinguishable from a real clean pass (B2)');
-    assert.strictEqual(output.scope, SCOPE.UNSCOPED);
+    assert.strictEqual(output.valid, false);
+    assert.strictEqual(output.drift.phase_reference.reason, 'unresolved');
   });
 
   test('B5: missing phase dir differs from could-not-look (distinguishable from B4)', () => {
@@ -3395,11 +3648,8 @@ describe('#3187 state validate — scope field (matrix section B)', () => {
     // phases/ exists (createFixture) but has no matching 99-* directory.
 
     const output = JSON.parse(runGsdTools('state validate', tmpDir).output);
-    assert.strictEqual(output.valid, true);
-    assert.strictEqual(output.warnings.length, 0);
-    // Resolvable phase + legitimately-absent directory is a real answer —
-    // COMPLETE — not the same non-answer as B4's totally unresolvable phase.
-    assert.strictEqual(output.scope, SCOPE.COMPLETE);
+    assert.strictEqual(output.valid, false);
+    assert.strictEqual(output.drift.phase_directory.reason, 'not_found');
   });
 
   test('B6: unreadable phases dir is surfaced, not swallowed', (t) => {
@@ -3432,8 +3682,28 @@ describe('#3187 state validate — scope field (matrix section B)', () => {
 
     const raw = captureStdout(() => stateLib.cmdStateValidate(tmpDir, false));
     const output = JSON.parse(raw);
-    assert.strictEqual(output.valid, true, 'the previous silent degrade must not crash or fabricate a warning');
-    assert.strictEqual(output.scope, SCOPE.UNREADABLE);
+    assert.strictEqual(output.valid, false, 'an unreadable directory must not validate cleanly');
+    assert.strictEqual(output.drift.phase_directory.reason, 'unreadable');
+  });
+
+  test('B6b: unreadable selected phase directory fails closed', (t) => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      ['# Project State', '', '**Status:** Executing Phase 1', '**Current Phase:** 1', ''].join('\n'),
+    );
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    const originalReaddirSync = fs.readdirSync;
+    mock.method(fs, 'readdirSync', (p, ...rest) => {
+      if (p === phaseDir) throw new Error('EACCES: permission denied, scandir');
+      return originalReaddirSync.call(fs, p, ...rest);
+    });
+    t.after(() => mock.restoreAll());
+
+    const output = JSON.parse(captureStdout(() => stateLib.cmdStateValidate(tmpDir, false)));
+    assert.strictEqual(output.valid, false, 'an unreadable selected phase must not validate cleanly');
+    assert.strictEqual(output.drift.phase_directory.reason, 'unreadable');
   });
 
   test('B7: one unreadable verification file does not abort the scan', (t) => {
@@ -3694,9 +3964,10 @@ describe('#3187 chain-owner identity — every consumer agrees with stateFieldVa
     fs.writeFileSync(path.join(phase2Dir, '02-01-PLAN.md'), '# Plan\n');
 
     const output = JSON.parse(runGsdTools('state validate', tmpDir).output);
-    assert.strictEqual(output.valid, true, 'validate must have scanned phase 2 (the owner answer), which matches disk');
-    assert.strictEqual(output.warnings.length, 0);
-    assert.strictEqual(output.scope, SCOPE.COMPLETE);
+    assert.strictEqual(output.valid, false, 'conflicting phase sources must not validate cleanly');
+    assert.strictEqual(output.drift.phase_reference.reason, 'conflict');
+    assert.strictEqual(output.drift.phase_reference.selected, '2');
+    assert.ok(!output.drift.plan_count, 'validate must scan phase 2, not the shadowed phase 1');
   });
 
   test('C3: prune resolves the same phase as the owner', () => {
