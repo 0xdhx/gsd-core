@@ -4781,7 +4781,12 @@ describe('#2297: install-marker precedence rung (GSD_RUNTIME and config.runtime 
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Folded from tests/issue-2517-runtime-aware-profiles.test.cjs
+// Folded from tests/issue-2517-runtime-aware-profiles.test.cjs (H3 Wave 7,
+// issue #3339). 1 of 80 source test blocks ('resolveTierEntry helper: unknown
+// runtime + no overrides -> null', runtime:'mystery') was dropped as a verified
+// duplicate of the pre-existing test at line 525 ('unknown runtime + unknown
+// tier, no overrides -> null') — same resolveTierEntry null-return assertion
+// for an unknown runtime with no overrides.
 // ────────────────────────────────────────────────────────────────────────
 {
   const { describe: __foldDescribe } = require('node:test');

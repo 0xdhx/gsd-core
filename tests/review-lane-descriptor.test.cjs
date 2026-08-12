@@ -815,6 +815,7 @@ describe('mergeReviewerLanes (#2927)', () => {
     assert.ok(slugs.includes('gemini'), 'first-party lanes preserved');
     // the overlay body itself is the merged entry (no translation layer)
     const overlay = merged.find((l) => l.slug === 'agy-revisor');
+    assert.ok(overlay, 'agy-revisor overlay lane should be present in merged set');
     assert.equal(overlay.reviewsSection, 'Antigravity revisor-gsd');
     assert.deepEqual(overlay.flags, ['--agy-revisor']);
   });
@@ -824,6 +825,7 @@ describe('mergeReviewerLanes (#2927)', () => {
     const colliding = overlayLane({ slug: 'claude', reviewsSection: 'EVIL CLAUDE' });
     const merged = mergeReviewerLanes(FP, registry(reviewerCap(colliding)));
     const claude = merged.find((l) => l.slug === 'claude');
+    assert.ok(claude, 'claude first-party lane should be present in merged set');
     assert.equal(claude, FP.find((l) => l.slug === 'claude'), 'first-party identity wins');
     assert.notEqual(claude.reviewsSection, 'EVIL CLAUDE', 'overlay did not leak through');
     assert.equal(merged.length, FP.length, 'collision added no extra entry');

@@ -10492,6 +10492,39 @@ describe('#2572: phase complete warns when a SUMMARY claims files that never lan
   });
 });
 
+// Outer scope shared by the two fold blocks below (deliberately NOT module-scope:
+// this file already declares a distinct, 3-arg `runVerifiedPhaseComplete(args, tmpDir, env)`
+// at line 54 used throughout the rest of the file; nesting here avoids shadowing it).
+{
+/**
+ * Write a passed-VERIFICATION marker for the phase, then run `phase complete N`.
+ * Mirrors phase.test.cjs's writePassedVerificationForPhase: a `<phase>-VERIFICATION.md`
+ * with `status: passed` frontmatter. Requires the phase directory to exist.
+ *
+ * Shared by the folded:issue-2945-phase-complete-checkbox-rollback and
+ * folded:issue-2949-phase-complete-stage3-sentinel blocks below — both fold sources
+ * defined this same helper independently; consolidated to one definition (PR #3339
+ * review, Fowler-baseline duplication finding) since both bodies were functionally
+ * identical modulo variable naming.
+ */
+function runVerifiedPhaseComplete(args, tmpDir) {
+  const argv = Array.isArray(args) ? args : args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
+  const completeIdx = argv.findIndex((t, i) => t === 'complete' && argv[i - 1] === 'phase');
+  const phase = argv[completeIdx + 1];
+  const phasesDir = path.join(tmpDir, '.planning', 'phases');
+  const wanted = parseInt(String(phase).replace(/^0+/, ''), 10);
+  const phaseDirName = fs.readdirSync(phasesDir).find((name) => {
+    const m = name.match(/^(\d+)/);
+    return m && parseInt(m[1], 10) === wanted;
+  });
+  if (!phaseDirName) throw new Error(`no phase directory for phase ${phase}`);
+  fs.writeFileSync(
+    path.join(phasesDir, phaseDirName, `${phase}-VERIFICATION.md`),
+    ['---', 'status: passed', '---', '', '# Verification', ''].join('\n'),
+  );
+  return runGsdTools(args, tmpDir);
+}
+
 // ────────────────────────────────────────────────────────────────────────
 // Folded from tests/issue-2945-phase-complete-checkbox-rollback.test.cjs — H3 Wave 7 test-hygiene sweep (#3339)
 // ────────────────────────────────────────────────────────────────────────
@@ -10519,30 +10552,11 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+const { createTempProject, cleanup } = require('./helpers.cjs');
 
-/**
- * Write a passed-VERIFICATION marker for the phase, then run `phase complete N`.
- * Mirrors phase.test.cjs's writePassedVerificationForPhase: a `<phase>-VERIFICATION.md`
- * with `status: passed` frontmatter. Requires the phase directory to exist.
- */
-function runVerifiedPhaseComplete(args, tmpDir) {
-  const argv = Array.isArray(args) ? args : args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
-  const completeIdx = argv.findIndex((t, i) => t === 'complete' && argv[i - 1] === 'phase');
-  const phase = argv[completeIdx + 1];
-  const phasesDir = path.join(tmpDir, '.planning', 'phases');
-  const wanted = parseInt(String(phase).replace(/^0+/, ''), 10);
-  const phaseDirName = fs.readdirSync(phasesDir).find((name) => {
-    const m = name.match(/^(\d+)/);
-    return m && parseInt(m[1], 10) === wanted;
-  });
-  if (!phaseDirName) throw new Error(`no phase directory for phase ${phase}`);
-  fs.writeFileSync(
-    path.join(phasesDir, phaseDirName, `${phase}-VERIFICATION.md`),
-    ['---', 'status: passed', '---', '', '# Verification', ''].join('\n'),
-  );
-  return runGsdTools(args, tmpDir);
-}
+// runVerifiedPhaseComplete is defined once, hoisted above both fold blocks (see
+// the shared helper preceding the "Folded from tests/issue-2945-..." banner);
+// this block closes over that module-scope definition.
 
 describe('phase complete checkbox rollback (#2945)', () => {
   let tmpDir;
@@ -10668,33 +10682,11 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+const { createTempProject, cleanup } = require('./helpers.cjs');
 
-/**
- * Write a passed-verification marker for a phase, then run `phase complete N`.
- * Mirrors phase.test.cjs's writePassedVerificationForPhase: a `<phase>-VERIFICATION.md`
- * with `status: passed` frontmatter, plus a SUMMARY for each plan (the completion gate
- * requires executed plans). Requires the phase directory to already exist.
- */
-function runVerifiedPhaseComplete(args, tmpDir) {
-  const argv = Array.isArray(args) ? args : args.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g);
-  const completeIdx = argv.findIndex((t, i) => t === 'complete' && argv[i - 1] === 'phase');
-  const phase = argv[completeIdx + 1];
-  const phasesDir = path.join(tmpDir, '.planning', 'phases');
-  // Find the phase directory whose leading token matches the requested phase number.
-  const wantedPadded = String(phase).replace(/^0+/, '');
-  const phaseDirName = fs.readdirSync(phasesDir).find((name) => {
-    const m = name.match(/^(\d+)/);
-    return m && parseInt(m[1], 10) === parseInt(wantedPadded, 10);
-  });
-  if (!phaseDirName) throw new Error(`no phase directory for phase ${phase}`);
-  const phaseDir = path.join(phasesDir, phaseDirName);
-  fs.writeFileSync(
-    path.join(phaseDir, `${phase}-VERIFICATION.md`),
-    ['---', 'status: passed', '---', '', '# Verification', ''].join('\n'),
-  );
-  return runGsdTools(args, tmpDir);
-}
+// runVerifiedPhaseComplete is defined once, in the outer scope shared by this block
+// and the folded:issue-2945-phase-complete-checkbox-rollback block above (see the
+// shared helper preceding that block's banner comment); this block closes over it.
 
 describe('phase complete stage-3 sentinel filter (#2949)', () => {
   let tmpDir;
@@ -10853,4 +10845,5 @@ describe('phase complete stage-3 sentinel filter (#2949)', () => {
   });
 });
   });
+}
 }
