@@ -10495,7 +10495,18 @@ describe('#2572: phase complete warns when a SUMMARY claims files that never lan
 // Outer scope shared by the two fold blocks below (deliberately NOT module-scope:
 // this file already declares a distinct, 3-arg `runVerifiedPhaseComplete(args, tmpDir, env)`
 // at line 54 used throughout the rest of the file; nesting here avoids shadowing it).
-{
+//
+// IIFE, not a bare `{ }` block: this file has no top-level 'use strict', so a plain
+// block is sloppy-mode and Annex B function-hoisting semantics apply — a `function`
+// declared directly inside a bare block still leaks out and REASSIGNS the enclosing
+// (module-scope) `runVerifiedPhaseComplete` var the moment this block runs, clobbering
+// the real one at line 54 for every call site in the file (test() bodies are deferred
+// and all run after this synchronous top-level code, so every caller ends up hitting
+// this one). Wrapping in a strict-mode function expression suppresses Annex B leakage,
+// matching how the two original un-consolidated copies were each scoped inside a
+// strict-mode `describe(() => { 'use strict'; ... })` arrow function body.
+(function () {
+'use strict';
 /**
  * Write a passed-VERIFICATION marker for the phase, then run `phase complete N`.
  * Mirrors phase.test.cjs's writePassedVerificationForPhase: a `<phase>-VERIFICATION.md`
@@ -10846,4 +10857,4 @@ describe('phase complete stage-3 sentinel filter (#2949)', () => {
 });
   });
 }
-}
+})();
