@@ -77,6 +77,47 @@ interface Diagnostic {
 interface Rule {
   code: string;
   severity: Severity;
+  /**
+   * Short, static, human-readable summary of what this rule checks — the
+   * source of `gsd-core/workflows/health.md`'s generated `<error_codes>`
+   * table (`scripts/gen-health-docs.cjs`). Deliberately distinct from a
+   * fired `Diagnostic`'s `message`, which is dynamic/per-instance (e.g.
+   * W001's message names the specific PROJECT.md section that is missing);
+   * `description` is exactly one fixed sentence per code, matching the
+   * hand-written table's pre-existing style for the codes it already
+   * documented (E001-E005, W001-W009, W018, W019, W024, I001).
+   */
+  description: string;
+  /**
+   * Whether `--repair` will actually apply this rule's remedy (`true`) or
+   * never will (`false`) — the source of the generated table's "Repairable"
+   * column. This MUST match `diagnosticToIssueEntry`'s (`src/verify.cts`)
+   * per-diagnostic semantics: `remedy.action !== ADVISE && remedy.risk !==
+   * REMEDY_RISK.DESTRUCTIVE`. `false` covers TWO distinct cases, and both
+   * must map to `false` here:
+   *
+   * 1. ADVISE-only rules — no real `REMEDY_ACTION` exists to apply.
+   * 2. DESTRUCTIVE-risk rules (`regenerateState`, `resetConfig`) — a real
+   *    action exists and is described, but `applyRepairs`'s dispatcher
+   *    (`src/health-diagnostic.cts`) refuses to auto-apply any
+   *    DESTRUCTIVE-risk remedy (§8.3 rule 3), so `--repair` never applies it
+   *    either. "A remedy exists to describe" is NOT sufficient for `true` —
+   *    only "an unattended `--repair` run will actually apply it" is.
+   *
+   * STATIC field, not derived by executing `check` against a fixture at
+   * doc-gen time: confirmed by direct read of all 8
+   * `src/health-diagnostic-rules/*.cts` files that every rule in this
+   * codebase uses exactly ONE `remedy.action` (and therefore one
+   * `remedy.risk`) across every `Diagnostic` it can ever emit — no rule mixes
+   * ADVISE with a real action, or NONE-risk with DESTRUCTIVE-risk, depending
+   * on the triggering condition (the design doc's "primary remedy" ambiguity
+   * this field's doc comment was asked to consider does not arise in
+   * practice). A single static boolean is therefore a faithful,
+   * execution-free summary, and cheaper/simpler than adding a second
+   * `primaryRemedyAction` field or having the generator import and execute
+   * every rule against a synthetic snapshot.
+   */
+  repairable: boolean;
   check: (snapshot: PlanningSnapshot) => Diagnostic[]; // §8.1 rule 1 signature, verbatim
 }
 

@@ -86,6 +86,8 @@ const { getMilestoneFromPhaseId, matchPhaseDirs, normalizePhaseName, extractPhas
 const RULE_W024: Rule = {
   code: 'W024',
   severity: SEVERITY.WARNING,
+  description: 'STATE.md was written many commits ago — treat its contents as approximate',
+  repairable: false,
   check: (_snapshot: PlanningSnapshot): Diagnostic[] => [],
 };
 
@@ -139,6 +141,8 @@ function normalizePhaseTokenSet(valid: Set<string>): Set<string> {
 const RULE_W002: Rule = {
   code: 'W002',
   severity: SEVERITY.WARNING,
+  description: 'STATE.md references invalid phase',
+  repairable: false,
   check: (snapshot: PlanningSnapshot): Diagnostic[] => {
     const validPhases = buildValidPhaseSet(snapshot);
     // Mirrors `verify.cts:1765`'s `if (normalizedValid.size > 0)` guard
@@ -193,6 +197,8 @@ function currentPhaseIdFromLabel(label: string | null): string | null {
 const RULE_W011: Rule = {
   code: 'W011',
   severity: SEVERITY.WARNING,
+  description: 'STATE.md current-phase status disagrees with ROADMAP.md checkbox',
+  repairable: false,
   check: (snapshot: PlanningSnapshot): Diagnostic[] => {
     const phaseId = currentPhaseIdFromLabel(snapshot.currentPhaseLabel.value);
     if (phaseId === null) return [];
@@ -216,6 +222,9 @@ const RULE_W011: Rule = {
 const RULE_W021: Rule = {
   code: 'W021',
   severity: SEVERITY.WARNING,
+  description:
+    "Phase's integer prefix implies a different milestone than its ROADMAP section (phase_id_convention: milestone-prefixed)",
+  repairable: false,
   check: (snapshot: PlanningSnapshot): Diagnostic[] => {
     const convention = snapshot.config.value?.['phase_id_convention'];
     if (convention !== 'milestone-prefixed') return [];
@@ -246,6 +255,8 @@ const RULE_W021: Rule = {
 const RULE_W026: Rule = {
   code: 'W026',
   severity: SEVERITY.WARNING,
+  description: 'STATE says milestone complete but ROADMAP lists an unstarted phase for that milestone',
+  repairable: false,
   check: (snapshot: PlanningSnapshot): Diagnostic[] => {
     const statusVal = (snapshot.stateStatus.value ?? '').trim().toLowerCase();
     if (!/milestone complete|archived/.test(statusVal)) return [];

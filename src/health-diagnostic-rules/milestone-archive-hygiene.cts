@@ -96,8 +96,20 @@ function checkW019(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const RULES: Rule[] = [
-  { code: 'W018', severity: SEVERITY.WARNING, check: checkW018 },
-  { code: 'W019', severity: SEVERITY.WARNING, check: checkW019 },
+  {
+    code: 'W018',
+    severity: SEVERITY.WARNING,
+    description: 'MILESTONES.md missing entry for archived milestone snapshot',
+    repairable: true,
+    check: checkW018,
+  },
+  {
+    code: 'W019',
+    severity: SEVERITY.WARNING,
+    description: 'Unrecognized .planning/ root file — not a canonical GSD artifact',
+    repairable: false,
+    check: checkW019,
+  },
 ];
 
 export = { RULES };

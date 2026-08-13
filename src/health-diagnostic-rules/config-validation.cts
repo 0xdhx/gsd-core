@@ -276,16 +276,59 @@ function checkW022(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const RULES: Rule[] = [
-  { code: 'W003', severity: SEVERITY.WARNING, check: checkW003 },
-  { code: 'E005', severity: SEVERITY.ERROR, check: checkE005 },
-  { code: 'W004', severity: SEVERITY.WARNING, check: checkW004 },
-  { code: 'W008', severity: SEVERITY.WARNING, check: checkW008 },
-  { code: 'W016', severity: SEVERITY.WARNING, check: checkW016 },
-  { code: 'W012', severity: SEVERITY.WARNING, check: checkW012 },
-  { code: 'W013', severity: SEVERITY.WARNING, check: checkW013 },
-  { code: 'W014', severity: SEVERITY.WARNING, check: checkW014 },
-  { code: 'W015', severity: SEVERITY.WARNING, check: checkW015 },
-  { code: 'W022', severity: SEVERITY.WARNING, check: checkW022 },
+  { code: 'W003', severity: SEVERITY.WARNING, description: 'config.json not found', repairable: true, check: checkW003 },
+  { code: 'E005', severity: SEVERITY.ERROR, description: 'config.json parse error', repairable: false, check: checkE005 },
+  { code: 'W004', severity: SEVERITY.WARNING, description: 'config.json invalid field value', repairable: false, check: checkW004 },
+  {
+    code: 'W008',
+    severity: SEVERITY.WARNING,
+    description: 'config.json: workflow.nyquist_validation absent (defaults to enabled but agents may skip)',
+    repairable: true,
+    check: checkW008,
+  },
+  {
+    code: 'W016',
+    severity: SEVERITY.WARNING,
+    description:
+      'config.json: workflow.ai_integration_phase absent (defaults to enabled but agents may skip AI-integration-phase planning)',
+    repairable: true,
+    check: checkW016,
+  },
+  {
+    code: 'W012',
+    severity: SEVERITY.WARNING,
+    description: 'config.json invalid branching_strategy value',
+    repairable: false,
+    check: checkW012,
+  },
+  {
+    code: 'W013',
+    severity: SEVERITY.WARNING,
+    description: 'config.json context_window not a positive integer',
+    repairable: false,
+    check: checkW013,
+  },
+  {
+    code: 'W014',
+    severity: SEVERITY.WARNING,
+    description: 'config.json phase_branch_template missing {phase} placeholder',
+    repairable: false,
+    check: checkW014,
+  },
+  {
+    code: 'W015',
+    severity: SEVERITY.WARNING,
+    description: 'config.json milestone_branch_template missing {milestone} placeholder',
+    repairable: false,
+    check: checkW015,
+  },
+  {
+    code: 'W022',
+    severity: SEVERITY.WARNING,
+    description: 'config.json models entry malformed (unknown phase type, invalid tier, or non-object value)',
+    repairable: false,
+    check: checkW022,
+  },
 ];
 
 export = { RULES };

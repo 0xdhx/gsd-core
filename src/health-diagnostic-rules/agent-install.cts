@@ -107,6 +107,8 @@ const RULES: Rule[] = [
   {
     code: 'W010',
     severity: SEVERITY.WARNING,
+    description: 'GSD agent installation missing or incomplete',
+    repairable: false,
     check: checkAgentInstall,
   },
 ];

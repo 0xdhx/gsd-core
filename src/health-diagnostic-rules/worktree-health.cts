@@ -154,9 +154,27 @@ function checkW027(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const RULES: Rule[] = [
-  { code: 'W020', severity: SEVERITY.WARNING, check: checkW020 },
-  { code: 'W017', severity: SEVERITY.WARNING, check: checkW017 },
-  { code: 'W027', severity: SEVERITY.WARNING, check: checkW027 },
+  {
+    code: 'W020',
+    severity: SEVERITY.WARNING,
+    description: 'Worktree health scan degraded — git worktree list timed out, failed, or a finding could not be verified',
+    repairable: false,
+    check: checkW020,
+  },
+  {
+    code: 'W017',
+    severity: SEVERITY.WARNING,
+    description: 'Orphan git worktree (path no longer exists on disk)',
+    repairable: false,
+    check: checkW017,
+  },
+  {
+    code: 'W027',
+    severity: SEVERITY.WARNING,
+    description: 'Stale git worktree (not modified in a long time)',
+    repairable: false,
+    check: checkW027,
+  },
 ];
 
 export = { RULES };

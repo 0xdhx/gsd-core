@@ -180,10 +180,34 @@ function checkW009(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const RULES: Rule[] = [
-  { code: 'W005', severity: SEVERITY.WARNING, check: checkW005 },
-  { code: 'W023', severity: SEVERITY.WARNING, check: checkW023 },
-  { code: 'I001', severity: SEVERITY.INFO, check: checkI001 },
-  { code: 'W009', severity: SEVERITY.WARNING, check: checkW009 },
+  {
+    code: 'W005',
+    severity: SEVERITY.WARNING,
+    description: 'Phase directory naming mismatch',
+    repairable: false,
+    check: checkW005,
+  },
+  {
+    code: 'W023',
+    severity: SEVERITY.WARNING,
+    description: 'Phase directories collide on normalized key',
+    repairable: false,
+    check: checkW023,
+  },
+  {
+    code: 'I001',
+    severity: SEVERITY.INFO,
+    description: 'Plan without SUMMARY (may be in progress)',
+    repairable: false,
+    check: checkI001,
+  },
+  {
+    code: 'W009',
+    severity: SEVERITY.WARNING,
+    description: 'Phase has Validation Architecture in RESEARCH.md but no VALIDATION.md',
+    repairable: false,
+    check: checkW009,
+  },
 ];
 
 export = { RULES };

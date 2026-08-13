@@ -210,8 +210,20 @@ function checkW007(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const RULES: Rule[] = [
-  { code: 'W006', severity: SEVERITY.WARNING, check: checkW006 },
-  { code: 'W007', severity: SEVERITY.WARNING, check: checkW007 },
+  {
+    code: 'W006',
+    severity: SEVERITY.WARNING,
+    description: 'Phase in ROADMAP but no directory',
+    repairable: false,
+    check: checkW006,
+  },
+  {
+    code: 'W007',
+    severity: SEVERITY.WARNING,
+    description: 'Phase on disk but not in ROADMAP',
+    repairable: false,
+    check: checkW007,
+  },
 ];
 
 export = { RULES };

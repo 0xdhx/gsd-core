@@ -163,10 +163,16 @@ function checkW001(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const RULES: Rule[] = [
-  { code: 'E002', severity: SEVERITY.ERROR, check: checkE002 },
-  { code: 'E003', severity: SEVERITY.ERROR, check: checkE003 },
-  { code: 'E004', severity: SEVERITY.ERROR, check: checkE004 },
-  { code: 'W001', severity: SEVERITY.WARNING, check: checkW001 },
+  { code: 'E002', severity: SEVERITY.ERROR, description: 'PROJECT.md not found', repairable: false, check: checkE002 },
+  { code: 'E003', severity: SEVERITY.ERROR, description: 'ROADMAP.md not found', repairable: false, check: checkE003 },
+  { code: 'E004', severity: SEVERITY.ERROR, description: 'STATE.md not found', repairable: false, check: checkE004 },
+  {
+    code: 'W001',
+    severity: SEVERITY.WARNING,
+    description: 'PROJECT.md missing required section',
+    repairable: false,
+    check: checkW001,
+  },
 ];
 
 export = { RULES };
