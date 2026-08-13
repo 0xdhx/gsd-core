@@ -80,12 +80,27 @@ interface Rule {
   check: (snapshot: PlanningSnapshot) => Diagnostic[]; // §8.1 rule 1 signature, verbatim
 }
 
+// ─── adviseRemedy — shared ADVISE-remedy builder ───────────────────────────
+
+/**
+ * Every rule-group file needs the same `{action: ADVISE, risk: NONE, args:
+ * {command}}` shape for a non-repairable finding's `fix` string (§8.3 rule
+ * 5). Was defined identically in `config-validation.cts` and
+ * `agent-install.cts`, and repeated inline elsewhere — moved to this shared,
+ * dependency-free leaf so every rule-group file imports one implementation
+ * instead of duplicating it.
+ */
+function adviseRemedy(command: string): Remedy {
+  return { action: REMEDY_ACTION.ADVISE, risk: REMEDY_RISK.NONE, args: { command } };
+}
+
 // ─── Exports ────────────────────────────────────────────────────────────────
 
 const healthDiagnosticTypes = {
   SEVERITY,
   REMEDY_ACTION,
   REMEDY_RISK,
+  adviseRemedy,
 };
 
 // Namespace merge (same binding name as the value above) is how a CommonJS

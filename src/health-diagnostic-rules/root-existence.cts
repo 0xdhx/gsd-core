@@ -35,7 +35,7 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, REMEDY_ACTION, REMEDY_RISK, adviseRemedy } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 type Rule = healthDiagnosticMod.Rule;
 
@@ -52,11 +52,7 @@ function checkE002(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'E002',
       severity: SEVERITY.ERROR,
       message: 'PROJECT.md not found',
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: '/gsd-new-project' },
-      },
+      remedy: adviseRemedy('/gsd-new-project'),
     },
   ];
 }
@@ -86,11 +82,7 @@ function checkE003(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'E003',
       severity: SEVERITY.ERROR,
       message: 'ROADMAP.md not found',
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: '/gsd-new-milestone' },
-      },
+      remedy: adviseRemedy('/gsd-new-milestone'),
     },
   ];
 }
@@ -161,11 +153,7 @@ function checkW001(snapshot: PlanningSnapshot): Diagnostic[] {
         code: 'W001',
         severity: SEVERITY.WARNING,
         message: `PROJECT.md missing section: ${required}`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: { command: 'Add section manually' },
-        },
+        remedy: adviseRemedy('Add section manually'),
       });
     }
   }

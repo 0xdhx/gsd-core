@@ -23,7 +23,7 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, REMEDY_ACTION, REMEDY_RISK, adviseRemedy } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 type Rule = healthDiagnosticMod.Rule;
 
@@ -85,14 +85,9 @@ function checkW019(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'W019',
       severity: SEVERITY.WARNING,
       message: `Unrecognized .planning/ file: ${filename} — not a canonical GSD artifact`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: {
-          command:
-            'Move to .planning/milestones/ archive subdir or delete if stale. See templates/README.md for the canonical artifact list.',
-        },
-      },
+      remedy: adviseRemedy(
+        'Move to .planning/milestones/ archive subdir or delete if stale. See templates/README.md for the canonical artifact list.',
+      ),
     });
   }
   return diagnostics;

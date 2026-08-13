@@ -56,19 +56,14 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- health-diagnostic-types.cjs is an export= CommonJS module
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, REMEDY_ACTION, REMEDY_RISK, adviseRemedy } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
-type Remedy = healthDiagnosticMod.Remedy;
 type Rule = healthDiagnosticMod.Rule;
 
 import { VALID_PROFILES, VALID_TIERS, VALID_PHASE_TYPES } from '../model-catalog.cjs';
 
 // verify.cts:2141 — inlined literal, not exported from anywhere; same list.
 const VALID_BRANCHING_STRATEGIES = ['none', 'phase', 'milestone'];
-
-function adviseRemedy(command: string): Remedy {
-  return { action: REMEDY_ACTION.ADVISE, risk: REMEDY_RISK.NONE, args: { command } };
-}
 
 // ─── W003 — config.json not found (verify.cts:1777-1785) ───────────────────
 

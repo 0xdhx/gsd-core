@@ -88,7 +88,7 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, adviseRemedy } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 type Rule = healthDiagnosticMod.Rule;
 
@@ -158,11 +158,7 @@ function checkW006(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'W006',
       severity: SEVERITY.WARNING,
       message: `Phase ${phaseId} in ROADMAP.md but no directory on disk`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: 'Create phase directory or remove from roadmap' },
-      },
+      remedy: adviseRemedy('Create phase directory or remove from roadmap'),
     });
   }
   return diagnostics;
@@ -205,11 +201,7 @@ function checkW007(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'W007',
       severity: SEVERITY.WARNING,
       message: `Phase ${token} exists on disk but not in ROADMAP.md`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: 'Add to roadmap or remove directory' },
-      },
+      remedy: adviseRemedy('Add to roadmap or remove directory'),
     });
   }
   return diagnostics;

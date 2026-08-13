@@ -55,7 +55,7 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, adviseRemedy } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 type Rule = healthDiagnosticMod.Rule;
 
@@ -77,11 +77,7 @@ function checkW005(snapshot: PlanningSnapshot): Diagnostic[] {
         code: 'W005',
         severity: SEVERITY.WARNING,
         message: `Phase directory "${name}" doesn't follow NN-name format`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: { command: 'Rename to match pattern (e.g., 01-setup)' },
-        },
+        remedy: adviseRemedy('Rename to match pattern (e.g., 01-setup)'),
       });
     }
   }
@@ -127,14 +123,9 @@ function checkW023(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'W023',
       severity: SEVERITY.WARNING,
       message: `Phase directories collide on normalized key "${key}": ${described}`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: {
-          command:
-            'Inspect each directory; rename or remove the duplicate so only one directory maps to this phase key',
-        },
-      },
+      remedy: adviseRemedy(
+        'Inspect each directory; rename or remove the duplicate so only one directory maps to this phase key',
+      ),
     });
   }
   return diagnostics;
@@ -161,11 +152,7 @@ function checkI001(snapshot: PlanningSnapshot): Diagnostic[] {
         code: 'I001',
         severity: SEVERITY.INFO,
         message: `Phase ${phase.dir} has ${deficit} plan(s) without a matching summary`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: { command: 'May be in progress' },
-        },
+        remedy: adviseRemedy('May be in progress'),
       });
     }
   }
@@ -183,11 +170,7 @@ function checkW009(snapshot: PlanningSnapshot): Diagnostic[] {
         code: 'W009',
         severity: SEVERITY.WARNING,
         message: `Phase ${entry.dir}: has Validation Architecture in RESEARCH.md but no VALIDATION.md`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: { command: 'Re-run /gsd-plan-phase with --research to regenerate' },
-        },
+        remedy: adviseRemedy('Re-run /gsd-plan-phase with --research to regenerate'),
       });
     }
   }

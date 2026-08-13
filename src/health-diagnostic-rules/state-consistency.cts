@@ -43,7 +43,7 @@
 // `planning-snapshot.cjs`, which never touches that module's runtime values.
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- export= CommonJS module
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, adviseRemedy } = healthDiagnosticMod;
 type Rule = healthDiagnosticMod.Rule;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 
@@ -161,14 +161,9 @@ const RULE_W002: Rule = {
         code: 'W002',
         severity: SEVERITY.WARNING,
         message: `STATE.md references phase ${ref}, but only phases ${sortedValid.join(', ')} are declared`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: {
-            command:
-              'Review STATE.md manually before changing it; /gsd-health --repair will not overwrite an existing STATE.md for phase mismatches',
-          },
-        },
+        remedy: adviseRemedy(
+          'Review STATE.md manually before changing it; /gsd-health --repair will not overwrite an existing STATE.md for phase mismatches',
+        ),
       });
     }
     return diagnostics;
@@ -210,11 +205,7 @@ const RULE_W011: Rule = {
         code: 'W011',
         severity: SEVERITY.WARNING,
         message: `STATE.md says current phase is ${phaseId} (status: ${statusVal || 'unknown'}) but ROADMAP.md shows it as [x] complete — state files may be out of sync`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: { command: 'Run /gsd-progress to re-derive current position, or manually update STATE.md' },
-        },
+        remedy: adviseRemedy('Run /gsd-progress to re-derive current position, or manually update STATE.md'),
       },
     ];
   },
@@ -243,11 +234,7 @@ const RULE_W021: Rule = {
         code: 'W021',
         severity: SEVERITY.WARNING,
         message: `Phase ${entry.phaseId}: integer prefix implies ${expectedMilestone} but listed under ${entry.milestone}`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: { command: 'gsd-tools roadmap upgrade --convention milestone-prefixed' },
-        },
+        remedy: adviseRemedy('gsd-tools roadmap upgrade --convention milestone-prefixed'),
       });
     }
     return diagnostics;
@@ -283,13 +270,9 @@ const RULE_W026: Rule = {
         code: 'W026',
         severity: SEVERITY.WARNING,
         message: `STATE says milestone complete but ROADMAP lists ${unstarted.length} unstarted phase(s) (e.g. Phase ${unstarted[0]})`,
-        remedy: {
-          action: REMEDY_ACTION.ADVISE,
-          risk: REMEDY_RISK.NONE,
-          args: {
-            command: 'Run validate consistency or re-run complete-milestone after verifying all phases are done',
-          },
-        },
+        remedy: adviseRemedy(
+          'Run validate consistency or re-run complete-milestone after verifying all phases are done',
+        ),
       },
     ];
   },

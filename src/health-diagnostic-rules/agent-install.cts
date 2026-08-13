@@ -26,10 +26,9 @@
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- health-diagnostic-types.cjs is an export= CommonJS module
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, adviseRemedy } = healthDiagnosticMod;
 type Rule = healthDiagnosticMod.Rule;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
-type Remedy = healthDiagnosticMod.Remedy;
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- type-only; erased at compile time, no runtime require emitted
 import type planningSnapshotMod = require('../planning-snapshot.cjs');
@@ -40,10 +39,6 @@ import planningScopeMod = require('../planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 
 import { PACKAGE_NAME } from '../package-identity.cjs';
-
-function adviseRemedy(command: string): Remedy {
-  return { action: REMEDY_ACTION.ADVISE, risk: REMEDY_RISK.NONE, args: { command } };
-}
 
 /**
  * `check(snapshot)` for W010 — see module header for the exact 4-way
