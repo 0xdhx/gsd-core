@@ -16,20 +16,23 @@
  * - W023's original "described" list called `determinePhaseStatus`
  *   (`commands.cts:154`), a SIX-way status string ('Not Started'/'Planned'/
  *   'In Progress'/'Executed'/'Needs Review'/'Complete') computed from its own
- *   raw `readdirSync` + `*-VERIFICATION.md` frontmatter read of `phaseDir` —
- *   neither `PhaseSnapshot.complete` (a boolean) nor `PhaseSnapshot.
- *   verificationStatus` (the DIFFERENT, `readVerificationStatus`-routed
- *   status vocabulary: 'passed'/'gaps_found'/'human_needed'/'stale'/
- *   'unknown'/'missing', §7.4 disk-strict) reproduces that six-way string
- *   byte-for-byte — the two computations read the same file independently
- *   and can disagree (e.g. a stale-but-frontmatter-"passed" VERIFICATION.md
- *   reads 'Complete' under the original raw read but routes to a non-'passed'
- *   `verificationStatus` under §7.4's staleness handling). Reproducing the
- *   raw frontmatter read here would violate §8.1 rule 1 (no ambient I/O in a
- *   rule's `check`). This rule instead describes each colliding directory
- *   with the snapshot fields actually available (`planCount`, `summaryCount`,
- *   `verificationStatus`) — a disclosed fidelity reduction, not a silent
- *   reproduction of the original six-way label.
+ *   raw `readdirSync` + `*-VERIFICATION.md` frontmatter read of `phaseDir`.
+ *   This rule cannot re-run that raw read (§8.1 rule 1 forbids ambient I/O in
+ *   `check`), so `derivePhaseStatusLabel` below reconstructs the same
+ *   six-way label from fields `PlanningSnapshot` already exposes —
+ *   `PhaseSnapshot.planCount`/`summaryCount` (the plan/no-plan and
+ *   in-progress/planned branches, identical inputs to the original) and
+ *   `PhaseSnapshot.complete`/`verificationStatus` (`isPhaseComplete`'s own
+ *   §7.4 disk-strict routing of the SAME `*-VERIFICATION.md` file) for the
+ *   verification-gated branches. This is a disclosed fidelity reduction, not
+ *   a byte-for-byte guarantee: `verificationStatus` is the DIFFERENT,
+ *   `readVerificationStatus`-routed vocabulary ('passed'/'gaps_found'/
+ *   'human_needed'/'stale'/'unknown'/'missing') and can disagree with a raw
+ *   frontmatter re-read in edge cases (e.g. a stale-but-frontmatter-"passed"
+ *   VERIFICATION.md routes to 'stale', not 'passed', under §7.4's staleness
+ *   handling — this rule reports 'Executed' there, not 'Complete'). No new
+ *   ambient I/O and no new `PlanningSnapshot` field were needed — every input
+ *   was already on `PhaseSnapshot`.
  *
  * W009's original message interpolates `${slash('plan-phase')}`
  * (`verify.cts:1982`, ``Re-run ${slash('plan-phase')} with --research to
@@ -93,6 +96,32 @@ function checkW005(snapshot: PlanningSnapshot): Diagnostic[] {
 // `verify.cts:1930-1932`'s deterministic-output rationale. See the file-level
 // comment for the disclosed "described" fidelity reduction.
 
+/**
+ * Reconstruct `commands.cts:154`'s `determinePhaseStatus` six-way label from
+ * fields `PhaseSnapshot` already exposes (no ambient I/O, no new snapshot
+ * field — see file-level comment). `complete`/`verificationStatus` come from
+ * `isPhaseComplete`'s §7.4 disk-strict routing of the same `*-VERIFICATION.md`
+ * file the original raw read targeted.
+ */
+function derivePhaseStatusLabel(
+  planCount: number,
+  summaryCount: number,
+  complete: boolean,
+  verificationStatus: string,
+): string {
+  if (planCount === 0) return 'Not Started';
+  if (summaryCount < planCount && summaryCount > 0) return 'In Progress';
+  if (summaryCount < planCount) return 'Planned';
+  // summaryCount >= planCount > 0 — verification-gated, same as the original's
+  // post-count fall-through.
+  if (complete) return 'Complete';
+  if (verificationStatus === 'human_needed') return 'Needs Review';
+  // gaps_found / stale / missing / unknown all land here, same as the
+  // original's "verification exists but unrecognized" and "no verification
+  // file" branches both returning 'Executed'.
+  return 'Executed';
+}
+
 function checkW023(snapshot: PlanningSnapshot): Diagnostic[] {
   const groups = new Map<string, string[]>();
   for (const name of snapshot.phaseDirs.value) {
@@ -115,8 +144,10 @@ function checkW023(snapshot: PlanningSnapshot): Diagnostic[] {
         const phase = phaseByDir.get(d);
         const plans = phase ? phase.planCount : 0;
         const summaries = phase ? phase.summaryCount : 0;
+        const complete = phase ? phase.complete : false;
         const verificationStatus = phase ? phase.verificationStatus : 'missing';
-        return `${d} (plans: ${plans}, summaries: ${summaries}, verification: ${verificationStatus})`;
+        const status = derivePhaseStatusLabel(plans, summaries, complete, verificationStatus);
+        return `${d} (${status})`;
       })
       .join(', ');
     diagnostics.push({
