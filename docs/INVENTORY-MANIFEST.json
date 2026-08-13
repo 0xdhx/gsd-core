@@ -378,6 +378,7 @@
       "graphify.cjs",
       "gsd2-import.cjs",
       "handshake-serialized.cjs",
+      "health-diagnostic.cjs",
       "hook-bus.cjs",
       "host-integration-sdk.cjs",
       "host-integration.cjs",
