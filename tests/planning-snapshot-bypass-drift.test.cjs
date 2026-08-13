@@ -40,6 +40,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const REGISTERED_FILE = path.join('src', 'verify.cts');
+// The guard's OWN output (found/file fields, baseline entries) is always
+// POSIX-normalized via toPosixRel, regardless of the separator form its
+// `relPath` input used — comparing against the platform-native
+// REGISTERED_FILE is correct for the guard's INPUT (the DIAGNOSTIC_RULE_FUNCTIONS
+// Map key is also path.join-constructed, so an exact Map.has() lookup needs
+// this form) but wrong for anything the guard PRODUCED, which this constant
+// is for.
+const REGISTERED_FILE_POSIX = REGISTERED_FILE.replace(/\\/g, '/');
 const REGISTERED_FN = 'cmdValidateHealth';
 
 // A minimal fixture carrying one registered diagnostic-rule-shaped function
@@ -72,12 +80,12 @@ describe('findSnapshotBypassDrift — G1/G3: registered function raw-read detect
     assert.strictEqual(out[0].line, 2);
     assert.strictEqual(out[0].found, 'platformReadSync(');
     assert.strictEqual(out[0].text, 'const raw = platformReadSync(x);');
-    assert.strictEqual(out[0].file, REGISTERED_FILE);
+    assert.strictEqual(out[0].file, REGISTERED_FILE_POSIX);
   });
 
   test('G1: a registered-function violation present in the baseline is KNOWN — neither fresh nor stale', () => {
     const violations = findSnapshotBypassDrift(fixtureSource(), REGISTERED_FILE);
-    const baseline = [{ file: REGISTERED_FILE, text: 'const raw = platformReadSync(x);' }];
+    const baseline = [{ file: REGISTERED_FILE_POSIX, text: 'const raw = platformReadSync(x);' }];
     const { fresh, stale } = diffAgainstBaseline(violations, baseline);
     assert.deepStrictEqual(fresh, []);
     assert.deepStrictEqual(stale, []);
@@ -116,7 +124,7 @@ describe('findSnapshotBypassDrift — G2: function-scoped detection (not whole-f
 
 describe('diffAgainstBaseline — G4: stale entries', () => {
   test('a baseline entry whose (file, text) pair no longer appears in a fresh scan is reported under stale', () => {
-    const baseline = [{ file: REGISTERED_FILE, text: 'const raw = platformReadSync(oldSite);' }];
+    const baseline = [{ file: REGISTERED_FILE_POSIX, text: 'const raw = platformReadSync(oldSite);' }];
     const violations = findSnapshotBypassDrift(fixtureSource(), REGISTERED_FILE);
     const { fresh, stale } = diffAgainstBaseline(violations, baseline);
     // The baseline's own (unmatched) entry is stale...
@@ -136,7 +144,7 @@ describe('writeBaseline / dedupeViolationsForBaseline — G5: regeneration match
     const deduped = dedupeViolationsForBaseline(violations);
     const sorted = sortEntries(deduped);
     assert.strictEqual(sorted.length, 1);
-    assert.strictEqual(sorted[0].file, REGISTERED_FILE);
+    assert.strictEqual(sorted[0].file, REGISTERED_FILE_POSIX);
     assert.strictEqual(sorted[0].text, 'const raw = platformReadSync(x);');
     assert.strictEqual(sorted[0].count, 1);
     // A freshly-written baseline must itself be immediately KNOWN (not
@@ -155,7 +163,7 @@ describe('writeBaseline / dedupeViolationsForBaseline — G5: regeneration match
     const writtenPath = path.join(root, 'scripts', 'baselines', 'planning-snapshot-bypass-baseline.json');
     const written = JSON.parse(fs.readFileSync(writtenPath, 'utf8'));
     assert.strictEqual(written.entries.length, 1);
-    assert.strictEqual(written.entries[0].file, REGISTERED_FILE);
+    assert.strictEqual(written.entries[0].file, REGISTERED_FILE_POSIX);
     assert.strictEqual(written.entries[0].text, 'const raw = platformReadSync(x);');
     assert.strictEqual(written.entries[0].count, 1);
     // The written baseline immediately reconciles with the pass that produced
