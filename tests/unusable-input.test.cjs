@@ -72,7 +72,7 @@ describe('UNUSABLE_REASON', () => {
     // (enum + call site + this assertion) instead of a silent widening.
     assert.deepStrictEqual(
       Object.keys(UNUSABLE_REASON).sort(),
-      ['CONFIG_UNREADABLE', 'FRONTMATTER_UNTERMINATED', 'LAST_ACTIVITY_UNPARSEABLE', 'ROADMAP_UNREADABLE', 'STATE_UNREADABLE'],
+      ['CONFIG_UNREADABLE', 'FRONTMATTER_UNTERMINATED', 'LAST_ACTIVITY_UNPARSEABLE', 'PROJECT_UNREADABLE', 'ROADMAP_UNREADABLE', 'STATE_UNREADABLE'],
     );
     assert.strictEqual(UNUSABLE_REASON.FRONTMATTER_UNTERMINATED, 'frontmatter_unterminated');
   });
@@ -178,6 +178,53 @@ describe('CONFIG_UNREADABLE', () => {
 
   test('the reason value is the frozen string "config_unreadable"', () => {
     assert.strictEqual(UNUSABLE_REASON.CONFIG_UNREADABLE, 'config_unreadable');
+  });
+});
+
+// ─── PROJECT_UNREADABLE: a PROJECT.md that exists but could not be read ──────
+
+describe('PROJECT_UNREADABLE', () => {
+  test('a genuinely unreadable PROJECT.md produces exactly one diagnostic', () => {
+    _resetUnusableInputWarningsForTests();
+    const emitted = emissionsDuring(() => {
+      const wrote = warnUnusableInput({
+        reason: UNUSABLE_REASON.PROJECT_UNREADABLE,
+        source: '/u/project-unreadable.md',
+      });
+      assert.strictEqual(wrote, true);
+    });
+    assert.strictEqual(emitted, 1);
+  });
+
+  test('the same PROJECT.md path reported twice yields one diagnostic', () => {
+    _resetUnusableInputWarningsForTests();
+    const source = '/u/project-unreadable-dedup/PROJECT.md';
+    const emitted = emissionsDuring(() => {
+      const first = warnUnusableInput({ reason: UNUSABLE_REASON.PROJECT_UNREADABLE, source });
+      const repeat = warnUnusableInput({ reason: UNUSABLE_REASON.PROJECT_UNREADABLE, source });
+      assert.strictEqual(first, true);
+      assert.strictEqual(repeat, false, 'same (path, cause) must dedup');
+    });
+    assert.strictEqual(emitted, 1);
+  });
+
+  test('two different PROJECT.md paths are never suppressed as one', () => {
+    _resetUnusableInputWarningsForTests();
+    const emitted = emissionsDuring(() => {
+      warnUnusableInput({
+        reason: UNUSABLE_REASON.PROJECT_UNREADABLE,
+        source: '/u/project-unreadable-a/PROJECT.md',
+      });
+      warnUnusableInput({
+        reason: UNUSABLE_REASON.PROJECT_UNREADABLE,
+        source: '/u/project-unreadable-b/PROJECT.md',
+      });
+    });
+    assert.strictEqual(emitted, 2, 'keying too coarsely would hide a real second fault');
+  });
+
+  test('the reason value is the frozen string "project_unreadable"', () => {
+    assert.strictEqual(UNUSABLE_REASON.PROJECT_UNREADABLE, 'project_unreadable');
   });
 });
 

@@ -688,3 +688,363 @@ describe('Phase-10 fields unchanged by the Phase-11 extension (matrix row 8)', (
     assert.ok('worktreeHealth' in snap);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════
+// Phase 11 (#3309) — "Rule table organization" batch, 7 more fields
+//
+// Design: .gsd/phase/refactor-3309-health-diagnostic-rule-table/40-design.md
+//         ("Rule table organization" table)
+//
+// Each field relocates (not reinvents) an existing verify.cts derivation —
+// see the JSDoc above each builder in src/planning-snapshot.cts for the
+// exact source lines. Fixture helpers below mirror the existing
+// writeRoadmap/writeState/writeFile idiom.
+// ═════════════════════════════════════════════════════════════════════════
+
+function writeProject(cwd, content) {
+  fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+  fs.writeFileSync(path.join(planningDirOf(cwd), 'PROJECT.md'), content);
+}
+
+function writeMilestoneArchiveRoadmap(cwd, version, content) {
+  const archiveDir = path.join(planningDirOf(cwd), 'milestones');
+  fs.mkdirSync(archiveDir, { recursive: true });
+  fs.writeFileSync(path.join(archiveDir, `${version}-ROADMAP.md`), content);
+}
+
+function writeMilestonesRegistry(cwd, content) {
+  fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+  fs.writeFileSync(path.join(planningDirOf(cwd), 'MILESTONES.md'), content);
+}
+
+describe('projectSections field (Phase 11, #3309)', () => {
+  test('happy: returns every ## heading actually present, unfiltered against any required list', (t) => {
+    const cwd = createTempDir('gsd-3309-ps1-');
+    t.after(() => cleanup(cwd));
+    writeProject(cwd, [
+      '# My Project',
+      '',
+      '## What This Is',
+      '',
+      'text',
+      '',
+      '## Custom Section',
+      '',
+      '### Not a top-level heading',
+    ].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.projectSections, {
+      value: ['What This Is', 'Custom Section'],
+      scope: SCOPE.COMPLETE,
+      exists: true,
+    });
+  });
+
+  test('absence: no PROJECT.md is a real non-answer, not corruption', (t) => {
+    const cwd = createTempDir('gsd-3309-ps2-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    assert.deepStrictEqual(snap.projectSections, { value: null, scope: SCOPE.UNREADABLE, exists: false });
+    assert.strictEqual(emitted, 0);
+  });
+
+  test('hostile: present-but-unreadable PROJECT.md degrades without throwing, emits PROJECT_UNREADABLE exactly once', (t) => {
+    const cwd = createTempDir('gsd-3309-ps3-');
+    t.after(() => cleanup(cwd));
+    makeFileUnreadableAsDir(path.join(planningDirOf(cwd), 'PROJECT.md'));
+
+    const [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    assert.deepStrictEqual(snap.projectSections, { value: null, scope: SCOPE.UNREADABLE, exists: true });
+    assert.strictEqual(emitted, 1, 'present-but-unreadable PROJECT.md is corruption — exactly one PROJECT_UNREADABLE diagnostic');
+  });
+});
+
+describe('statePhaseTokens field (Phase 11, #3309)', () => {
+  test('happy: every phase-number-shaped token anywhere in STATE.md text, in appearance order', (t) => {
+    const cwd = createTempDir('gsd-3309-spt1-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    // The `Phase:`-field syntax ("Phase: 3 of 8") does NOT match this regex —
+    // it requires `[Pp]hase\s+<digits>` (whitespace, not a colon, right
+    // after "Phase"), exactly like verify.cts's own W002 relocation target.
+    // Only prose-style "Phase N" references match, e.g. bracketed decision
+    // annotations and free-text mentions.
+    appendToState(cwd, [
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 of 8 (User Auth)',
+      '',
+      '### Decisions',
+      '- [Phase 5]: revisit after Phase 2 wraps',
+    ].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.statePhaseTokens, { value: ['5', '2'], scope: SCOPE.COMPLETE });
+  });
+
+  test('absence: no STATE.md yields an empty token list, non-answer scope, no diagnostic', (t) => {
+    const cwd = createTempDir('gsd-3309-spt2-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    assert.deepStrictEqual(snap.statePhaseTokens, { value: [], scope: SCOPE.UNREADABLE });
+    assert.strictEqual(emitted, 0);
+  });
+
+  test('hostile: unreadable-but-present STATE.md degrades statePhaseTokens together with currentPhaseLabel from ONE diagnostic', (t) => {
+    const cwd = createTempDir('gsd-3309-spt3-');
+    t.after(() => cleanup(cwd));
+    makeFileUnreadableAsDir(path.join(planningDirOf(cwd), 'STATE.md'));
+
+    const [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    assert.deepStrictEqual(snap.statePhaseTokens, { value: [], scope: SCOPE.UNREADABLE });
+    assert.deepStrictEqual(snap.currentPhaseLabel, { value: null, scope: SCOPE.UNREADABLE });
+    assert.strictEqual(emitted, 1, 'the shared STATE.md read must not double-emit across fields');
+  });
+});
+
+describe('stateStatus field (Phase 11, #3309)', () => {
+  test('happy: Status field under Current Position is extracted verbatim, mirroring currentPhaseLabel', (t) => {
+    const cwd = createTempDir('gsd-3309-ss1-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    appendToState(cwd, [
+      '',
+      '## Current Position',
+      '',
+      'Phase: 3 of 8 (User Auth)',
+      'Status: In progress',
+      '',
+    ].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.stateStatus, { value: 'In progress', scope: SCOPE.COMPLETE });
+  });
+
+  test('boundary: missing Current Position section still resolves status from frontmatter, scope TRUNCATED', (t) => {
+    const cwd = createTempDir('gsd-3309-ss2-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { status: 'planning' });
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.strictEqual(snap.stateStatus.value, 'planning');
+    assert.strictEqual(snap.stateStatus.scope, SCOPE.TRUNCATED);
+  });
+
+  test('absence: no STATE.md yields a non-answer, no diagnostic', (t) => {
+    const cwd = createTempDir('gsd-3309-ss3-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    assert.deepStrictEqual(snap.stateStatus, { value: null, scope: SCOPE.UNREADABLE });
+    assert.strictEqual(emitted, 0);
+  });
+});
+
+describe('roadmapDeclaredPhases field (Phase 11, #3309)', () => {
+  test('happy: every declared phase id paired with the milestone section it was found under', (t) => {
+    const cwd = createTempDir('gsd-3309-rdp1-');
+    t.after(() => cleanup(cwd));
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo', '', '### Phase 2: Bar'].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.roadmapDeclaredPhases, {
+      value: [
+        { phaseId: '1', milestone: 'v1.0' },
+        { phaseId: '2', milestone: 'v1.0' },
+      ],
+      scope: SCOPE.COMPLETE,
+    });
+  });
+
+  test('boundary: a phase declared before any version heading gets milestone: null', (t) => {
+    const cwd = createTempDir('gsd-3309-rdp2-');
+    t.after(() => cleanup(cwd));
+    writeRoadmap(cwd, ['### Phase 9: Prelude', '', '## v1.0 Current 🚧', '', '### Phase 1: Foo'].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    const prelude = snap.roadmapDeclaredPhases.value.find((p) => p.phaseId === '9');
+    const foo = snap.roadmapDeclaredPhases.value.find((p) => p.phaseId === '1');
+    assert.deepStrictEqual(prelude, { phaseId: '9', milestone: null });
+    assert.deepStrictEqual(foo, { phaseId: '1', milestone: 'v1.0' });
+  });
+
+  test('absence: no ROADMAP.md is a non-answer', (t) => {
+    const cwd = createTempDir('gsd-3309-rdp3-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.roadmapDeclaredPhases, { value: [], scope: SCOPE.UNREADABLE });
+  });
+
+  test('hostile: unreadable ROADMAP.md degrades to an empty list, scope UNREADABLE', (t) => {
+    const cwd = createTempDir('gsd-3309-rdp4-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    makeFileUnreadableAsDir(path.join(planningDirOf(cwd), 'ROADMAP.md'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.roadmapDeclaredPhases, { value: [], scope: SCOPE.UNREADABLE });
+  });
+});
+
+describe('roadmapPhaseCheckboxes field (Phase 11, #3309)', () => {
+  test('happy: [x]/[ ] checkbox state parsed per phase id', (t) => {
+    const cwd = createTempDir('gsd-3309-rpc1-');
+    t.after(() => cleanup(cwd));
+    writeRoadmap(cwd, ['## Progress', '', '- [x] Phase 1: Foo', '- [ ] Phase 2: Bar'].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.roadmapPhaseCheckboxes, { value: { '1': true, '2': false }, scope: SCOPE.COMPLETE });
+  });
+
+  test('boundary: no checklist lines present is a real empty answer, not a non-answer', (t) => {
+    const cwd = createTempDir('gsd-3309-rpc2-');
+    t.after(() => cleanup(cwd));
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo'].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.roadmapPhaseCheckboxes, { value: {}, scope: SCOPE.COMPLETE });
+  });
+
+  test('hostile: unreadable ROADMAP.md degrades to an empty map, scope UNREADABLE', (t) => {
+    const cwd = createTempDir('gsd-3309-rpc3-');
+    t.after(() => cleanup(cwd));
+    makeFileUnreadableAsDir(path.join(planningDirOf(cwd), 'ROADMAP.md'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.roadmapPhaseCheckboxes, { value: {}, scope: SCOPE.UNREADABLE });
+  });
+});
+
+describe('researchValidationStatus field (Phase 11, #3309)', () => {
+  test('happy: RESEARCH.md carries the Validation Architecture heading and a VALIDATION.md exists', (t) => {
+    const cwd = createTempDir('gsd-3309-rvs1-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo'].join('\n'));
+    writeFile(cwd, '.planning/phases/01-foo/01-RESEARCH.md', '# Research\n\n## Validation Architecture\n\ntext\n');
+    writeFile(cwd, '.planning/phases/01-foo/01-VALIDATION.md', '# Validation\n');
+
+    const snap = buildPlanningSnapshot(cwd);
+    const entry = snap.researchValidationStatus.value.find((r) => r.dir === '01-foo');
+    assert.deepStrictEqual(entry, { dir: '01-foo', hasValidationArchitecture: true, hasValidationMd: true });
+    assert.strictEqual(snap.researchValidationStatus.scope, SCOPE.COMPLETE);
+  });
+
+  test('negative: RESEARCH.md without the heading and no VALIDATION.md reports both false', (t) => {
+    const cwd = createTempDir('gsd-3309-rvs2-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo'].join('\n'));
+    writeFile(cwd, '.planning/phases/01-foo/01-RESEARCH.md', '# Research\n\nno special section\n');
+
+    const snap = buildPlanningSnapshot(cwd);
+    const entry = snap.researchValidationStatus.value.find((r) => r.dir === '01-foo');
+    assert.deepStrictEqual(entry, { dir: '01-foo', hasValidationArchitecture: false, hasValidationMd: false });
+  });
+
+  test('hostile: an unreadable phase directory degrades that entry to false/false without throwing', (t) => {
+    const cwd = createTempDir('gsd-3309-rvs3-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo'].join('\n'));
+    const phaseDir = path.join(planningDirOf(cwd), 'phases', '01-foo');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    injectPhaseDirFault(t, phaseDir);
+
+    const snap = buildPlanningSnapshot(cwd);
+    const entry = snap.researchValidationStatus.value.find((r) => r.dir === '01-foo');
+    assert.deepStrictEqual(entry, { dir: '01-foo', hasValidationArchitecture: false, hasValidationMd: false });
+  });
+});
+
+describe('milestoneArchiveStatus field (Phase 11, #3309)', () => {
+  test('happy: archived ROADMAP snapshot present and its version documented in MILESTONES.md', (t) => {
+    const cwd = createTempDir('gsd-3309-mas1-');
+    t.after(() => cleanup(cwd));
+    writeMilestoneArchiveRoadmap(cwd, 'v1.0', '# v1.0 archive\n');
+    writeMilestonesRegistry(cwd, '## v1.0\n\nShipped.\n');
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.milestoneArchiveStatus, {
+      value: { archivedVersions: ['v1.0'], documentedVersions: ['v1.0'] },
+      scope: SCOPE.COMPLETE,
+    });
+  });
+
+  test('negative: no milestones/ dir and no MILESTONES.md is a real empty answer, not a non-answer', (t) => {
+    const cwd = createTempDir('gsd-3309-mas2-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.milestoneArchiveStatus, {
+      value: { archivedVersions: [], documentedVersions: [] },
+      scope: SCOPE.COMPLETE,
+    });
+  });
+
+  test('boundary: an archived version missing from the registry is reported, not silently dropped', (t) => {
+    const cwd = createTempDir('gsd-3309-mas3-');
+    t.after(() => cleanup(cwd));
+    writeMilestoneArchiveRoadmap(cwd, 'v1.0', '# v1.0 archive\n');
+    // No MILESTONES.md at all.
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.milestoneArchiveStatus.value.archivedVersions, ['v1.0']);
+    assert.deepStrictEqual(snap.milestoneArchiveStatus.value.documentedVersions, []);
+  });
+
+  test('hostile: an unreadable milestones/ dir degrades to scope UNREADABLE without throwing', (t) => {
+    const cwd = createTempDir('gsd-3309-mas4-');
+    t.after(() => cleanup(cwd));
+    // Directory-vs-file swap: milestones/ is a regular FILE, so
+    // fs.existsSync is true but readdirSync throws ENOTDIR.
+    makeDirUnreadableAsFile(path.join(planningDirOf(cwd), 'milestones'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.strictEqual(snap.milestoneArchiveStatus.scope, SCOPE.UNREADABLE);
+  });
+});
+
+describe('planningRootFiles field (Phase 11, #3309)', () => {
+  test('happy: lists files (not directories) directly under .planning/ root', (t) => {
+    const cwd = createTempDir('gsd-3309-prf1-');
+    t.after(() => cleanup(cwd));
+    writeState(cwd, { milestone: 'v1.0' });
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', ''].join('\n'));
+    writeFile(cwd, '.planning/NOTES.md', 'stray file\n');
+    fs.mkdirSync(path.join(planningDirOf(cwd), 'phases'), { recursive: true }); // a directory — must be excluded
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.planningRootFiles.value.slice().sort(), ['NOTES.md', 'ROADMAP.md', 'STATE.md']);
+    assert.strictEqual(snap.planningRootFiles.scope, SCOPE.COMPLETE);
+  });
+
+  test('absence: no .planning/ directory at all degrades to an empty list, scope UNREADABLE', (t) => {
+    const cwd = createTempDir('gsd-3309-prf2-');
+    t.after(() => cleanup(cwd));
+    // .planning/ deliberately never created.
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.planningRootFiles, { value: [], scope: SCOPE.UNREADABLE });
+  });
+
+  test('hostile: an unreadable .planning/ root degrades without throwing', (t) => {
+    const cwd = createTempDir('gsd-3309-prf3-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+    injectPhaseDirFault(t, planningDirOf(cwd));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.planningRootFiles, { value: [], scope: SCOPE.UNREADABLE });
+  });
+});

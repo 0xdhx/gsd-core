@@ -71,6 +71,13 @@ const UNUSABLE_REASON = Object.freeze({
    * is corruption. (#3309, eighth #1879 site — planning-snapshot's config field)
    */
   CONFIG_UNREADABLE: 'config_unreadable',
+  /**
+   * A PROJECT.md exists but could not be read (EACCES/EIO/…). Distinct from a project that has
+   * not run any project-writing command yet: absence returns the same non-answer, silently —
+   * only an exists-but-unreadable PROJECT.md is corruption. (#3309, ninth #1879 site —
+   * planning-snapshot's projectSections field)
+   */
+  PROJECT_UNREADABLE: 'project_unreadable',
 } as const);
 
 type UnusableReason = (typeof UNUSABLE_REASON)[keyof typeof UNUSABLE_REASON];
@@ -87,6 +94,8 @@ const REASON_PROSE: Readonly<Record<UnusableReason, string>> = Object.freeze({
     'STATE.md exists but could not be read; the current-phase label fell back to unavailable',
   [UNUSABLE_REASON.CONFIG_UNREADABLE]:
     'config.json exists but could not be read or parsed; the config field fell back to unavailable',
+  [UNUSABLE_REASON.PROJECT_UNREADABLE]:
+    'PROJECT.md exists but could not be read; the projectSections field fell back to unavailable',
 });
 
 // ─── Dedup state ──────────────────────────────────────────────────────────────

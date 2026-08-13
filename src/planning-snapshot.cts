@@ -54,6 +54,10 @@ const { checkAgentsInstalled } = agentInstallCheckMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- worktree-safety.cjs is an export= CommonJS module
 import worktreeSafetyMod = require('./worktree-safety.cjs');
 const { inspectWorktreeHealth } = worktreeSafetyMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseIdMod = require('./phase-id.cjs');
+const { PHASE_NUMBER_TOKEN_SOURCE, OPTIONAL_PHASE_TAG_SOURCE } = phaseIdMod;
+import { buildRoadmapPhaseVariants } from './validate.cjs';
 
 // ─── worstScope — the one new piece of coordination logic ───────────────────
 
@@ -107,6 +111,30 @@ interface PlanningSnapshot {
   config: { value: Record<string, unknown> | null; scope: Scope; exists: boolean };
   agentInstall: { value: ReturnType<typeof checkAgentsInstalled>; scope: Scope };
   worktreeHealth: { value: ReturnType<typeof inspectWorktreeHealth>['findings']; scope: Scope };
+  // ─── Phase 11 (#3309) "Rule table organization" additions ─────────────────
+  // The design doc's own "Rule table organization" table and prose disagree
+  // on the count: the table lists EIGHT rows (through `planningRootFiles`,
+  // W019) but the prose says "7 more fields" / "14 fields after this batch".
+  // This implementation follows the table (and the task brief, which
+  // separately enumerates all eight) — every field a reused owner or a
+  // small, relocated (not new-algorithm) derivation. `PlanningSnapshot`
+  // therefore totals 15 fields after this batch, not 14; flagged here rather
+  // than silently reconciled, since correcting the design doc's prose is
+  // outside this diff's scope.
+  projectSections: { value: string[] | null; scope: Scope; exists: boolean };
+  statePhaseTokens: { value: string[]; scope: Scope };
+  stateStatus: { value: string | null; scope: Scope };
+  roadmapDeclaredPhases: { value: { phaseId: string; milestone: string | null }[]; scope: Scope };
+  roadmapPhaseCheckboxes: { value: Record<string, boolean>; scope: Scope };
+  researchValidationStatus: {
+    value: { dir: string; hasValidationArchitecture: boolean; hasValidationMd: boolean }[];
+    scope: Scope;
+  };
+  milestoneArchiveStatus: {
+    value: { archivedVersions: string[]; documentedVersions: string[] };
+    scope: Scope;
+  };
+  planningRootFiles: { value: string[]; scope: Scope };
 }
 
 /**
@@ -131,10 +159,27 @@ function buildPhaseSnapshot(phasesDir: string, dir: string): PhaseSnapshot {
   };
 }
 
+interface StateFields {
+  currentPhaseLabel: { value: string | null; scope: Scope };
+  statePhaseTokens: { value: string[]; scope: Scope };
+  stateStatus: { value: string | null; scope: Scope };
+}
+
 /**
- * Resolve `currentPhaseLabel` — the raw `Phase:` field STATE.md records under
- * `## Current Position` (e.g. `"3 of 8 (User Auth)"`), not a normalized
- * phase-directory id (see the design doc's Known limits).
+ * Resolve every STATE.md-sourced field in one place: `currentPhaseLabel` (the
+ * raw `Phase:` field under `## Current Position`, e.g. `"3 of 8 (User
+ * Auth)"`, not a normalized phase-directory id — see the design doc's Known
+ * limits), `statePhaseTokens` (Phase 11, #3309 — every phase-number-shaped
+ * token found anywhere in STATE.md's raw text, backs W002), and `stateStatus`
+ * (Phase 11, #3309 — the `status`/`Status` field, backs W011).
+ *
+ * Phase 10 shipped `currentPhaseLabel` as its own single-purpose reader
+ * (`buildCurrentPhaseLabel(statePath)`); this phase folds two more STATE.md
+ * derivations in rather than reading and parsing the same file three times
+ * per `buildPlanningSnapshot` call — the read, `extractFrontmatter`, and
+ * `stripFrontmatter` are genuinely shared inputs for all three, and sharing
+ * them means `warnUnusableInput(STATE_UNREADABLE)` also stays a single call
+ * site instead of a risk of tripling on one degraded read.
  *
  * This module performs the one STATE.md read no §7 owner does, mirroring
  * every existing STATE.md caller (`cmdStateSnapshot`, `cmdStatePrune`):
@@ -144,30 +189,63 @@ function buildPhaseSnapshot(phasesDir: string, dir: string): PhaseSnapshot {
  *   non-answer, NOT corruption — a project that never ran `state.init`
  *   legitimately has no STATE.md yet. `warnUnusableInput` is NOT called.
  * - STATE.md present but unreadable (any other read error, e.g. EISDIR) is
- *   corruption — `warnUnusableInput(STATE_UNREADABLE)` fires exactly once.
+ *   corruption — `warnUnusableInput(STATE_UNREADABLE)` fires exactly once,
+ *   and all three fields degrade to their UNREADABLE non-answer together.
  * - An unterminated frontmatter fence is reported by `extractFrontmatter`
  *   itself (`FRONTMATTER_UNTERMINATED`) — this function does not duplicate
  *   that diagnostic; it still attempts a body-only field read on whatever
  *   `stripFrontmatter` leaves behind.
+ * - `currentPhaseLabel`/`stateStatus` both live under `## Current Position`
+ *   (`gsd-core/templates/state.md`) and both use `stateFieldValue`
+ *   (`state-document.cts:296`) the exact way `smart-entry.cts:448`/
+ *   `state.cts:1561,3273` already call it for `'status'`/`'Status'` — so a
+ *   missing `## Current Position` section degrades BOTH to `TRUNCATED` with
+ *   a whole-body fallback, together.
+ * - `statePhaseTokens` scans the WHOLE document (`verify.cts`'s exact
+ *   `PHASE_NUMBER_TOKEN_SOURCE` regex, relocated verbatim from
+ *   `verify.cts:1731-1735`), not just the Current Position section, so it is
+ *   NOT degraded to `TRUNCATED` by a missing section header — it stays
+ *   `COMPLETE` whenever the file itself was read successfully.
  */
-function buildCurrentPhaseLabel(statePath: string): { value: string | null; scope: Scope } {
+function buildStateFields(statePath: string): StateFields {
   let content: string | null;
   try {
     content = platformReadSync(statePath);
   } catch {
     warnUnusableInput({ reason: UNUSABLE_REASON.STATE_UNREADABLE, source: statePath });
-    return { value: null, scope: SCOPE.UNREADABLE };
+    return {
+      currentPhaseLabel: { value: null, scope: SCOPE.UNREADABLE },
+      statePhaseTokens: { value: [], scope: SCOPE.UNREADABLE },
+      stateStatus: { value: null, scope: SCOPE.UNREADABLE },
+    };
   }
   if (content === null) {
-    return { value: null, scope: SCOPE.UNREADABLE };
+    return {
+      currentPhaseLabel: { value: null, scope: SCOPE.UNREADABLE },
+      statePhaseTokens: { value: [], scope: SCOPE.UNREADABLE },
+      stateStatus: { value: null, scope: SCOPE.UNREADABLE },
+    };
   }
 
   const frontmatter = extractFrontmatter(content, statePath);
   const body = stripFrontmatter(content);
   const section = stateCurrentPositionSlice(body);
-  return stateFieldValue(frontmatter, section ?? body, null, 'Phase', {
-    scope: section === null ? SCOPE.TRUNCATED : SCOPE.COMPLETE,
+  const currentPositionScope = section === null ? SCOPE.TRUNCATED : SCOPE.COMPLETE;
+
+  const currentPhaseLabel = stateFieldValue(frontmatter, section ?? body, null, 'Phase', {
+    scope: currentPositionScope,
   });
+  const stateStatus = stateFieldValue(frontmatter, section ?? body, 'status', 'Status', {
+    scope: currentPositionScope,
+  });
+  const statePhaseTokens = {
+    value: [...content.matchAll(new RegExp(`[Pp]hase\\s+(${PHASE_NUMBER_TOKEN_SOURCE})`, 'g'))].map(
+      (m) => m[1],
+    ),
+    scope: SCOPE.COMPLETE,
+  };
+
+  return { currentPhaseLabel, statePhaseTokens, stateStatus };
 }
 
 /**
@@ -262,6 +340,273 @@ function buildWorktreeHealthField(cwd: string): { value: ReturnType<typeof inspe
   }
 }
 
+// ─── Phase 11 (#3309) "Rule table organization" builders ────────────────────
+// Each relocates (not reinvents) an existing `verify.cts` derivation. See the
+// design doc's "Rule table organization" table for the exact source lines.
+
+/**
+ * Resolve `projectSections` — the `##`-level section headings actually
+ * present in `.planning/PROJECT.md`, as a plain list (NOT filtered against a
+ * required-sections list — the caller, the future W001/E002 rules, do that
+ * comparison). Relocates the read+parse half of `verify.cts:1681-1691`
+ * (E002/W001), generalized from "does the file include these three fixed
+ * strings" to "what headings does the file actually have."
+ *
+ * PROJECT.md is root-scoped (`planningRoot(cwd)`), NOT workstream-scoped —
+ * mirrors `cmdValidateHealth`'s own `projectPath = path.join(rootBase,
+ * 'PROJECT.md')` (`verify.cts:1649`), the same root-vs-workstream split
+ * `buildConfigField` already documents for config.json.
+ *
+ * Same `exists`-discriminator shape as `config`: absent file is a real
+ * non-answer (`{value: null, scope: UNREADABLE, exists: false}`, no
+ * `warnUnusableInput`); present but unreadable IS corruption —
+ * `{value: null, scope: UNREADABLE, exists: true}`,
+ * `warnUnusableInput(PROJECT_UNREADABLE)` fires exactly once, mirroring
+ * `buildConfigField`'s treatment of a present-but-unparseable config.json.
+ */
+function buildProjectSectionsField(cwd: string): { value: string[] | null; scope: Scope; exists: boolean } {
+  const projectPath = path.join(planningRoot(cwd), 'PROJECT.md');
+  if (!fs.existsSync(projectPath)) {
+    return { value: null, scope: SCOPE.UNREADABLE, exists: false };
+  }
+  let content: string;
+  try {
+    content = fs.readFileSync(projectPath, 'utf-8');
+  } catch {
+    warnUnusableInput({ reason: UNUSABLE_REASON.PROJECT_UNREADABLE, source: projectPath });
+    return { value: null, scope: SCOPE.UNREADABLE, exists: true };
+  }
+  const value = [...content.matchAll(/^##\s+(.+)$/gm)].map((m) => m[1].trim());
+  return { value, scope: SCOPE.COMPLETE, exists: true };
+}
+
+/**
+ * Resolve `roadmapDeclaredPhases` — every phase id ROADMAP.md declares
+ * (heading-style AND checklist-style, not filtered to disk presence), each
+ * paired with the milestone-version section it was found under (`null` when
+ * found outside any versioned section). Backs W006/W007 (declared-phase
+ * half) and W021(2288)/W026(2392) (milestone-attribution half).
+ *
+ * The declared-phase-id half reuses `buildRoadmapPhaseVariants`
+ * (`validate.cts:136`, already imported by `verify.cts:12` — genuine existing
+ * reuse). The milestone-attribution half relocates
+ * `checkMilestonePrefixMismatches`'s `sectionRx`-based section walk
+ * (`verify.cts:1429-1459`, local/unexported there), generalized from "record
+ * only the mismatches" to "record every attribution" — this field exposes
+ * the parsed fact; the future W021/W026 rules make the mismatch judgment.
+ */
+function buildRoadmapDeclaredPhasesField(
+  roadmapPath: string,
+): { value: { phaseId: string; milestone: string | null }[]; scope: Scope } {
+  if (!fs.existsSync(roadmapPath)) {
+    return { value: [], scope: SCOPE.UNREADABLE };
+  }
+  let content: string;
+  try {
+    content = fs.readFileSync(roadmapPath, 'utf-8');
+  } catch {
+    return { value: [], scope: SCOPE.UNREADABLE };
+  }
+
+  const { roadmapPhases } = buildRoadmapPhaseVariants(content);
+
+  const milestoneByPhase = new Map<string, string>();
+  const sectionRx = /^#{1,3}\s+(?:\[[^\]]{1,200}\]\s*)?.*v(\d+\.\d+)/gim;
+  const sections: { version: string; start: number; end: number }[] = [];
+  let sm: RegExpExecArray | null;
+  while ((sm = sectionRx.exec(content)) !== null) {
+    if (sections.length > 0) sections[sections.length - 1].end = sm.index;
+    sections.push({ version: `v${sm[1]}`, start: sm.index, end: content.length });
+  }
+  const phaseRx = /#{2,4}\s*(?:\[[^\]]{1,200}\]\s*)?Phase\s+([\w][\w.-]*)(?:\s*\([^)\n]{0,200}\))?\s*:/gi;
+  for (const section of sections) {
+    const sectionContent = content.slice(section.start, section.end);
+    phaseRx.lastIndex = 0;
+    let pm: RegExpExecArray | null;
+    while ((pm = phaseRx.exec(sectionContent)) !== null) {
+      if (!milestoneByPhase.has(pm[1])) milestoneByPhase.set(pm[1], section.version);
+    }
+  }
+
+  const value = [...roadmapPhases].map((phaseId) => ({
+    phaseId,
+    milestone: milestoneByPhase.get(phaseId) ?? null,
+  }));
+  return { value, scope: SCOPE.COMPLETE };
+}
+
+/**
+ * Resolve `roadmapPhaseCheckboxes` — parsed `[x]`/`[ ]` checkbox state per
+ * phase from ROADMAP.md's progress-table region, keyed by phase id. Backs
+ * W011.
+ *
+ * Relocates and generalizes `verify.cts`'s W011 block (`verify.cts:2104-
+ * 2134`): that call site builds ONE hardcoded `phaseCheckboxRe` testing a
+ * single target phase id (STATE's current phase) for a `[x]` match. This
+ * builder is the same regex shape, generalized to CAPTURE both the check
+ * character and the phase id instead of interpolating one fixed target, so
+ * every declared checkbox is recorded, not just one.
+ *
+ * NOT a re-derivation of `isPhaseComplete` (`verification.cts:557`, ADR-3180
+ * §7.4, disk-strict): that owner explicitly refuses to consult the ROADMAP
+ * checkbox at all when DECIDING phase completion (`verification.cts:536-
+ * 537`). This field only exposes what the checkbox literally says, for a
+ * diagnostic (W011) whose entire purpose is flagging when the two DISAGREE —
+ * reading the data is not re-litigating who is authoritative.
+ */
+function buildRoadmapPhaseCheckboxesField(
+  roadmapPath: string,
+): { value: Record<string, boolean>; scope: Scope } {
+  if (!fs.existsSync(roadmapPath)) {
+    return { value: {}, scope: SCOPE.UNREADABLE };
+  }
+  let content: string;
+  try {
+    content = fs.readFileSync(roadmapPath, 'utf-8');
+  } catch {
+    return { value: {}, scope: SCOPE.UNREADABLE };
+  }
+
+  const checkboxRe = new RegExp(
+    `-\\s*\\[([xX ])\\].*?Phase\\s+0*(${PHASE_NUMBER_TOKEN_SOURCE})${OPTIONAL_PHASE_TAG_SOURCE}[:\\s]`,
+    'gi',
+  );
+  const value: Record<string, boolean> = {};
+  let m: RegExpExecArray | null;
+  while ((m = checkboxRe.exec(content)) !== null) {
+    value[m[2]] = m[1].toLowerCase() === 'x';
+  }
+  return { value, scope: SCOPE.COMPLETE };
+}
+
+/**
+ * Resolve `researchValidationStatus` — per phase directory, whether its
+ * `*-RESEARCH.md` contains the literal heading `## Validation Architecture`,
+ * and whether a `*-VALIDATION.md` file exists in the same directory. Backs
+ * W009.
+ *
+ * Relocates the file-naming convention `verify.cts:1967-1990` (W009) uses to
+ * find "the" RESEARCH.md / VALIDATION.md in a phase dir: a flat,
+ * non-recursive `readdirSync` of the phase dir, then the first entry whose
+ * name ends `-RESEARCH.md` / any entry ending `-VALIDATION.md`. Computed for
+ * EVERY phase dir unconditionally (verify.cts's W009 only reads RESEARCH.md
+ * when `hasResearch && !hasValidation`; this field exposes both booleans
+ * regardless, so the future W009 rule does its own `hasResearch &&
+ * hasValidationArchitecture && !hasValidationMd` check against parsed data,
+ * not raw text).
+ *
+ * `scope` mirrors `phaseDirs.scope` (the caller-supplied enumeration): a
+ * per-directory read failure degrades that single entry's booleans to
+ * `false` and is silently skipped, mirroring `verify.cts`'s own
+ * `catch { intentionally empty }` around this exact read — this is a
+ * deliberate fail-open match to the pre-migration behavior, not a scope
+ * degradation, since the original never surfaced these failures either.
+ */
+function buildResearchValidationStatusField(
+  phasesDir: string,
+  phaseDirNames: string[],
+  enumerationScope: Scope,
+): {
+  value: { dir: string; hasValidationArchitecture: boolean; hasValidationMd: boolean }[];
+  scope: Scope;
+} {
+  const value = phaseDirNames.map((dir) => {
+    const fullPhaseDir = path.join(phasesDir, dir);
+    let files: string[];
+    try {
+      files = fs.readdirSync(fullPhaseDir);
+    } catch {
+      return { dir, hasValidationArchitecture: false, hasValidationMd: false };
+    }
+    const researchFile = files.find((f) => f.endsWith('-RESEARCH.md'));
+    const hasValidationMd = files.some((f) => f.endsWith('-VALIDATION.md'));
+    let hasValidationArchitecture = false;
+    if (researchFile) {
+      try {
+        const researchContent = fs.readFileSync(path.join(fullPhaseDir, researchFile), 'utf-8');
+        hasValidationArchitecture = researchContent.includes('## Validation Architecture');
+      } catch {
+        /* intentionally empty — mirrors verify.cts:1986-1988's own silent skip */
+      }
+    }
+    return { dir, hasValidationArchitecture, hasValidationMd };
+  });
+  return { value, scope: enumerationScope };
+}
+
+/**
+ * Resolve `milestoneArchiveStatus` — `archivedVersions` (versions with a
+ * `milestones/<ver>-ROADMAP.md` snapshot file present) and `documentedVersions`
+ * (`## <version>` headings already present in MILESTONES.md). Backs W018.
+ *
+ * Relocates `verify.cts:2301-2335` (W018)'s directory-scan glob
+ * (`^(v\d+\.\d+(?:\.\d+)?)-ROADMAP\.md$` against a flat, non-recursive
+ * `readdirSync` of `.planning/milestones/`) and its MILESTONES.md
+ * heading-membership check, generalized from "is THIS archived version's
+ * heading present" to "list every `## <version>` heading MILESTONES.md has."
+ *
+ * Confirmed NOT a fit for `listArchiveVersionDirs`
+ * (`phase-locator.cts:127`): that function scans `milestones/*-phases/`
+ * DIRECTORIES, a different target than this field's `milestones/*-ROADMAP.md`
+ * FILES — reusing it here would silently answer the wrong question.
+ *
+ * Root-scoped (`planningRoot(cwd)`), matching `verify.cts`'s own
+ * `rootBase`-based `milestonesPath`/`milestonesArchiveDir`.
+ */
+function buildMilestoneArchiveStatusField(
+  cwd: string,
+): { value: { archivedVersions: string[]; documentedVersions: string[] }; scope: Scope } {
+  const rootBase = planningRoot(cwd);
+  const milestonesArchiveDir = path.join(rootBase, 'milestones');
+  const milestonesPath = path.join(rootBase, 'MILESTONES.md');
+
+  let archivedVersions: string[] = [];
+  let scope: Scope = SCOPE.COMPLETE;
+  if (fs.existsSync(milestonesArchiveDir)) {
+    try {
+      const archiveFiles = fs.readdirSync(milestonesArchiveDir);
+      archivedVersions = archiveFiles
+        .map((f) => f.match(/^(v\d+\.\d+(?:\.\d+)?)-ROADMAP\.md$/))
+        .filter((m): m is RegExpMatchArray => m !== null)
+        .map((m) => m[1]);
+    } catch {
+      scope = SCOPE.UNREADABLE;
+    }
+  }
+
+  let documentedVersions: string[] = [];
+  if (fs.existsSync(milestonesPath)) {
+    try {
+      const registryContent = fs.readFileSync(milestonesPath, 'utf-8');
+      documentedVersions = [...registryContent.matchAll(/^##\s+(v\d+\.\d+(?:\.\d+)?)/gm)].map(
+        (m) => m[1],
+      );
+    } catch {
+      scope = worstScope(scope, SCOPE.UNREADABLE);
+    }
+  }
+
+  return { value: { archivedVersions, documentedVersions }, scope };
+}
+
+/**
+ * Resolve `planningRootFiles` — plain listing of file (not directory) names
+ * directly under `.planning/` root. Backs W019.
+ *
+ * Pairs with the existing exported `isCanonicalPlanningFile` predicate
+ * (`artifacts.cts:43`) — but per the design doc, that predicate is called by
+ * the future W019 RULE per filename, not by this builder; this field only
+ * needs to BE the raw filename list.
+ */
+function buildPlanningRootFilesField(cwd: string): { value: string[]; scope: Scope } {
+  try {
+    const entries = fs.readdirSync(planningRoot(cwd), { withFileTypes: true });
+    return { value: entries.filter((e) => e.isFile()).map((e) => e.name), scope: SCOPE.COMPLETE };
+  } catch {
+    return { value: [], scope: SCOPE.UNREADABLE };
+  }
+}
+
 /**
  * Build the full `.planning/` projection for `cwd`. Composes the six §7
  * owners named in the design doc's "Owners consumed" table, plus (Phase 11,
@@ -276,6 +621,7 @@ function buildPlanningSnapshot(cwd: string): PlanningSnapshot {
   const phaseDirs = listMilestonePhaseDirs(paths.phases, { cwd });
 
   const phasesValue = phaseDirs.value.map((dir) => buildPhaseSnapshot(paths.phases, dir));
+  const stateFields = buildStateFields(paths.state);
 
   return {
     milestone,
@@ -284,10 +630,18 @@ function buildPlanningSnapshot(cwd: string): PlanningSnapshot {
       value: phasesValue,
       scope: worstScope(phaseDirs.scope, ...phasesValue.map((p) => p.scope)),
     },
-    currentPhaseLabel: buildCurrentPhaseLabel(paths.state),
+    currentPhaseLabel: stateFields.currentPhaseLabel,
     config: buildConfigField(cwd),
     agentInstall: buildAgentInstallField(cwd),
     worktreeHealth: buildWorktreeHealthField(cwd),
+    projectSections: buildProjectSectionsField(cwd),
+    statePhaseTokens: stateFields.statePhaseTokens,
+    stateStatus: stateFields.stateStatus,
+    roadmapDeclaredPhases: buildRoadmapDeclaredPhasesField(paths.roadmap),
+    roadmapPhaseCheckboxes: buildRoadmapPhaseCheckboxesField(paths.roadmap),
+    researchValidationStatus: buildResearchValidationStatusField(paths.phases, phaseDirs.value, phaseDirs.scope),
+    milestoneArchiveStatus: buildMilestoneArchiveStatusField(cwd),
+    planningRootFiles: buildPlanningRootFilesField(cwd),
   };
 }
 
