@@ -41,11 +41,26 @@
  * (`src/planning-snapshot.cts`) instead: every directory actually present
  * under the active `phases/` root, unfiltered by roadmap declaration.
  * Archived-milestone directory names (`verify.cts:2050`,
- * `collectArchivedPhaseDirNames`) are still not part of `PlanningSnapshot`
- * and remain a disclosed fidelity reduction (a phase whose only directory
- * lives in a shipped-milestone archive can read as W006-missing; a shipped
- * archived dir is never scanned so it cannot spuriously read as
- * W007-orphaned either) — unchanged by this fix.
+ * `collectArchivedPhaseDirNames`) are still not exposed as directory NAMES
+ * on `PlanningSnapshot`, but the equivalent TOKEN set is: `checkW006` below
+ * additionally consults `snapshot.archivedPhaseTokens` (added for the
+ * W002/state-consistency group's #3652 fix, reused verbatim here — see that
+ * field's own doc comment) so a phase whose only directory lives in a
+ * milestone archive (shipped OR the current milestone's own archive layout)
+ * no longer reads as W006-missing (Bug 1, found post-migration: the archived
+ * fixtures under `tests/milestone-archive.test.cjs` and
+ * `tests/verify-health.test.cjs` regressed against the pre-migration
+ * `verify.cts` behavior). W007 still never scans archived dirs (its loop is
+ * `allPhaseDirNames.value`, the active `phases/` root only), so an archived
+ * dir still cannot spuriously read as W007-orphaned either — unchanged.
+ *
+ * Bug 2 (found alongside Bug 1): `dirsForPhase` below also runs a
+ * `phaseVariants()`-based fallback when `matchPhaseDirs` finds nothing — see
+ * its own doc comment. Pre-migration, `verify.cts:2071-2073`/`2092-2093` ran
+ * this as a SECOND, independent check the migrated matchPhaseDirs-only path
+ * had dropped, causing a false W006/W007 whenever ROADMAP and disk spelled
+ * the same phase with a different zero-padding (e.g. ROADMAP "01A" vs disk
+ * "1A-...").
  *
  * Not-started exclusion (verify.cts:2065/2075-2076,
  * `buildNotStartedPhaseVariants`, `src/validate.cts:160`): the design doc's
@@ -114,7 +129,34 @@ const { phaseVariants } = validateMod;
  * file-level comment.
  */
 function dirsForPhase(dirs: string[], phaseId: string): string[] {
-  return matchPhaseDirs(dirs, normalizePhaseName(phaseId)).matches;
+  const canonical = matchPhaseDirs(dirs, normalizePhaseName(phaseId)).matches;
+  if (canonical.length > 0) return canonical;
+
+  // Bug 2 (#3309 W006/W007 migration cluster, found while fixing the
+  // originally-reported archived-directory gap): `matchPhaseDirs`'s
+  // `phaseTokenMatches` compares `extractPhaseToken(dir)` (the directory's
+  // LITERAL, un-normalized digit run — e.g. "1A" for `1A-suffix-phase`)
+  // against `normalizePhaseName(phaseId)` (which PADS — "01A") case-
+  // insensitively, but never unifies a padding/letter-suffix mismatch
+  // BETWEEN the two sides: "1A" !== "01A" even though they name the same
+  // phase. Pre-migration, `verify.cts:2071-2073`/`2092-2093` ran a SECOND,
+  // independent check here — `[...phaseVariants(p)].some((v) =>
+  // diskPhases.has(v))` — that the migrated matchPhaseDirs-only path
+  // dropped. `phaseVariants` (`validate.cts:101`) is symmetric
+  // (padded<->unpadded, letter-suffix preserved both ways), so generating
+  // variants from `phaseId` and checking raw-disk-token membership is
+  // equivalent to intersecting `phaseVariants(phaseId)` with
+  // `phaseVariants(diskToken)` — variants always include their own input
+  // verbatim, so this fallback catches exactly the cases `matchPhaseDirs`
+  // alone misses without re-deriving a second matcher.
+  const variants = phaseVariants(phaseId);
+  return dirs.filter((d) => {
+    const token = extractPhaseToken(d).toUpperCase();
+    for (const variant of variants) {
+      if (token === variant.toUpperCase()) return true;
+    }
+    return false;
+  });
 }
 
 /**
@@ -145,6 +187,7 @@ function checkW006(snapshot: PlanningSnapshot): Diagnostic[] {
   if (snapshot.roadmapDeclaredPhases.scope !== SCOPE.COMPLETE) return [];
 
   const dirs = snapshot.allPhaseDirNames.value;
+  const archivedTokens = new Set(snapshot.archivedPhaseTokens.value);
   const checkboxes = snapshot.roadmapPhaseCheckboxes.value;
   const diagnostics: Diagnostic[] = [];
 
@@ -153,6 +196,17 @@ function checkW006(snapshot: PlanningSnapshot): Diagnostic[] {
     // convention; a sentinel heading shouldn't demand a directory.
     if (isSentinelPhaseId(phaseId)) continue;
     if (dirsForPhase(dirs, phaseId).length > 0) continue;
+    // Bug 1 (#3309 W006/W007 migration cluster): a phase whose ONLY
+    // directory lives under a milestone archive
+    // (`.planning/milestones/vX.Y-phases/<phase>/`, shipped OR the current
+    // milestone's own archive layout) must not read as "no directory on
+    // disk" — mirrors `verify.cts:2038`'s
+    // `forEachArchivedPhaseToken(planBase, (token) => diskPhases.add(token))`
+    // feeding the archived-phase token set into this exact existence check.
+    // `snapshot.archivedPhaseTokens` (`src/planning-snapshot.cts`) is the
+    // same token set, reused verbatim from the W002/state-consistency
+    // group's own fix for the analogous gap — not a re-derivation.
+    if ([...phaseVariants(phaseId)].some((v) => archivedTokens.has(v))) continue;
     if (isPhaseNotStarted(phaseId, checkboxes)) continue;
     diagnostics.push({
       code: 'W006',
