@@ -19,6 +19,7 @@
  * gsd-core/bin/lib/planning-snapshot.cjs (gitignored).
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
@@ -33,8 +34,8 @@ const { isPhaseComplete } = verificationMod;
 import scanPhasePlans = require('./plan-scan.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
-const { planningPaths } = planningWorkspace;
-import { platformReadSync } from './shell-command-projection.cjs';
+const { planningPaths, planningRoot } = planningWorkspace;
+import { platformReadSync, execGit } from './shell-command-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterMod = require('./frontmatter.cjs');
 const { extractFrontmatter, stripFrontmatter } = frontmatterMod;
@@ -46,6 +47,13 @@ const { UNUSABLE_REASON, warnUnusableInput } = unusableInputMod;
 import planningScopeMod = require('./planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 type Scope = planningScopeMod.Scope;
+import { resolveRuntime } from './runtime-slash.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- agent-install-check.cjs is an export= CommonJS module
+import agentInstallCheckMod = require('./agent-install-check.cjs');
+const { checkAgentsInstalled } = agentInstallCheckMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- worktree-safety.cjs is an export= CommonJS module
+import worktreeSafetyMod = require('./worktree-safety.cjs');
+const { inspectWorktreeHealth } = worktreeSafetyMod;
 
 // ─── worstScope — the one new piece of coordination logic ───────────────────
 
@@ -89,6 +97,16 @@ interface PlanningSnapshot {
   phaseDirs: ReturnType<typeof listMilestonePhaseDirs>;
   phases: { value: PhaseSnapshot[]; scope: Scope };
   currentPhaseLabel: { value: string | null; scope: Scope };
+  // ─── Phase 11 (#3309, ADR-3180 §8.2/§8.3/§8.5) additions ───────────────────
+  // Additive-only — see the design doc's "The subject-surface gap" section.
+  // `config` genuinely lives under `.planning/`; `agentInstall` and
+  // `worktreeHealth` do not (named as such so a future reader does not
+  // mistake them for §7 derivations) but are exposed here anyway so every
+  // rule's `check(snapshot)` signature stays the single object §8.1 rule 1
+  // names, "the snapshot".
+  config: { value: Record<string, unknown> | null; scope: Scope; exists: boolean };
+  agentInstall: { value: ReturnType<typeof checkAgentsInstalled>; scope: Scope };
+  worktreeHealth: { value: ReturnType<typeof inspectWorktreeHealth>['findings']; scope: Scope };
 }
 
 /**
@@ -153,9 +171,103 @@ function buildCurrentPhaseLabel(statePath: string): { value: string | null; scop
 }
 
 /**
- * Build the full `.planning/` projection for `cwd`. Composes exactly the six
- * §7 owners named in the design doc's "Owners consumed" table — no
- * re-derivation, no new semantic answer. See the design doc for the
+ * Resolve `config` — the parsed `.planning/config.json`, preserving the same
+ * three-way distinction `cmdValidateHealth` (`src/verify.cts` W003/E005)
+ * already makes without going through `loadConfig` (which collapses that
+ * distinction): absent is a real non-answer — `{value: null, scope:
+ * UNREADABLE, exists: false}`, no `warnUnusableInput` call, mirrors
+ * `buildCurrentPhaseLabel`'s treatment of an absent STATE.md; present but
+ * unparseable JSON IS corruption — `{value: null, scope: UNREADABLE, exists:
+ * true}`, `warnUnusableInput(CONFIG_UNREADABLE)` fires exactly once, so a
+ * later health-diagnostic rule can tell "config.json not found" (W003,
+ * repairable via `createConfig`) apart from "config.json: JSON parse error"
+ * (E005, repairable via `resetConfig`) — the `exists` flag is exactly that
+ * discriminator. `config.json` is root-scoped (`planningRoot`), NOT
+ * workstream-scoped (`planningPaths(cwd).config` would resolve under
+ * `.planning/workstreams/<ws>/` instead) — see verify.cts's own
+ * rootBase-vs-wsBase split at cmdValidateHealth's top.
+ */
+function buildConfigField(cwd: string): { value: Record<string, unknown> | null; scope: Scope; exists: boolean } {
+  const configPath = path.join(planningRoot(cwd), 'config.json');
+  if (!fs.existsSync(configPath)) {
+    return { value: null, scope: SCOPE.UNREADABLE, exists: false };
+  }
+  try {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    return { value: parsed, scope: SCOPE.COMPLETE, exists: true };
+  } catch {
+    warnUnusableInput({ reason: UNUSABLE_REASON.CONFIG_UNREADABLE, source: configPath });
+    return { value: null, scope: SCOPE.UNREADABLE, exists: true };
+  }
+}
+
+/**
+ * Resolve `agentInstall` — wraps `checkAgentsInstalled(runtime, cwd)` with
+ * the same `runtime` `cmdValidateHealth` resolves (`resolveRuntime(cwd)`,
+ * its `_slashRuntime`). Not `.planning/`-sourced (see design doc). `scope`
+ * is `COMPLETE` whenever the scan itself ran, even when it reports missing
+ * or incomplete agents — that is a real answer, not a non-answer.
+ * `UNREADABLE` only if the scan itself throws, mirroring cmdValidateHealth's
+ * own try/catch around this same call (there, the exception is swallowed as
+ * "non-blocking"; here it is surfaced via `scope` instead of silently
+ * dropped, since a snapshot field has nowhere else to carry that fact).
+ */
+function buildAgentInstallField(cwd: string): { value: ReturnType<typeof checkAgentsInstalled>; scope: Scope } {
+  const runtime = resolveRuntime(cwd);
+  try {
+    return { value: checkAgentsInstalled(runtime, cwd), scope: SCOPE.COMPLETE };
+  } catch {
+    return {
+      value: {
+        agents_installed: false,
+        missing_agents: [],
+        installed_agents: [],
+        incomplete_agents: [],
+        agents_dir: '',
+        agent_runtime: runtime,
+      },
+      scope: SCOPE.UNREADABLE,
+    };
+  }
+}
+
+/**
+ * Resolve `worktreeHealth` — wraps `inspectWorktreeHealth(cwd, { staleAfterMs
+ * }, deps)` with the exact same arguments `cmdValidateHealth` passes
+ * (`src/verify.cts` W017/W020/W027 call sites): a 1-hour staleness window,
+ * and the raw `execGit`/`fs.existsSync`/`fs.statSync` seam (not
+ * `worktree-safety.cts`'s own `execGitDefault` wrapper). Not
+ * `.planning/`-sourced (see design doc). `scope` is `COMPLETE` only when the
+ * underlying `git worktree list` scan itself succeeded (`ok: true`) — a
+ * timed-out or failed scan (`ok: false`, mirroring W020's degraded-check
+ * report) or a thrown exception (mirrors cmdValidateHealth's own
+ * "git worktree not available or not a git repo — skip silently" catch)
+ * both degrade to `UNREADABLE` with an empty findings array, since neither
+ * case has real per-worktree data to report.
+ */
+function buildWorktreeHealthField(cwd: string): { value: ReturnType<typeof inspectWorktreeHealth>['findings']; scope: Scope } {
+  try {
+    const result = inspectWorktreeHealth(
+      cwd,
+      { staleAfterMs: 60 * 60 * 1000 },
+      { execGit, existsSync: fs.existsSync, statSync: fs.statSync },
+    );
+    if (!result.ok) {
+      return { value: [], scope: SCOPE.UNREADABLE };
+    }
+    return { value: result.findings, scope: SCOPE.COMPLETE };
+  } catch {
+    return { value: [], scope: SCOPE.UNREADABLE };
+  }
+}
+
+/**
+ * Build the full `.planning/` projection for `cwd`. Composes the six §7
+ * owners named in the design doc's "Owners consumed" table, plus (Phase 11,
+ * #3309) the three additive subject-surface fields `config`/`agentInstall`/
+ * `worktreeHealth` — no re-derivation, no new semantic answer beyond what
+ * their respective owners already compute. See the design doc for the
  * behavior table and rejected alternatives.
  */
 function buildPlanningSnapshot(cwd: string): PlanningSnapshot {
@@ -173,6 +285,9 @@ function buildPlanningSnapshot(cwd: string): PlanningSnapshot {
       scope: worstScope(phaseDirs.scope, ...phasesValue.map((p) => p.scope)),
     },
     currentPhaseLabel: buildCurrentPhaseLabel(paths.state),
+    config: buildConfigField(cwd),
+    agentInstall: buildAgentInstallField(cwd),
+    worktreeHealth: buildWorktreeHealthField(cwd),
   };
 }
 

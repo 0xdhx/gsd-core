@@ -26,6 +26,7 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const childProcess = require('node:child_process');
 const fc = require('fast-check');
 
 const { createTempDir, cleanup } = require('./helpers.cjs');
@@ -42,6 +43,12 @@ const { worstScope } = planningSnapshotLib;
 
 const { SCOPE } = require('../gsd-core/bin/lib/planning-scope.cjs');
 const { _unusableInputEmissionCountForTests } = require('../gsd-core/bin/lib/unusable-input.cjs');
+
+// Phase 11 (#3309) additions — agent-install fixture helper mirrors
+// tests/agent-install-check.test.cjs's own EXPECTED_AGENTS/createCompleteAgents
+// (design doc's "subject-surface gap" §, reused per its provenance rule).
+const { MODEL_PROFILES } = require('../gsd-core/bin/lib/model-profiles.cjs');
+const EXPECTED_AGENTS = Object.keys(MODEL_PROFILES);
 
 // ─── Fixture helpers (mirrors tests/completion-ratio-scope-withholding.test.cjs) ─
 
@@ -493,5 +500,191 @@ describe('worstScope — pure unit coverage', () => {
       }),
       { seed: 20261012 },
     );
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// Phase 11 (#3309) additions — config / agentInstall / worktreeHealth
+//
+// Design:      .gsd/phase/refactor-3309-health-diagnostic-rule-table/40-design.md
+//              ("The subject-surface gap: config.json, agent-install, git-worktree-list")
+// Test matrix: .gsd/phase/refactor-3309-health-diagnostic-rule-table/50-test-matrix.md
+//              section 1, rows 1-8
+//
+// These three new fields wrap the SAME owner calls `cmdValidateHealth`
+// (src/verify.cts) already makes (`checkAgentsInstalled`, `inspectWorktreeHealth`,
+// a raw config.json read), so a later phase step can migrate the caller onto
+// this snapshot without a shape mismatch.
+// ═════════════════════════════════════════════════════════════════════════
+
+function writeConfig(cwd, obj) {
+  fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+  fs.writeFileSync(path.join(planningDirOf(cwd), 'config.json'), JSON.stringify(obj));
+}
+
+function writeRawConfig(cwd, rawText) {
+  fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+  fs.writeFileSync(path.join(planningDirOf(cwd), 'config.json'), rawText);
+}
+
+// Env isolation for GSD_AGENTS_DIR — mirrors tests/agent-install-check.test.cjs's
+// beforeEach/afterEach save-restore idiom, inlined per-test via t.after since this
+// describe block does not otherwise need beforeEach/afterEach hooks.
+function withAgentsDirOverride(t, agentsDir) {
+  const saved = process.env['GSD_AGENTS_DIR'];
+  process.env['GSD_AGENTS_DIR'] = agentsDir;
+  t.after(() => {
+    if (saved === undefined) delete process.env['GSD_AGENTS_DIR'];
+    else process.env['GSD_AGENTS_DIR'] = saved;
+  });
+}
+
+function createCompleteAgentsDir(agentsDir) {
+  fs.mkdirSync(agentsDir, { recursive: true });
+  for (const agent of EXPECTED_AGENTS) {
+    fs.writeFileSync(path.join(agentsDir, `${agent}.toml`), `name = "${agent}"\n`);
+  }
+}
+
+// Simulates a successful `git worktree list --porcelain` at the spawnSync seam —
+// mirrors tests/worktree-safety.test.cjs's "execGitDefault (real spawn seam)"
+// section, the repo's convention for driving the real execGit rather than a
+// hand-set deps.execGit stub (this module accepts no deps parameter to inject).
+function mockGitWorktreeListOk(t, porcelain) {
+  t.mock.method(childProcess, 'spawnSync', () => ({
+    status: 0,
+    stdout: porcelain,
+    stderr: '',
+    signal: null,
+    error: null,
+  }));
+}
+
+// Simulates a timed-out `git worktree list --porcelain` (ETIMEDOUT), the same
+// shape shell-command-projection.cjs's execGit / isSpawnTimeout recognize.
+function mockGitWorktreeListTimeout(t) {
+  t.mock.method(childProcess, 'spawnSync', () => ({
+    status: null,
+    stdout: '',
+    stderr: '',
+    signal: null,
+    error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+  }));
+}
+
+describe('config field (Phase 11, #3309, matrix rows 1-3)', () => {
+  test('row 1: well-formed config.json parses to {value, scope: COMPLETE}', (t) => {
+    const cwd = createTempDir('gsd-3309-cfg1-');
+    t.after(() => cleanup(cwd));
+    writeConfig(cwd, { model_profile: 'balanced' });
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.config, { value: { model_profile: 'balanced' }, scope: SCOPE.COMPLETE, exists: true });
+  });
+
+  test('row 2: absent config.json is a real non-answer — {value: null, scope: UNREADABLE, exists: false}', (t) => {
+    const cwd = createTempDir('gsd-3309-cfg2-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+    // No config.json written at all.
+
+    const [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    assert.deepStrictEqual(snap.config, { value: null, scope: SCOPE.UNREADABLE, exists: false });
+    assert.strictEqual(emitted, 0, 'absence is not corruption — no diagnostic');
+  });
+
+  test('row 3: present-but-unparseable config.json degrades without throwing — {value: null, scope: UNREADABLE, exists: true}, emits CONFIG_UNREADABLE exactly once', (t) => {
+    const cwd = createTempDir('gsd-3309-cfg3-');
+    t.after(() => cleanup(cwd));
+    writeRawConfig(cwd, '{ not valid json');
+
+    let snap;
+    let emitted;
+    assert.doesNotThrow(() => {
+      [snap, emitted] = emissionsDuring(() => buildPlanningSnapshot(cwd));
+    });
+    assert.deepStrictEqual(snap.config, { value: null, scope: SCOPE.UNREADABLE, exists: true });
+    assert.strictEqual(emitted, 1, 'present-but-unparseable config.json is corruption — exactly one CONFIG_UNREADABLE diagnostic');
+  });
+});
+
+describe('agentInstall field (Phase 11, #3309, matrix rows 4-5)', () => {
+  test('row 4: all agents present reports zero missing/incomplete, scope COMPLETE', (t) => {
+    const cwd = createTempDir('gsd-3309-agt4-');
+    t.after(() => cleanup(cwd));
+    const agentsDir = path.join(cwd, 'agents-complete');
+    createCompleteAgentsDir(agentsDir);
+    withAgentsDirOverride(t, agentsDir);
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.strictEqual(snap.agentInstall.scope, SCOPE.COMPLETE);
+    assert.strictEqual(snap.agentInstall.value.agents_installed, true);
+    assert.deepStrictEqual(snap.agentInstall.value.missing_agents, []);
+    assert.deepStrictEqual(snap.agentInstall.value.incomplete_agents, []);
+  });
+
+  test('row 5: missing agents dir reports the full missing set, scope COMPLETE (the scan itself succeeded)', (t) => {
+    const cwd = createTempDir('gsd-3309-agt5-');
+    t.after(() => cleanup(cwd));
+    const agentsDir = path.join(cwd, 'agents-absent');
+    withAgentsDirOverride(t, agentsDir);
+    // agentsDir deliberately never created.
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.strictEqual(snap.agentInstall.scope, SCOPE.COMPLETE);
+    assert.strictEqual(snap.agentInstall.value.agents_installed, false);
+    assert.deepStrictEqual(snap.agentInstall.value.missing_agents.slice().sort(), EXPECTED_AGENTS.slice().sort());
+  });
+});
+
+describe('worktreeHealth field (Phase 11, #3309, matrix rows 6-7)', () => {
+  test('row 6: git worktree list succeeds — value is the parsed findings array, scope COMPLETE', (t) => {
+    const cwd = createTempDir('gsd-3309-wt6-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+    mockGitWorktreeListOk(t, 'worktree /repo\nHEAD 0000000000000000000000000000000000000000\nbranch refs/heads/main\n\n');
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.strictEqual(snap.worktreeHealth.scope, SCOPE.COMPLETE);
+    assert.ok(Array.isArray(snap.worktreeHealth.value));
+  });
+
+  test('row 7: git worktree list times out — scope reflects degradation (mirrors W020)', (t) => {
+    const cwd = createTempDir('gsd-3309-wt7-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+    mockGitWorktreeListTimeout(t);
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.notStrictEqual(snap.worktreeHealth.scope, SCOPE.COMPLETE);
+    assert.strictEqual(snap.worktreeHealth.scope, SCOPE.UNREADABLE);
+    assert.deepStrictEqual(snap.worktreeHealth.value, []);
+  });
+});
+
+describe('Phase-10 fields unchanged by the Phase-11 extension (matrix row 8)', () => {
+  test('the four original fields keep their exact pre-extension values on the same fixture', (t) => {
+    const cwd = createTempDir('gsd-3309-reg8-');
+    t.after(() => cleanup(cwd));
+    buildHealthyTwoPhaseFixture(cwd);
+
+    const snap = buildPlanningSnapshot(cwd);
+
+    assert.strictEqual(snap.milestone.scope, SCOPE.COMPLETE);
+    assert.strictEqual(snap.phaseDirs.scope, SCOPE.COMPLETE);
+    assert.strictEqual(snap.phases.scope, SCOPE.COMPLETE);
+    assert.strictEqual(snap.phases.value.length, 2);
+    for (const p of snap.phases.value) {
+      assert.strictEqual(p.complete, true);
+      assert.strictEqual(p.scope, SCOPE.COMPLETE);
+      assert.strictEqual(p.verificationStatus, 'passed');
+      assert.strictEqual(p.planCount, 1);
+      assert.strictEqual(p.summaryCount, 1);
+    }
+    // The extension is additive — the new fields must be present alongside
+    // the untouched originals, not in place of them.
+    assert.ok('config' in snap);
+    assert.ok('agentInstall' in snap);
+    assert.ok('worktreeHealth' in snap);
   });
 });
