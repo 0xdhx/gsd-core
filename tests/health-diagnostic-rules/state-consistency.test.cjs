@@ -208,12 +208,11 @@ describe('W002 — STATE.md references a phase not declared on disk or ROADMAP',
     assert.deepEqual(ruleFor('W002').check(snapshot), []);
   });
 
-  // KNOWN GAP (implementer report): archived-phase-token coverage
-  // (`forEachArchivedPhaseToken`) is not in any PlanningSnapshot field, so a
-  // STATE.md reference to a phase that lives only in a milestone archive is
-  // reported as undeclared here, unlike the original `verify.cts` check.
-  // Documents the gap rather than silently absorbing it.
-  test('KNOWN GAP: fires on a phase reference whose only home is an archived milestone (not modeled by any snapshot field)', (t) => {
+  // `snapshot.archivedPhaseTokens` (#3652) now covers archived-milestone
+  // phase-dir tokens, so `buildValidPhaseSet` includes them — a STATE.md
+  // reference to a phase whose only home is an archived milestone is
+  // correctly treated as declared and does NOT fire.
+  test('does not fire on a phase reference whose only home is an archived milestone', (t) => {
     const cwd = createTempDir('gsd-3309-w002-4-');
     t.after(() => cleanup(cwd));
     writeRoadmap(cwd, '## v2.0 Current 🚧\n\n### Phase 3: Baz\n');
@@ -232,15 +231,14 @@ describe('W002 — STATE.md references a phase not declared on disk or ROADMAP',
         '',
         '### Decisions',
         '',
-        '- Phase 1: this phase is archived, not currently exposed by any snapshot field',
+        '- Phase 1: this phase is archived, covered by snapshot.archivedPhaseTokens',
         '',
       ].join('\n'),
     );
 
     const snapshot = buildPlanningSnapshot(cwd);
     const diagnostics = ruleFor('W002').check(snapshot);
-    assert.equal(diagnostics.length, 1);
-    assert.match(diagnostics[0].message, /STATE\.md references phase 1,/);
+    assert.deepEqual(diagnostics, []);
   });
 });
 

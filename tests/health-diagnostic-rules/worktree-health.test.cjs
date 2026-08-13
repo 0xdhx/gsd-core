@@ -122,7 +122,7 @@ describe('RULES (worktree-health group)', () => {
 // ─── W020 — worktree health scan itself is degraded ────────────────────────
 
 describe('W020 — worktree health scan degraded', () => {
-  test('fires the combined scan-degraded message when git worktree list times out', (t) => {
+  test('fires the git_timed_out-specific scan-degraded message when git worktree list times out', (t) => {
     const cwd = createTempDir('gsd-3309-w020-timeout-');
     t.after(() => cleanup(cwd));
     fs.mkdirSync(planningDirOf(cwd), { recursive: true });
@@ -136,25 +136,25 @@ describe('W020 — worktree health scan degraded', () => {
       code: 'W020',
       severity: SEVERITY.WARNING,
       message:
-        'Worktree health check degraded: git worktree list timed out or failed — orphan/stale worktrees could not be inspected',
+        'Worktree health check degraded: git worktree list timed out after 10s — orphan/stale worktrees could not be inspected',
       remedy: {
         action: REMEDY_ACTION.ADVISE,
         risk: REMEDY_RISK.NONE,
         args: {
           command:
-            'Run: git worktree list --porcelain to diagnose; check for .git/index.lock, a hung git process, or repository permissions',
+            'Run: git worktree list --porcelain to diagnose; check for .git/index.lock or a hung git process',
         },
       },
     });
   });
 
-  // GAP (documented in the rule module's own header comment, gap 1):
-  // `buildWorktreeHealthField` discards `inspectWorktreeHealth`'s `reason`
-  // field ('git_timed_out' vs 'git_list_failed'), so the snapshot alone
-  // cannot distinguish a timeout from an outright failure. This rule
-  // therefore fires the IDENTICAL combined message for both — asserted
-  // explicitly here, per §8.5 fixture-proof, rather than left undocumented.
-  test('GAP: fires the SAME combined message when git worktree list fails outright (not a timeout) — scope alone cannot distinguish', (t) => {
+  // `inspectWorktreeHealth`'s `reason` field ('git_timed_out' vs
+  // 'git_list_failed') is carried straight through on
+  // `PlanningSnapshot.worktreeHealth` (`planning-snapshot.cts`'s
+  // `buildWorktreeHealthField`), so `checkW020` distinguishes the two scan
+  // failures with distinct messages/remedies (verify.cts:2204-2219) — this
+  // asserts the git_list_failed-specific one.
+  test('fires the git_list_failed-specific message when git worktree list fails outright (not a timeout)', (t) => {
     const cwd = createTempDir('gsd-3309-w020-failed-');
     t.after(() => cleanup(cwd));
     fs.mkdirSync(planningDirOf(cwd), { recursive: true });
@@ -164,10 +164,20 @@ describe('W020 — worktree health scan degraded', () => {
     const diagnostics = ruleFor('W020').check(snapshot);
 
     assert.equal(diagnostics.length, 1);
-    assert.equal(
-      diagnostics[0].message,
-      'Worktree health check degraded: git worktree list timed out or failed — orphan/stale worktrees could not be inspected',
-    );
+    assert.deepEqual(diagnostics[0], {
+      code: 'W020',
+      severity: SEVERITY.WARNING,
+      message:
+        'Worktree health check degraded: git worktree list failed — orphan/stale worktrees could not be inspected',
+      remedy: {
+        action: REMEDY_ACTION.ADVISE,
+        risk: REMEDY_RISK.NONE,
+        args: {
+          command:
+            'Run: git worktree list --porcelain to diagnose; check git repository state and permissions',
+        },
+      },
+    });
   });
 
   test('fires once per unverified finding — exact port of verify.cts:2256-2263', (t) => {
