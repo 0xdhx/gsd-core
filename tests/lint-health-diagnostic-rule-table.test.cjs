@@ -21,6 +21,7 @@ const {
   checkOneToOneInvariant,
   checkFixtureProofInvariant,
   findHealthDiagnosticTestFiles,
+  PERMANENTLY_INERT_CODES,
 } = guard;
 
 const FAKE_SEVERITY = Object.freeze({ ERROR: 'error', WARNING: 'warning', INFO: 'info' });
@@ -148,6 +149,75 @@ describe('checkFixtureProofInvariant (§8.5)', () => {
     const { uncovered } = checkFixtureProofInvariant([{ code: 'W001' }], testFiles);
 
     assert.deepEqual(uncovered, []);
+  });
+});
+
+// ─── Check 2b — §8.5 EXCEPTION: PERMANENTLY_INERT_CODES ────────────────────
+//
+// A code whose `check` is a documented permanent no-op (W024 — see
+// `scripts/lint-health-diagnostic-rule-table.cjs`'s own `PERMANENTLY_INERT_CODES`
+// comment) can never satisfy a real fixture-proof. It must be reported as
+// `exempted`, separately from genuinely-covered codes, and must NEVER land in
+// `uncovered` — regardless of whether any test file happens to mention it.
+
+describe('checkFixtureProofInvariant — PERMANENTLY_INERT_CODES exemption (§8.5 exception)', () => {
+  test('an exempted code with ZERO test coverage anywhere still passes (not uncovered), and is reported as exempted', (t) => {
+    const dir = createTempDir('gsd-lint-hd-rt-exempt-nomention-');
+    t.after(() => cleanup(dir));
+    const file = writeTempTestFile(dir, 'fake.test.cjs', "describe('unrelated', () => {});\n");
+
+    const rules = [{ code: 'W024' }];
+    const inertCodes = new Map([['W024', 'permanent no-op, real check lives outside the rule table']]);
+    const { uncovered, exempted } = checkFixtureProofInvariant(rules, [file], inertCodes);
+
+    assert.deepEqual(uncovered, [], 'an exempted code must never be reported as uncovered');
+    assert.deepEqual(exempted, ['W024']);
+  });
+
+  test('a code NOT in the exemption map, with zero test coverage, still fails as uncovered', (t) => {
+    const dir = createTempDir('gsd-lint-hd-rt-not-exempt-');
+    t.after(() => cleanup(dir));
+    const file = writeTempTestFile(dir, 'fake.test.cjs', "describe('unrelated', () => {});\n");
+
+    const rules = [{ code: 'W998' }];
+    const inertCodes = new Map([['W024', 'permanent no-op']]); // W998 is NOT in this map
+    const { uncovered, exempted } = checkFixtureProofInvariant(rules, [file], inertCodes);
+
+    assert.deepEqual(uncovered, ['W998'], 'a non-exempted, uncovered code must still fail the guard');
+    assert.deepEqual(exempted, []);
+  });
+
+  test('an exempted code is reported as exempted even when a test file DOES happen to mention it in a titled block', (t) => {
+    const dir = createTempDir('gsd-lint-hd-rt-exempt-mentioned-');
+    t.after(() => cleanup(dir));
+    const file = writeTempTestFile(
+      dir,
+      'fake.test.cjs',
+      "test('exports exactly 1 rule: W024', () => {});\n",
+    );
+
+    const rules = [{ code: 'W024' }];
+    const inertCodes = new Map([['W024', 'permanent no-op']]);
+    const { uncovered, exempted } = checkFixtureProofInvariant(rules, [file], inertCodes);
+
+    assert.deepEqual(uncovered, []);
+    assert.deepEqual(exempted, ['W024'], 'must be classified as exempted, not folded into ordinary coverage');
+  });
+
+  test('W024 is exempted (not uncovered, not silently "covered") against the real tests/ tree and the real PERMANENTLY_INERT_CODES map', () => {
+    const testFiles = findHealthDiagnosticTestFiles();
+    const { uncovered, exempted } = checkFixtureProofInvariant([{ code: 'W024' }], testFiles);
+
+    assert.deepEqual(uncovered, []);
+    assert.deepEqual(exempted, ['W024']);
+  });
+
+  test('PERMANENTLY_INERT_CODES locks exactly W024 with a non-empty, auditable reason', () => {
+    assert.deepEqual([...PERMANENTLY_INERT_CODES.keys()], ['W024']);
+    const reason = PERMANENTLY_INERT_CODES.get('W024');
+    assert.equal(typeof reason, 'string');
+    assert.ok(reason.length > 0);
+    assert.ok(/ambient I\/O|§8\.1/i.test(reason), 'reason should explain the §8.1 rule 1 constraint');
   });
 });
 

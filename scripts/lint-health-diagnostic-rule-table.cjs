@@ -23,6 +23,19 @@
  *    `tests/health-diagnostic.test.cjs`). A mere comment/string mention
  *    outside a titled block does not count as coverage.
  *
+ *    EXCEPTION — `PERMANENTLY_INERT_CODES` (below): a rule whose `check`
+ *    always returns `[]` BY DESIGN (the real check lives outside the rule
+ *    table entirely, because it needs ambient I/O `Rule.check` cannot
+ *    perform — §8.1 rule 1) can never satisfy a real fixture-proof, no
+ *    matter how many tests reference its code. Before this exception
+ *    existed, W024 "passed" this guard only because an unrelated test title
+ *    (the RULES-array shape assertion, "exports exactly 5 rules: W024, ...")
+ *    happened to contain the string "W024" — accidental coverage, not proof
+ *    the rule can fire. `PERMANENTLY_INERT_CODES` makes that exemption
+ *    explicit and auditable instead of relying on a coincidental title
+ *    match, and the PASS output now reports exempted codes SEPARATELY from
+ *    genuinely fixture-covered ones rather than folding them together.
+ *
  * Design: .gsd/phase/refactor-3309-health-diagnostic-rule-table/40-design.md
  * ("The lint guard (§8.2 1:1 invariant + §8.5 fixture proof)").
  *
@@ -56,6 +69,22 @@ const SKELETON_TEST_FILE = path.join(REPO_ROOT, 'tests', 'health-diagnostic.test
 // (not full AST) per this repo's existing lint-guard house style
 // (scripts/lint-planning-snapshot-bypass-drift.cjs's scanCode precedent).
 const TITLED_BLOCK_RE = /\b(describe|test|it)\(\s*(['"`])((?:\\.|(?!\2)[^\\])*)\2/g;
+
+// Rule codes whose `check` is a documented PERMANENT no-op (always returns
+// `[]`) because the real check requires ambient I/O forbidden inside a
+// `Rule.check(snapshot)` (§8.1 rule 1) — the real check runs elsewhere,
+// outside the rule table. These can never be proven via a real
+// diagnostic-firing fixture, so they are exempted from the §8.5 fixture-proof
+// invariant explicitly here rather than via an accidental test-title match.
+// Adding an entry is a deliberate, reviewed decision — see each reason.
+const PERMANENTLY_INERT_CODES = new Map([
+  [
+    'W024',
+    'readStateHeadFreshness requires a git-log shell-out, forbidden ambient I/O for Rule.check ' +
+      '(§8.1 rule 1) — the real check runs in cmdValidateHealth itself, outside the rule table ' +
+      '(src/verify.cts). This rule-table entry is a permanent no-op by design, not a fixture gap.',
+  ],
+]);
 
 /**
  * Load the compiled health-diagnostic module. Throws a clear ExitError
@@ -155,13 +184,17 @@ function findHealthDiagnosticTestFiles(repoRoot = REPO_ROOT) {
 /**
  * §8.5 — fixture-proof invariant: for every code in `rules`, confirm at
  * least one test file in `testFiles` has a `describe(`/`test(`/`it(` block
- * whose title names that exact code.
+ * whose title names that exact code — UNLESS the code is listed in
+ * `PERMANENTLY_INERT_CODES`, in which case it is reported separately as
+ * `exempted` (visibly, not folded into "covered") and never fails the guard
+ * regardless of test coverage.
  *
  * @param {Array<{code: string}>} rules
  * @param {string[]} testFiles  absolute paths to *.test.cjs files to scan
- * @returns {{uncovered: string[], testFilesScanned: string[]}}
+ * @param {Map<string, string>} inertCodes  PERMANENTLY_INERT_CODES (injectable for tests)
+ * @returns {{uncovered: string[], exempted: string[], testFilesScanned: string[]}}
  */
-function checkFixtureProofInvariant(rules, testFiles) {
+function checkFixtureProofInvariant(rules, testFiles, inertCodes = PERMANENTLY_INERT_CODES) {
   const allTitles = [];
   for (const file of testFiles) {
     const text = fs.readFileSync(file, 'utf8');
@@ -169,13 +202,18 @@ function checkFixtureProofInvariant(rules, testFiles) {
   }
 
   const uncovered = [];
+  const exempted = [];
   for (const rule of rules) {
+    if (inertCodes.has(rule.code)) {
+      exempted.push(rule.code);
+      continue;
+    }
     if (!codeAppearsInTitle(rule.code, allTitles)) {
       uncovered.push(rule.code);
     }
   }
 
-  return { uncovered, testFilesScanned: testFiles };
+  return { uncovered, exempted, testFilesScanned: testFiles };
 }
 
 function formatRepoRelative(absPath) {
@@ -188,7 +226,7 @@ function main() {
   const { duplicates, badSeverities } = checkOneToOneInvariant(RULES, SEVERITY);
 
   const testFiles = findHealthDiagnosticTestFiles(REPO_ROOT);
-  const { uncovered } = checkFixtureProofInvariant(RULES, testFiles);
+  const { uncovered, exempted } = checkFixtureProofInvariant(RULES, testFiles);
 
   const problems = [];
 
@@ -229,9 +267,15 @@ function main() {
     throw new ExitError(1, `${problems.join('\n\n')}\n`);
   }
 
+  const coveredCount = RULES.length - exempted.length;
+  const exemptedDetail = exempted
+    .map((code) => `${code} (${PERMANENTLY_INERT_CODES.get(code)})`)
+    .join('; ');
+
   console.log(
-    `lint-health-diagnostic-rule-table: PASS — ${RULES.length} rule code(s), all unique, ` +
-      `all severities valid, all covered by a titled test block across ${testFiles.length} test file(s).`,
+    `lint-health-diagnostic-rule-table: PASS — ${RULES.length} rule code(s): ${coveredCount} covered by a ` +
+      `real fixture, ${exempted.length} exempted across ${testFiles.length} test file(s).` +
+      (exempted.length > 0 ? `\n  Exempted: ${exemptedDetail}` : ''),
   );
 }
 
@@ -244,6 +288,7 @@ module.exports = {
   codeAppearsInTitle,
   findHealthDiagnosticTestFiles,
   checkFixtureProofInvariant,
+  PERMANENTLY_INERT_CODES,
   COMPILED_MODULE_PATH,
   TEST_GROUP_DIR,
   SKELETON_TEST_FILE,
