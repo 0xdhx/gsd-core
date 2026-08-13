@@ -306,17 +306,13 @@ describe('W027 — stale git worktree', () => {
     assert.deepEqual(ruleFor('W027').check(snapshot), []);
   });
 
-  // GAP (documented in the rule module's own header comment, gap 2): the
-  // pre-migration `process.cwd()` exclusion of the ACTIVE session's own
-  // worktree cannot be reproduced here — `Rule.check(snapshot)` has no
-  // ambient cwd access, and `PlanningSnapshot` carries no "which entry is
-  // the active worktree" field. This test recreates the real-world shape the
-  // module doc calls out: the active session's cwd is a LINKED (non-first)
-  // `git worktree list` entry, not the main repo root — `buildPlanningSnapshot(cwd)`
-  // is called with `cwd` itself listed as entry index 1 (not the dropped
-  // index-0 "main" entry) and made stale. W027 fires for it anyway,
-  // demonstrating the gap rather than silently passing.
-  test('GAP: fires for the active session\'s own (stale) worktree — no cwd-based exclusion is possible from snapshot alone', (t) => {
+  // Regression proof (restores `verify.cts:2233-2242`'s pre-migration
+  // behavior via `PlanningSnapshot.cwd`, see the rule module's own header
+  // comment): the active session's cwd is a LINKED (non-first) `git worktree
+  // list` entry, not the main repo root — `buildPlanningSnapshot(cwd)` is
+  // called with `cwd` itself listed as entry index 1 (not the dropped
+  // index-0 "main" entry) and made stale. W027 must NOT fire for it.
+  test('excludes the active session\'s own (stale) worktree — matches snapshot.cwd exactly', (t) => {
     const cwd = createTempDir('gsd-3309-w027-3-');
     t.after(() => cleanup(cwd));
     fs.mkdirSync(planningDirOf(cwd), { recursive: true });
@@ -327,10 +323,52 @@ describe('W027 — stale git worktree', () => {
     mockGitWorktreeListOk(t, buildPorcelain(['/fake/main-repo', cwd]));
 
     const snapshot = buildPlanningSnapshot(cwd);
+    assert.equal(snapshot.cwd, path.resolve(cwd), 'snapshot.cwd must be the resolved active cwd');
+
+    const diagnostics = ruleFor('W027').check(snapshot);
+    assert.deepEqual(
+      diagnostics,
+      [],
+      'the active worktree must be excluded from stale-worktree diagnostics, matching pre-migration behavior',
+    );
+  });
+
+  test('excludes the active session\'s own (stale) worktree when cwd is NESTED under the worktree path — mirrors verify.cts:2239-2241\'s startsWith check', (t) => {
+    const cwd = createTempDir('gsd-3309-w027-4-');
+    t.after(() => cleanup(cwd));
+    const worktreePath = path.join(cwd, 'wt-active');
+    const nestedCwd = path.join(worktreePath, 'sub', 'dir');
+    fs.mkdirSync(nestedCwd, { recursive: true });
+    fs.mkdirSync(planningDirOf(nestedCwd), { recursive: true });
+    fs.utimesSync(worktreePath, new Date(), new Date(Date.now() - 2 * 60 * 60 * 1000));
+
+    mockGitWorktreeListOk(t, buildPorcelain(['/fake/main-repo', worktreePath]));
+
+    const snapshot = buildPlanningSnapshot(nestedCwd);
     const diagnostics = ruleFor('W027').check(snapshot);
 
-    assert.equal(diagnostics.length, 1, 'the active worktree is NOT excluded — this is the documented gap');
+    assert.deepEqual(
+      diagnostics,
+      [],
+      'a worktree that is an ancestor of the active cwd must also be excluded',
+    );
+  });
+
+  test('a DIFFERENT stale worktree (not the active cwd, not an ancestor of it) still fires', (t) => {
+    const cwd = createTempDir('gsd-3309-w027-5-');
+    t.after(() => cleanup(cwd));
+    fs.mkdirSync(planningDirOf(cwd), { recursive: true });
+
+    const otherStalePath = path.join(cwd, 'wt-other-stale');
+    fs.mkdirSync(otherStalePath, { recursive: true });
+    fs.utimesSync(otherStalePath, new Date(), new Date(Date.now() - 2 * 60 * 60 * 1000));
+
+    mockGitWorktreeListOk(t, buildPorcelain(['/fake/main-repo', otherStalePath]));
+
+    const snapshot = buildPlanningSnapshot(cwd);
+    const diagnostics = ruleFor('W027').check(snapshot);
+
+    assert.equal(diagnostics.length, 1, 'a stale worktree distinct from the active cwd must still be flagged');
     assert.equal(diagnostics[0].code, 'W027');
-    assert.ok(diagnostics[0].message.includes(cwd));
   });
 });

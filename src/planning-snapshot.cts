@@ -97,6 +97,13 @@ interface PhaseSnapshot {
 }
 
 interface PlanningSnapshot {
+  // The resolved absolute `cwd` this snapshot was built for — `cwd` is
+  // already `buildPlanningSnapshot`'s own input, not a new ambient read, so
+  // exposing it is a "parsed value" per §8.1 rule 2, not §8.1 rule 1 ambient
+  // I/O. Backs W027's active-worktree exclusion
+  // (`src/health-diagnostic-rules/worktree-health.cts`), the one pre-migration
+  // behavior (`verify.cts:2233-2242`) that genuinely needed the caller's cwd.
+  cwd: string;
   milestone: ReturnType<typeof getMilestoneInfo>;
   phaseDirs: ReturnType<typeof listMilestonePhaseDirs>;
   phases: { value: PhaseSnapshot[]; scope: Scope };
@@ -668,6 +675,7 @@ function buildPlanningSnapshot(cwd: string): PlanningSnapshot {
   const stateFields = buildStateFields(paths.state);
 
   return {
+    cwd: path.resolve(cwd),
     milestone,
     phaseDirs,
     phases: {

@@ -13,7 +13,7 @@
  * pre-migration source still names the split-off stale-worktree site
  * 'W017' — this batch is what actually applies the W027 split).
  *
- * KNOWN GAPS (found while building, reported rather than papered over — see
+ * KNOWN GAP (found while building, reported rather than papered over — see
  * this batch's dispatch report for full detail):
  *
  * 1. W020's original THREE conditions were git_timed_out / git_list_failed /
@@ -31,25 +31,10 @@
  *    with the discarded `reason` field — an snapshot-field enhancement
  *    outside this rule-file batch's scope, flagged here rather than guessed
  *    around.
- * 2. W027's original exclusion of the active session's own worktree
- *    (`verify.cts:2233-2242`, comparing `finding.path` against
- *    `process.cwd()`) happens at the `cmdValidateHealth` call site, NOT
- *    inside `inspectWorktreeHealth`/`worktree-safety.cts`. Confirmed by
- *    direct read: `inspectWorktreeHealth` (`src/worktree-safety.cts:352-397`)
- *    performs no cwd comparison, and `listLinkedWorktreePaths`
- *    (`src/worktree-safety.cts:321-338`) only drops the FIRST `git worktree
- *    list` entry (assumed main worktree) via `.slice(1)` — it does not know
- *    which entry, if any, is the ACTIVE session's cwd, which is commonly a
- *    LINKED (non-first) worktree in this repo's own multi-worktree workflow.
- *    A `Rule.check(snapshot)` has no ambient `process.cwd()` access (§8.1
- *    rule 1 forbids it), and `PlanningSnapshot` carries no
- *    "active worktree path" field to filter against. This is a REAL,
- *    unclosed gap: `checkW027` below reports every 'stale' finding,
- *    INCLUDING the active session's own worktree, which is a behavior
- *    change from the pre-migration code. Closing it precisely requires
- *    either a new snapshot field carrying the active worktree path/cwd, or
- *    moving the exclusion into `inspectWorktreeHealth` itself — both are
- *    snapshot/owner changes outside this rule-file batch's scope.
+ *
+ * W027 restores the pre-migration active-worktree exclusion
+ * (`verify.cts:2233-2242`) via `PlanningSnapshot.cwd` — see `checkW027`'s own
+ * comment below for the mechanism.
  *
  * Design: .gsd/phase/refactor-3309-health-diagnostic-rule-table/40-design.md
  *
@@ -58,6 +43,8 @@
  * gsd-core/bin/lib/health-diagnostic-rules/worktree-health.cjs (gitignored).
  */
 
+import path from 'node:path';
+
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- type-only; erased at compile time, no runtime require emitted
 import type planningSnapshotMod = require('../planning-snapshot.cjs');
 
@@ -65,7 +52,7 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
-const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
+const { SEVERITY, adviseRemedy } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 type Rule = healthDiagnosticMod.Rule;
 
@@ -94,14 +81,9 @@ function checkW020(snapshot: PlanningSnapshot): Diagnostic[] {
       severity: SEVERITY.WARNING,
       message:
         'Worktree health check degraded: git worktree list timed out or failed — orphan/stale worktrees could not be inspected',
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: {
-          command:
-            'Run: git worktree list --porcelain to diagnose; check for .git/index.lock, a hung git process, or repository permissions',
-        },
-      },
+      remedy: adviseRemedy(
+        'Run: git worktree list --porcelain to diagnose; check for .git/index.lock, a hung git process, or repository permissions',
+      ),
     });
   }
 
@@ -112,11 +94,7 @@ function checkW020(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'W020',
       severity: SEVERITY.WARNING,
       message: `Worktree health check degraded: could not stat ${finding.path} — presence/staleness could not be verified`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: 'Check filesystem permissions on the worktree path, or investigate why statSync failed for it' },
-      },
+      remedy: adviseRemedy('Check filesystem permissions on the worktree path, or investigate why statSync failed for it'),
     });
   }
 
@@ -137,11 +115,7 @@ function checkW017(snapshot: PlanningSnapshot): Diagnostic[] {
       code: 'W017',
       severity: SEVERITY.WARNING,
       message: `Orphan git worktree: ${finding.path} (path no longer exists on disk)`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: 'git worktree prune' },
-      },
+      remedy: adviseRemedy('git worktree prune'),
     });
   }
   return diagnostics;
@@ -150,26 +124,28 @@ function checkW017(snapshot: PlanningSnapshot): Diagnostic[] {
 // ─── W027 — stale git worktree (verify.cts:2232-2249, the split-off half of
 // the pre-migration 'W017' site) ─────────────────────────────────────────
 //
-// `finding.kind === 'stale'` — age-based. GAP: does NOT exclude the active
-// session's own worktree (see module doc, gap 2) — the original's
-// `process.cwd()` comparison cannot be reproduced from `snapshot` alone.
-// Per this batch's brief: the interpolated command (with the real path)
-// lives in `message`; `remedy.args.command` stays a static `<path>`
-// template, mirroring the split the brief specifies.
+// `finding.kind === 'stale'` — age-based. Excludes the active session's own
+// worktree, restored via `snapshot.cwd` (see module doc, gap 2 — RESOLVED):
+// a 'stale' finding is skipped when `snapshot.cwd` equals the finding's path
+// or is nested under it, the exact comparison `verify.cts:2238-2241` made
+// against `process.cwd()`. Per this batch's brief: the interpolated command
+// (with the real path) lives in `message`; `remedy.args.command` stays a
+// static `<path>` template, mirroring the split the brief specifies.
 
 function checkW027(snapshot: PlanningSnapshot): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  const activeCwd = snapshot.cwd;
   for (const finding of snapshot.worktreeHealth.value) {
     if (finding.kind !== 'stale') continue;
+    const normalizedWorktree = path.resolve(finding.path);
+    const isActiveWorktree =
+      activeCwd === normalizedWorktree || activeCwd.startsWith(normalizedWorktree + path.sep);
+    if (isActiveWorktree) continue;
     diagnostics.push({
       code: 'W027',
       severity: SEVERITY.WARNING,
       message: `Stale git worktree: ${finding.path} (last modified ${finding.ageMinutes} minutes ago). Run: git worktree remove ${finding.path} --force`,
-      remedy: {
-        action: REMEDY_ACTION.ADVISE,
-        risk: REMEDY_RISK.NONE,
-        args: { command: 'git worktree remove <path> --force' },
-      },
+      remedy: adviseRemedy('git worktree remove <path> --force'),
     });
   }
   return diagnostics;
