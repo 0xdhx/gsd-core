@@ -2,14 +2,24 @@
  * Health Diagnostic — frozen rule-table types, enums, and evaluator for
  * `validate health` (Phase 11, #3309, ADR-3180 §8.2/§8.3/§8.5).
  *
- * SKELETON (this phase). Establishes the exact contract every later batch of
- * extracted rules builds onto: the frozen `SEVERITY`/`REMEDY_ACTION`/
- * `REMEDY_RISK` enums, the `Diagnostic`/`Remedy`/`Rule` shapes, the `RULES`
- * container (starts EMPTY — a later migration step appends the 32 rules
- * extracted from `cmdValidateHealth`, `src/verify.cts:1616-2577`), the
- * `evaluateRules` evaluator, and the `applyRepairs` `--repair`/`--backfill`
- * dispatcher. `applyRepairs`'s per-action handlers are stubs in this phase —
- * they land alongside the rules that need them.
+ * Establishes the exact contract every extracted rule builds onto: the
+ * frozen `SEVERITY`/`REMEDY_ACTION`/`REMEDY_RISK` enums, the
+ * `Diagnostic`/`Remedy`/`Rule` shapes, the `RULES` container (the 32 rules
+ * extracted from `cmdValidateHealth`, `src/verify.cts:1616-2577`, are
+ * concatenated in from each rule-group file under
+ * `src/health-diagnostic-rules/`), the `evaluateRules` evaluator, and the
+ * `applyRepairs` `--repair`/`--backfill` dispatcher — whose per-action
+ * handlers are REAL here (ported behavior-preserving from
+ * `verify.cts:2405-2553`'s repair switch), not stubs.
+ *
+ * `applyRepairs` does not receive a `PlanningSnapshot` (its call-site
+ * signature, `(cwd, diagnostics, repair, backfill)`, is a locked contract —
+ * see `tests/health-diagnostic.test.cjs`) — so, like `cmdValidateHealth`
+ * itself before this migration, it performs its own bounded filesystem I/O
+ * to apply a repair. This is not a §8.1 rule 1 violation: that rule
+ * constrains a RULE's `check(snapshot)` signature (no ambient I/O), not the
+ * evaluator/dispatcher, which the design doc's "subject-surface gap" section
+ * already establishes performs I/O once, up front, on the rules' behalf.
  *
  * `PlanningSnapshot` is deliberately NOT re-exported as a type from
  * `planning-snapshot.cts` here (see the design doc's "Known limits" and this
@@ -24,6 +34,9 @@
  * ADR-457 build-at-publish: source in src/health-diagnostic.cts, compiled to
  * gsd-core/bin/lib/health-diagnostic.cjs (gitignored).
  */
+
+import fs from 'node:fs';
+import path from 'node:path';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- type-only; erased at compile time, no runtime require emitted
 import type planningSnapshotMod = require('./planning-snapshot.cjs');
@@ -80,15 +93,36 @@ const RULES: Rule[] = [
   ...milestoneArchiveHygieneMod.RULES,
 ];
 
+// ─── Repair-handler runtime dependencies ───────────────────────────────────
+//
+// Same owners `cmdValidateHealth`'s pre-migration repair switch used
+// (`verify.cts:2405-2553`) — ported verbatim, not reinvented.
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningWorkspaceMod = require('./planning-workspace.cjs');
+const { planningRoot, planningDir } = planningWorkspaceMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import configLoaderMod = require('./config-loader.cjs');
+const { CONFIG_DEFAULTS } = configLoaderMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import roadmapParserMod = require('./roadmap-parser.cjs');
+const { getMilestoneInfo } = roadmapParserMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import stateMod = require('./state.cjs');
+const { writeStateMd } = stateMod;
+import { realClock } from './clock.cjs';
+import { platformReadSync as safeReadFile, platformWriteSync } from './shell-command-projection.cjs';
+import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
+
 // ─── Evaluator ──────────────────────────────────────────────────────────────
 
 /**
  * Evaluate an explicit `rules` array against `snapshot`, throwing if any two
- * entries share a `code` (defense in depth beside the future static lint
- * guard, §8.2 rule 1). Separated from `evaluateRules` so the duplicate-code
- * guard is unit-testable against a small, locally-constructed fake rule
- * array, independent of whether `RULES` itself has any entries yet (it does
- * not, in this skeleton).
+ * entries share a `code` (defense in depth beside the static lint guard,
+ * §8.2 rule 1, `scripts/lint-health-diagnostic-rule-table.cjs`). Separated
+ * from `evaluateRules` so the duplicate-code guard is unit-testable against
+ * a small, locally-constructed fake rule array, independent of the real
+ * `RULES` table.
  */
 function evaluateRuleTable(rules: Rule[], snapshot: PlanningSnapshot): Diagnostic[] {
   const seen = new Set<string>();
@@ -110,17 +144,231 @@ function evaluateRules(snapshot: PlanningSnapshot): Diagnostic[] {
 }
 
 // ─── Repair dispatcher ──────────────────────────────────────────────────────
+// Repair-handler bodies (real, ported from verify.cts:2405-2553).
 
 /**
- * Stub repair handler. Real per-action handlers (`createConfig`,
- * `resetConfig`, `regenerateState`, `addNyquistKey`,
- * `addAiIntegrationPhaseKey`, `backfillMilestones`) land in a later
- * migration batch alongside the rules that need them — see this phase's
- * brief. Applying a NONE-risk remedy is a no-op beyond recording it, in this
- * skeleton.
+ * One `repairs_performed`-shaped entry (legacy `cmdValidateHealth` output
+ * shape), tagged with the diagnostic `code` it came from so
+ * `applyRepairs`'s caller can build BOTH the code-keyed `applied`/`refused`
+ * arrays this module's own tests lock (`tests/health-diagnostic.test.cjs`)
+ * AND the action-keyed `repairs_performed` array `cmdValidateHealth` still
+ * emits. `code` is stripped by the caller before the entry reaches JSON
+ * output — the legacy shape never carried it.
  */
-function applyStubRepair(_cwd: string, _diagnostic: Diagnostic): void {
-  /* intentionally empty — real handlers land with the rules that need them */
+interface RepairDetail {
+  code: string;
+  action: string;
+  success: boolean;
+  path?: string;
+  detail?: string;
+  error?: string;
+}
+
+interface RepairPaths {
+  rootBase: string;
+  configPath: string;
+  statePath: string;
+  milestonesPath: string;
+  milestonesArchiveDir: string;
+}
+
+/**
+ * Derive every filesystem path a repair handler needs, from `cwd` alone —
+ * exactly how `cmdValidateHealth` derived them pre-migration
+ * (`verify.cts:1644-1652`/`2301-2302`). `config.json`/`MILESTONES.md`/
+ * `milestones/` are root-scoped (`planningRoot`); `STATE.md` is
+ * workstream-scoped (`planningDir`) — the same root-vs-workstream split
+ * `buildConfigField`/`buildStateFields` (`planning-snapshot.cts`) already
+ * document for the read side.
+ */
+function repairPaths(cwd: string): RepairPaths {
+  const rootBase = planningRoot(cwd);
+  const wsBase = planningDir(cwd);
+  return {
+    rootBase,
+    configPath: path.join(rootBase, 'config.json'),
+    statePath: path.join(wsBase, 'STATE.md'),
+    milestonesPath: path.join(rootBase, 'MILESTONES.md'),
+    milestonesArchiveDir: path.join(rootBase, 'milestones'),
+  };
+}
+
+/** `verify.cts:2413-2429`'s default config.json payload, ported verbatim. */
+function defaultConfigPayload(): Record<string, unknown> {
+  return {
+    model_profile: CONFIG_DEFAULTS.model_profile,
+    commit_docs: CONFIG_DEFAULTS.commit_docs,
+    search_gitignored: CONFIG_DEFAULTS.search_gitignored,
+    branching_strategy: CONFIG_DEFAULTS.branching_strategy,
+    phase_branch_template: CONFIG_DEFAULTS.phase_branch_template,
+    milestone_branch_template: CONFIG_DEFAULTS.milestone_branch_template,
+    quick_branch_template: CONFIG_DEFAULTS.quick_branch_template,
+    workflow: {
+      research: CONFIG_DEFAULTS.research,
+      plan_check: CONFIG_DEFAULTS.plan_checker,
+      verifier: CONFIG_DEFAULTS.verifier,
+      nyquist_validation: CONFIG_DEFAULTS.nyquist_validation,
+    },
+    parallelization: CONFIG_DEFAULTS.parallelization,
+    brave_search: CONFIG_DEFAULTS.brave_search,
+  };
+}
+
+/**
+ * `verify.cts:2301-2335`'s W018 archived-vs-documented-versions diff,
+ * relocated verbatim (same two regexes, same two-file read) so
+ * `backfillMilestones` can recompute exactly which versions are missing
+ * without a `PlanningSnapshot` (`applyRepairs` is not a `Rule` and is not
+ * handed one — see this file's header comment). This is the same
+ * derivation `buildMilestoneArchiveStatusField`
+ * (`src/planning-snapshot.cts`) already performs for the W018 RULE's read
+ * side; recomputed here, not re-invented, because the rule's own
+ * `Diagnostic.remedy.args` carries no version list (confirmed by direct
+ * read of `src/health-diagnostic-rules/milestone-archive-hygiene.cts`).
+ */
+function computeMissingMilestoneVersions(milestonesArchiveDir: string, milestonesPath: string): string[] {
+  let archivedVersions: string[] = [];
+  try {
+    if (fs.existsSync(milestonesArchiveDir)) {
+      const archiveFiles = fs.readdirSync(milestonesArchiveDir);
+      archivedVersions = archiveFiles
+        .map((f) => f.match(/^(v\d+\.\d+(?:\.\d+)?)-ROADMAP\.md$/))
+        .filter((m): m is RegExpMatchArray => m !== null)
+        .map((m) => m[1]);
+    }
+  } catch {
+    /* intentionally empty — mirrors the original's advisory try/catch */
+  }
+
+  let documentedVersions: string[] = [];
+  try {
+    if (fs.existsSync(milestonesPath)) {
+      const registryContent = fs.readFileSync(milestonesPath, 'utf-8');
+      documentedVersions = [...registryContent.matchAll(/^##\s+(v\d+\.\d+(?:\.\d+)?)/gm)].map((m) => m[1]);
+    }
+  } catch {
+    /* intentionally empty */
+  }
+
+  const documented = new Set(documentedVersions);
+  return archivedVersions.filter((v) => !documented.has(v));
+}
+
+interface RepairOutcome {
+  success: boolean;
+  path?: string;
+  detail?: string;
+  error?: string;
+  // regenerateState's original backup step (verify.cts:2435-2440) pushed its
+  // own SEPARATE `repairActions` entry before the main one — preserved here
+  // as extra, prepended detail rows. Unreachable in practice today
+  // (regenerateState is DESTRUCTIVE and `applyRepairs`'s dispatcher below
+  // refuses it before this handler is ever invoked), but the handler stays
+  // complete rather than partially ported, per this batch's brief.
+  extraDetails?: { action: string; success: boolean; path?: string }[];
+}
+
+/**
+ * Execute exactly one real repair action, ported behavior-preserving from
+ * `verify.cts:2405-2553`'s `switch (repair)`. Throws are the caller's
+ * responsibility to catch (mirrors the original's per-action try/catch
+ * shape, collapsed to one seam here since every case now shares one
+ * caller).
+ */
+function runRepairAction(cwd: string, action: RemedyAction, paths: RepairPaths): RepairOutcome {
+  const { rootBase, configPath, statePath, milestonesPath, milestonesArchiveDir } = paths;
+
+  switch (action) {
+    case REMEDY_ACTION.CREATE_CONFIG:
+    case REMEDY_ACTION.RESET_CONFIG: {
+      platformWriteSync(configPath, JSON.stringify(defaultConfigPayload(), null, 2));
+      return { success: true, path: 'config.json' };
+    }
+
+    case REMEDY_ACTION.REGENERATE_STATE: {
+      const extraDetails: { action: string; success: boolean; path?: string }[] = [];
+      if (fs.existsSync(statePath)) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const backupPath = `${statePath}.bak-${timestamp}`;
+        fs.copyFileSync(statePath, backupPath);
+        extraDetails.push({ action: 'backupState', success: true, path: backupPath });
+      }
+      const milestone = getMilestoneInfo(cwd).value;
+      const projectRef = path
+        .relative(cwd, path.join(rootBase, 'PROJECT.md'))
+        .split(path.sep)
+        .join('/');
+      const slashRuntime = resolveRuntime(cwd);
+      const slash = (name: string) => formatGsdSlash(name, slashRuntime) as string;
+      let stateContent = `# Session State\n\n`;
+      stateContent += `## Project Reference\n\n`;
+      stateContent += `See: ${projectRef}\n\n`;
+      stateContent += `## Position\n\n`;
+      stateContent += `**Milestone:** ${milestone?.version ?? ''} ${milestone?.name ?? ''}\n`;
+      stateContent += `**Current phase:** (determining...)\n`;
+      stateContent += `**Status:** Resuming\n\n`;
+      stateContent += `## Session Log\n\n`;
+      stateContent += `- ${realClock.localToday()}: STATE.md regenerated by ${slash('health')} --repair\n`;
+      writeStateMd(statePath, stateContent, cwd);
+      return { success: true, path: 'STATE.md', extraDetails };
+    }
+
+    case REMEDY_ACTION.ADD_NYQUIST_KEY:
+    case REMEDY_ACTION.ADD_AI_INTEGRATION_PHASE_KEY: {
+      const key = action === REMEDY_ACTION.ADD_NYQUIST_KEY ? 'nyquist_validation' : 'ai_integration_phase';
+      const configRaw = fs.readFileSync(configPath, 'utf-8');
+      const configParsed = JSON.parse(configRaw) as Record<string, unknown>;
+      if (!configParsed['workflow']) configParsed['workflow'] = {};
+      const wf = configParsed['workflow'] as Record<string, unknown>;
+      if (wf[key] === undefined) {
+        wf[key] = true;
+        platformWriteSync(configPath, JSON.stringify(configParsed, null, 2));
+      }
+      return { success: true, path: 'config.json' };
+    }
+
+    case REMEDY_ACTION.BACKFILL_MILESTONES: {
+      const missing = computeMissingMilestoneVersions(milestonesArchiveDir, milestonesPath);
+      const today = realClock.localToday();
+      const slashRuntime = resolveRuntime(cwd);
+      const slash = (name: string) => formatGsdSlash(name, slashRuntime) as string;
+      let backfilled = 0;
+      for (const ver of missing) {
+        try {
+          const snapshotPath = path.join(milestonesArchiveDir, `${ver}-ROADMAP.md`);
+          const snapshot = safeReadFile(snapshotPath);
+          const titleMatch = snapshot && snapshot.match(/^#\s+(.+)$/m);
+          const milestoneName = titleMatch
+            ? titleMatch[1].replace(/^Milestone\s+/i, '').replace(/^v[\d.]+\s*/, '').trim()
+            : ver;
+          const entry =
+            `## ${ver}${milestoneName && milestoneName !== ver ? ` ${milestoneName}` : ''} (Backfilled: ${today})\n\n**Note:** Synthesized from archive snapshot by \`${slash('health')} --backfill\`. Original completion date unknown.\n\n---\n\n`;
+          const milestonesContent = fs.existsSync(milestonesPath)
+            ? fs.readFileSync(milestonesPath, 'utf-8')
+            : '';
+          if (!milestonesContent.trim()) {
+            platformWriteSync(milestonesPath, `# Milestones\n\n${entry}`);
+          } else {
+            const headerMatch = milestonesContent.match(/^(#{1,3}\s+[^\n]*\n\n?)/);
+            if (headerMatch) {
+              const header = headerMatch[1];
+              const rest = milestonesContent.slice(header.length);
+              platformWriteSync(milestonesPath, header + entry + rest);
+            } else {
+              platformWriteSync(milestonesPath, entry + milestonesContent);
+            }
+          }
+          backfilled++;
+        } catch {
+          /* intentionally empty — partial backfill is acceptable */
+        }
+      }
+      return { success: true, detail: `Backfilled ${backfilled} milestone(s) into MILESTONES.md` };
+    }
+
+    default:
+      return { success: false, error: `no repair handler registered for action "${action}"` };
+  }
 }
 
 /**
@@ -136,21 +384,33 @@ function applyStubRepair(_cwd: string, _diagnostic: Diagnostic): void {
  * - Requested and `remedy.risk === DESTRUCTIVE` — pushed onto `refused`,
  *   handler never invoked. This is the §8.3 rule 3 breaking-change
  *   enforcement point: a DESTRUCTIVE remedy is describable but is never
- *   applied by `--repair`.
- * - Requested and `remedy.risk === NONE` — stub handler invoked, pushed
- *   onto `applied`.
+ *   applied by `--repair`. A `details` row is still recorded, so the
+ *   refusal is VISIBLE in `cmdValidateHealth`'s `repairs_performed` output,
+ *   not silently dropped.
+ * - Requested and `remedy.risk === NONE` — the real handler is invoked,
+ *   pushed onto `applied`.
+ *
+ * `applied`/`refused` are unchanged in shape from the pre-existing skeleton
+ * (locked by `tests/health-diagnostic.test.cjs`, rows 11-12): arrays of
+ * diagnostic `code`s. `details` is ADDITIVE — every real action maps 1:1 to
+ * exactly one code in this rule table (confirmed: no `REMEDY_ACTION` other
+ * than `ADVISE` is used by more than one rule), so `cmdValidateHealth` can
+ * rebuild the legacy action-keyed `repairs_performed` shape directly from
+ * it.
  */
 function applyRepairs(
   cwd: string,
   diagnostics: Diagnostic[],
   repair: boolean,
   backfill: boolean,
-): { applied: string[]; refused: string[] } {
+): { applied: string[]; refused: string[]; details: RepairDetail[] } {
   const applied: string[] = [];
   const refused: string[] = [];
+  const details: RepairDetail[] = [];
+  const paths = repairPaths(cwd);
 
   for (const diagnostic of diagnostics) {
-    const { remedy } = diagnostic;
+    const { remedy, code } = diagnostic;
     if (remedy.action === REMEDY_ACTION.ADVISE) continue;
 
     const requested =
@@ -158,15 +418,43 @@ function applyRepairs(
     if (!requested) continue;
 
     if (remedy.risk === REMEDY_RISK.DESTRUCTIVE) {
-      refused.push(diagnostic.code);
+      refused.push(code);
+      details.push({
+        code,
+        action: remedy.action,
+        success: false,
+        error: `refused: '${remedy.action}' is a destructive remedy and is not auto-applied by --repair`,
+      });
       continue;
     }
 
-    applyStubRepair(cwd, diagnostic);
-    applied.push(diagnostic.code);
+    try {
+      const outcome = runRepairAction(cwd, remedy.action, paths);
+      if (outcome.extraDetails) {
+        for (const extra of outcome.extraDetails) {
+          details.push({ code, action: extra.action, success: extra.success, ...(extra.path ? { path: extra.path } : {}) });
+        }
+      }
+      details.push({
+        code,
+        action: remedy.action,
+        success: outcome.success,
+        ...(outcome.path ? { path: outcome.path } : {}),
+        ...(outcome.detail ? { detail: outcome.detail } : {}),
+        ...(outcome.error ? { error: outcome.error } : {}),
+      });
+    } catch (err) {
+      details.push({
+        code,
+        action: remedy.action,
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    applied.push(code);
   }
 
-  return { applied, refused };
+  return { applied, refused, details };
 }
 
 // ─── Exports ────────────────────────────────────────────────────────────────
