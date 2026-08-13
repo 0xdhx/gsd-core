@@ -13,24 +13,16 @@
  * pre-migration source still names the split-off stale-worktree site
  * 'W017' — this batch is what actually applies the W027 split).
  *
- * KNOWN GAP (found while building, reported rather than papered over — see
- * this batch's dispatch report for full detail):
- *
- * 1. W020's original THREE conditions were git_timed_out / git_list_failed /
- *    a per-finding 'unverified' kind, each with its own message. The first
- *    two are scan-level failures reported by `inspectWorktreeHealth`'s own
- *    `reason` field ('git_timed_out' vs 'git_list_failed' vs
- *    'not_a_git_repo') — but `planning-snapshot.cts`'s
- *    `buildWorktreeHealthField` discards `reason` entirely and only
- *    preserves `scope: SCOPE.UNREADABLE` for ANY `!result.ok` case. This
- *    rule therefore CANNOT distinguish "git timed out" from "git worktree
- *    list failed outright" from the snapshot alone — both collapse to the
- *    same `checkScanDegraded` branch below, which emits one reasonable
- *    combined message instead of the original's two separate ones. Fixing
- *    this precisely requires extending `PlanningSnapshot.worktreeHealth`
- *    with the discarded `reason` field — an snapshot-field enhancement
- *    outside this rule-file batch's scope, flagged here rather than guessed
- *    around.
+ * W020's original THREE conditions were git_timed_out / git_list_failed / a
+ * per-finding 'unverified' kind, each with its own message. The first two
+ * are scan-level failures reported by `inspectWorktreeHealth`'s own `reason`
+ * field ('git_timed_out' vs 'git_list_failed' vs 'not_a_git_repo') —
+ * `planning-snapshot.cts`'s `buildWorktreeHealthField` now carries `reason`
+ * straight through on `PlanningSnapshot.worktreeHealth`, so `checkW020`
+ * below reproduces the original's exact branch-per-reason messages instead
+ * of collapsing them (a prior version of this file collapsed both into one
+ * message AND, worse, warned on 'not_a_git_repo' too — a regression, since
+ * the original silently skips a non-git cwd; see `verify.cts:2202-2217`).
  *
  * W027 restores the pre-migration active-worktree exclusion
  * (`verify.cts:2233-2242`) via `PlanningSnapshot.cwd` — see `checkW027`'s own
@@ -60,29 +52,46 @@ type Rule = healthDiagnosticMod.Rule;
 import planningScopeMod = require('../planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
 
-// ─── W020 — worktree health scan itself is degraded (verify.cts:2203-2264) ─
+// ─── W020 — worktree health scan itself is degraded (verify.cts:2193-2264) ─
 //
 // ONE rule, THREE internal conditions, all the same subject ("the worktree
 // health scan itself is degraded" — design doc "Rejected alternatives" §3):
-// (a) `git worktree list` timed out, (b) `git worktree list` failed
-// outright, (c) a specific 'unverified' finding (existsSync ok, statSync
-// threw). (a) and (b) collapse to a single combined message per the
-// module-doc gap note above; (c) is a per-finding, exact port of
-// `verify.cts:2256-2263`.
+// (a) `git worktree list` timed out (verify.cts:2202-2209), (b) `git
+// worktree list` failed outright (verify.cts:2210-2217), (c) a specific
+// 'unverified' finding (existsSync ok, statSync threw,
+// verify.cts:2256-2263). A fourth `!ok` reason, 'not_a_git_repo', and a
+// thrown exception ('exception') are DELIBERATELY silent — the original's
+// `if` ladder never matches 'not_a_git_repo', and the outer try/catch around
+// the whole block is commented "git worktree not available or not a git
+// repo — skip silently".
 
 function checkW020(snapshot: PlanningSnapshot): Diagnostic[] {
   const diagnostics: Diagnostic[] = [];
+  const { scope, reason } = snapshot.worktreeHealth;
+  const degraded = scope === SCOPE.UNREADABLE;
 
-  // (a)+(b) — scan-level degradation. GAP: cannot distinguish timeout from
-  // outright failure from `scope` alone (see module doc, gap 1).
-  if (snapshot.worktreeHealth.scope === SCOPE.UNREADABLE) {
+  // (a) — git worktree list timed out (verify.cts:2202-2209).
+  if (degraded && reason === 'git_timed_out') {
     diagnostics.push({
       code: 'W020',
       severity: SEVERITY.WARNING,
       message:
-        'Worktree health check degraded: git worktree list timed out or failed — orphan/stale worktrees could not be inspected',
+        'Worktree health check degraded: git worktree list timed out after 10s — orphan/stale worktrees could not be inspected',
       remedy: adviseRemedy(
-        'Run: git worktree list --porcelain to diagnose; check for .git/index.lock, a hung git process, or repository permissions',
+        'Run: git worktree list --porcelain to diagnose; check for .git/index.lock or a hung git process',
+      ),
+    });
+  }
+
+  // (b) — git worktree list failed outright (verify.cts:2210-2217).
+  if (degraded && reason === 'git_list_failed') {
+    diagnostics.push({
+      code: 'W020',
+      severity: SEVERITY.WARNING,
+      message:
+        'Worktree health check degraded: git worktree list failed — orphan/stale worktrees could not be inspected',
+      remedy: adviseRemedy(
+        'Run: git worktree list --porcelain to diagnose; check git repository state and permissions',
       ),
     });
   }
