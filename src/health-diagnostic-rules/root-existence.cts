@@ -10,6 +10,18 @@
  * Ported behavior-preserving from `cmdValidateHealth`
  * (`src/verify.cts:1681-1705`), the exact call sites for E002/E003/E004/W001.
  *
+ * E002's original message interpolates `${slash('new-project')}`
+ * (`verify.cts:1682`, ``Run ${slash('new-project')} to create``) and E003's
+ * interpolates `${slash('new-milestone')}` (`verify.cts:1694`, ``Run
+ * ${slash('new-milestone')} to create roadmap``) — both per-project
+ * runtime-resolved values (`formatGsdSlash`, `src/runtime-slash.cts`) this
+ * rule's `(snapshot) => Diagnostic[]` signature has no access to (§8.1 rule
+ * 1 forbids ambient I/O, including `cwd`, inside `check`). Hardcodes the
+ * canonical `/gsd-new-project`/`/gsd-new-milestone` hyphen form instead,
+ * mirroring the sibling "config.json validation" group's W016 rule
+ * (`src/health-diagnostic-rules/config-validation.cts`), which hardcodes
+ * `/gsd-ai-integration-phase` the same way for the identical reason.
+ *
  * Design: .gsd/phase/refactor-3309-health-diagnostic-rule-table/40-design.md
  *
  * ADR-457 build-at-publish: source in src/health-diagnostic-rules/root-existence.cts,

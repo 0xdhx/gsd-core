@@ -31,6 +31,16 @@
  *   `verificationStatus`) — a disclosed fidelity reduction, not a silent
  *   reproduction of the original six-way label.
  *
+ * W009's original message interpolates `${slash('plan-phase')}`
+ * (`verify.cts:1982`, ``Re-run ${slash('plan-phase')} with --research to
+ * regenerate``), a per-project runtime-resolved value (`formatGsdSlash`,
+ * `src/runtime-slash.cts`) this rule's `(snapshot) => Diagnostic[]`
+ * signature has no access to. Hardcodes the canonical `/gsd-plan-phase`
+ * hyphen form instead, mirroring the sibling "config.json validation"
+ * group's W016 rule (`src/health-diagnostic-rules/config-validation.cts`),
+ * which hardcodes `/gsd-ai-integration-phase` the same way for the
+ * identical reason.
+ *
  * Design: .gsd/phase/refactor-3309-health-diagnostic-rule-table/40-design.md
  *
  * ADR-457 build-at-publish: source in
