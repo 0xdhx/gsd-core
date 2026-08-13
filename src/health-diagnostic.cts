@@ -443,6 +443,12 @@ function applyRepairs(
         ...(outcome.detail ? { detail: outcome.detail } : {}),
         ...(outcome.error ? { error: outcome.error } : {}),
       });
+      // `applied` means "the repair actually succeeded", not "was attempted"
+      // — a handler that returns `{success: false}` (or throws, caught
+      // below) is recorded in `details` with its failure, but must not be
+      // reported as applied. `refused` is reserved for the DESTRUCTIVE-risk
+      // gate above; a failed attempt is neither applied nor refused.
+      if (outcome.success) applied.push(code);
     } catch (err) {
       details.push({
         code,
@@ -451,7 +457,6 @@ function applyRepairs(
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    applied.push(code);
   }
 
   return { applied, refused, details };

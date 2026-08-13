@@ -350,4 +350,28 @@ describe('applyRepairs — REAL diagnostics (rows 15-16)', () => {
     const diskConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     assert.equal(diskConfig.model_profile, 'balanced');
   });
+
+  // Regression: a repair handler that THROWS (caught by applyRepairs's own
+  // try/catch) must be recorded in `details` with `success: false` and must
+  // NOT land in `applied` — `applied` means "succeeded", not "attempted".
+  // Forced here via ADD_NYQUIST_KEY against a config.json that is genuinely
+  // absent: `runRepairAction`'s `fs.readFileSync(configPath, ...)` throws
+  // ENOENT.
+  test('regression: a repair handler that throws is recorded in details with success:false and is NOT pushed to applied', (t) => {
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    setupHealthyProject(tmpDir);
+    fs.unlinkSync(path.join(tmpDir, '.planning', 'config.json'));
+    assert.equal(fs.existsSync(path.join(tmpDir, '.planning', 'config.json')), false);
+
+    const diagnostics = [fakeDiagnostic('W008', REMEDY_ACTION.ADD_NYQUIST_KEY, REMEDY_RISK.NONE)];
+    const result = applyRepairs(tmpDir, diagnostics, true, false);
+
+    assert.ok(!result.applied.includes('W008'), 'W008 must not be applied — the handler threw');
+    assert.ok(!result.refused.includes('W008'), 'a thrown handler is not a DESTRUCTIVE-risk refusal either');
+    const detail = result.details.find((d) => d.code === 'W008');
+    assert.ok(detail, 'a details row must still be recorded for the failed attempt');
+    assert.equal(detail.success, false);
+    assert.ok(detail.error, 'the details row must carry the thrown error message');
+  });
 });
