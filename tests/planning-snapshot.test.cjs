@@ -1048,3 +1048,45 @@ describe('planningRootFiles field (Phase 11, #3309)', () => {
     assert.deepStrictEqual(snap.planningRootFiles, { value: [], scope: SCOPE.UNREADABLE });
   });
 });
+
+describe('allPhaseDirNames field (Phase 11, #3309 — health-diagnostic-rules/roadmap-disk-consistency batch)', () => {
+  // Found while implementing W007 (`src/health-diagnostic-rules/
+  // roadmap-disk-consistency.cts`): `phaseDirs` is windowed to directories
+  // the ROADMAP already declares, so it can never expose a genuine orphan
+  // directory. `allPhaseDirNames` is the unwindowed twin.
+
+  test('happy: lists every directory under phases/, including one NOT declared anywhere in ROADMAP.md', (t) => {
+    const cwd = createTempDir('gsd-3309-apdn1-');
+    t.after(() => cleanup(cwd));
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', '', '### Phase 1: Foo'].join('\n'));
+    fs.mkdirSync(path.join(planningDirOf(cwd), 'phases', '01-foo'), { recursive: true });
+    fs.mkdirSync(path.join(planningDirOf(cwd), 'phases', '04-extra'), { recursive: true }); // undeclared
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.allPhaseDirNames.value.slice().sort(), ['01-foo', '04-extra']);
+    assert.strictEqual(snap.allPhaseDirNames.scope, SCOPE.COMPLETE);
+    // Sanity: `phaseDirs` (windowed) must NOT include the undeclared dir —
+    // this is the exact gap `allPhaseDirNames` exists to close.
+    assert.ok(!snap.phaseDirs.value.includes('04-extra'));
+  });
+
+  test('absence: no phases/ directory at all is a real empty, not a failure', (t) => {
+    const cwd = createTempDir('gsd-3309-apdn2-');
+    t.after(() => cleanup(cwd));
+    writeRoadmap(cwd, ['## v1.0 Current 🚧', ''].join('\n'));
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.allPhaseDirNames, { value: [], scope: SCOPE.COMPLETE });
+  });
+
+  test('hostile: an unreadable phases/ directory degrades to an empty list, scope UNREADABLE, without throwing', (t) => {
+    const cwd = createTempDir('gsd-3309-apdn3-');
+    t.after(() => cleanup(cwd));
+    const phasesDir = path.join(planningDirOf(cwd), 'phases');
+    fs.mkdirSync(phasesDir, { recursive: true });
+    injectPhaseDirFault(t, phasesDir);
+
+    const snap = buildPlanningSnapshot(cwd);
+    assert.deepStrictEqual(snap.allPhaseDirNames, { value: [], scope: SCOPE.UNREADABLE });
+  });
+});

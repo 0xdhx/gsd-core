@@ -135,6 +135,27 @@ interface PlanningSnapshot {
     scope: Scope;
   };
   planningRootFiles: { value: string[]; scope: Scope };
+  // W006/W007 (ROADMAP/disk consistency group) fidelity fix, found while
+  // implementing `src/health-diagnostic-rules/roadmap-disk-consistency.cts`:
+  // `phaseDirs` (Phase 10) is deliberately WINDOWED to the phases
+  // `listMilestonePhaseDirs`'s `inWindow` filter (`getMilestonePhaseFilter`,
+  // `src/roadmap-parser.cts:1220`) resolves as belonging to the CURRENT
+  // milestone window — a directory whose phase id is NOT declared anywhere
+  // in ROADMAP.md is EXCLUDED from `phaseDirs.value` by construction
+  // (`isDirInMilestone` membership test). That is exactly the directory
+  // W007 exists to find ("an on-disk phase dir has no matching ROADMAP
+  // entry"), so sourcing W007 from `phaseDirs.value` would make it
+  // structurally unable to fire on the very case it names: an orphan
+  // directory can never be a member of the set that is itself defined as
+  // "directories the roadmap already declares." `allPhaseDirNames` is the
+  // un-windowed twin — every directory actually present under the active
+  // `phases/` root, unfiltered by roadmap declaration (sentinel-id
+  // exclusion is left to the RULE, mirroring `verify.cts:2091`'s own
+  // per-entry `isSentinelPhaseId` guard rather than baking it into the
+  // field). Archived-milestone directories are out of scope here exactly as
+  // they already are for `phaseDirs` (see this batch's own disclosed
+  // fidelity reduction for that).
+  allPhaseDirNames: { value: string[]; scope: Scope };
 }
 
 /**
@@ -608,6 +629,29 @@ function buildPlanningRootFilesField(cwd: string): { value: string[]; scope: Sco
 }
 
 /**
+ * Resolve `allPhaseDirNames` — every directory name directly under the
+ * active `phases/` root, UNFILTERED by `listMilestonePhaseDirs`'s
+ * current-milestone-window membership test (unlike `phaseDirs`). Backs
+ * W007 (see the field's own doc comment on `PlanningSnapshot` for why
+ * `phaseDirs` cannot). An absent `phases/` root is a real empty, not a
+ * failure (mirrors `listMilestonePhaseDirs`'s own treatment); a present but
+ * unreadable root degrades to `UNREADABLE` with an empty list.
+ */
+function buildAllPhaseDirNamesField(phasesDir: string): { value: string[]; scope: Scope } {
+  if (!fs.existsSync(phasesDir)) return { value: [], scope: SCOPE.COMPLETE };
+  try {
+    const value = fs
+      .readdirSync(phasesDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort();
+    return { value, scope: SCOPE.COMPLETE };
+  } catch {
+    return { value: [], scope: SCOPE.UNREADABLE };
+  }
+}
+
+/**
  * Build the full `.planning/` projection for `cwd`. Composes the six §7
  * owners named in the design doc's "Owners consumed" table, plus (Phase 11,
  * #3309) the three additive subject-surface fields `config`/`agentInstall`/
@@ -642,6 +686,7 @@ function buildPlanningSnapshot(cwd: string): PlanningSnapshot {
     researchValidationStatus: buildResearchValidationStatusField(paths.phases, phaseDirs.value, phaseDirs.scope),
     milestoneArchiveStatus: buildMilestoneArchiveStatusField(cwd),
     planningRootFiles: buildPlanningRootFilesField(cwd),
+    allPhaseDirNames: buildAllPhaseDirNamesField(paths.phases),
   };
 }
 
