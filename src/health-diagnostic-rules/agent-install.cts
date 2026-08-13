@@ -24,8 +24,8 @@
  *         ("Rule table organization" — Agent installation group)
  */
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports -- health-diagnostic.cjs is an export= CommonJS module
-import healthDiagnosticMod = require('../health-diagnostic.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- health-diagnostic-types.cjs is an export= CommonJS module
+import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
 const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
 type Rule = healthDiagnosticMod.Rule;
 type Diagnostic = healthDiagnosticMod.Diagnostic;

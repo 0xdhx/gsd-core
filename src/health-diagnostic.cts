@@ -30,68 +30,55 @@ import type planningSnapshotMod = require('./planning-snapshot.cjs');
 
 type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnapshot>;
 
-// ─── Severity ───────────────────────────────────────────────────────────────
-
-const SEVERITY = Object.freeze({
-  ERROR: 'error',
-  WARNING: 'warning',
-  INFO: 'info',
-});
-type Severity = (typeof SEVERITY)[keyof typeof SEVERITY];
-
-// ─── Remedy action / risk ───────────────────────────────────────────────────
-
-// Harvested from health.md's published table + the corrected 6-action
-// implementation (`src/verify.cts:2405-2553`) — not 5; `addAiIntegrationPhaseKey`
-// (verify.cts:1860/2481-2502) was live in code, missing from docs (design
-// doc, "Ground truth vs. issue #3309's claims" section).
-const REMEDY_ACTION = Object.freeze({
-  CREATE_CONFIG: 'createConfig',
-  RESET_CONFIG: 'resetConfig',
-  REGENERATE_STATE: 'regenerateState',
-  ADD_NYQUIST_KEY: 'addNyquistKey',
-  ADD_AI_INTEGRATION_PHASE_KEY: 'addAiIntegrationPhaseKey',
-  BACKFILL_MILESTONES: 'backfillMilestones',
-  // §8.3 rule 5 — every non-repairable finding's `fix` string becomes an
-  // ADVISE payload; ADVISE never acts, only describes.
-  ADVISE: 'advise',
-});
-type RemedyAction = (typeof REMEDY_ACTION)[keyof typeof REMEDY_ACTION];
-
-const REMEDY_RISK = Object.freeze({
-  NONE: 'none',
-  DESTRUCTIVE: 'destructive',
-});
-type RemedyRisk = (typeof REMEDY_RISK)[keyof typeof REMEDY_RISK];
-
-// ─── Diagnostic / Rule shapes ───────────────────────────────────────────────
-
-interface Remedy {
-  action: RemedyAction;
-  risk: RemedyRisk;
-  args: Record<string, unknown>;
-}
-
-interface Diagnostic {
-  code: string; // e.g. 'W010' — append-only, never renumbered (§8.2 rule 2)
-  severity: Severity; // property of the RULE, never the emit call (§8.2 rule 3)
-  message: string;
-  remedy: Remedy;
-}
-
-interface Rule {
-  code: string;
-  severity: Severity;
-  check: (snapshot: PlanningSnapshot) => Diagnostic[]; // §8.1 rule 1 signature, verbatim
-}
+// Runtime values (SEVERITY/REMEDY_ACTION/REMEDY_RISK) are needed here — not
+// just types — for `applyRepairs`'s comparisons, so this is a normal
+// (non type-only) `import ... = require(...)`. `health-diagnostic-types.cjs`
+// is the leaf module these enums/types were extracted to, so that this file
+// can `require()` every rule-group file below without a circular dependency
+// (see that module's file-level comment for the full explanation).
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import healthDiagnosticTypesMod = require('./health-diagnostic-types.cjs');
+const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticTypesMod;
+type Severity = healthDiagnosticTypesMod.Severity;
+type RemedyAction = healthDiagnosticTypesMod.RemedyAction;
+type RemedyRisk = healthDiagnosticTypesMod.RemedyRisk;
+type Remedy = healthDiagnosticTypesMod.Remedy;
+type Diagnostic = healthDiagnosticTypesMod.Diagnostic;
+type Rule = healthDiagnosticTypesMod.Rule;
 
 // ─── Rule table ─────────────────────────────────────────────────────────────
 
-// Starts EMPTY. A later migration batch appends each of the 32 rule
-// functions extracted from `cmdValidateHealth` (design doc, "Rule table
-// organization" section) — this phase establishes only the container and its
-// type.
-const RULES: Rule[] = [];
+// Populated by concatenating each rule group's exported `RULES` array (design
+// doc, "Rule table organization" section) — the 32 rule functions extracted
+// from `cmdValidateHealth`, `src/verify.cts:1616-2577`.
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import rootExistenceMod = require('./health-diagnostic-rules/root-existence.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import stateConsistencyMod = require('./health-diagnostic-rules/state-consistency.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import configValidationMod = require('./health-diagnostic-rules/config-validation.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseStructureMod = require('./health-diagnostic-rules/phase-structure.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import agentInstallMod = require('./health-diagnostic-rules/agent-install.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import roadmapDiskConsistencyMod = require('./health-diagnostic-rules/roadmap-disk-consistency.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import worktreeHealthMod = require('./health-diagnostic-rules/worktree-health.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import milestoneArchiveHygieneMod = require('./health-diagnostic-rules/milestone-archive-hygiene.cjs');
+
+const RULES: Rule[] = [
+  ...rootExistenceMod.RULES,
+  ...stateConsistencyMod.RULES,
+  ...configValidationMod.RULES,
+  ...phaseStructureMod.RULES,
+  ...agentInstallMod.RULES,
+  ...roadmapDiskConsistencyMod.RULES,
+  ...worktreeHealthMod.RULES,
+  ...milestoneArchiveHygieneMod.RULES,
+];
 
 // ─── Evaluator ──────────────────────────────────────────────────────────────
 

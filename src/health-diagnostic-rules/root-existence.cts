@@ -22,7 +22,7 @@ import type planningSnapshotMod = require('../planning-snapshot.cjs');
 type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnapshot>;
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-import healthDiagnosticMod = require('../health-diagnostic.cjs');
+import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
 const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
 type Rule = healthDiagnosticMod.Rule;

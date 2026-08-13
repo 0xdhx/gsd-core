@@ -42,7 +42,7 @@
 // — unlike `health-diagnostic.cts`'s own type-only import of
 // `planning-snapshot.cjs`, which never touches that module's runtime values.
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- export= CommonJS module
-import healthDiagnosticMod = require('../health-diagnostic.cjs');
+import healthDiagnosticMod = require('../health-diagnostic-types.cjs');
 const { SEVERITY, REMEDY_ACTION, REMEDY_RISK } = healthDiagnosticMod;
 type Rule = healthDiagnosticMod.Rule;
 type Diagnostic = healthDiagnosticMod.Diagnostic;
