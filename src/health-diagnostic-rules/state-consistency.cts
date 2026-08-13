@@ -55,7 +55,8 @@ type PlanningSnapshot = ReturnType<typeof planningSnapshotMod.buildPlanningSnaps
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('../phase-id.cjs');
-const { getMilestoneFromPhaseId, matchPhaseDirs, normalizePhaseName, extractPhaseToken } = phaseIdMod;
+const { getMilestoneFromPhaseId, matchPhaseDirs, normalizePhaseName, extractPhaseToken, PHASE_NUMBER_TOKEN_SOURCE } =
+  phaseIdMod;
 
 // ─── W024 — STATE.md commit-age freshness (DELIBERATELY INERT) ─────────────
 
@@ -110,6 +111,13 @@ const RULE_W024: Rule = {
  * fixture shape that would expose a false positive, and none of this
  * group's fixtures exercise archives, so this gap is disclosed rather than
  * silently absorbed.
+ *
+ * UPDATE (#3652): archived-phase-token coverage IS now included, via the
+ * additive `snapshot.archivedPhaseTokens` field
+ * (`src/planning-snapshot.cts`, added for this fix) — the disclosed gap
+ * above is closed; the paragraph is kept for the "conservative direction"
+ * reasoning, which still explains why every OTHER omission in this
+ * function is safe.
  */
 function buildValidPhaseSet(snapshot: PlanningSnapshot): Set<string> {
   const valid = new Set<string>();
@@ -119,6 +127,9 @@ function buildValidPhaseSet(snapshot: PlanningSnapshot): Set<string> {
   }
   for (const entry of snapshot.roadmapDeclaredPhases.value) {
     valid.add(entry.phaseId);
+  }
+  for (const token of snapshot.archivedPhaseTokens.value) {
+    valid.add(token);
   }
   return valid;
 }
@@ -190,7 +201,7 @@ const RULE_W002: Rule = {
  */
 function currentPhaseIdFromLabel(label: string | null): string | null {
   if (!label) return null;
-  const m = label.match(/^0*(\d+[A-Z]?(?:\.\d+)*)/);
+  const m = label.match(new RegExp(`^0*(${PHASE_NUMBER_TOKEN_SOURCE})`));
   return m ? m[1] : null;
 }
 
@@ -261,18 +272,22 @@ const RULE_W026: Rule = {
     const statusVal = (snapshot.stateStatus.value ?? '').trim().toLowerCase();
     if (!/milestone complete|archived/.test(statusVal)) return [];
 
-    const currentMilestone = snapshot.milestone.value?.version ?? null;
-    if (currentMilestone === null) return [];
-
+    // `currentMilestoneRoadmapPhaseIds` is already scoped to the current
+    // milestone (`extractCurrentMilestone(roadmapRaw, cwd)`, the same
+    // `<details>`/`<summary>`-tolerant owner `verify.cts:2364` used) — no
+    // separate `currentMilestone` resolution/filter needed here (see the
+    // field's own doc comment on `PlanningSnapshot` for why
+    // `roadmapDeclaredPhases`'s `milestone` attribution is the wrong fit).
     const unstarted: string[] = [];
-    for (const entry of snapshot.roadmapDeclaredPhases.value) {
-      // Scoped to the current milestone only — mirrors the original's
-      // `extractCurrentMilestone(roadmapRaw, cwd)` narrowing before its
-      // phase-heading scan (`verify.cts:2363-2364`).
-      if (entry.milestone !== currentMilestone) continue;
-      const normalized = normalizePhaseName(entry.phaseId);
-      const hasDirectory = matchPhaseDirs(snapshot.phaseDirs.value, normalized).matches.length > 0;
-      if (!hasDirectory) unstarted.push(entry.phaseId);
+    for (const phaseId of snapshot.currentMilestoneRoadmapPhaseIds.value) {
+      const normalized = normalizePhaseName(phaseId);
+      // `allPhaseDirNames` — every directory under `phases/`, UNWINDOWED by
+      // ROADMAP-declaration membership — mirrors the original's own
+      // unwindowed `phaseDirNames2` (`verify.cts:2372-2382`, a direct
+      // `readdirSync` of the phases dir), not the current-milestone-windowed
+      // `phaseDirs`.
+      const hasDirectory = matchPhaseDirs(snapshot.allPhaseDirNames.value, normalized).matches.length > 0;
+      if (!hasDirectory) unstarted.push(phaseId);
     }
     if (unstarted.length === 0) return [];
 
