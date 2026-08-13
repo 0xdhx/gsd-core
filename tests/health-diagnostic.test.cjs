@@ -166,14 +166,26 @@ describe('applyRepairs — risk gating (hand-constructed diagnostics)', () => {
     assert.deepEqual(result.refused.sort(), ['E004', 'E005']);
   });
 
-  test('row 12: every other real action (NONE risk) is applied, not refused, when --repair is requested', () => {
+  test('row 12: every other real action (NONE risk) is applied, not refused, when --repair is requested', (t) => {
+    // Unlike the other tests in this block, these four codes now dispatch to
+    // REAL handlers (runRepairAction, src/health-diagnostic.cts) that perform
+    // real filesystem I/O — createConfig writes config.json, addNyquistKey /
+    // addAiIntegrationPhaseKey read-then-patch it (throwing if absent). A
+    // literal '/fake/cwd' makes every one of those genuinely fail (ENOENT),
+    // which applyRepairs correctly reports as NOT applied. A real temp
+    // project with a real, valid config.json already in place is required so
+    // the read-then-patch handlers have something to read.
+    const tmpDir = createTempProject();
+    t.after(() => cleanup(tmpDir));
+    writeValidConfigJson(tmpDir);
+
     const diagnostics = [
       fakeDiagnostic('W003', REMEDY_ACTION.CREATE_CONFIG, REMEDY_RISK.NONE),
       fakeDiagnostic('W008', REMEDY_ACTION.ADD_NYQUIST_KEY, REMEDY_RISK.NONE),
       fakeDiagnostic('W016', REMEDY_ACTION.ADD_AI_INTEGRATION_PHASE_KEY, REMEDY_RISK.NONE),
       fakeDiagnostic('W018', REMEDY_ACTION.BACKFILL_MILESTONES, REMEDY_RISK.NONE),
     ];
-    const result = applyRepairs('/fake/cwd', diagnostics, true, false);
+    const result = applyRepairs(tmpDir, diagnostics, true, false);
     assert.deepEqual(result.applied.sort(), ['W003', 'W008', 'W016', 'W018']);
     assert.deepEqual(result.refused, []);
   });
