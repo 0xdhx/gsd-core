@@ -1222,10 +1222,22 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
     if (result) { content = result; updated.push('Last Date'); }
 
     // Update Stopped at
+    // #3374 Variant B: stateReplaceField returns the replaced string on any
+    // label MATCH, including when the value is already the target. Pushing
+    // 'Stopped At' on match alone reported a write that never changed a byte
+    // (and that the #948 no-op guard may then discard entirely), leaving a
+    // stale frontmatter stopped_at undetectable to the caller. Report only on
+    // real change — and track the match separately so an identical value does
+    // not read as "label missing" to the #944 DWIM insertion below (whose
+    // section rewrite would reset an executor-authored resume file to None).
+    let stoppedAtMatched = false;
     if (options.stopped_at) {
       result = stateReplaceField(content, 'Stopped At', options.stopped_at);
       if (!result) result = stateReplaceField(content, 'Stopped at', options.stopped_at);
-      if (result) { content = result; updated.push('Stopped At'); }
+      if (result) {
+        stoppedAtMatched = true;
+        if (result !== content) { content = result; updated.push('Stopped At'); }
+      }
     }
 
     // Update Resume File — only when the caller explicitly passed a value OR the
@@ -1276,7 +1288,10 @@ function cmdStateRecordSession(cwd: string, options: StateRecordSessionOptions, 
     // missing canonical fields are inserted while the heading and any prose are
     // preserved (#1101). Only append a brand-new section when NEITHER heading exists.
     const callerSuppliedValues = !!(options.stopped_at || (options.resume_file !== undefined && options.resume_file !== null));
-    const needsStoppedAt = options.stopped_at && !updated.includes('Stopped At');
+    // #3374: keyed on the label MATCH, not on updated[] — a matched-but-
+    // identical value is persisted (it is already on disk) and must not
+    // trigger the insertion rewrite.
+    const needsStoppedAt = options.stopped_at && !stoppedAtMatched;
     const needsResumeFile = options.resume_file !== undefined && options.resume_file !== null && !updated.includes('Resume File');
     const needsLastSession = !updated.includes('Last session') && !updated.includes('Last Date');
 
@@ -2312,13 +2327,15 @@ function syncStateFrontmatter(content: string, cwd: string | undefined, authorit
   // survive every writeStateMd call.
   //
   // For stopped_at / paused_at: the original #905 "fall back when derived is
-  // absent" rule is preserved here. The stale-body-overwrites-frontmatter
-  // scenario from #948 is prevented by the no-op guard in
-  // readModifyWriteStateMd: when the transform produces no change the file is
-  // never written, so syncStateFrontmatter never even runs. Attempting to
-  // "always prefer frontmatter" here breaks legitimate callers like phase.complete
-  // that intentionally write a new stopped_at value to the body and expect
-  // syncStateFrontmatter to pick it up.
+  // absent" rule is preserved here — this block handles the EMPTY case only.
+  // The disagreeing case (a present-but-stale body value vs a fresher
+  // frontmatter value, #948/#3374) is NOT handled here: it is governed by
+  // applyStatePreservation's preserve-when-unchanged delta, applied post-sync
+  // by readModifyWriteStateMd and by cmdPhaseComplete's adapter (the one
+  // caller that deliberately bypasses the RMW wrapper for the atomic
+  // ROADMAP/REQUIREMENTS/STATE commit — #3374). "Always prefer frontmatter"
+  // would still be wrong here: it would break callers whose transform
+  // legitimately writes a new body value and expects this sync to pick it up.
   if (!derivedFm['stopped_at'] && existingFm['stopped_at']) {
     derivedFm['stopped_at'] = existingFm['stopped_at'];
   }
@@ -4152,6 +4169,10 @@ export = {
   stateExtractField,
   stateReplaceField,
   stateReplaceFieldWithFallback,
+  // #3374: exported for phase.cts's cmdPhaseComplete adapter, whose direct
+  // syncStateFrontmatter call must snapshot the same ## Session scope the
+  // RMW path snapshots for applyStatePreservation's stopped_at delta.
+  matchSessionSection,
   acquireStateLock,
   releaseStateLock,
   writeStateMd,

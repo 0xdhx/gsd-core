@@ -63,7 +63,7 @@ import stateMod = require('./state.cjs');
 import { platformWriteSync, platformReadSync, platformEnsureDir, retryRenameSync } from './shell-command-projection.cjs';
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
 import { realClock } from './clock.cjs';
-import { transitionCore } from './state-transition.cjs';
+import { transitionCore, applyStatePreservation } from './state-transition.cjs';
 import { updateTableCell, deleteTableRow, escapeCell } from './markdown-table.cjs';
 import { deleteSection, updateBullet } from './markdown-sectionizer.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- uat-predicate.cjs is an export= CommonJS module
@@ -85,12 +85,13 @@ const { planningDir, withPlanningLock, listAvailableWorkstreams, getActiveWorkst
   planningWorkspace;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- milestone-lock.cjs is an export= CommonJS module
 import milestoneLockMod = require('./milestone-lock.cjs');
-const { extractFrontmatter } = frontmatterMod;
+const { extractFrontmatter, stripFrontmatter, reconstructFrontmatter } = frontmatterMod;
 const {
   readModifyWriteStateMd,
   stateExtractField,
   stateReplaceField,
   syncStateFrontmatter,
+  matchSessionSection,
   withStateLock,
   updatePerformanceMetricsSection,
 } = stateMod;
@@ -2971,6 +2972,23 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
           planCount,
           summaryCount,
         );
+        // #3374: this direct syncStateFrontmatter call bypasses
+        // readModifyWriteStateMd by design (STATE.md is committed atomically
+        // with ROADMAP/REQUIREMENTS), which also bypassed the #948/#1230
+        // preservation pass every RMW write gets — so a stale body
+        // `Stopped at:` line (which this transition never touches) silently
+        // clobbered a fresher frontmatter stopped_at on every completion.
+        // Mirror the RMW post-sync sequence here: snapshot the body source
+        // fields the preservation deltas key on (pre = on-disk content, post =
+        // the transformed content; the sync only rewrites the frontmatter
+        // block, so either side of it has the same body), then
+        // applyStatePreservation, then the #2736 authoritative re-assert.
+        const preFmSnapshot = extractFrontmatter(originalStateContent, statePath) as Record<string, unknown>;
+        const preBody = stripFrontmatter(originalStateContent);
+        const preSessionScope = matchSessionSection(preBody) ?? preBody;
+        const postBody = stripFrontmatter(stateContent);
+        const postSessionScope = matchSessionSection(postBody) ?? postBody;
+
         // #2736: the transition holds the next phase's exact display name in
         // the intent; pass it as authoritative so the sync's prose
         // re-derivation cannot rewrite current_phase_name to the name's own
@@ -2980,6 +2998,38 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
           cwd,
           nextPhaseDisplayName ? { current_phase_name: nextPhaseDisplayName } : undefined,
         );
+
+        // #3374: the same table-driven policy the RMW path applies. preFm null
+        // + resync true = lifecycle-transition posture (progress recomputed
+        // from disk; only the preserve-when-unchanged deltas apply). Fields
+        // the transition legitimately rewrote (Status, Phase) have changed
+        // body sources, so their deltas do not fire.
+        const postFm = extractFrontmatter(stateContent, statePath) as Record<string, unknown>;
+        const preservation = applyStatePreservation({
+          preFm: null,
+          postFm,
+          preFmSnapshot,
+          resync: true,
+          preBodyStatus: stateExtractField(preBody, 'Status'),
+          postBodyStatus: stateExtractField(postBody, 'Status'),
+          preBodyStoppedAt: stateExtractField(preSessionScope, 'Stopped At') || stateExtractField(preSessionScope, 'Stopped at'),
+          postBodyStoppedAt: stateExtractField(postSessionScope, 'Stopped At') || stateExtractField(postSessionScope, 'Stopped at'),
+          preBodyPhaseSource: stateExtractField(preBody, 'Phase'),
+          postBodyPhaseSource: stateExtractField(postBody, 'Phase'),
+        });
+        // #2736 re-assert (mirrors readModifyWriteStateMd): on layouts with no
+        // body `Phase:` line both phase-source snapshots are null (equal), so
+        // the #1695 restore fires and would put the stale pre-transition name
+        // back over the authoritative one. Intent beats the curated restore.
+        let preservationMutated = preservation.mutated;
+        if (nextPhaseDisplayName && preservation.postFm['current_phase_name'] !== nextPhaseDisplayName) {
+          preservation.postFm['current_phase_name'] = nextPhaseDisplayName;
+          preservationMutated = true;
+        }
+        if (preservationMutated) {
+          const yamlStr = reconstructFrontmatter(preservation.postFm as Parameters<typeof reconstructFrontmatter>[0]);
+          stateContent = `---\n${yamlStr}\n---\n\n${stripFrontmatter(stateContent)}`;
+        }
 
         writes.push({ filePath: statePath, before: originalStateContent, after: stateContent });
       }
