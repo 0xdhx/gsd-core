@@ -168,15 +168,19 @@
  *     inside it to match — not an enumeration of the phases directory at
  *     all; only shaped like one because `phasesDir` is a substring of the
  *     joined path.
- *   - `src/audit.cts` `scanUatGaps`, `scanVerificationGaps`,
- *     `scanContextQuestions`, `scanDeferredItems`: the pre-milestone-close
- *     audit gate (`gsd-tools.cjs audit-open`, called by `/gsd:complete-
- *     milestone`'s pre-close gate). Each deliberately SWEEPS EVERY phase
- *     directory on disk to report open UAT/VERIFICATION/CONTEXT/deferred-item
+ *   - `src/audit.cts` `collectPhaseScanTargets`: the shared enumerator the
+ *     four pre-milestone-close audit scanners (`scanUatGaps`,
+ *     `scanVerificationGaps`, `scanContextQuestions`, `scanDeferredItems`)
+ *     read through (`gsd-tools.cjs audit-open`, called by `/gsd:complete-
+ *     milestone`'s pre-close gate; #3458 hoisted the four per-scanner
+ *     readdirs here and added the archived `milestones/v*-phases/` root).
+ *     It deliberately SWEEPS EVERY phase directory on disk — active and
+ *     archived — to report open UAT/VERIFICATION/CONTEXT/deferred-item
  *     gaps — the audit's whole purpose is catching stragglers before a
  *     milestone closes, so scoping it to the current milestone's window
  *     would hide exactly the drift (e.g. a still-open item in a phase that
- *     somehow fell outside the window) it exists to surface.
+ *     somehow fell outside the window, or was archived still-open) it
+ *     exists to surface.
  *   - `src/roadmap-upgrade.cts` `computeMigrationPlan`: a legacy-id-to-
  *     milestone-prefixed-id MIGRATION. It must see and rename EVERY existing
  *     phase directory across every milestone in one pass (a legacy phase
@@ -276,7 +280,7 @@ const FUNCTION_SCOPED_EXEMPTIONS = new Map([
   [path.join('src', 'init.cts'), new Set(['detectHasPriorPhases', 'detectUiPhaseActive', 'cmdInitMilestoneOp'])],
   [path.join('src', 'milestone.cts'), new Set(['archivePhaseDirectories', 'cmdMilestoneComplete', 'cmdPhasesClear'])],
   [path.join('src', 'phase.cts'), new Set(['cmdPhasesList', 'cmdPhaseNextDecimal', 'cmdPhasePlanIndex', 'cmdPhaseInsert', 'renameDecimalPhases', 'renameIntegerPhases'])],
-  [path.join('src', 'audit.cts'), new Set(['scanUatGaps', 'scanVerificationGaps', 'scanContextQuestions', 'scanDeferredItems'])],
+  [path.join('src', 'audit.cts'), new Set(['collectPhaseScanTargets'])],
   [path.join('src', 'commands.cts'), new Set(['cmdHistoryDigest'])],
   [path.join('src', 'state.cts'), new Set(['cmdStateValidate', 'cmdStateSync', 'cmdStateRebuild'])],
   [path.join('src', 'roadmap-upgrade.cts'), new Set(['computeMigrationPlan'])],

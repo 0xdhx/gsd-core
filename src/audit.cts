@@ -25,6 +25,9 @@ const { extractFrontmatter } = frontmatter;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
 const { PHASE_NUMBER_TOKEN_SOURCE } = phaseIdMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseLocator = require('./phase-locator.cjs');
+const { getArchivedPhaseDirs } = phaseLocator;
 import { requireSafePath, sanitizeForDisplay } from './security.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -75,6 +78,7 @@ interface UatGapItem {
   file: string;
   status: string;
   open_scenario_count: number;
+  milestone?: string;
   scan_error?: boolean;
 }
 
@@ -82,6 +86,7 @@ interface VerificationGapItem {
   phase: string;
   file: string;
   status: string;
+  milestone?: string;
   scan_error?: boolean;
 }
 
@@ -90,6 +95,7 @@ interface ContextQuestionItem {
   file: string;
   question_count: number;
   questions: string[];
+  milestone?: string;
   scan_error?: boolean;
 }
 
@@ -97,6 +103,7 @@ interface DeferredItem {
   phase: string;
   file: string;
   text: string;
+  milestone?: string;
   scan_error?: boolean;
 }
 
@@ -494,29 +501,83 @@ function scanSeeds(planDir: string): SeedItem[] {
   return results;
 }
 
+// ─── collectPhaseScanTargets ──────────────────────────────────────────────────
+
+interface PhaseScanTarget {
+  dir: string;
+  phaseDir: string;
+  /** Archive milestone version (`v<X.Y>`), undefined for an active phase dir. */
+  milestone?: string;
+}
+
+/**
+ * Enumerate the phase directories the four phase-scoped scanners below read,
+ * from BOTH roots: the active `.planning/phases/` tree and every archived
+ * `.planning/milestones/v<X.Y>-phases/` tree (#3458).
+ *
+ * Milestone close MOVES phase dirs into the archive (#1871), so a scanner that
+ * resolves only the active root goes blind to an item exactly one milestone
+ * after it was left unresolved — the `[R]/[A]/[C]` prompt's "carry forward"
+ * answer produces precisely that item. `src/uat.cts` (#2766) is the reference
+ * implementation; the archive layout convention stays owned by
+ * `phase-locator.cts`'s `getArchivedPhaseDirs`, so a future layout change has
+ * one home.
+ *
+ * Active dirs are enumerated unfiltered, exactly as these scanners always did.
+ * Archived dirs are deliberately NOT milestone-filtered — archived phases
+ * belong to past milestones by definition, so a current-milestone filter would
+ * discard every one of them and silently reinstate the bug.
+ *
+ * Archived targets carry their archive's milestone version so items can be
+ * labeled with provenance instead of presenting archived and in-flight work
+ * identically — phase numbers repeat across milestones (same rationale as
+ * `uat.cts`'s `archived_milestone`).
+ *
+ * `scanError` reports an unreadable active root (EACCES/EIO — distinct from
+ * absent). Each caller maps it to its own scan_error sentinel shape, as
+ * before — but still scans the archived targets, which are unaffected by an
+ * unreadable active root; dropping them would be the same silent loss one
+ * root over.
+ */
+function collectPhaseScanTargets(planDir: string, cwd: string): { targets: PhaseScanTarget[]; scanError: boolean } {
+  const targets: PhaseScanTarget[] = [];
+  let scanError = false;
+
+  const phasesDir = path.join(planDir, 'phases');
+  if (fs.existsSync(phasesDir)) {
+    try {
+      const dirs = fs.readdirSync(phasesDir, { withFileTypes: true })
+        .filter(e => e.isDirectory())
+        .map(e => e.name)
+        .sort();
+      for (const dir of dirs) {
+        targets.push({ dir, phaseDir: path.join(phasesDir, dir) });
+      }
+    } catch {
+      scanError = true;
+    }
+  }
+
+  for (const archived of getArchivedPhaseDirs(cwd)) {
+    targets.push({ dir: archived.name, phaseDir: archived.fullPath, milestone: archived.milestone });
+  }
+
+  return { targets, scanError };
+}
+
 // ─── scanUatGaps ──────────────────────────────────────────────────────────────
 
 /**
- * Scan .planning/phases for UAT gaps (UAT files with status != 'complete').
+ * Scan active and archived phase dirs for UAT gaps (UAT files with
+ * status != 'complete').
  */
-function scanUatGaps(planDir: string): UatGapItem[] {
-  const phasesDir = path.join(planDir, 'phases');
-  if (!fs.existsSync(phasesDir)) return [];
+function scanUatGaps(planDir: string, cwd: string): UatGapItem[] {
+  const { targets, scanError } = collectPhaseScanTargets(planDir, cwd);
+  const results: UatGapItem[] = scanError
+    ? [{ scan_error: true, phase: '', file: '', status: '', open_scenario_count: 0 }]
+    : [];
 
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(phasesDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name)
-      .sort();
-  } catch {
-    return [{ scan_error: true, phase: '', file: '', status: '', open_scenario_count: 0 }];
-  }
-
-  const results: UatGapItem[] = [];
-
-  for (const dir of dirs) {
-    const phaseDir = path.join(phasesDir, dir);
+  for (const { dir, phaseDir, milestone } of targets) {
     const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
     const phaseNum = phaseMatch ? phaseMatch[1] : dir;
 
@@ -557,6 +618,7 @@ function scanUatGaps(planDir: string): UatGapItem[] {
         file: sanitizeForDisplay(file),
         status: sanitizeForDisplay(status),
         open_scenario_count: pendingMatches,
+        ...(milestone !== undefined ? { milestone: sanitizeForDisplay(milestone) } : {}),
       });
     }
   }
@@ -567,26 +629,15 @@ function scanUatGaps(planDir: string): UatGapItem[] {
 // ─── scanVerificationGaps ─────────────────────────────────────────────────────
 
 /**
- * Scan .planning/phases for VERIFICATION gaps.
+ * Scan active and archived phase dirs for VERIFICATION gaps.
  */
-function scanVerificationGaps(planDir: string): VerificationGapItem[] {
-  const phasesDir = path.join(planDir, 'phases');
-  if (!fs.existsSync(phasesDir)) return [];
+function scanVerificationGaps(planDir: string, cwd: string): VerificationGapItem[] {
+  const { targets, scanError } = collectPhaseScanTargets(planDir, cwd);
+  const results: VerificationGapItem[] = scanError
+    ? [{ scan_error: true, phase: '', file: '', status: '' }]
+    : [];
 
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(phasesDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name)
-      .sort();
-  } catch {
-    return [{ scan_error: true, phase: '', file: '', status: '' }];
-  }
-
-  const results: VerificationGapItem[] = [];
-
-  for (const dir of dirs) {
-    const phaseDir = path.join(phasesDir, dir);
+  for (const { dir, phaseDir, milestone } of targets) {
     const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
     const phaseNum = phaseMatch ? phaseMatch[1] : dir;
 
@@ -619,6 +670,7 @@ function scanVerificationGaps(planDir: string): VerificationGapItem[] {
         phase: sanitizeForDisplay(phaseNum),
         file: sanitizeForDisplay(file),
         status: sanitizeForDisplay(status),
+        ...(milestone !== undefined ? { milestone: sanitizeForDisplay(milestone) } : {}),
       });
     }
   }
@@ -629,26 +681,15 @@ function scanVerificationGaps(planDir: string): VerificationGapItem[] {
 // ─── scanContextQuestions ─────────────────────────────────────────────────────
 
 /**
- * Scan .planning/phases for CONTEXT files with open_questions.
+ * Scan active and archived phase dirs for CONTEXT files with open_questions.
  */
-function scanContextQuestions(planDir: string): ContextQuestionItem[] {
-  const phasesDir = path.join(planDir, 'phases');
-  if (!fs.existsSync(phasesDir)) return [];
+function scanContextQuestions(planDir: string, cwd: string): ContextQuestionItem[] {
+  const { targets, scanError } = collectPhaseScanTargets(planDir, cwd);
+  const results: ContextQuestionItem[] = scanError
+    ? [{ scan_error: true, phase: '', file: '', question_count: 0, questions: [] }]
+    : [];
 
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(phasesDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name)
-      .sort();
-  } catch {
-    return [{ scan_error: true, phase: '', file: '', question_count: 0, questions: [] }];
-  }
-
-  const results: ContextQuestionItem[] = [];
-
-  for (const dir of dirs) {
-    const phaseDir = path.join(phasesDir, dir);
+  for (const { dir, phaseDir, milestone } of targets) {
     const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
     const phaseNum = phaseMatch ? phaseMatch[1] : dir;
 
@@ -704,6 +745,7 @@ function scanContextQuestions(planDir: string): ContextQuestionItem[] {
         file: sanitizeForDisplay(file),
         question_count: questions.length,
         questions: questions.slice(0, 3),
+        ...(milestone !== undefined ? { milestone: sanitizeForDisplay(milestone) } : {}),
       });
     }
   }
@@ -723,7 +765,10 @@ function scanContextQuestions(planDir: string): ContextQuestionItem[] {
  * unresolved at MILESTONE close surfaces in the pre-close audit alongside the
  * other eight categories and the existing `[R]/[A]/[C]` prompt applies to it.
  * Without this, phase directories archive to `milestones/vX.Y-phases/` (#1871)
- * and the entry leaves the live tree having never been triaged.
+ * and the entry leaves the live tree having never been triaged. #3458 made
+ * that promise reach the archive itself: an entry carried forward past its own
+ * milestone close now stays visible at every later close, via the shared
+ * collectPhaseScanTargets dual-root enumeration.
  *
  * The resolved/unresolved predicate is NOT reimplemented here: `uat.cjs`
  * already exports `parseDeferredItems`, which owns the parsing rule (entries
@@ -734,27 +779,20 @@ function scanContextQuestions(planDir: string): ContextQuestionItem[] {
  * inside the scan, to preserve `audit-command-router.cts`'s property that a
  * route never loads the module it does not need.
  */
-function scanDeferredItems(planDir: string): DeferredItem[] {
-  const phasesDir = path.join(planDir, 'phases');
-  if (!fs.existsSync(phasesDir)) return [];
+function scanDeferredItems(planDir: string, cwd: string): DeferredItem[] {
+  const { targets, scanError } = collectPhaseScanTargets(planDir, cwd);
+  const results: DeferredItem[] = scanError
+    ? [{ scan_error: true, phase: '', file: '', text: '' }]
+    : [];
 
-  let dirs: string[];
-  try {
-    dirs = fs.readdirSync(phasesDir, { withFileTypes: true })
-      .filter(e => e.isDirectory())
-      .map(e => e.name)
-      .sort();
-  } catch {
-    return [{ scan_error: true, phase: '', file: '', text: '' }];
-  }
+  // Nothing to scan → skip the lazy require entirely (pre-fix, an absent
+  // phases dir returned before it too).
+  if (targets.length === 0) return results;
 
   // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
   const uat: UatDeferredModule = require('./uat.cjs');
 
-  const results: DeferredItem[] = [];
-
-  for (const dir of dirs) {
-    const phaseDir = path.join(phasesDir, dir);
+  for (const { dir, phaseDir, milestone } of targets) {
     const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
     const phaseNum = phaseMatch ? phaseMatch[1] : dir;
 
@@ -776,6 +814,7 @@ function scanDeferredItems(planDir: string): DeferredItem[] {
         phase: sanitizeForDisplay(phaseNum),
         file: DEFERRED_ITEMS_FILENAME,
         text: sanitizeForDisplay(item.name),
+        ...(milestone !== undefined ? { milestone: sanitizeForDisplay(milestone) } : {}),
       });
     }
   }
@@ -815,19 +854,19 @@ function auditOpenArtifacts(cwd: string): AuditResult {
   })();
 
   const uatGaps = (() => {
-    try { return scanUatGaps(planDir); } catch { return [{ scan_error: true, phase: '', file: '', status: '', open_scenario_count: 0 }]; }
+    try { return scanUatGaps(planDir, cwd); } catch { return [{ scan_error: true, phase: '', file: '', status: '', open_scenario_count: 0 }]; }
   })();
 
   const verificationGaps = (() => {
-    try { return scanVerificationGaps(planDir); } catch { return [{ scan_error: true, phase: '', file: '', status: '' }]; }
+    try { return scanVerificationGaps(planDir, cwd); } catch { return [{ scan_error: true, phase: '', file: '', status: '' }]; }
   })();
 
   const contextQuestions = (() => {
-    try { return scanContextQuestions(planDir); } catch { return [{ scan_error: true, phase: '', file: '', question_count: 0, questions: [] }]; }
+    try { return scanContextQuestions(planDir, cwd); } catch { return [{ scan_error: true, phase: '', file: '', question_count: 0, questions: [] }]; }
   })();
 
   const deferredItems = (() => {
-    try { return scanDeferredItems(planDir); } catch { return [{ scan_error: true, phase: '', file: '', text: '' }]; }
+    try { return scanDeferredItems(planDir, cwd); } catch { return [{ scan_error: true, phase: '', file: '', text: '' }]; }
   })();
 
   // Count real items (not scan_error sentinels)
@@ -906,7 +945,7 @@ function formatAuditReport(auditResult: AuditResult): string {
     lines.push('');
     lines.push(`🔴 UAT Gaps (${counts.uat_gaps} phases with incomplete UAT)`);
     for (const item of items.uat_gaps.filter(i => !i.scan_error)) {
-      lines.push(`   • Phase ${item.phase}: ${item.file} [${item.status}] — ${item.open_scenario_count} pending scenarios`);
+      lines.push(`   • Phase ${item.phase}${item.milestone ? ` (${item.milestone})` : ''}: ${item.file} [${item.status}] — ${item.open_scenario_count} pending scenarios`);
     }
   }
 
@@ -915,7 +954,7 @@ function formatAuditReport(auditResult: AuditResult): string {
     lines.push('');
     lines.push(`🔴 Verification Gaps (${counts.verification_gaps} unresolved)`);
     for (const item of items.verification_gaps.filter(i => !i.scan_error)) {
-      lines.push(`   • Phase ${item.phase}: ${item.file} [${item.status}]`);
+      lines.push(`   • Phase ${item.phase}${item.milestone ? ` (${item.milestone})` : ''}: ${item.file} [${item.status}]`);
     }
   }
 
@@ -971,7 +1010,7 @@ function formatAuditReport(auditResult: AuditResult): string {
     lines.push('');
     lines.push(`🔵 CONTEXT Open Questions (${counts.context_questions} phases with open questions)`);
     for (const item of items.context_questions.filter(i => !i.scan_error)) {
-      lines.push(`   • Phase ${item.phase}: ${item.file} (${item.question_count} question${item.question_count !== 1 ? 's' : ''})`);
+      lines.push(`   • Phase ${item.phase}${item.milestone ? ` (${item.milestone})` : ''}: ${item.file} (${item.question_count} question${item.question_count !== 1 ? 's' : ''})`);
       for (const q of item.questions) {
         lines.push(`     - ${q}`);
       }
@@ -984,7 +1023,7 @@ function formatAuditReport(auditResult: AuditResult): string {
     lines.push('');
     lines.push(`🔵 Deferred Items (${counts.deferred_items} unresolved)`);
     for (const item of items.deferred_items.filter(i => !i.scan_error)) {
-      lines.push(`   • Phase ${item.phase}: ${item.text}`);
+      lines.push(`   • Phase ${item.phase}${item.milestone ? ` (${item.milestone})` : ''}: ${item.text}`);
     }
   }
 

@@ -1095,3 +1095,123 @@ describe('bug #950: quick-task SUMMARY must carry status: complete', () => {
 });
   });
 }
+
+// ─── #3458: archived phases are audited too ──────────────────────────────────
+//
+// Milestone close MOVES phase dirs to `.planning/milestones/v<X.Y>-phases/`
+// (#1871). The four phase-scoped scanners (uat_gaps, verification_gaps,
+// context_questions, deferred_items) resolved only `.planning/phases/`, so an
+// item carried forward at one milestone close was invisible to every later
+// pre-close audit — and could flip `has_open_items` to false on its own.
+// Failing-first per the triage brief on #3458; the fix reuses
+// `getArchivedPhaseDirs` (phase-locator.cjs), the same seam #2766 gave uat.cjs.
+
+describe('#3458: the four phase scanners read milestones/v*-phases/', () => {
+  const fs3458 = require('node:fs');
+  const path3458 = require('node:path');
+  const helpers3458 = require('./helpers.cjs');
+
+  let tmpDir;
+  beforeEach(() => { tmpDir = helpers3458.createTempProject(); });
+  afterEach(() => { helpers3458.cleanup(tmpDir); });
+
+  /** Write the four open-artifact kinds into one phase dir (relative to tmpDir). */
+  function writeOpenArtifacts(relPhaseDir) {
+    const phaseDir = path3458.join(tmpDir, relPhaseDir);
+    fs3458.mkdirSync(phaseDir, { recursive: true });
+    fs3458.writeFileSync(path3458.join(phaseDir, '01-UAT.md'),
+      '---\nstatus: pending\n---\n\n# UAT\n\nresult: pending\n');
+    fs3458.writeFileSync(path3458.join(phaseDir, '01-VERIFICATION.md'),
+      '---\nstatus: gaps_found\n---\n\n# Verification\n');
+    fs3458.writeFileSync(path3458.join(phaseDir, '01-CONTEXT.md'),
+      '# Context\n\n## Open Questions\n\n- Is the retry budget per-call or global?\n');
+    fs3458.writeFileSync(path3458.join(phaseDir, 'deferred-items.md'),
+      '## Deferred Items\n\n- STILL-OPEN: survived a milestone close.\n');
+  }
+
+  function auditJson3458() {
+    const result = helpers3458.runGsdTools('audit-open --json', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    return JSON.parse(result.output);
+  }
+
+  test('fully-archived project (no .planning/phases/ at all): all four categories surface', () => {
+    writeOpenArtifacts('.planning/milestones/v1.0-phases/01-alpha');
+    // ROADMAP names a LATER current milestone — archived items must not be
+    // discarded by current-milestone scoping (AC 4).
+    fs3458.writeFileSync(path3458.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n## Milestone v1.1\n');
+
+    const out = auditJson3458();
+
+    assert.strictEqual(out.counts.uat_gaps, 1);
+    assert.strictEqual(out.counts.verification_gaps, 1);
+    assert.strictEqual(out.counts.context_questions, 1);
+    assert.strictEqual(out.counts.deferred_items, 1);
+    assert.strictEqual(out.has_open_items, true);
+    // Archived items carry their archive's milestone as provenance (the AC's
+    // "without mixing up items across milestones" — phase numbers repeat).
+    assert.strictEqual(out.items.deferred_items[0].milestone, 'v1.0');
+    assert.strictEqual(out.items.uat_gaps[0].milestone, 'v1.0');
+
+    // And the human report labels them.
+    const report = helpers3458.runGsdTools('audit-open', tmpDir);
+    assert.ok(report.success, `Command failed: ${report.error}`);
+    assert.match(report.output, /Phase 01 \(v1\.0\)/);
+  });
+
+  test('mixed active + archived: items from both roots, no double-counting', () => {
+    writeOpenArtifacts('.planning/milestones/v1.0-phases/01-alpha');
+    const activeDir = path3458.join(tmpDir, '.planning', 'phases', '02-beta');
+    fs3458.mkdirSync(activeDir, { recursive: true });
+    fs3458.writeFileSync(path3458.join(activeDir, 'deferred-items.md'),
+      '## Deferred Items\n\n- Active-tree item, distinct from the archived one.\n');
+
+    const out = auditJson3458();
+
+    assert.strictEqual(out.counts.deferred_items, 2);
+    assert.deepStrictEqual(
+      [...new Set(out.items.deferred_items.map(i => i.phase))].sort(),
+      ['01', '02'],
+    );
+    // Provenance separates the roots: archived carries its milestone, active none.
+    const byPhase = Object.fromEntries(out.items.deferred_items.map(i => [i.phase, i.milestone]));
+    assert.strictEqual(byPhase['01'], 'v1.0');
+    assert.strictEqual(byPhase['02'], undefined);
+    // The archived phase's other three artifacts are counted exactly once each.
+    assert.strictEqual(out.counts.uat_gaps, 1);
+    assert.strictEqual(out.counts.verification_gaps, 1);
+    assert.strictEqual(out.counts.context_questions, 1);
+  });
+
+  test('fully-archived project with everything resolved stays all-clear (no new noise)', () => {
+    const phaseDir = path3458.join(tmpDir, '.planning', 'milestones', 'v1.0-phases', '01-alpha');
+    fs3458.mkdirSync(phaseDir, { recursive: true });
+    fs3458.writeFileSync(path3458.join(phaseDir, '01-UAT.md'),
+      '---\nstatus: complete\n---\n\n# UAT\n');
+    fs3458.writeFileSync(path3458.join(phaseDir, '01-VERIFICATION.md'),
+      '---\nstatus: passed\n---\n\n# Verification\n');
+    fs3458.writeFileSync(path3458.join(phaseDir, '01-CONTEXT.md'),
+      '# Context\n\n## Open Questions\n\nNone\n');
+    fs3458.writeFileSync(path3458.join(phaseDir, 'deferred-items.md'),
+      '## Deferred Items\n\n- Was handled.\n  status: resolved\n');
+
+    const out = auditJson3458();
+
+    assert.strictEqual(out.counts.uat_gaps, 0);
+    assert.strictEqual(out.counts.verification_gaps, 0);
+    assert.strictEqual(out.counts.context_questions, 0);
+    assert.strictEqual(out.counts.deferred_items, 0);
+    assert.strictEqual(out.has_open_items, false);
+  });
+
+  test('archives across multiple milestones are all scanned', () => {
+    writeOpenArtifacts('.planning/milestones/v1.0-phases/01-alpha');
+    writeOpenArtifacts('.planning/milestones/v1.1-phases/03-gamma');
+
+    const out = auditJson3458();
+
+    assert.strictEqual(out.counts.deferred_items, 2);
+    assert.strictEqual(out.counts.uat_gaps, 2);
+  });
+});
