@@ -2976,7 +2976,9 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         // readModifyWriteStateMd by design (STATE.md is committed atomically
         // with ROADMAP/REQUIREMENTS), which also bypassed the #948/#1230
         // preservation pass every RMW write gets — so a stale body
-        // `Stopped at:` line (which this transition never touches) silently
+        // `Stopped at:` line (which this transition historically never
+        // touched — completePhaseCore now refreshes it, so this pass is the
+        // backstop for layouts whose line that writer cannot reach) silently
         // clobbered a fresher frontmatter stopped_at on every completion.
         // Mirror the RMW post-sync sequence here: snapshot the body source
         // fields the preservation deltas key on (pre = on-disk content, post =
