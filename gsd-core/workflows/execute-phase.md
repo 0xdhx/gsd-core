@@ -91,7 +91,7 @@ Parse JSON for: `executor_model`, `verifier_model`, `commit_docs`, `parallelizat
 
 `section_manifest` (#2932) gates the three `steps/*.md` reads below: read a step file only when its `id` is in `section_manifest.included` (equivalently, its path is in `section_manifest.read`); skip it — without reading — when its `id` is in `section_manifest.excluded`. When `section_manifest` is `null` (degraded: manifest artifact missing/unreadable), read all three unconditionally — the safe superset.
 
-**Model resolution:** If `executor_model` is `"inherit"`, omit the `model=` parameter from all `Agent()` calls — do NOT pass `model="inherit"` to Agent. Omitting the `model=` parameter causes Claude Code to inherit the current orchestrator model automatically. Only set `model=` when `executor_model` is an explicit model name (e.g., `"claude-sonnet-5"`, `"claude-opus-4-8"`).
+**Model resolution:** If `executor_model` is `"inherit"`, omit the `model=` parameter from all `Agent()` calls — do NOT pass `model="inherit"` to Agent. Omitting the `model=` parameter causes Claude Code to inherit the orchestrator model automatically. Only set `model=` when `executor_model` is an explicit model name (e.g., `"claude-sonnet-5"`, `"claude-opus-4-8"`).
 
 @~/.claude/gsd-core/references/execute-phase-response-language.md
 
@@ -742,7 +742,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
        ${CONTEXT_WINDOW < 200000 ? '' : '- `~/.claude/gsd-core/references/executor-examples.md`'}
        </execution_context>
 
-       <files_to_read>
+       <required_reading>
        Read these files at execution start using the Read tool.
        First resolve repo root so every path is anchored:
        \`PROJECT_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)\`
@@ -757,7 +757,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
        ` : ''}
        - ${PROJECT_ROOT}/CLAUDE.md (Project instructions, if exists — follow project-specific guidelines and coding conventions)
        - ${PROJECT_ROOT}/.claude/skills/ or ${PROJECT_ROOT}/.agents/skills/ (Project skills, if either exists — list skills, read SKILL.md for each, follow relevant rules during implementation)
-       </files_to_read>
+       </required_reading>
 
        ${AGENT_SKILLS}
 
@@ -1301,7 +1301,7 @@ Check must_haves against actual codebase.
 Cross-reference requirement IDs from PLAN frontmatter against REQUIREMENTS.md — every ID MUST be accounted for.
 Create VERIFICATION.md.
 
-<files_to_read>
+<required_reading>
 Read these files before verification:
 - {phase_dir}/*-PLAN.md (All plans — understand intent, check must_haves)
 - {phase_dir}/*-SUMMARY.md (All summaries — cross-reference claimed vs actual)
@@ -1310,7 +1310,7 @@ ${CONTEXT_WINDOW >= 500000 ? `- {phase_dir}/*-CONTEXT.md (User decisions — ver
 - {phase_dir}/*-RESEARCH.md (Known pitfalls — check for traps)
 - Prior VERIFICATION.md files from earlier phases (regression check)
 ` : ''}
-</files_to_read>
+</required_reading>
 
 ${VERIFIER_SKILLS}",
   subagent_type="gsd-verifier",
