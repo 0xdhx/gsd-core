@@ -106,7 +106,8 @@ interface CommitToSubrepoRepoResult {
 interface EffortSyncChange {
   agent: string;
   from: string | null;
-  to: string;
+  // #3533 (10d): to === null is the typed IR for omission (inherit strips the key).
+  to: string | null;
 }
 
 // ─── Phase Status ─────────────────────────────────────────────────────────────
@@ -745,6 +746,28 @@ function setEffortFrontmatter(content: string, effortValue: string): string {
 }
 
 /**
+ * #3533 (10d) — remove exactly the frontmatter `effort:` line (and its line
+ * ending) so an agent configured for `inherit` carries NO key. Mirrors the
+ * codex-agent-toml strip discipline: targeted line removal, EOL-aware, every
+ * other byte (comments, sibling keys, the body) untouched.
+ */
+function removeEffortFrontmatter(content: string): string {
+  // Scoped to the FIRST frontmatter block (not a whole-file /m match): a
+  // preamble or body line starting with `effort:` (a fenced config example,
+  // a thematic-break flanked fragment) must never be the line removed.
+  const fmRe = /^---\r?\n([\s\S]*?)^---\r?$/m;
+  const match = fmRe.exec(content);
+  if (!match) return content;
+  const fmBody = match[1];
+  const lineRe = /^effort:[ \t]*.*\r?\n?/m;
+  if (!lineRe.test(fmBody)) return content;
+  const strippedFm = fmBody.replace(lineRe, '');
+  const openLen = 3 + (/^---\r\n/.test(content) ? 2 : 1);
+  const closingStart = match.index + openLen + fmBody.length;
+  return content.slice(0, match.index + openLen) + strippedFm + content.slice(closingStart);
+}
+
+/**
  * #488 — Re-sync effort: frontmatter in all installed gsd-*.md agent files to
  * match the current effort config, without requiring a full reinstall.
  *
@@ -811,6 +834,25 @@ function cmdEffortSync(cwd: string, raw: boolean, opts?: { dryRun?: boolean; con
 
     // Resolve using install-time logic: home defaults merged with project config.
     const universalEffort = resolveInstallTimeEffort(effortCfg, agentName);
+
+    // #3533 (10d): 'inherit' means the key must NOT exist. An absent key is
+    // the CORRECT state (in sync, skipped) — before #3533 absence read as null
+    // drift and the sync re-added a hand-stripped key on every apply. A
+    // present key under inherit is stripped, reported as {from, to: null}.
+    if (universalEffort === 'inherit') {
+      // eslint-disable-next-line local/no-unbounded-quantifier -- same lazy `*?` bounded by the `^---$/m` closing anchor as the concrete-path fmMatch below; duplicated here so the inherit branch validates against the same frontmatter span the strip targets
+      const fmMatchInherit = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(content);
+      if (!fmMatchInherit) { skipped++; continue; }
+      const effortMatchInherit = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatchInherit[1]);
+      if (!effortMatchInherit) { skipped++; continue; }
+      changes.push({ agent: agentName, from: effortMatchInherit[1], to: null });
+      synced++;
+      if (!dryRun) {
+        fs.writeFileSync(filePath, removeEffortFrontmatter(content));
+      }
+      continue;
+    }
+
     const rendered = renderEffortForRuntime(runtime, universalEffort);
     const newEffortValue = rendered.value;
 
