@@ -175,26 +175,42 @@ const CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
  *  #13 names. */
 const BIDI_RE = /[‪-‮⁦-⁩]/g;
 
+/** Combining marks (U+0300-U+036F) — "zalgo" text. Stacked onto the
+ *  preceding base character, an unbounded run visually overflows into
+ *  adjacent terminal cells/rows even though the string stays within the
+ *  64-char cap `readInstallManifest` enforces. Written as `\u{...}` escapes
+ *  (not literal combining characters) so the source itself stays plain
+ *  ASCII and does not visually combine in editors/diffs. */
+const COMBINING_MARK_RE = /[\u{0300}-\u{036F}]/gu;
+
+/** Zero-width characters: ZWSP (U+200B), ZWNJ (U+200C), ZWJ (U+200D), and
+ *  BOM/ZWNBSP (U+FEFF). None of these are JS `\s`, so they survive both the
+ *  char-count cap and the whitespace-collapse step below undetected. */
+const ZERO_WIDTH_RE = /[\u{200B}-\u{200D}\u{FEFF}]/gu;
+
 /**
  * Sanitize a `declaredRuntime` (or any similarly attacker-influenceable
  * string) for terminal/console rendering. `null` passes through as `null`;
- * `''` passes through as `''`. Strips ANSI escapes, C0/C1 controls, and
- * Unicode bidi overrides/isolates (replacing each stripped run with
- * nothing — never a space), then collapses any remaining whitespace run
- * (including adjacent spaces left behind by a removed newline) to a single
- * space and trims.
+ * `''` passes through as `''`. Strips ANSI escapes, C0/C1 controls, Unicode
+ * bidi overrides/isolates, combining marks (zalgo), and zero-width
+ * characters (replacing each stripped run with nothing — never a space),
+ * then collapses any remaining whitespace run (including adjacent spaces
+ * left behind by a removed newline) to a single space and trims.
  *
- * Idempotent by construction: once ANSI/control/bidi bytes are gone and
- * whitespace is collapsed to single internal spaces with no leading/
- * trailing space, a second pass finds nothing left to strip or collapse.
- * Never truncates — `readInstallManifest` already caps at 64 chars.
+ * Idempotent by construction: once ANSI/control/bidi/combining/zero-width
+ * bytes are gone and whitespace is collapsed to single internal spaces with
+ * no leading/trailing space, a second pass finds nothing left to strip or
+ * collapse. Pure character-class filter — never truncates; `readInstallManifest`
+ * already caps at 64 chars.
  */
 export function sanitizeForRender(value: string | null): string | null {
   if (value === null) return null;
   const stripped = value
     .replace(ANSI_RE, '')
     .replace(CONTROL_RE, '')
-    .replace(BIDI_RE, '');
+    .replace(BIDI_RE, '')
+    .replace(COMBINING_MARK_RE, '')
+    .replace(ZERO_WIDTH_RE, '');
   return stripped.replace(/\s+/g, ' ').trim();
 }
 

@@ -328,3 +328,47 @@ describe('buildShadowReport — the lstatSync symlink guard (B14-B16)', () => {
     assert.strictEqual(report.triggers.length, 1);
   });
 });
+
+// ─── B17-B18 — zalgo / zero-width, #2873 PR review Finding 2 (MINOR) ──────
+//
+// `sanitizeForRender` stripped ANSI, C0/C1, and bidi overrides/isolates, but
+// not combining marks (U+0300-U+036F — "zalgo" text, which visually
+// overflows into adjacent terminal cells) or zero-width characters (ZWSP
+// U+200B, ZWNJ U+200C, ZWJ U+200D, BOM/ZWNBSP U+FEFF). Neither class is a JS
+// `\s`, so both survived the 64-char cap and the whitespace-collapse step
+// undetected.
+
+// Written as `\u{...}` escapes throughout (never literal combining/bidi/
+// zero-width characters) so the source stays plain ASCII and does not
+// visually combine with adjacent punctuation in editors/diffs.
+const ZALGO_COMBINING_1 = '\u{0300}'; // combining grave accent
+const ZALGO_COMBINING_2 = '\u{0301}'; // combining acute accent
+const ZALGO_COMBINING_3 = '\u{036F}'; // combining latin small letter x (top of range)
+const ZWSP = '\u{200B}';
+const ZWNJ = '\u{200C}';
+const ZWJ = '\u{200D}';
+const BOM = '\u{FEFF}';
+
+describe('buildShadowReport — hostile declaredRuntime is sanitized in the IR (B17-B18)', () => {
+  test('combining marks (zalgo) are stripped (B17)', () => {
+    const report = declaredRuntimeReport(`a${ZALGO_COMBINING_1}${ZALGO_COMBINING_2}${ZALGO_COMBINING_3}b`);
+    assert.strictEqual(report.mismatches.length, 1);
+    assert.strictEqual(report.mismatches[0].declaredRuntime, 'ab');
+    assert.ok(!/[\u{0300}-\u{036F}]/u.test(report.mismatches[0].declaredRuntime));
+  });
+
+  test('zero-width characters (ZWSP/ZWNJ/ZWJ/BOM) are stripped (B18)', () => {
+    const report = declaredRuntimeReport(`a${ZWSP}b${ZWNJ}c${ZWJ}d${BOM}e`);
+    assert.strictEqual(report.mismatches.length, 1);
+    assert.strictEqual(report.mismatches[0].declaredRuntime, 'abcde');
+    assert.ok(!/[\u{200B}-\u{200D}\u{FEFF}]/u.test(report.mismatches[0].declaredRuntime));
+  });
+});
+
+// Note: the F3 property ("sanitizer output contains no character in the
+// stripped class, for arbitrary input") lives in `tests/shadow-report.test.cjs`
+// alongside F2 (sanitizer idempotence) — both target `sanitizeForRender` and
+// share one hostile-input generator, extended for #2873 PR review Finding 2
+// (MINOR) to also emit combining marks (zalgo) and zero-width characters so
+// the property actually exercises the newly-stripped classes rather than
+// passing vacuously.

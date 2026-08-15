@@ -41,6 +41,7 @@ const fc = require('./helpers/fast-check-setup.cjs');
 const {
   buildShadowReport,
   renderShadowReport,
+  sanitizeForRender,
   SHADOW_REASON,
 } = require('../gsd-core/bin/lib/install-shadow-report.cjs');
 const { resolveScope } = require('../gsd-core/bin/lib/install-scope.cjs');
@@ -561,6 +562,268 @@ describe('buildShadowReport — property (F1)', () => {
   });
 });
 
+// ─── F2/F3 — sanitizeForRender properties (idempotence, stripped-class-free) ─
+
+describe('sanitizeForRender — properties (F2, F3)', () => {
+  // Explicit seed + bounded numRuns (CONTRIBUTING: unseeded property tests
+  // are a review blocker), matching F1/F4's seed above.
+  const SEED = 20260814;
+  const NUM_RUNS = 300;
+
+  // Hostile-input generator: ANSI CSI/OSC escape sequences, C0 controls
+  // (including bare \x00 and a lone unterminated \x1b), DEL/C1, Unicode bidi
+  // embedding/override + isolate controls, combining marks ("zalgo",
+  // U+0300-U+036F), zero-width characters (ZWSP/ZWNJ/ZWJ/BOM), astral-plane
+  // characters (surrogate-pair-backed — real emoji/supplementary-plane text,
+  // not just printable ASCII), CRLF/LF/CR newlines, and plain text —
+  // interleaved so a single generated string usually mixes several hostile
+  // classes at once, per the brief's "not just printable ASCII, or the
+  // properties are vacuous" requirement.
+  //
+  // #2873 PR review Finding 2 (MINOR): `sanitizeForRender` originally
+  // stripped ANSI/control/bidi only, missing combining marks and zero-width
+  // characters — neither is a JS `\s`, so both survived the 64-char cap and
+  // the whitespace-collapse step undetected. `combiningArb`/`zeroWidthArb`
+  // and the extended `STRIPPED_CLASS_RE` below close that generator gap.
+  const c0ControlArb = fc.integer({ min: 0x00, max: 0x1f }).map((c) => String.fromCharCode(c));
+  const delC1Arb = fc.integer({ min: 0x7f, max: 0x9f }).map((c) => String.fromCharCode(c));
+  const ansiCsiArb = fc.constantFrom('\x1b[31m', '\x1b[0m', '\x1b[2K', '\x1b[1;37;40m');
+  const ansiOscArb = fc.constantFrom('\x1b]0;title\x07', '\x1b]8;;http://example\x1b\\');
+  const bidiArb = fc.constantFrom(
+    '‪', '‫', '‬', '‭', '‮', // embedding/override
+    '⁦', '⁧', '⁨', '⁩',            // isolates
+  );
+  const combiningArb = fc.constantFrom('\u{0300}', '\u{0301}', '\u{0302}', '\u{036F}');
+  const zeroWidthArb = fc.constantFrom('\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}');
+  const astralArb = fc.constantFrom('\u{1F600}', '\u{1F4A9}', '\u{10000}', '\u{1F469}\u{200D}\u{1F4BB}');
+  const newlineArb = fc.constantFrom('\n', '\r\n', '\r');
+  const plainArb = fc.string({ maxLength: 12 });
+
+  const hostileChunkArb = fc.oneof(
+    c0ControlArb, delC1Arb, ansiCsiArb, ansiOscArb, bidiArb, combiningArb, zeroWidthArb, astralArb, newlineArb, plainArb,
+  );
+  const hostileStringArb = fc.array(hostileChunkArb, { maxLength: 10 }).map((parts) => parts.join(''));
+
+  // The stripped classes sanitizeForRender documents (ANSI escapes, C0
+  // controls + DEL/C1, Unicode bidi override/isolate, combining marks,
+  // zero-width characters), checked with an INDEPENDENT regex here rather
+  // than re-requiring the module's private ANSI_RE/CONTROL_RE/BIDI_RE/
+  // COMBINING_MARK_RE/ZERO_WIDTH_RE — so F3 is a real invariant check
+  // against the module's documented contract, not a tautology against its
+  // own internals.
+  // eslint-disable-next-line no-control-regex, no-misleading-character-class
+  const STRIPPED_CLASS_RE = /[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩\u{0300}-\u{036F}\u{200B}-\u{200D}\u{FEFF}]/u;
+
+  test('sanitizer is idempotent: s(s(x)) === s(x) for arbitrary strings (F2)', () => {
+    let changedCount = 0;
+    fc.assert(
+      fc.property(hostileStringArb, (input) => {
+        const once = sanitizeForRender(input);
+        if (once !== input) changedCount += 1;
+        const twice = sanitizeForRender(once);
+        assert.strictEqual(
+          twice,
+          once,
+          `not idempotent — input: ${JSON.stringify(input)}\nonce: ${JSON.stringify(once)}\ntwice: ${JSON.stringify(twice)}`,
+        );
+      }),
+      { seed: SEED, numRuns: NUM_RUNS },
+    );
+    // Non-vacuity (mirrors F4's real-shape-generator rationale above): prove
+    // the generator actually produced input sanitizeForRender changed at
+    // least once, or this property would pass trivially over inert strings.
+    assert.ok(changedCount > 0, 'generator never produced a string sanitizeForRender actually changed — F2 would be vacuous');
+  });
+
+  test('sanitizer output never contains a stripped-class character, for arbitrary input (F3)', () => {
+    let hostileInputCount = 0;
+    fc.assert(
+      fc.property(hostileStringArb, (input) => {
+        if (STRIPPED_CLASS_RE.test(input)) hostileInputCount += 1;
+        const output = sanitizeForRender(input);
+        assert.ok(
+          output === null || !STRIPPED_CLASS_RE.test(output),
+          `stripped-class character survived sanitization — input: ${JSON.stringify(input)}\noutput: ${JSON.stringify(output)}`,
+        );
+      }),
+      { seed: SEED, numRuns: NUM_RUNS },
+    );
+    // Non-vacuity: prove the generator actually exercised at least one
+    // stripped-class character, or F3 would hold trivially over clean input.
+    assert.ok(hostileInputCount > 0, 'generator never produced a stripped-class character — F3 would be vacuous');
+  });
+});
+
+// ─── E1-E12 — resolveSpecRootReference direct unit coverage ───────────────
+// Matrix section E (`.gsd/phase/feat-2873-cross-scope-shadowing/50-test-matrix.md`).
+// Only the E13/E14 installed-output integration pair (in
+// tests/install-runtime-artifacts.test.cjs) and F4's idempotence property
+// (above) touched this exported function before this block — these rows
+// exercise it DIRECTLY, one behavior at a time.
+describe('resolveSpecRootReference — direct unit coverage (E1-E12)', () => {
+  test('global skill body: the include is replaced by the two-step imperative form naming both candidates (E1)', () => {
+    const body = '@~/.claude/gsd-core/workflows/plan-phase.md';
+    const result = resolveSpecRootReference(body);
+    assert.notStrictEqual(result, body);
+    assert.ok(!result.startsWith('@'), 'the static @-include must be gone');
+    assert.ok(
+      result.includes('.claude/gsd-core/workflows/plan-phase.md') && result.includes('~/.claude/gsd-core/workflows/plan-phase.md'),
+      `expected both the project-local and global candidate paths named in: ${JSON.stringify(result)}`,
+    );
+  });
+
+  test('local command body: byte-identical to today (E2)', () => {
+    // The REAL literal a local claude install emits for this same source
+    // line (verified empirically against a real --local install): the
+    // installer's path-prefix rewrite resolves the local scope's absolute
+    // config dir, never `~`, so this never has the `@~/.claude/` shape
+    // WORKFLOW_SPEC_ROOT_INCLUDE_RE requires in the first place — a genuine
+    // non-qualifying condition, not a hand-waved one.
+    const body = '@/Users/dev/myrepo/.claude/gsd-core/workflows/plan-phase.md';
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('every non-claude runtime, both scopes: byte-identical to today (E3)', () => {
+    // Real literal shapes emitted for other runtimes (verified empirically
+    // against a real --cursor --global install): no `.claude/` segment at
+    // all, so none of them ever match the claude-only spec-root regex.
+    const cursorGlobal = '@$HOME/gsd-core/workflows/plan-phase.md';
+    const genericLocal = '@./gsd-core/workflows/plan-phase.md';
+    assert.strictEqual(resolveSpecRootReference(cursorGlobal), cursorGlobal);
+    assert.strictEqual(resolveSpecRootReference(genericLocal), genericLocal);
+  });
+
+  test('a references/ include is a different spec root and stays static (E4)', () => {
+    const body = '@~/.claude/gsd-core/references/ui-brand.md';
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('an @.planning/… include is untouched (E5)', () => {
+    const body = '@.planning/notes.md';
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('an include inside a fenced code block is untouched, byte-identical (E6)', () => {
+    const body = ['```', '@~/.claude/gsd-core/workflows/plan-phase.md', '```'].join('\n');
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('an include mentioned in inline backticks is untouched, byte-identical (E7)', () => {
+    const body = 'See `@~/.claude/gsd-core/workflows/plan-phase.md` for the spec.';
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('a body with no workflow include is a no-op (E8)', () => {
+    const body = 'Just some ordinary command prose with no includes at all.';
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('two independent workflow includes both resolve (E9)', () => {
+    const body = [
+      '@~/.claude/gsd-core/workflows/plan-phase.md',
+      '@~/.claude/gsd-core/workflows/execute-phase.md',
+    ].join('\n');
+    const result = resolveSpecRootReference(body);
+    assert.ok(!result.includes('@~/.claude/gsd-core/workflows/plan-phase.md'));
+    assert.ok(!result.includes('@~/.claude/gsd-core/workflows/execute-phase.md'));
+    assert.ok(result.includes('.claude/gsd-core/workflows/plan-phase.md'));
+    assert.ok(result.includes('.claude/gsd-core/workflows/execute-phase.md'));
+  });
+
+  test('prose merely mentioning gsd-core/workflows/x.md is untouched (E10)', () => {
+    const body = 'See gsd-core/workflows/plan-phase.md for background on how this works.';
+    assert.strictEqual(resolveSpecRootReference(body), body);
+  });
+
+  test('a CRLF body emits identically to LF, no orphaned \\r (E11)', () => {
+    const bodyLf = '@~/.claude/gsd-core/workflows/plan-phase.md\nSecond line.';
+    const bodyCrlf = '@~/.claude/gsd-core/workflows/plan-phase.md\r\nSecond line.';
+    const resultLf = resolveSpecRootReference(bodyLf);
+    const resultCrlf = resolveSpecRootReference(bodyCrlf);
+    assert.strictEqual(resultCrlf, resultLf.replace('\n', '\r\n'));
+    // Every `\r` in the result must be immediately followed by `\n` — an
+    // orphaned CR (one not paired with the LF that owns it) would mean the
+    // transform dropped or duplicated a line-ending byte.
+    assert.ok(!/\r(?!\n)/.test(resultCrlf), `orphaned CR found in: ${JSON.stringify(resultCrlf)}`);
+  });
+
+  test('applying the transform twice over an installed tree is idempotent (E12)', () => {
+    const body = 'intro\n@~/.claude/gsd-core/workflows/plan-phase.md\noutro';
+    const once = resolveSpecRootReference(body);
+    const twice = resolveSpecRootReference(once);
+    assert.strictEqual(twice, once);
+  });
+});
+
+// ─── E-rows — resolveSpecRootReference fence-detection regressions ────────
+// (#2873 PR review Finding 1, MEDIUM): the hand-rolled `FENCE_DELIMITER_RE`
+// tracker toggled open/closed on ANY delimiter line regardless of type,
+// which is wrong under CommonMark (a closer must share the opener's
+// delimiter character and have run length >= the opener's). The fix reuses
+// `scanFencedBlocks` (`markdown-sectionizer.cts`). These cases pin the exact
+// failure the review constructed plus the sibling CommonMark edge cases
+// named in the review (nested fences, an unterminated fence, and a
+// longer-run opener closed by a too-short run).
+describe('resolveSpecRootReference — unit (fence detection, #2873 review Finding 1)', () => {
+  test('mismatched fence types (``` opened, ~~~ inside, ``` closes) leave BOTH includes untouched', () => {
+    const body = [
+      '```',
+      '@~/.claude/gsd-core/workflows/alpha.md',
+      '~~~',
+      '@~/.claude/gsd-core/workflows/beta.md',
+      '```',
+    ].join('\n');
+
+    const result = resolveSpecRootReference(body);
+
+    assert.strictEqual(result, body, 'a ``` fence is not closed by a ~~~ line — both includes must stay inside the one open block');
+    assert.ok(!result.includes('To load this command'), 'no rewrite marker should appear when both includes are fenced');
+  });
+
+  test('nested fences (outer run longer than an inner same-char run) leave the enclosed include untouched', () => {
+    const body = [
+      '````',
+      '```',
+      '@~/.claude/gsd-core/workflows/nested.md',
+      '```',
+      '````',
+    ].join('\n');
+
+    const result = resolveSpecRootReference(body);
+
+    assert.strictEqual(result, body, 'the inner 3-backtick lines are content, not closers, for a 4-backtick opener');
+  });
+
+  test('an unterminated fence covers to end-of-string, leaving the include untouched', () => {
+    const body = [
+      '```',
+      '@~/.claude/gsd-core/workflows/orphan.md',
+    ].join('\n');
+
+    const result = resolveSpecRootReference(body);
+
+    assert.strictEqual(result, body, 'a fence with no closer is still open through EOF');
+  });
+
+  test('a fence opened with a longer run (````) is NOT closed by a shorter run (```)', () => {
+    const body = [
+      '````',
+      '@~/.claude/gsd-core/workflows/longshort.md',
+      '```',
+      '@~/.claude/gsd-core/workflows/other.md',
+      '````',
+    ].join('\n');
+
+    const result = resolveSpecRootReference(body);
+
+    assert.strictEqual(
+      result,
+      body,
+      'a 3-backtick line cannot close a 4-backtick opener per CommonMark run-length rule — both includes stay inside the one fence',
+    );
+  });
+});
+
 // ─── F4 — resolveSpecRootReference is idempotent over arbitrary bodies ────
 
 describe('resolveSpecRootReference — property (F4)', () => {
@@ -583,6 +846,27 @@ describe('resolveSpecRootReference — property (F4)', () => {
     const fencedIncludeArb = fc.tuple(fc.constantFrom('```', '~~~'), stemArb).map(
       ([fence, s]) => `${fence}\n@~/.claude/gsd-core/workflows/${s}.md\n${fence}`,
     );
+    // #2873 review Finding 1: a same-type-only generator is structurally
+    // incapable of producing the mismatched-delimiter defect the review
+    // constructed (a ``` fence "closed" by a ~~~ line). Also emit
+    // mismatched-type and nested-run shapes so the property actually
+    // exercises the CommonMark same-type/same-or-longer-run closing rule,
+    // not just the trivial same-fence-twice case.
+    const mismatchedFencedIncludeArb = fc.tuple(
+      fc.constantFrom(['```', '~~~'], ['~~~', '```']),
+      stemArb,
+      stemArb,
+    ).map(
+      ([[openFence, midFence], s1, s2]) =>
+        `${openFence}\n@~/.claude/gsd-core/workflows/${s1}.md\n${midFence}\n@~/.claude/gsd-core/workflows/${s2}.md\n${openFence}`,
+    );
+    const nestedFencedIncludeArb = fc.tuple(fc.constantFrom('```', '~~~'), stemArb).map(
+      ([fenceChar, s]) => {
+        const inner = fenceChar.repeat(3);
+        const outer = fenceChar.repeat(4);
+        return `${outer}\n${inner}\n@~/.claude/gsd-core/workflows/${s}.md\n${inner}\n${outer}`;
+      },
+    );
     const plainTextArb = fc.string({ maxLength: 40 });
 
     const chunkArb = fc.oneof(
@@ -590,6 +874,8 @@ describe('resolveSpecRootReference — property (F4)', () => {
       proseMentionArb,
       planningIncludeArb,
       fencedIncludeArb,
+      mismatchedFencedIncludeArb,
+      nestedFencedIncludeArb,
       plainTextArb,
     );
     const bodyArb = fc.array(chunkArb, { maxLength: 12 }).map((chunks) => chunks.join('\n'));

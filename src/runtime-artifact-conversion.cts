@@ -27,6 +27,7 @@ import capabilityRegistry = require('./capability-registry.cjs');
 import hostIntegration = require('./host-integration.cjs');
 import { posixNormalize } from './shell-command-projection.cjs';
 import { escapeRegex as escapeRegExp } from './pattern.cjs';
+import { scanFencedBlocks } from './markdown-sectionizer.cjs';
 // #2870: install-scope.cts is a leaf-tier sibling (imports only
 // runtime-homes.cjs + node builtins, never this module) — no cycle. See the
 // isGlobal sites below for why the boolean projection is centralized here too.
@@ -513,13 +514,6 @@ function convertClaudeCommandToClaudeSkill(content, skillName, runtime = null, c
 // preserved rather than dropped.
 const WORKFLOW_SPEC_ROOT_INCLUDE_RE = /^@~\/\.claude\/gsd-core\/workflows\/([A-Za-z0-9._-]+)\.md[ \t]*(\r?)$/gm;
 
-// Matches a fenced code-block delimiter line (``` or ~~~, any info string)
-// so occurrences of the include shape used as *documentation* inside a fence
-// are left untouched — Claude Code documents backticks as the way to
-// *prevent* an `@`-import, so rewriting a fenced example would corrupt
-// documentation-of-the-syntax.
-const FENCE_DELIMITER_RE = /^(```|~~~)[^\r\n]*$/gm;
-
 /**
  * Rewrite a static global-scope Claude skill `@`-include of the command's own
  * workflow spec into an imperative two-step resolution the agent performs at
@@ -548,29 +542,38 @@ const FENCE_DELIMITER_RE = /^(```|~~~)[^\r\n]*$/gm;
  * Idempotent: the replacement text never begins with `@` and never matches
  * `WORKFLOW_SPEC_ROOT_INCLUDE_RE`, so re-applying this function to its own
  * output is a no-op.
+ *
+ * Fence detection reuses `scanFencedBlocks` (markdown-sectionizer.cts) — the
+ * same CommonMark-correct state machine `stripFencedCode`/`extractFencedBlock`
+ * are built on — instead of a hand-rolled "any delimiter line toggles
+ * open/closed" tracker. A naive toggle is wrong under CommonMark: a fence
+ * opened with ``` is NOT closed by a ~~~ line (closer must share the
+ * opener's delimiter character and have run length >= the opener's), so a
+ * mismatched delimiter is fence CONTENT, not a boundary. #2873 review.
  */
 function resolveSpecRootReference(body) {
   if (typeof body !== 'string' || body.length === 0) return body;
   if (!body.includes('@~/.claude/gsd-core/workflows/')) return body;
 
-  // Collect [start, end) offset ranges covered by fenced code blocks so
-  // matches inside them are skipped. An unterminated trailing fence covers
-  // to the end of the string (still "inside a fence").
-  const fenceRanges = [];
+  // Collect [start, end) character-offset ranges covered by fenced code
+  // blocks so matches inside them are skipped. An unterminated trailing
+  // fence covers to the end of the string (still "inside a fence").
+  const lines = body.split('\n');
+  const lineStartOffsets = [];
   {
-    let m;
-    let openStart = null;
-    FENCE_DELIMITER_RE.lastIndex = 0;
-    while ((m = FENCE_DELIMITER_RE.exec(body)) !== null) {
-      if (openStart === null) {
-        openStart = m.index;
-      } else {
-        fenceRanges.push([openStart, m.index + m[0].length]);
-        openStart = null;
-      }
+    let offset = 0;
+    for (const line of lines) {
+      lineStartOffsets.push(offset);
+      offset += line.length + 1; // +1 for the '\n' separator
     }
-    if (openStart !== null) fenceRanges.push([openStart, body.length]);
   }
+  const fenceRanges = scanFencedBlocks(lines).map(({ openLineIdx, closeLineIdx }) => {
+    const start = lineStartOffsets[openLineIdx];
+    const end = closeLineIdx === -1
+      ? body.length
+      : lineStartOffsets[closeLineIdx] + lines[closeLineIdx].length;
+    return [start, end];
+  });
   const isInsideFence = (offset) => fenceRanges.some(([start, end]) => offset >= start && offset < end);
 
   return body.replace(WORKFLOW_SPEC_ROOT_INCLUDE_RE, (match, stem, cr, offset) => {
