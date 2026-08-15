@@ -341,23 +341,34 @@ const GLOBAL_DEFAULTS_RESOLUTION_KEYS = [
   'model_profile_overrides', 'model_policy',
 ];
 
-// Module-level dedup keyed on the sorted shadowed-key set: a later call with
+// Module-level dedup keyed on the SORTED shadowed-key set: a later call with
 // the same shadowed set stays quiet, while a config that grows a new shadowed
-// key re-arms the warning (same discipline as _warnedUnknownConfigKeys).
+// key re-arms the warning. Stronger than _warnedUnknownConfigKeys (which keys
+// on insertion order) — same discipline, order-independent key.
 const _warnedShadowedGlobalKeys = new Set<string>();
 
 function _warnShadowedGlobalDefaults(globalDefaults: Record<string, unknown>, globalPath: string): void {
   const shadowed = GLOBAL_DEFAULTS_RESOLUTION_KEYS.filter(k =>
     k !== 'effort' && Object.prototype.hasOwnProperty.call(globalDefaults, k));
+  // Branch D also honors the nested alias workflow.post_planning_gaps (the
+  // `?? globalDefaults['workflow']?.['post_planning_gaps']` fallback in
+  // _globalBaseCfg) — a global file using only the nested form is equally
+  // shadowed, so it reports under its dotted name.
+  if (!shadowed.includes('post_planning_gaps')) {
+    const wf = globalDefaults['workflow'];
+    if (wf && typeof wf === 'object' && !Array.isArray(wf) &&
+        Object.prototype.hasOwnProperty.call(wf, 'post_planning_gaps')) {
+      shadowed.push('workflow.post_planning_gaps');
+    }
+  }
   if (shadowed.length === 0) return;
   const dedupKey = shadowed.slice().sort().join(',');
   if (_warnedShadowedGlobalKeys.has(dedupKey)) return;
   _warnedShadowedGlobalKeys.add(dedupKey);
   try {
     process.stderr.write(
-      `gsd-tools: warning: ${globalPath} sets ${shadowed.join(', ')} but this project's ` +
-      `.planning/config.json takes precedence — those global keys are ignored for model ` +
-      `resolution here. (#3532)\n`,
+      `gsd-tools: warning: ${globalPath} sets ${shadowed.join(', ')} but a project config ` +
+      `takes precedence here — those global keys are ignored for model resolution. (#3532)\n`,
     );
   } catch { /* stderr might be closed in some test harnesses */ }
 }

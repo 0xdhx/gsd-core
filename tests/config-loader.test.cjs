@@ -740,7 +740,7 @@ const { describe, test, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { createTempProject, cleanup, TOOLS_PATH, TEST_ENV_BASE } = require('./helpers.cjs');
+const { createTempProject, cleanup, TOOLS_PATH, TEST_ENV_BASE, installSpawnHome } = require('./helpers.cjs');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
@@ -751,7 +751,11 @@ const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 function runWithStderr(args, cwd, env = {}) {
   const result = runNode([TOOLS_PATH, ...args], {
     cwd,
-    env: { ...process.env, ...TEST_ENV_BASE, ...env },
+    // #3532: pin GSD_HOME to an empty sandbox so a developer's real
+    // ~/.gsd/defaults.json cannot leak shadow-key warnings into children that
+    // these suites assert are stderr-clean (TEST_ENV_BASE only BLANKS the
+    // var; an empty string falls through to the real homedir).
+    env: { ...process.env, ...TEST_ENV_BASE, GSD_HOME: installSpawnHome(), ...env },
     timeoutMs: PROBE_TIMEOUT_MS,
   });
   return {
@@ -1404,21 +1408,40 @@ describe('#3532 shadowed global-defaults warning', () => {
     assert.equal(stderrLines.filter(l => l.includes('__gsd_3532_arbitrary__') && l.includes('shadowed')).length, 0);
   });
 
-  // Parity canary: every key Branch D honors must warn when set globally under
-  // a project config. If _globalBaseCfg grows a key this list misses, the
-  // warning goes silent for it; if this list grows a key _globalBaseCfg does
-  // not read, the warning lies. Both directions fail here first.
+  // Typed-IR parity canary (CONTRIBUTING: assert the exported dedup Set, not
+  // stderr prose — #2674 precedent). Every key Branch D honors must register
+  // as shadowed when set globally under a project config.
   for (const key of GLOBAL_KEYS_SHADOWED_UNDER_PROJECT) {
     test(`canary: global "${key}" alone warns under a project config`, () => {
       writeConfig(tmpDir, { model_profile: 'balanced' });
       writeGlobalDefaults({ [key]: true });
       loadConfigResolved(tmpDir);
-      assert.ok(
-        stderrLines.some(l => l.includes(key)),
-        `global "${key}" must be reported as shadowed; stderr: ${stderrLines.join('')}`,
-      );
+      const registered = [...configLoader._warnedShadowedGlobalKeys].some(set => set.split(',').includes(key));
+      assert.ok(registered, `global "${key}" must register as shadowed`);
     });
   }
+
+  // The nested alias Branch D honors (workflow.post_planning_gaps fallback in
+  // _globalBaseCfg) is equally shadowed and reports under its dotted name.
+  test('canary: nested workflow.post_planning_gaps warns under a project config', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ workflow: { post_planning_gaps: 'extended' } });
+    loadConfigResolved(tmpDir);
+    const registered = [...configLoader._warnedShadowedGlobalKeys].some(set => set.split(',').includes('workflow.post_planning_gaps'));
+    assert.ok(registered, 'nested workflow.post_planning_gaps must register as shadowed');
+  });
+
+  // List parity, both directions: the implementation's exported list (minus
+  // effort) must equal this file's expected list — a key _globalBaseCfg grows
+  // without updating GLOBAL_DEFAULTS_RESOLUTION_KEYS goes silently unwarned,
+  // and a key the export grows without _globalBaseCfg reading makes the
+  // warning lie.
+  test('GLOBAL_DEFAULTS_RESOLUTION_KEYS parity with the expected shadow set', () => {
+    const exported = configLoader.GLOBAL_DEFAULTS_RESOLUTION_KEYS.filter(k => k !== 'effort').sort();
+    const expected = GLOBAL_KEYS_SHADOWED_UNDER_PROJECT.slice().sort();
+    assert.deepEqual(exported, expected,
+      `resolution-key list drifted: exported=${JSON.stringify(exported)} expected=${JSON.stringify(expected)}`);
+  });
 
   test('_resetRuntimeWarningCacheForTests clears the shadowed-key dedup set', () => {
     writeConfig(tmpDir, { model_profile: 'balanced' });
