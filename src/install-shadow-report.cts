@@ -43,6 +43,55 @@
  * (`installed-surface-resolver.cts`'s `deriveStemsForKindEntry`) before they
  * ever reach a `TriggerSurface` — this module does not re-gate them.
  *
+ * ── Per-scope truth filter (why this lives HERE, not in the resolver) ──────
+ * `resolveOneRuntime` (`installed-surface-resolver.cts`) builds ONE union of
+ * every installed scope's `stems` and hands that single list to
+ * `resolveTriggerSurface`, which then synthesizes a candidate trigger for
+ * EVERY stem at EVERY installed scope's trigger-bearing kind entry —
+ * regardless of whether that specific scope's own manifest actually shipped
+ * that stem. Concretely: a global `full`-profile install (stems a, b, c)
+ * alongside a local `core`-profile install (stem a only) unions to
+ * `{a, b, c}`, and `resolveTriggerSurface` then reports `commands@local`
+ * candidates for b and c too — trigger names for artifacts that do not exist
+ * on disk at that scope. Left unfiltered, this module would tell the user
+ * `/gsd-b` and `/gsd-c` are shadowed local commands when there is no local
+ * artifact for either at all — over-reporting that is not cosmetic, since
+ * the whole point of this report is to make a real failure legible.
+ *
+ * `resolveTriggerSurface`'s API takes ONE stem list shared by every scope it
+ * is asked about, so per-scope truth cannot be expressed through it without
+ * either widening a shipped Phase-2 contract other callers may depend on, or
+ * calling it once per scope and re-implementing its winner computation
+ * (`isHigherPriority`) here as a second, driftable copy. `resolveOneRuntime`
+ * / `resolveInstalledSurfaces` (Phase 3, #2872) is likewise a shipped module
+ * this task deliberately leaves untouched. This module already receives the
+ * full `InstalledRuntimeSurface`, including each scope's own REAL `stems`
+ * list (`installed-surface-resolver.cts`'s `deriveStemsFromManifest`) — so
+ * the correction belongs here, as a filter over `resolveTriggerSurface`'s
+ * already-computed `shadowedBy` groups: a trigger is reported as shadowed
+ * only when its underlying stem is present in BOTH the winner's scope's own
+ * `stems` AND the shadowed side's scope's own `stems` — i.e. an artifact
+ * genuinely exists at both scopes, not merely "some stem exists somewhere in
+ * the union".
+ *
+ * `TriggerSurface` does not carry the originating stem OR the composing
+ * prefix on its output — only the already-composed `trigger` string
+ * (`${prefix}${stem}`) — so the stem cannot be read off it directly. Rather
+ * than hand-roll a fixed-offset `trigger.slice(4)` (which would silently
+ * assume every runtime's prefix is exactly `gsd-` — true today, but not a
+ * contract this module owns), the prefix is recovered the honest way: by
+ * re-resolving that scope's `ArtifactKind` layout (`resolveRuntimeArtifactLayout`
+ * / `resolveRuntimeArtifactLayoutFromRegistry`, the SAME layout descriptor
+ * `resolveTriggerSurface` itself reads its `entry.prefix` from) for the
+ * winner's and shadowed side's own `(scope, kind)`, and reading `.prefix`
+ * off the matching kind entry. This is metadata-only (constructing an
+ * `ArtifactKind` never touches the filesystem — see
+ * `runtime-artifact-layout.cts`'s kind-builder functions), so it costs
+ * nothing beyond a small per-`(scope,kind)` memo. If a prefix cannot be
+ * resolved at all (a `TypeError` from an unexpected registry shape), the
+ * trigger is conservatively DROPPED rather than kept — the same
+ * report-nothing-you-cannot-prove posture as the rest of this filter.
+ *
  * ── Pure with respect to caller-visible state ───────────────────────────────
  * `buildShadowReport` builds a fresh `ShadowReport` (fresh arrays, fresh
  * objects) on every call, exactly as the resolver documents for itself
@@ -55,7 +104,23 @@ import {
   resolveInstalledSurfaces,
   type ResolveInstalledSurfacesOptions,
   type InstalledRuntimeSurface,
+  type InstalledScopeRecord,
 } from './installed-surface-resolver.cjs';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import runtimeArtifactLayoutMod = require('./runtime-artifact-layout.cjs');
+const { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry } = runtimeArtifactLayoutMod;
+
+/** The registry shape `resolveRuntimeArtifactLayoutFromRegistry` accepts as
+ *  its first argument — reused (not re-typed) so `opts.registry` can be
+ *  forwarded to it, mirroring `installed-surface-resolver.cts`'s own
+ *  `LayoutRegistryLike`. */
+type LayoutRegistryLike = Parameters<typeof resolveRuntimeArtifactLayoutFromRegistry>[0];
+
+/** `installed-surface-resolver.cts` does not export `TriggerSurface` by
+ *  name (only via `InstalledRuntimeSurface.triggers`'s element type) —
+ *  derived here rather than re-declared as a second, driftable shape. */
+type TriggerSurface = InstalledRuntimeSurface['triggers'][number];
 
 // ── Reason enum ─────────────────────────────────────────────────────────
 
@@ -133,6 +198,76 @@ export function sanitizeForRender(value: string | null): string | null {
   return stripped.replace(/\s+/g, ' ').trim();
 }
 
+// ── Per-scope truth filter helpers ─────────────────────────────────────
+
+/**
+ * Build a `(scope, kind) -> prefix | null` lookup for one runtime, memoized
+ * per call to `buildShadowReport` (never shared across calls — matches this
+ * module's "fresh objects on every call" contract). `null` means "could not
+ * be resolved" (unknown scope record, or a `TypeError` from the layout
+ * resolver) — the caller treats that as "cannot honestly attribute this
+ * trigger to a real stem here", not as "assume it is fine".
+ */
+function buildPrefixLookup(
+  runtime: string,
+  scopeRecords: Map<InstallScope, InstalledScopeRecord>,
+  opts: ResolveInstalledSurfacesOptions,
+): (scope: InstallScope, kind: string) => string | null {
+  const cache = new Map<string, string | null>();
+  return (scope: InstallScope, kind: string): string | null => {
+    const key = `${scope}:${kind}`;
+    if (cache.has(key)) return cache.get(key) as string | null;
+    const record = scopeRecords.get(scope);
+    let prefix: string | null = null;
+    if (record) {
+      try {
+        const layout = opts.registry !== undefined
+          ? resolveRuntimeArtifactLayoutFromRegistry(opts.registry as LayoutRegistryLike, runtime, record.configHome, record.scope)
+          : resolveRuntimeArtifactLayout(runtime, record.configHome, record.scope);
+        const kindEntry = (layout.kinds as Array<{ kind: string; prefix: string }>).find((k) => k.kind === kind);
+        prefix = kindEntry ? kindEntry.prefix : null;
+      } catch {
+        // Unknown runtime / malformed registry — degrade to "cannot resolve",
+        // never throw out of a report builder (matches this module's own
+        // RESOLVER_UNAVAILABLE degrade-not-propagate posture above).
+        prefix = null;
+      }
+    }
+    cache.set(key, prefix);
+    return prefix;
+  };
+}
+
+/** `trigger` minus `prefix`, or `null` when `prefix` is unknown, does not
+ *  actually prefix `trigger`, or the remainder would be empty (a `prefix`
+ *  covering the whole trigger string is not a real stem). */
+function stemFromTrigger(trigger: string, prefix: string | null): string | null {
+  if (prefix === null || !trigger.startsWith(prefix)) return null;
+  const stem = trigger.slice(prefix.length);
+  return stem === '' ? null : stem;
+}
+
+/**
+ * True when `t` (a `resolveTriggerSurface`-reported shadowed trigger) is a
+ * REAL cross-scope shadow: its stem is present in the winner's OWN scope
+ * `stems` and, independently, in the shadowed side's OWN scope `stems`. See
+ * the module-level "Per-scope truth filter" comment for why this check
+ * exists and why it lives here rather than in the resolver.
+ */
+function isGenuinelyShadowed(
+  t: TriggerSurface,
+  scopeRecords: Map<InstallScope, InstalledScopeRecord>,
+  prefixFor: (scope: InstallScope, kind: string) => string | null,
+): boolean {
+  if (t.shadowedBy === null) return false;
+  const winnerRecord = scopeRecords.get(t.shadowedBy.scope);
+  const shadowedRecord = scopeRecords.get(t.scope);
+  const winnerStem = stemFromTrigger(t.trigger, prefixFor(t.shadowedBy.scope, t.shadowedBy.kind));
+  const shadowedStem = stemFromTrigger(t.trigger, prefixFor(t.scope, t.kind));
+  if (winnerStem === null || shadowedStem === null) return false;
+  return (winnerRecord?.stems ?? []).includes(winnerStem) && (shadowedRecord?.stems ?? []).includes(shadowedStem);
+}
+
 // ── Report builder ──────────────────────────────────────────────────────
 
 /**
@@ -171,7 +306,15 @@ export function buildShadowReport(runtime: string, opts: ResolveInstalledSurface
   // always returns exactly one element (see its own doc comment).
   const surface = surfaces[0];
 
-  const shadowedSurfaces = surface.triggers.filter((t) => t.shadowedBy !== null);
+  // Per-scope truth filter (see module comment): `surface.triggers` may
+  // contain candidates synthesized from the CROSS-SCOPE stem union
+  // (`installed-surface-resolver.cts`'s `stemUnion`) that do not correspond
+  // to a real artifact at one or both scopes. Only a trigger whose stem is
+  // provably present in BOTH the winner's own `stems` and the shadowed
+  // side's own `stems` is reported.
+  const scopeRecords = new Map<InstallScope, InstalledScopeRecord>(surface.scopes.map((r) => [r.scope, r] as const));
+  const prefixFor = buildPrefixLookup(runtime, scopeRecords, opts);
+  const shadowedSurfaces = surface.triggers.filter((t) => isGenuinelyShadowed(t, scopeRecords, prefixFor));
   const triggers: ShadowedTrigger[] = shadowedSurfaces
     .map((t) => ({
       trigger: t.trigger,
