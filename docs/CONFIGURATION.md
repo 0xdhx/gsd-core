@@ -1416,6 +1416,14 @@ The model-catalog's `reasoning_effort` per-tier hint is a legacy field kept for 
 
 Valid effort values: `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
 
+`query resolve-execution --json` reports two effort views ([#3534](https://github.com/open-gsd/gsd-core/issues/3534)):
+`effort` is the **resolved** config-cascade value; `effort_effective` is what the installed
+agent will actually run at — read from the installed agent's `effort:` frontmatter for the
+claude runtime (`effort_effective_source: "frontmatter"`), reported as `"inherit"` when the
+key is absent (`"frontmatter-absent"` — the agent follows the session effort), and equal to
+the resolved value with source `"resolved"` when there is no install-time channel or no
+agent file to read. `--pick effort` still returns the resolved value.
+
 #### Where effort actually reaches — added in v1.8.0
 
 Effort resolved from the cascade above reaches a runtime through one of two channels.

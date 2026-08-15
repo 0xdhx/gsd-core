@@ -620,6 +620,38 @@ function cmdResolveExecution(cwd: string, agentType: string | undefined, raw: bo
 
   const fastModeSupported = RUNTIMES_WITH_FAST_MODE.has(runtime);
 
+  // #3534 (10a): the effective effort — what the installed agent will actually
+  // run at. `effort` above is the config cascade; for the claude runtime the
+  // per-agent frontmatter key is the source of truth (Claude Code's Agent tool
+  // has no per-spawn effort parameter), so the query reads the installed file.
+  // An ABSENT key is a real state — the agent follows the session effort
+  // ('inherit'), not drift. No file / no frontmatter / any read failure means
+  // no evidence: the resolved value is reported, flagged 'resolved' so a
+  // consumer can tell evidence from echo. Additive only — every existing key
+  // is unchanged.
+  let effortEffectiveSource: 'frontmatter' | 'frontmatter-absent' | 'resolved' = 'resolved';
+  let effortEffective: string = effort;
+  if (runtime === 'claude') {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
+      const { getGlobalConfigDir } = require('./runtime-homes.cjs') as { getGlobalConfigDir(runtime: string, explicitDir?: string | null): string };
+      const agentPath = path.join(getGlobalConfigDir(runtime), 'agents', `${agentType}.md`);
+      const agentContent = fs.readFileSync(agentPath, 'utf8');
+      // eslint-disable-next-line local/no-unbounded-quantifier -- same lazy `*?` bounded by the `^---$/m` closing anchor as the sibling frontmatter regexes in this file
+      const fmMatchEff = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(agentContent);
+      if (fmMatchEff) {
+        const effortLine = /^effort:[ \t]*(.+?)[ \t]*$/m.exec(fmMatchEff[1]);
+        if (effortLine) {
+          effortEffective = effortLine[1];
+          effortEffectiveSource = 'frontmatter';
+        } else {
+          effortEffective = 'inherit';
+          effortEffectiveSource = 'frontmatter-absent';
+        }
+      }
+    } catch { /* no frontmatter evidence — stay on the resolved value */ }
+  }
+
   // Own-property guard: agentType is an unvalidated CLI positional, so a
   // prototype-chain value ("toString", "constructor") would otherwise return
   // an inherited truthy member from this plain object and misreport a
@@ -633,6 +665,8 @@ function cmdResolveExecution(cwd: string, agentType: string | undefined, raw: bo
     effort_rendered: rendered.value,
     effort_param: rendered.param,
     effort_propagation: rendered.channel,
+    effort_effective: effortEffective,
+    effort_effective_source: effortEffectiveSource,
     fast_mode: fastMode,
     fast_mode_supported: fastModeSupported,
   };
