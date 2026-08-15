@@ -635,7 +635,14 @@ function cmdResolveExecution(cwd: string, agentType: string | undefined, raw: bo
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/unbound-method
       const { getGlobalConfigDir } = require('./runtime-homes.cjs') as { getGlobalConfigDir(runtime: string, explicitDir?: string | null): string };
-      const agentPath = path.join(getGlobalConfigDir(runtime), 'agents', `${agentType}.md`);
+      const agentsDirEff = path.join(getGlobalConfigDir(runtime), 'agents');
+      const agentPath = path.join(agentsDirEff, `${agentType}.md`);
+      // agentType is an unvalidated CLI positional: keep the read inside the
+      // agents dir so `../../x` cannot point it elsewhere (defense in depth —
+      // the reflected surface is only a frontmatter effort line).
+      if (!path.resolve(agentPath).startsWith(path.resolve(agentsDirEff) + path.sep)) {
+        throw new Error('agent path escapes the agents directory');
+      }
       const agentContent = fs.readFileSync(agentPath, 'utf8');
       // eslint-disable-next-line local/no-unbounded-quantifier -- same lazy `*?` bounded by the `^---$/m` closing anchor as the sibling frontmatter regexes in this file
       const fmMatchEff = /^---\r?\n([\s\S]*?)^---\r?$/m.exec(agentContent);

@@ -102,9 +102,9 @@ describe('#3534 resolve-execution reports resolved AND effective effort', () => 
     return home;
   }
 
-  function resolveExecution(dir, agent = 'gsd-executor', extra = []) {
+  function resolveExecution(dir, agent = 'gsd-executor', extra = [], env = {}) {
     return JSON.parse(
-      runGsdTools(`query resolve-execution ${agent} ${extra.join(' ')}`, dir).output,
+      runGsdTools(`query resolve-execution ${agent} ${extra.join(' ')}`, dir, env).output,
     );
   }
 
@@ -112,7 +112,10 @@ describe('#3534 resolve-execution reports resolved AND effective effort', () => 
     const dir = projectWithEffort('high');
     t.after(() => cleanup(dir));
     const home = agentHome(t, '---\nname: gsd-executor\neffort: low\ndescription: x\n---\nBody.\n');
-    const out = resolveExecutionWithClaudeHome(dir, home);
+    // #3534: pass the fixture home as the CHILD env argument — testEnvBase()
+    // blanks CLAUDE_CONFIG_DIR after the process.env spread, so a process.env
+    // mutation never reaches the child (and a dev's real ~/.claude would).
+    const out = resolveExecution(dir, 'gsd-executor', [], { CLAUDE_CONFIG_DIR: home });
     assert.equal(out.effort, 'high', 'resolved cascade value unchanged');
     assert.equal(out.effort_effective, 'low', 'the installed frontmatter value');
     assert.equal(out.effort_effective_source, 'frontmatter');
@@ -126,7 +129,7 @@ describe('#3534 resolve-execution reports resolved AND effective effort', () => 
     const dir = projectWithEffort('high');
     t.after(() => cleanup(dir));
     const home = agentHome(t, '---\nname: gsd-executor\ndescription: x\n---\nBody.\n');
-    const out = resolveExecutionWithClaudeHome(dir, home);
+    const out = resolveExecution(dir, 'gsd-executor', [], { CLAUDE_CONFIG_DIR: home });
     assert.equal(out.effort, 'high');
     assert.equal(out.effort_effective, 'inherit', 'absent key = follows the session');
     assert.equal(out.effort_effective_source, 'frontmatter-absent');
@@ -136,7 +139,7 @@ describe('#3534 resolve-execution reports resolved AND effective effort', () => 
     const dir = projectWithEffort('high');
     t.after(() => cleanup(dir));
     const home = agentHome(t, null);
-    const out = resolveExecutionWithClaudeHome(dir, home);
+    const out = resolveExecution(dir, 'gsd-executor', [], { CLAUDE_CONFIG_DIR: home });
     assert.equal(out.effort_effective, out.effort);
     assert.equal(out.effort_effective_source, 'resolved');
   });
@@ -158,7 +161,7 @@ describe('#3534 resolve-execution reports resolved AND effective effort', () => 
     const dir = projectWithEffort('high');
     t.after(() => cleanup(dir));
     const home = agentHome(t, ['---', 'name: gsd-executor', 'effort: xhigh', 'description: x', '---', 'Body.', ''].join('\r\n'));
-    const out = resolveExecutionWithClaudeHome(dir, home);
+    const out = resolveExecution(dir, 'gsd-executor', [], { CLAUDE_CONFIG_DIR: home });
     assert.equal(out.effort_effective, 'xhigh');
     assert.equal(out.effort_effective_source, 'frontmatter');
   });
@@ -167,21 +170,11 @@ describe('#3534 resolve-execution reports resolved AND effective effort', () => 
     const dir = projectWithEffort('high');
     t.after(() => cleanup(dir));
     const home = agentHome(t, 'No frontmatter here at all.\n');
-    const out = resolveExecutionWithClaudeHome(dir, home);
+    const out = resolveExecution(dir, 'gsd-executor', [], { CLAUDE_CONFIG_DIR: home });
     assert.equal(out.effort_effective, out.effort);
     assert.equal(out.effort_effective_source, 'resolved');
   });
 
-  function resolveExecutionWithClaudeHome(dir, home) {
-    const prev = process.env.CLAUDE_CONFIG_DIR;
-    process.env.CLAUDE_CONFIG_DIR = home;
-    try {
-      return resolveExecution(dir);
-    } finally {
-      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
-      else process.env.CLAUDE_CONFIG_DIR = prev;
-    }
-  }
 });
 
 describe('#2481 effortSurface — closed vocabulary', () => {
