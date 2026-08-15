@@ -17,7 +17,14 @@ import configLoaderMod = require('./config-loader.cjs');
 const { loadConfig } = configLoaderMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdMod = require('./phase-id.cjs');
-const { parsePhaseFromProse, PHASE_NUMBER_TOKEN_SOURCE, phaseKeyFromToken, phaseKeyFromDir, isSentinelPhaseId } = phaseIdMod;
+const {
+  parsePhaseFromProse,
+  PHASE_NUMBER_TOKEN_SOURCE,
+  phaseKeyFromToken,
+  phaseKeyFromDir,
+  isSentinelPhaseId,
+  scopeToPhase,
+} = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import roadmapParserMod = require('./roadmap-parser.cjs');
 const { getMilestoneInfo, extractCurrentMilestone, isMilestoneBoundedInRoadmap, hasMilestoneSectioning } = roadmapParserMod;
@@ -4187,9 +4194,35 @@ function cmdStateValidate(cwd: string, raw: boolean): void {
           ));
         }
 
-        // Check for VERIFICATION.md
+        // Check for VERIFICATION.md — scoped to THIS phase's own token (#3511)
+        // so a stray, cross-phase, or ad-hoc VERIFICATION file cannot claim
+        // this phase's status has drifted.
+        //
+        // WARNING-4 (#3511 review): the pre-filter grammar here is
+        // deliberately BROADER than the `-VERIFICATION.md` suffix every
+        // other site in the codebase uses — `.includes('VERIFICATION')`
+        // admits names like `03_VERIFICATION.md` (underscore, no dash) that
+        // the dashed grammar would reject outright. That breadth predates
+        // #3511 and is intentional here (this is a best-effort drift
+        // WARNING scan, not an authoritative single-pick resolver), so it is
+        // left as-is rather than narrowed to match the dashed sites — doing
+        // so would be a separate, un-asked-for behavior change (S006/S007).
+        // What #3511 DOES change is that a name this broader grammar admits
+        // is now ALSO subject to the same `scopeToPhase` membership check as
+        // every dashed-grammar site, so a stray `04_VERIFICATION.md`-shaped
+        // file in phase 03's directory is excluded exactly like a stray
+        // `04-VERIFICATION.md` would be — while `03_VERIFICATION.md` (own
+        // phase, underscore separator) is NOT excluded: `isPhaseArtifact`
+        // (`phase-id.cts`) accepts `_` as a candidate-boundary separator
+        // alongside `-` and `.` for exactly this reason, so an S006/S007
+        // scan of `03-alpha/03_VERIFICATION.md` still resolves to S006
+        // ("verification passed" drift), not a false S007.
         const files = fs.readdirSync(phaseDirPath);
-        const verificationFiles = files.filter(f => f.includes('VERIFICATION') && f.endsWith('.md'));
+        const phaseDirBaseName = path.basename(phaseDirPath);
+        const verificationFiles = scopeToPhase(
+          files.filter(f => f.includes('VERIFICATION') && f.endsWith('.md')),
+          phaseDirBaseName,
+        );
         for (const vf of verificationFiles) {
           try {
             const vContent = fs.readFileSync(path.join(phaseDirPath, vf), 'utf-8');
