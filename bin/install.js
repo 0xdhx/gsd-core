@@ -7952,8 +7952,20 @@ function copyWithPathReplacement(srcDir, destDir, pathPrefix, runtime, isCommand
         content = content.replace(globalClaudeRegex, pathPrefix);
         content = content.replace(globalClaudeHomeRegex, pathPrefix);
         content = content.replace(localClaudeRegex, `./${dirName}/`);
-        content = content.replace(/~\/\.claude\b/g, pathPrefix.replace(/\/$/, ''));
-        content = content.replace(/\$HOME\/\.claude\b/g, pathPrefix.replace(/\/$/, ''));
+        // #3544 review (Finding 1 fallout): guarded with the SAME
+        // negative-lookahead convention already used at ~:2859-2860 below
+        // ("preserve .claude-plugin and .claudeignore"). A naive `\b` here
+        // is satisfied by ANY non-word character, including '-' — so for a
+        // --config-dir whose name EXTENDS '.claude' (e.g. '.claude-work',
+        // pathPrefix '$HOME/.claude-work/'), this pass re-matched the
+        // '$HOME/.claude' PREFIX of its own slash-form output (lines above)
+        // and re-appended the full prefix, corrupting every emitted path to
+        // '$HOME/.claude-work-work/...'. Harmless no-op for the literal
+        // default '.claude' (self-replace with an identical string), which
+        // is why this went undetected until a non-default config-dir name
+        // was exercised.
+        content = content.replace(/~\/\.claude(?![\w-])/g, pathPrefix.replace(/\/$/, ''));
+        content = content.replace(/\$HOME\/\.claude(?![\w-])/g, pathPrefix.replace(/\/$/, ''));
         content = content.replace(/\.\/\.claude\b/g, `./${dirName}`);
         content = content.replace(/~\/\.qwen\//g, pathPrefix);
         content = content.replace(/\$HOME\/\.qwen\//g, pathPrefix);
@@ -7961,6 +7973,17 @@ function copyWithPathReplacement(srcDir, destDir, pathPrefix, runtime, isCommand
         content = content.replace(/~\/\.hermes\//g, pathPrefix);
         content = content.replace(/\$HOME\/\.hermes\//g, pathPrefix);
         content = content.replace(/\.\/\.hermes\//g, `./${dirName}/`);
+        // #3544: restore @-file-reference lines to the tilde form Claude Code
+        // actually expands — the SAME correction #3133 already applies to
+        // skill/command bodies via _applyRuntimeRewrites's 'claude' case (see
+        // restoreClaudeGlobalAtRefTilde's doc comment in
+        // runtime-artifact-conversion.cts). This is the gsd-core/ spec-tree
+        // emit path, which never had it: every @~/.claude/gsd-core/… include
+        // in a global install's workflows/references tree silently resolved
+        // to nothing (54 includes across 22 files on a live install).
+        if (runtime === 'claude') {
+          content = runtimeArtifactConversion._restoreClaudeGlobalAtRefTilde(content, pathPrefix);
+        }
       }
       content = processAttribution(content, getCommitAttribution(runtime));
 
