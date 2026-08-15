@@ -6455,7 +6455,7 @@ describe('#2218 cross-scope shadowing', () => {
 // and exit code — the actual product surface #2218 reported a gap in.
 
 describe('#2873 C1-C6 — install-time shadow report (spawned installer wiring)', () => {
-  const { buildShadowReport, renderShadowReport } = require('../gsd-core/bin/lib/install-shadow-report.cjs');
+  const { buildShadowReport, renderShadowReport, SHADOW_REASON } = require('../gsd-core/bin/lib/install-shadow-report.cjs');
   const SHADOW_THROWS_PRELOAD = path.join(__dirname, 'helpers', 'shadow-report-throws-preload.cjs');
 
   function spawnInstall(args, cwd, root, nodeFlags = []) {
@@ -6485,6 +6485,34 @@ describe('#2873 C1-C6 — install-time shadow report (spawned installer wiring)'
     for (const line of lines) {
       assert.ok(stripped.includes(line),
         `expected installer stderr to carry the typed report line ${JSON.stringify(line)}\nstderr: ${stderr}`);
+    }
+  }
+
+  /**
+   * Negative-proof counterpart to `assertReportRendered`, for fixtures where
+   * no report is expected. `expectedReport` is computed by calling the
+   * module's own pure `buildShadowReport` against the SAME on-disk fixture
+   * the spawned installer just produced. Asserts the typed IR itself is
+   * `not_shadowed`, that `renderShadowReport` therefore computes ZERO lines
+   * for it, and then — for every line it WOULD have computed had the IR been
+   * shadowed (structurally empty here) — that none of them appear in
+   * `stderr`. This replaces matching a hardcoded literal fragment
+   * (`' shadowed: the '`) with a structural comparison against
+   * `renderShadowReport`'s own (empty) output, so there is no longer a
+   * guessed string for `local/no-source-grep`/`allow-test-rule` to flag.
+   */
+  function assertReportAbsent(stderr, expectedReport) {
+    assert.strictEqual(expectedReport.shadowed, false,
+      'fixture must not be shadowed for this to be a meaningful negative assertion');
+    assert.strictEqual(expectedReport.reason, SHADOW_REASON.NOT_SHADOWED,
+      `expected reason ${SHADOW_REASON.NOT_SHADOWED}, got ${expectedReport.reason}`);
+    const lines = renderShadowReport(expectedReport);
+    assert.deepStrictEqual(lines, [],
+      'renderShadowReport must compute zero lines for a not_shadowed report');
+    const stripped = stripAnsi(stderr);
+    for (const line of lines) {
+      assert.ok(!stripped.includes(line),
+        `expected installer stderr NOT to carry the typed report line ${JSON.stringify(line)}\nstderr: ${stderr}`);
     }
   }
 
@@ -6541,19 +6569,7 @@ describe('#2873 C1-C6 — install-time shadow report (spawned installer wiring)'
     // construction (buildShadowReport requires two installed scopes) —
     // confirms this negative-proof fixture is not accidentally shadowed.
     const controlReport = buildShadowReport('claude', { home: root, cwd: root });
-    assert.strictEqual(controlReport.shadowed, false);
-
-    assert.ok(
-      // allow-test-rule: negative proof over a spawned process's real stdio
-      // has no typed positive to structurally compare against
-      // (renderShadowReport returns [] for an unshadowed report, so there
-      // is nothing computed to search for). This is renderShadowReport's
-      // own FIXED template fragment — present in BOTH its kindsDiffer
-      // branches, verbatim in the module source — not a guessed literal.
-      // [#2873]
-      !stripAnsi(g.stderr).includes(' shadowed: the '),
-      `expected no shadow report in a single-scope install's stderr: ${g.stderr}`,
-    );
+    assertReportAbsent(g.stderr, controlReport);
   });
 
   test('C4: an install that fails before writeManifest never emits a report', (t) => {
@@ -6574,14 +6590,13 @@ describe('#2873 C1-C6 — install-time shadow report (spawned installer wiring)'
 
     const manifestPath = path.join(root, '.claude', MANIFEST_NAME);
     assert.ok(!fs.existsSync(manifestPath), 'writeManifest must never have run');
-    assert.ok(
-      // allow-test-rule: same fixed-template anchor as C3 — the failure
-      // path never reaches the report call site at all (it runs strictly
-      // after writeManifest), so this asserts the absence side of the same
-      // typed renderShadowReport contract. [#2873]
-      !stripAnsi(g.stdout + g.stderr).includes(' shadowed: the '),
-      `expected no shadow report emitted before a structural failure: ${g.stdout}\n${g.stderr}`,
-    );
+
+    // Same fixture the failed install just left on disk: nothing was ever
+    // written, so the typed IR is not_shadowed by construction — the failure
+    // path never reaches the report call site at all (it runs strictly after
+    // writeManifest).
+    const expectedReport = buildShadowReport('claude', { home: root, cwd: root });
+    assertReportAbsent(g.stdout + g.stderr, expectedReport);
   });
 
   test('C5: a throwing report builder never fails the install, report suppressed', (t) => {
@@ -6596,14 +6611,13 @@ describe('#2873 C1-C6 — install-time shadow report (spawned installer wiring)'
     assert.ok(fs.existsSync(manifestPath),
       'writeManifest must still have run — the report call happens strictly after it');
 
-    assert.ok(
-      // allow-test-rule: same fixed-template anchor as C3/C4 — the injected
-      // throw is caught before renderShadowReport ever runs, so no report
-      // text should reach stderr; there is no typed positive to compare
-      // against for a suppressed report. [#2873]
-      !stripAnsi(g.stderr).includes(' shadowed: the '),
-      `expected the injected report failure to be swallowed silently: ${g.stderr}`,
-    );
+    // Same single-scope fixture as C3 (writeManifest ran, but the report
+    // builder was preloaded to throw): the typed IR built from the real
+    // installer's own scope is still not_shadowed, and — because the
+    // injected throw is caught before renderShadowReport ever runs — no
+    // report text should reach stderr either.
+    const expectedReport = buildShadowReport('claude', { home: root, cwd: root });
+    assertReportAbsent(g.stderr, expectedReport);
   });
 
   test('C6: re-running the same scope twice produces the same report', (t) => {
