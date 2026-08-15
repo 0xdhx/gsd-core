@@ -1284,3 +1284,151 @@ describe('#2997: phase_id_convention is not silently dropped on a clean read', (
     } finally { cleanup(tmpDir); }
   });
 });
+
+// ─── #3532 (10b): shadowed global-defaults diagnostic ─────────────────────────
+
+// The keys Branch D's _globalBaseCfg demonstrably honors when NO project config
+// exists. Under a project .planning/config.json (Branch A — every real project)
+// the global file is never opened, so each of these set globally is silently
+// inert. `effort` is deliberately absent: the install-time effort sync
+// (readGsdEffectiveEffortConfig) DOES merge the global file, so warning on it
+// would be false for the channel users control via effort sync.
+const GLOBAL_KEYS_SHADOWED_UNDER_PROJECT = [
+  'model_profile', 'commit_docs', 'research', 'plan_checker', 'verifier',
+  'nyquist_validation', 'post_planning_gaps', 'parallelization', 'text_mode',
+  'resolve_model_ids', 'context_window', 'subagent_timeout', 'model_overrides',
+  'models', 'granularity', 'granularities', 'planning', 'dynamic_routing',
+  'fast_mode', 'agent_skills', 'response_language', 'runtime',
+  'model_profile_overrides', 'model_policy',
+];
+
+describe('#3532 shadowed global-defaults warning', () => {
+  let tmpDir;
+  let gsdHome;
+  let stderrLines;
+  let originalStderrWrite;
+  let originalGsdHome;
+
+  beforeEach(() => {
+    tmpDir = makeTempProject('gsd-3532-shadow-');
+    gsdHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3532-home-'));
+    stderrLines = [];
+    originalStderrWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (chunk) => { stderrLines.push(String(chunk)); return true; };
+    originalGsdHome = process.env.GSD_HOME;
+    process.env.GSD_HOME = gsdHome;
+    if (_resetRuntimeWarningCacheForTests) _resetRuntimeWarningCacheForTests();
+  });
+
+  afterEach(() => {
+    process.stderr.write = originalStderrWrite;
+    if (originalGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = originalGsdHome;
+    if (tmpDir) cleanup(tmpDir);
+    if (gsdHome) cleanup(gsdHome);
+    tmpDir = gsdHome = null;
+  });
+
+  function writeGlobalDefaults(obj) {
+    fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+    fs.writeFileSync(
+      path.join(gsdHome, '.gsd', 'defaults.json'),
+      JSON.stringify(obj, null, 2),
+    );
+  }
+
+  test('project config + global model keys -> one warning naming both keys', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ model_overrides: { 'gsd-executor': 'haiku' }, model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    const warnings = stderrLines.filter(l => l.includes('model_overrides') && l.includes('model_profile'));
+    assert.equal(warnings.length, 1, `expected exactly one shadowed-keys warning, got: ${stderrLines.join('')}`);
+  });
+
+  test('second loadConfig call does not repeat the warning', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    loadConfigResolved(tmpDir);
+    const warnings = stderrLines.filter(l => l.includes('model_profile') && l.includes('defaults.json'));
+    assert.ok(warnings.length <= 1, `warning emitted more than once: ${warnings.length}`);
+  });
+
+  test('global effort keys do not warn (honored by the install-time effort sync)', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ effort: { default: 'low' } });
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.filter(l => l.includes('defaults.json')).length, 0,
+      `effort must not trigger the shadow warning: ${stderrLines.join('')}`);
+  });
+
+  test('absent global defaults never warn', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.length, 0, `unexpected warnings: ${stderrLines.join('')}`);
+  });
+
+  test('bare dir without .planning honors global defaults without warning (Branch D)', () => {
+    const bare = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3532-bare-'));
+    try {
+      writeGlobalDefaults({ model_profile: 'quality' });
+      const resolution = loadConfigResolved(bare);
+      assert.equal(resolution.source, 'global-defaults');
+      assert.equal(resolution.config['model_profile'], 'quality');
+      assert.equal(stderrLines.length, 0, `Branch D must not warn: ${stderrLines.join('')}`);
+    } finally {
+      cleanup(bare);
+    }
+  });
+
+  test('unparseable global defaults skip the shadow warning', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(gsdHome, '.gsd', 'defaults.json'), '{not json');
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.filter(l => l.includes('shadowed')).length, 0);
+  });
+
+  test('present-but-empty project config still shadows', () => {
+    writeConfig(tmpDir, {});
+    writeGlobalDefaults({ model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    assert.ok(stderrLines.some(l => l.includes('model_profile')),
+      `empty project config must still warn: ${stderrLines.join('')}`);
+  });
+
+  test('non-resolution global keys do not warn from this check', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ __gsd_3532_arbitrary__: true });
+    loadConfigResolved(tmpDir);
+    assert.equal(stderrLines.filter(l => l.includes('__gsd_3532_arbitrary__') && l.includes('shadowed')).length, 0);
+  });
+
+  // Parity canary: every key Branch D honors must warn when set globally under
+  // a project config. If _globalBaseCfg grows a key this list misses, the
+  // warning goes silent for it; if this list grows a key _globalBaseCfg does
+  // not read, the warning lies. Both directions fail here first.
+  for (const key of GLOBAL_KEYS_SHADOWED_UNDER_PROJECT) {
+    test(`canary: global "${key}" alone warns under a project config`, () => {
+      writeConfig(tmpDir, { model_profile: 'balanced' });
+      writeGlobalDefaults({ [key]: true });
+      loadConfigResolved(tmpDir);
+      assert.ok(
+        stderrLines.some(l => l.includes(key)),
+        `global "${key}" must be reported as shadowed; stderr: ${stderrLines.join('')}`,
+      );
+    });
+  }
+
+  test('_resetRuntimeWarningCacheForTests clears the shadowed-key dedup set', () => {
+    writeConfig(tmpDir, { model_profile: 'balanced' });
+    writeGlobalDefaults({ model_profile: 'quality' });
+    loadConfigResolved(tmpDir);
+    assert.ok(
+      configLoader._warnedShadowedGlobalKeys && configLoader._warnedShadowedGlobalKeys.size > 0,
+      'precondition: a shadowed key must populate the dedup set',
+    );
+    _resetRuntimeWarningCacheForTests();
+    assert.equal(configLoader._warnedShadowedGlobalKeys.size, 0);
+  });
+});
