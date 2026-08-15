@@ -91,6 +91,99 @@ function projectWithEffort(effort) {
   return dir;
 }
 
+describe('#3534 resolve-execution reports resolved AND effective effort', () => {
+  function agentHome(t, agentFileBody) {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3534-home-'));
+    t.after(() => cleanup(home));
+    if (agentFileBody !== null) {
+      fs.mkdirSync(path.join(home, 'agents'), { recursive: true });
+      fs.writeFileSync(path.join(home, 'agents', 'gsd-executor.md'), agentFileBody);
+    }
+    return home;
+  }
+
+  function resolveExecution(dir, agent = 'gsd-executor', extra = []) {
+    return JSON.parse(
+      runGsdTools(`query resolve-execution ${agent} ${extra.join(' ')}`, dir).output,
+    );
+  }
+
+  test('10a: effective effort reads the installed frontmatter (claude)', (t) => {
+    const dir = projectWithEffort('high');
+    t.after(() => cleanup(dir));
+    const home = agentHome(t, '---\nname: gsd-executor\neffort: low\ndescription: x\n---\nBody.\n');
+    const out = resolveExecutionWithClaudeHome(dir, home);
+    assert.equal(out.effort, 'high', 'resolved cascade value unchanged');
+    assert.equal(out.effort_effective, 'low', 'the installed frontmatter value');
+    assert.equal(out.effort_effective_source, 'frontmatter');
+    // Existing keys all still present, unchanged shape.
+    for (const k of ['model', 'profile', 'effort', 'effort_rendered', 'effort_param', 'effort_propagation', 'fast_mode', 'fast_mode_supported']) {
+      assert.ok(k in out, `existing key ${k} must remain`);
+    }
+  });
+
+  test('10a: absent frontmatter reports inherit as the effective state (the 10a repro)', (t) => {
+    const dir = projectWithEffort('high');
+    t.after(() => cleanup(dir));
+    const home = agentHome(t, '---\nname: gsd-executor\ndescription: x\n---\nBody.\n');
+    const out = resolveExecutionWithClaudeHome(dir, home);
+    assert.equal(out.effort, 'high');
+    assert.equal(out.effort_effective, 'inherit', 'absent key = follows the session');
+    assert.equal(out.effort_effective_source, 'frontmatter-absent');
+  });
+
+  test('10a: missing agent file falls back to resolved with the flag', (t) => {
+    const dir = projectWithEffort('high');
+    t.after(() => cleanup(dir));
+    const home = agentHome(t, null);
+    const out = resolveExecutionWithClaudeHome(dir, home);
+    assert.equal(out.effort_effective, out.effort);
+    assert.equal(out.effort_effective_source, 'resolved');
+  });
+
+  test('10a: runtimes without an install-time channel report resolved', (t) => {
+    const dir = createTempProject();
+    t.after(() => cleanup(dir));
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'config.json'),
+      JSON.stringify({ runtime: 'codex', effort: { default: 'medium' } }, null, 2),
+    );
+    const out = resolveExecution(dir);
+    assert.equal(out.effort, 'medium');
+    assert.equal(out.effort_effective, 'medium');
+    assert.equal(out.effort_effective_source, 'resolved');
+  });
+
+  test('10a: CRLF frontmatter is read', (t) => {
+    const dir = projectWithEffort('high');
+    t.after(() => cleanup(dir));
+    const home = agentHome(t, ['---', 'name: gsd-executor', 'effort: xhigh', 'description: x', '---', 'Body.', ''].join('\r\n'));
+    const out = resolveExecutionWithClaudeHome(dir, home);
+    assert.equal(out.effort_effective, 'xhigh');
+    assert.equal(out.effort_effective_source, 'frontmatter');
+  });
+
+  test('10a: frontmatter-less agent file degrades to resolved', (t) => {
+    const dir = projectWithEffort('high');
+    t.after(() => cleanup(dir));
+    const home = agentHome(t, 'No frontmatter here at all.\n');
+    const out = resolveExecutionWithClaudeHome(dir, home);
+    assert.equal(out.effort_effective, out.effort);
+    assert.equal(out.effort_effective_source, 'resolved');
+  });
+
+  function resolveExecutionWithClaudeHome(dir, home) {
+    const prev = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = home;
+    try {
+      return resolveExecution(dir);
+    } finally {
+      if (prev === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = prev;
+    }
+  }
+});
+
 describe('#2481 effortSurface — closed vocabulary', () => {
   test('is exactly argv|none — no config-file member', () => {
     // Gemini CLI was the only host with a config-file effort surface and was
