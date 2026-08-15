@@ -589,9 +589,21 @@ describe('sanitizeForRender — properties (F2, F3)', () => {
   const delC1Arb = fc.integer({ min: 0x7f, max: 0x9f }).map((c) => String.fromCharCode(c));
   const ansiCsiArb = fc.constantFrom('\x1b[31m', '\x1b[0m', '\x1b[2K', '\x1b[1;37;40m');
   const ansiOscArb = fc.constantFrom('\x1b]0;title\x07', '\x1b]8;;http://example\x1b\\');
+  // Bidi embedding/override controls (U+202A-U+202E) and isolates
+  // (U+2066-U+2069), written as `\u{...}` escapes rather than literal
+  // characters — see the #2873 PR review Finding 2 note above.
+  const BIDI_LRE = '\u{202A}'; // Left-to-Right Embedding
+  const BIDI_RLE = '\u{202B}'; // Right-to-Left Embedding
+  const BIDI_PDF = '\u{202C}'; // Pop Directional Formatting
+  const BIDI_LRO = '\u{202D}'; // Left-to-Right Override
+  const BIDI_RLO = '\u{202E}'; // Right-to-Left Override
+  const BIDI_LRI = '\u{2066}'; // Left-to-Right Isolate
+  const BIDI_RLI = '\u{2067}'; // Right-to-Left Isolate
+  const BIDI_FSI = '\u{2068}'; // First Strong Isolate
+  const BIDI_PDI = '\u{2069}'; // Pop Directional Isolate
   const bidiArb = fc.constantFrom(
-    '‪', '‫', '‬', '‭', '‮', // embedding/override
-    '⁦', '⁧', '⁨', '⁩',            // isolates
+    BIDI_LRE, BIDI_RLE, BIDI_PDF, BIDI_LRO, BIDI_RLO, // embedding/override
+    BIDI_LRI, BIDI_RLI, BIDI_FSI, BIDI_PDI,            // isolates
   );
   const combiningArb = fc.constantFrom('\u{0300}', '\u{0301}', '\u{0302}', '\u{036F}');
   const zeroWidthArb = fc.constantFrom('\u{200B}', '\u{200C}', '\u{200D}', '\u{FEFF}');
@@ -612,7 +624,7 @@ describe('sanitizeForRender — properties (F2, F3)', () => {
   // against the module's documented contract, not a tautology against its
   // own internals.
   // eslint-disable-next-line no-control-regex, no-misleading-character-class
-  const STRIPPED_CLASS_RE = /[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩\u{0300}-\u{036F}\u{200B}-\u{200D}\u{FEFF}]/u;
+  const STRIPPED_CLASS_RE = /[\x00-\x1f\x7f-\x9f\u{202A}-\u{202E}\u{2066}-\u{2069}\u{0300}-\u{036F}\u{200B}-\u{200D}\u{FEFF}]/u;
 
   test('sanitizer is idempotent: s(s(x)) === s(x) for arbitrary strings (F2)', () => {
     let changedCount = 0;

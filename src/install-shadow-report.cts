@@ -173,7 +173,7 @@ const CONTROL_RE = /[\x00-\x1f\x7f-\x9f]/g;
 /** Unicode bidi embedding/override controls (U+202A-U+202E) and bidi
  *  isolates (U+2066-U+2069) — the RTL-spoofing class the design doc's row
  *  #13 names. */
-const BIDI_RE = /[‪-‮⁦-⁩]/g;
+const BIDI_RE = /[\u{202A}-\u{202E}\u{2066}-\u{2069}]/gu;
 
 /** Combining marks (U+0300-U+036F) — "zalgo" text. Stacked onto the
  *  preceding base character, an unbounded run visually overflows into

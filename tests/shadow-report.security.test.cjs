@@ -80,6 +80,12 @@ function declaredRuntimeReport(runtimeVal) {
   return buildShadowReport('claude', baseOpts(home, cwd, { readManifest: mkReadManifest(byConfigHome) }));
 }
 
+// RLO (Right-to-Left Override, U+202E) — written as a `\u{...}` escape (not
+// a literal bidi character) so the source stays plain ASCII and does not
+// carry the very invisible/dangerous-Unicode class it tests. See the
+// matching B17/B18 note further below for the same rationale.
+const BIDI_RLO = '\u{202E}';
+
 // ─── B1-B4 — hostile declaredRuntime payloads are neutralized in the IR ────
 
 describe('buildShadowReport — hostile declaredRuntime is sanitized in the IR (B1-B4)', () => {
@@ -109,7 +115,7 @@ describe('buildShadowReport — hostile declaredRuntime is sanitized in the IR (
   });
 
   test('bidi override is stripped (B4)', () => {
-    const report = declaredRuntimeReport('a‮b');
+    const report = declaredRuntimeReport(`a${BIDI_RLO}b`);
     assert.strictEqual(report.mismatches[0].declaredRuntime, 'ab');
   });
 });
