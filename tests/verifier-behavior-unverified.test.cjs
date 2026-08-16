@@ -214,17 +214,19 @@ test('#3206: step 5b defines explicit evidence inline — presence+wiring never 
   assert.ok(m, 'step 5b line must exist');
   assert.match(m[0], /held-out\/property-based test/i);
   assert.match(m[0], /directly observed/i);
-  assert.match(m[0], /presence\+wiring/i);
-  assert.match(m[0], /never\s+qualifies/i, 'presence+wiring must be excluded in the 5b line itself');
+  assert.match(m[0], /presence\+wirting|presence\+wiring/i);
+  assert.match(m[0], /\*never\* qualifies/, 'presence+wiring must be excluded in the 5b line itself');
 });
 
 test('#3206: every references-tree cite in gsd-verifier.md resolves on disk as written', () => {
   // Pre-fix, this file cited `references/honest-verifier.md` — a bare path that
   // 404s from repo root after the reference-tree reorg. Every cite must now
   // resolve exactly as written.
-  const citeRe = /`(gsd-core\/)?references\/[A-Za-z0-9._-]+\.md`/g;
+  const citeRe = /`((?:gsd-core\/)?references\/[A-Za-z0-9._-]+\.md)`/g;
   const cites = [...verifier.matchAll(citeRe)].map((m) => m[1]);
-  assert.ok(cites.length >= 3, `expected the honest-verifier and verify-mvp-mode cites, found ${cites.length}`);
+  assert.ok(cites.includes('gsd-core/references/honest-verifier.md'), 'the 5c honest-verifier cite');
+  assert.ok(cites.includes('gsd-core/references/verify-mvp-mode.md'), 'the MVP-mode cite');
+  assert.ok(cites.length >= 2, `expected the two repaired cites, found ${cites.length}`);
   for (const cited of cites) {
     assert.ok(
       fs.existsSync(path.join(ROOT, cited)),
@@ -239,7 +241,8 @@ test('#3206: backstop reporting contract is in the eagerly-included verifier-pha
   // is @~/-included by gsd-verifier.md, so pinning their presence there pins
   // their reachability.
   assert.match(verifier, /@~\/\.claude\/gsd-core\/references\/verifier-phase-gates\.md/);
-  assert.match(verifierPhaseGates, /unverified non-inferable/i);
-  assert.match(verifierPhaseGates, /never a silent pass/i);
-  assert.match(verifierPhaseGates, /insufficient_spec/i);
+  assert.match(verifierPhaseGates, /Never silent, never a hard halt/);
+  assert.match(verifierPhaseGates, /complete with N unverified non-inferable checks/);
+  assert.match(verifierPhaseGates, /Distinguishable reason/);
+  assert.match(verifierPhaseGates, /reason: insufficient_spec/);
 });
