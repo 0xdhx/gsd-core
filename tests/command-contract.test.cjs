@@ -32,6 +32,7 @@ const {
   CANONICAL_TOOLS,
   parseFrontmatter,
   executionContextRefs,
+  workflowPathRefs,
 } = require('../scripts/command-contract-helpers.cjs');
 
 const commandFiles = fs
@@ -110,6 +111,174 @@ describe('command contract: execution_context @-refs on own line (ADR-0002)', ()
         `${name}: @-refs with trailing prose in execution_context: ` +
         bad.map(r => r.token).join(', '),
       );
+    });
+  }
+});
+
+describe('#3561 — workflowPathRefs resolver', () => {
+  test('eager @-include', () => {
+    assert.deepEqual(
+      workflowPathRefs('@~/.claude/gsd-core/workflows/x.md'),
+      ['workflows/x.md'],
+    );
+  });
+
+  test('lazy tilde path', () => {
+    assert.deepEqual(
+      workflowPathRefs('read `~/.claude/gsd-core/workflows/x.md` now'),
+      ['workflows/x.md'],
+    );
+  });
+
+  test('repo-relative path', () => {
+    assert.deepEqual(
+      workflowPathRefs('see gsd-core/workflows/x.md'),
+      ['workflows/x.md'],
+    );
+  });
+
+  test('bare workflows path', () => {
+    assert.deepEqual(
+      workflowPathRefs('see workflows/x.md'),
+      ['workflows/x.md'],
+    );
+  });
+
+  test('parent-relative steps path', () => {
+    assert.deepEqual(
+      workflowPathRefs('run execute-phase/steps/post-merge-gate.md'),
+      ['workflows/execute-phase/steps/post-merge-gate.md'],
+    );
+  });
+
+  test('parent-relative modes path', () => {
+    assert.deepEqual(
+      workflowPathRefs('use discuss-phase/modes/power.md'),
+      ['workflows/discuss-phase/modes/power.md'],
+    );
+  });
+
+  test('empty content yields no refs', () => {
+    assert.deepEqual(workflowPathRefs(''), []);
+  });
+
+  test('unrelated prose yields no refs', () => {
+    assert.deepEqual(workflowPathRefs('nothing to see here'), []);
+  });
+
+  test('whitespace-only yields no refs', () => {
+    assert.deepEqual(workflowPathRefs('   \n\t \n'), []);
+  });
+
+  test('de-duplicates repeated refs', () => {
+    const refs = workflowPathRefs('workflows/x.md and again workflows/x.md');
+    assert.deepEqual(refs, ['workflows/x.md']);
+    assert.equal(refs.length, 1);
+  });
+
+  test('CRLF-tolerant', () => {
+    assert.deepEqual(
+      workflowPathRefs('workflows/a.md\r\nworkflows/b.md'),
+      ['workflows/a.md', 'workflows/b.md'],
+    );
+  });
+
+  test('ignores non-workflow md paths', () => {
+    assert.deepEqual(
+      workflowPathRefs('docs/GUIDE.md README.md references/r.md'),
+      [],
+    );
+  });
+
+  test('surfaces a ref whose target is absent', () => {
+    assert.deepEqual(
+      workflowPathRefs('workflows/does-not-exist.md'),
+      ['workflows/does-not-exist.md'],
+    );
+  });
+
+  test('does not emit a traversing path', () => {
+    const refs = workflowPathRefs('workflows/../../etc/passwd.md');
+    for (const ref of refs) {
+      assert.ok(!ref.includes('..'), `traversal path leaked: ${ref}`);
+    }
+  });
+
+  test('tolerates an overlong path', () => {
+    const content = 'workflows/' + 'a'.repeat(5000) + '.md';
+    assert.doesNotThrow(() => workflowPathRefs(content));
+  });
+
+  test('rejects a .mdx path', () => {
+    assert.deepEqual(workflowPathRefs('workflows/foobar.mdx'), []);
+  });
+
+  test('rejects a .md5 path', () => {
+    assert.deepEqual(workflowPathRefs('workflows/foo.md5'), []);
+  });
+
+  test('still accepts a .md path followed by punctuation', () => {
+    assert.deepEqual(
+      workflowPathRefs('see workflows/x.md, then stop'),
+      ['workflows/x.md'],
+    );
+  });
+
+  test('binds to the --fast line, not the whole file', () => {
+    const syntheticFile = [
+      '- If it is `--fast`: strip the flag, run the scan workflow.',
+      '<!-- see gsd-core/workflows/scan.md -->',
+    ].join('\n');
+    const fastLine = syntheticFile
+      .split(/\r?\n/)
+      .find(line => /^-\s*If it is\s*`--fast`/.test(line));
+    assert.ok(fastLine, 'setup error: synthetic fixture missing --fast routing line');
+    assert.ok(
+      !workflowPathRefs(fastLine).includes('workflows/scan.md'),
+      'regression guard: the --fast routing line itself names no resolvable path — ' +
+      'an unrelated comment elsewhere in the file must not make this test pass',
+    );
+  });
+});
+
+describe('#3561 — /gsd-map-codebase --fast routes to a loadable workflow', () => {
+  const mapCodebasePath = path.join(COMMANDS_DIR, 'map-codebase.md');
+  const mapCodebaseContent = fs.readFileSync(mapCodebasePath, 'utf-8');
+
+  test('map-codebase: --fast routing names a loadable scan.md', () => {
+    const fastLine = mapCodebaseContent
+      .split(/\r?\n/)
+      .find(line => /^-\s*If it is\s*`--fast`/.test(line));
+    assert.ok(
+      fastLine,
+      '#3561: commands/gsd/map-codebase.md has no "--fast" routing bullet ' +
+      '(expected a line matching /^-\\s*If it is\\s*`--fast`/) — the routing logic is missing entirely',
+    );
+    const refs = workflowPathRefs(fastLine);
+    assert.ok(
+      refs.includes('workflows/scan.md'),
+      '#3561: --fast routes to the scan workflow but the routing line names no path ' +
+      'the runtime can resolve, so scan.md is never loaded',
+    );
+  });
+
+  test('full map does not eagerly load scan.md', () => {
+    const refs = executionContextRefs(mapCodebaseContent);
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].normalized, 'workflows/map-codebase.md');
+  });
+});
+
+describe('#3561 — every workflow path referenced by a command exists on disk', () => {
+  for (const { name, full } of commandFiles) {
+    test(`${name}: all workflowPathRefs paths exist on disk`, () => {
+      const refs = workflowPathRefs(fs.readFileSync(full, 'utf-8'));
+      for (const ref of refs) {
+        assert.ok(
+          fs.existsSync(path.join(GSD_ROOT, ref)),
+          `${name}: referenced workflow path "${ref}" does not exist under ${GSD_ROOT}`,
+        );
+      }
     });
   }
 });
