@@ -68,6 +68,14 @@
  *   milestone complete <version>       Archive milestone, create MILESTONES.md
  *     [--name <name>]
  *     [--no-archive-phases]          Skip moving phase dirs to milestones/vX.Y-phases/ (archived by default)
+ *     [--archive-quick]              Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the
+ *                                    Quick Tasks Completed table (#2142; opt-in, default OFF)
+ *
+ *   milestone archive-quick <version>  Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the
+ *                                      Quick Tasks Completed table, WITHOUT the milestone complete close-out
+ *                                      (no ROADMAP/REQUIREMENTS/MILESTONES.md writes, no completion guards);
+ *                                      safe against an already-completed milestone (#2142 escalation)
+ *     [--dry-run]                     Preview what would move, mutates nothing
  *
  * User Story Validation:
  *   user-story validate --story "..."  Validate "As a / I want to / so that" format
@@ -2134,9 +2142,20 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             const force = args.includes('--force');
             // #2118: --dry-run prints a preview plan without mutating.
             const dryRun = args.includes('--dry-run');
-            milestone.cmdMilestoneComplete(cwd, args[2], { name: milestoneName, archivePhases, force, dryRun }, raw);
+            // #2142: quick-task archival is opt-in (default OFF) — unlike
+            // --no-archive-phases' inverted shape, absence of this flag means
+            // "do nothing" rather than "skip a default-on behavior".
+            const archiveQuick = args.includes('--archive-quick');
+            milestone.cmdMilestoneComplete(cwd, args[2], { name: milestoneName, archivePhases, force, dryRun, archiveQuick }, raw);
+          } else if (subcommand === 'archive-quick') {
+            // #2142 escalation: narrow archival-only entry point (does NOT
+            // touch ROADMAP/REQUIREMENTS/MILESTONES.md, runs no completion
+            // guards) — safe to call against an already-completed milestone,
+            // unlike `milestone complete --archive-quick`.
+            const dryRun = args.includes('--dry-run');
+            milestone.cmdQuickArchive(cwd, args[2], { dryRun }, raw);
           } else {
-            error('Unknown milestone subcommand. Available: complete', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown milestone subcommand. Available: complete, archive-quick', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
