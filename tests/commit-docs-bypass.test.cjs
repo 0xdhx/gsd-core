@@ -1,99 +1,381 @@
 /**
- * commit_docs bypass guard tests (#1783)
+ * commit_docs bypass guard (#1783; superseded/widened by #3585)
  *
- * When users set commit_docs: false during /gsd-new-project, .planning/
- * files should never be staged or committed. The gsd-tools.cjs commit
- * wrapper already checks this flag, but three locations in execute-phase.md
- * and quick.md used raw `git add .planning/` commands that bypassed it.
+ * #1783: when users set commit_docs: false during /gsd-new-project,
+ * .planning/ files should never be staged or committed. The gsd-tools.cjs
+ * commit wrapper already checks this flag, but three locations in
+ * execute-phase.md and quick.md used raw `git add .planning/` commands that
+ * bypassed it.
  *
- * These tests verify that every `git add .planning/` invocation (explicit
- * or via file_list) is preceded by a commit_docs config check.
+ * The original guard here was a two-file allowlist (execute-phase.md,
+ * quick.md) whose regex required the literal substring `.planning/` on the
+ * SAME line as `git add`. That is structurally blind to `git add -A` /
+ * `git add .` / `git add -u` — none of those lines mention `.planning/` at
+ * all, yet every one of them stages the whole index, including
+ * `.planning/`, regardless of the config. #3585 replaces it with a
+ * repo-wide scan that classifies `git add` invocations by what they can
+ * actually reach (the blanket/wildcard forms, `.planning`-qualified paths in
+ * either separator convention, and any argument carrying an unresolved
+ * shell variable, fail-closed), across every scan root that carries live
+ * workflow/agent/command/skill/reference content — not just the original
+ * two files.
  */
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
 const path = require('path');
+const fc = require('fast-check');
+const {
+  hasReachingGitAdd, scanText, scanRepo, SCAN_ROOTS,
+} = require('./helpers/planning-add-guard.cjs');
 
-const EXECUTE_PHASE_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md');
-const QUICK_PATH = path.join(__dirname, '..', 'gsd-core', 'workflows', 'quick.md');
+const REPO_ROOT = path.join(__dirname, '..');
 
-describe('commit_docs bypass guard (#1783)', () => {
+describe('commit_docs bypass guard (#1783, repo-wide per #3585)', () => {
+  // ── Layer 1: the pure classifier, over inline string fixtures ──────────
 
-  test('execute-phase.md: every git add .planning/ has a commit_docs guard', () => {
-    const content = fs.readFileSync(EXECUTE_PHASE_PATH, 'utf-8');
-    const lines = content.split(/\r?\n/);
+  describe('A: argument-reach rules', () => {
+    test('A1: git add .planning/STATE.md reaches', () => {
+      assert.strictEqual(hasReachingGitAdd('git add .planning/STATE.md'), true);
+    });
 
-    for (let i = 0; i < lines.length; i++) {
-      if (/git add\b.*\.planning\//.test(lines[i])) {
-        // Search backwards from this line for a config-get commit_docs check
-        const windowStart = Math.max(0, i - 10);
-        const window = lines.slice(windowStart, i).join('\n');
-        assert.ok(
-          window.includes('config-get commit_docs'),
-          `git add .planning/ at line ${i + 1} in execute-phase.md must be guarded by a commit_docs config check`
-        );
-      }
-    }
+    test('A2: git add -A reaches', () => {
+      assert.strictEqual(hasReachingGitAdd('git add -A'), true);
+    });
+
+    test('A3: git add --all reaches', () => {
+      assert.strictEqual(hasReachingGitAdd('git add --all'), true);
+    });
+
+    test('A4: git add . reaches', () => {
+      assert.strictEqual(hasReachingGitAdd('git add .'), true);
+    });
+
+    test('A5: git add -u reaches', () => {
+      assert.strictEqual(hasReachingGitAdd('git add -u'), true);
+    });
+
+    test('A6: git add src/api/auth.ts does NOT reach', () => {
+      assert.strictEqual(hasReachingGitAdd('git add src/api/auth.ts'), false);
+    });
+
+    test('A7: git add {test_files} does NOT reach (brace placeholder, no $)', () => {
+      assert.strictEqual(hasReachingGitAdd('git add {test_files}'), false);
+    });
+
+    test('A8: git add "${QUICK_DIR}/x-PLAN.md" reaches (rule c: unresolved variable)', () => {
+      assert.strictEqual(hasReachingGitAdd('git add "${QUICK_DIR}/x-PLAN.md"'), true);
+    });
+
+    test('A9: git add .planning\\STATE.md reaches (Windows separator)', () => {
+      assert.strictEqual(hasReachingGitAdd('git add .planning\\STATE.md'), true);
+    });
+
+    test("A10: git add -A -- ':!.planning' does NOT reach (exclude pathspec overrides -A)", () => {
+      assert.strictEqual(hasReachingGitAdd("git add -A -- ':!.planning'"), false);
+    });
+
+    test('A11: V=$(git add -A) reaches (substitution-glued assignment prefix, #3585)', () => {
+      assert.strictEqual(hasReachingGitAdd('V=$(git add -A)'), true);
+    });
+
+    test('A12: FOO=1 git add -A still reaches (plain assignment prefix, not a substitution)', () => {
+      assert.strictEqual(hasReachingGitAdd('FOO=1 git add -A'), true);
+    });
+
+    test('A13: git -C /tmp/x add -A reaches (git-level -C flag consumes its value, #3585)', () => {
+      assert.strictEqual(hasReachingGitAdd('git -C /tmp/x add -A'), true);
+    });
+
+    test('A14: git --no-pager add -A reaches (a value-less flag must not swallow "add")', () => {
+      assert.strictEqual(hasReachingGitAdd('git --no-pager add -A'), true);
+    });
+
+    test('A15: git -c foo.bar=1 add -A reaches (git-level -c flag consumes its value)', () => {
+      assert.strictEqual(hasReachingGitAdd('git -c foo.bar=1 add -A'), true);
+    });
+
+    test('A16: git add "$(cat list.txt)" reaches (command substitution, #3585 F2)', () => {
+      assert.strictEqual(hasReachingGitAdd('git add "$(cat list.txt)"'), true);
+    });
+
+    test('A17: git add --pathspec-from-file=paths.txt reaches (#3585 F2)', () => {
+      assert.strictEqual(hasReachingGitAdd('git add --pathspec-from-file=paths.txt'), true);
+    });
+
+    test('A18: git commit -a -m "x" reaches (#3585 F3)', () => {
+      assert.strictEqual(hasReachingGitAdd('git commit -a -m "x"'), true);
+    });
+
+    test('A19: git commit -am "x" reaches (combined short cluster, #3585 F3)', () => {
+      assert.strictEqual(hasReachingGitAdd('git commit -am "x"'), true);
+    });
+
+    test('A20: git commit -m "x" does NOT reach (no -a/--all flag, #3585 F3)', () => {
+      assert.strictEqual(hasReachingGitAdd('git commit -m "x"'), false);
+    });
   });
 
-  test('quick.md: every git add .planning/ has a commit_docs guard', () => {
-    const content = fs.readFileSync(QUICK_PATH, 'utf-8');
-    const lines = content.split(/\r?\n/);
+  describe('B: invocation recognition', () => {
+    test('B1: a bare fenced line is an invocation', () => {
+      assert.strictEqual(hasReachingGitAdd('git add -A'), true);
+    });
 
-    for (let i = 0; i < lines.length; i++) {
-      if (/git add\b.*\.planning\//.test(lines[i])) {
-        const windowStart = Math.max(0, i - 10);
-        const window = lines.slice(windowStart, i).join('\n');
-        assert.ok(
-          window.includes('config-get commit_docs'),
-          `git add .planning/ at line ${i + 1} in quick.md must be guarded by a commit_docs config check`
-        );
-      }
-    }
+    test('B3: a quoted echo of "git add -A" is NOT an invocation', () => {
+      assert.strictEqual(
+        hasReachingGitAdd('[ -n "$X" ] && echo "  1. git add -A && git commit -m \'wip\'" >&2'),
+        false,
+      );
+    });
+
+    test('B5: bash -c "git add -A" IS an invocation', () => {
+      assert.strictEqual(hasReachingGitAdd('bash -c "git add -A"'), true);
+    });
+
+    test('B6: echo bash -c "git add -A" is NOT an invocation (echo prints, does not run)', () => {
+      assert.strictEqual(hasReachingGitAdd('echo bash -c "git add -A"'), false);
+    });
+
+    test('B7: cd "$X" && git add -A IS an invocation', () => {
+      assert.strictEqual(hasReachingGitAdd('cd "$X" && git add -A'), true);
+    });
+
+    test('B8: # git add -A (a shell comment) is NOT an invocation', () => {
+      assert.strictEqual(hasReachingGitAdd('# git add -A'), false);
+    });
   });
 
-  test('quick.md: git add ${file_list} has a commit_docs guard for .planning/ filtering', () => {
-    const content = fs.readFileSync(QUICK_PATH, 'utf-8');
-    const lines = content.split(/\r?\n/);
+  // ── Layer 1 continued: fence + commit_docs guard state (needs multi-line
+  // file context, so these drive scanText over small synthetic documents) ──
 
-    // Find the line(s) that do `git add ${file_list}` — this variable
-    // includes .planning/STATE.md so it needs a commit_docs guard too
-    for (let i = 0; i < lines.length; i++) {
-      if (/git add\s+\$\{?file_list/.test(lines[i])) {
-        const windowStart = Math.max(0, i - 10);
-        const window = lines.slice(windowStart, i + 1).join('\n');
-        assert.ok(
-          window.includes('config-get commit_docs'),
-          `git add \${file_list} at line ${i + 1} in quick.md must be guarded by a commit_docs check ` +
-          `because file_list includes .planning/ files`
-        );
-      }
-    }
+  describe('C: fence and commit_docs guard tracking', () => {
+    const fenced = (bodyLines) => ['```bash', ...bodyLines, '```'].join('\n');
+
+    test('C1: a guard enclosing the add is guarded (no offender)', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'COMMIT_DOCS=$(gsd_run query config-get commit_docs --default true)',
+        'if [ "$COMMIT_DOCS" != "false" ]; then',
+        '  git add .planning/STATE.md',
+        'fi',
+      ]));
+      assert.deepStrictEqual(offenders, []);
+    });
+
+    test('C2: an add BEFORE the if is unguarded', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'git add .planning/STATE.md',
+        'if [ "$COMMIT_DOCS" != "false" ]; then',
+        '  echo noop',
+        'fi',
+      ]));
+      assert.strictEqual(offenders.length, 1);
+    });
+
+    test('C3: an add AFTER the fi is unguarded', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'if [ "$COMMIT_DOCS" != "false" ]; then',
+        '  echo noop',
+        'fi',
+        'git add .planning/STATE.md',
+      ]));
+      assert.strictEqual(offenders.length, 1);
+    });
+
+    test('C4: markdown prose "**If commit_docs is true:**" outside the fence is not a guard', () => {
+      const text = [
+        '**If `commit_docs` is true:**',
+        '```bash',
+        'git add "${EVAL_REVIEW_FILE}"',
+        '```',
+      ].join('\n');
+      const { offenders } = scanText('fixture.md', text);
+      assert.strictEqual(offenders.length, 1);
+    });
+
+    test('C5: the real eval-review.md shape (prose line immediately before the fence) is not a guard', () => {
+      const text = [
+        '## 6. Commit',
+        '',
+        '**If `commit_docs` is true:**',
+        '```bash',
+        'git add "${EVAL_REVIEW_FILE}"',
+        'git commit -m "docs: add EVAL-REVIEW.md"',
+        '```',
+      ].join('\n');
+      const { offenders } = scanText('fixture.md', text);
+      assert.strictEqual(offenders.length, 1);
+    });
+
+    test('C6: a nested if inside the guard stays guarded', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'COMMIT_DOCS=$(gsd_run query config-get commit_docs --default true)',
+        'if [ "$COMMIT_DOCS" != "false" ]; then',
+        '  if [ -f somefile ]; then',
+        '    git add .planning/STATE.md',
+        '  fi',
+        'fi',
+      ]));
+      assert.deepStrictEqual(offenders, []);
+    });
+
+    test('C7: a guard in a DIFFERENT fenced block does not carry over', () => {
+      const text = [
+        '```bash',
+        'if [ "$COMMIT_DOCS" != "false" ]; then',
+        '```',
+        '',
+        '```bash',
+        'git add .planning/STATE.md',
+        '```',
+      ].join('\n');
+      const { offenders } = scanText('fixture.md', text);
+      assert.strictEqual(offenders.length, 1);
+    });
+
+    test('C8: CRLF line endings behave identically to LF (the C1 fixture, \\r\\n joined)', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'COMMIT_DOCS=$(gsd_run query config-get commit_docs --default true)',
+        'if [ "$COMMIT_DOCS" != "false" ]; then',
+        '  git add .planning/STATE.md',
+        'fi',
+      ]).split('\n').join('\r\n'));
+      assert.deepStrictEqual(offenders, []);
+    });
+
+    test('C9: the = "true" polarity is a guard too (both polarities accepted)', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'COMMIT_DOCS=$(gsd_run query config-get commit_docs --default true)',
+        'if [ "$COMMIT_DOCS" = "true" ]; then',
+        '  git add .planning/STATE.md',
+        'fi',
+      ]));
+      assert.deepStrictEqual(offenders, []);
+    });
+
+    // PIN, not a failing-first regression test (#3585 F6): this assertion
+    // does not distinguish the unclamped-ifDepth code from the clamped
+    // fix — a 200k-case differential fuzz over `if`/`fi` nestings found zero
+    // divergence between them, and this exact fixture passes identically on
+    // pre-fix code. That is because guardOpenDepth is only ever SET from a
+    // commit_docs/tracked-var-mentioning `if`, and that guard's own `fi`
+    // always closes it via a RELATIVE depth comparison regardless of the
+    // (possibly negative, pre-clamp) baseline. The `Math.max(0, ...)` clamp
+    // is kept anyway as DEFENSIVELY correct — no input was found, in 200k
+    // fuzzed cases, that makes the unclamped code diverge from the clamped
+    // one. This test PINS the malformed-shell ("stray fi") behavior for
+    // both versions; it does not demonstrate a fix for a reproduced defect.
+    test('C10: pins malformed-shell behavior — a stray fi before an unrelated if does not manufacture a guard (fails closed)', () => {
+      const { offenders } = scanText('fixture.md', fenced([
+        'fi',
+        'if [ "$X" = "1" ]; then',
+        '  git add -A',
+        'fi',
+      ]));
+      assert.strictEqual(offenders.length, 1, 'git add -A must still be reported as unguarded');
+    });
   });
 
-  test('no raw git add .planning/ without commit_docs guard in any workflow', () => {
-    const workflows = [
-      { name: 'execute-phase.md', path: EXECUTE_PHASE_PATH },
-      { name: 'quick.md', path: QUICK_PATH },
-    ];
+  describe('D: gsd-scan-ignore declaration handling', () => {
+    const fenced = (line) => ['```bash', line, '```'].join('\n');
 
-    for (const wf of workflows) {
-      const content = fs.readFileSync(wf.path, 'utf-8');
+    test('D1: declared with a tracked issue (#3585) is exempt', () => {
+      const { offenders, untracked } = scanText(
+        'fixture.md',
+        fenced('git add -A # gsd-scan-ignore: #3585 demonstrating the unscoped shape'),
+      );
+      assert.deepStrictEqual(offenders, []);
+      assert.deepStrictEqual(untracked, []);
+    });
 
-      // Find all occurrences of git add that reference .planning/
-      const regex = /git add\b[^\r\n]*\.planning\//g;
-      let match;
-      while ((match = regex.exec(content)) !== null) {
-        // Get the 500-char window before this match
-        const before = content.slice(Math.max(0, match.index - 500), match.index);
-        assert.ok(
-          before.includes('config-get commit_docs'),
-          `${wf.name}: found unguarded git add .planning/ near offset ${match.index}. ` +
-          `All raw git add .planning/ commands must check commit_docs config first.`
-        );
-      }
-    }
+    test('D2: an empty reason is malformed, not exempt', () => {
+      const { offenders, untracked } = scanText(
+        'fixture.md',
+        fenced('git add -A # gsd-scan-ignore:'),
+      );
+      assert.strictEqual(offenders.length, 1, 'not exempted — still an offender');
+      assert.strictEqual(untracked.length, 1, 'and reported as a malformed declaration');
+    });
+
+    test('D3: "just a note" (no tracking reference) is malformed, not exempt', () => {
+      const { offenders, untracked } = scanText(
+        'fixture.md',
+        fenced('git add -A # gsd-scan-ignore: just a note'),
+      );
+      assert.strictEqual(offenders.length, 1, 'not exempted — still an offender');
+      assert.strictEqual(untracked.length, 1, 'and reported as a malformed declaration');
+    });
+
+    test('D4: a marker surviving as an argv token declares nothing', () => {
+      const { offenders, untracked } = scanText(
+        'fixture.md',
+        fenced('git add .planning/STATE.md "gsd-scan-ignore: #3585"'),
+      );
+      assert.strictEqual(offenders.length, 1, 'plain unguarded offender');
+      assert.deepStrictEqual(untracked, [], 'the marker never reached comment position, so no declaration was attempted');
+    });
+  });
+
+  // ── Property test (#3585 F5): a parser needs a property test, per
+  // CLAUDE.md, mirroring the fast-check coverage already carried by the
+  // sibling classifier in tests/commit-files-pathspec.test.cjs. ───────────
+
+  describe('P: property — hasReachingGitAdd', () => {
+    // Bounded alphabet, deliberately small and non-overlapping with the
+    // trigger set below so a filler token never accidentally reaches on its
+    // own — every failure the property can find is attributable to the
+    // trigger token, not to generator noise.
+    const fillerToken = fc.constantFrom('src/a.ts', 'docs/readme.md', 'foo', 'bar123', 'lib/x.js');
+    const blanketFlag = fc.constantFrom('-A', '--all', '.', '-u');
+    const planningPath = fc.constantFrom(
+      '.planning/STATE.md',
+      '.planning/todos/pending/x.md',
+      '.planning/ROADMAP.md',
+    );
+    const triggerToken = fc.oneof(blanketFlag, planningPath);
+
+    test('P1: a line with a blanket flag or a .planning-rooted path, and no exclude pathspec, always reaches', () => {
+      fc.assert(
+        fc.property(
+          fc.array(fillerToken, { maxLength: 4 }),
+          triggerToken,
+          fc.array(fillerToken, { maxLength: 4 }),
+          (before, trigger, after) => {
+            const line = ['git', 'add', ...before, trigger, ...after].join(' ');
+            assert.strictEqual(
+              hasReachingGitAdd(line),
+              true,
+              `a git add line carrying a blanket flag or a .planning-rooted path, with no `
+                + `exclude pathspec, must reach .planning/: ${line}`,
+            );
+          },
+        ),
+        // Pinned seed + bounded numRuns per CONTRIBUTING.md/CLAUDE.md
+        // determinism rule — deterministic, replayable failures.
+        { seed: 3585, numRuns: 200 },
+      );
+    });
+  });
+
+  // ── Layer 2: the real tree ──────────────────────────────────────────────
+
+  test('every git add invocation in shipped content is guarded or declared', () => {
+    const { offenders, untracked } = scanRepo(REPO_ROOT, SCAN_ROOTS);
+
+    assert.deepStrictEqual(
+      untracked,
+      [],
+      'gsd-scan-ignore: declarations without a tracking reference. Add a #NNN issue '
+        + 'number or an http(s):// URL to the reason, per ADR-456:\n'
+        + untracked.map((u) => `${u.file}:${u.line}: ${u.text}`).join('\n'),
+    );
+
+    assert.deepStrictEqual(
+      offenders,
+      [],
+      'git add invocations that can reach .planning/ without a commit_docs guard or a '
+        + 'tracked gsd-scan-ignore declaration (#1783 / #3585):\n\n'
+        + offenders.map((o) => `${o.file}:${o.line}: ${o.text}`).join('\n'),
+    );
   });
 });
 
@@ -243,8 +525,13 @@ const REPO_ROOT = path.resolve(__dirname, '..');
 
 const EXECUTOR_AGENT = path.join(REPO_ROOT, 'agents', 'gsd-executor.md');
 
-// Frozen reason enum mirrors the SDK source — keep in sync with
-// `cmdCommit` in gsd-core/bin/lib/commands.cjs.
+// Frozen reason enum mirrors the SDK source. Both members are now
+// behaviorally pinned against the live envelope returned by `cmdCommit` in
+// gsd-core/bin/lib/commands.cjs, not kept in sync by hand-reading the
+// source: SKIPPED_COMMIT_DOCS_FALSE by describe block B (B1-B3, explicit
+// `commit_docs: false`) and SKIPPED_GITIGNORED by describe block G (G1-G3,
+// gitignore auto-detect). A production rename of either string now fails
+// these tests instead of drifting silently behind the comment (#3585).
 const COMMIT_REASON = Object.freeze({
   SKIPPED_COMMIT_DOCS_FALSE: 'skipped_commit_docs_false',
   SKIPPED_GITIGNORED: 'skipped_gitignored',
@@ -365,6 +652,87 @@ describe('bug #3678 — executor must respect commit_docs:false', () => {
         headAfter,
         headBefore,
         'HEAD must not advance when commit_docs is false',
+      );
+    });
+  });
+
+  describe('G — gitignore auto-detect pins the other COMMIT_REASON member', () => {
+    // Parity anchor for #3585's Generative Fix Divergence finding: describe
+    // block B above behaviorally pins SKIPPED_COMMIT_DOCS_FALSE (an explicit
+    // `commit_docs: false` in config.json), but SKIPPED_GITIGNORED was pinned
+    // by nothing except the "keep in sync" comment on COMMIT_REASON above —
+    // production could rename that string and every existing test here would
+    // still pass. This block drives the OTHER path: `.planning/config.json`
+    // is left absent entirely (not present-with-key-unset — a present,
+    // even-empty config.json routes through loadConfigResolved's own
+    // gitignore auto-detect override, which resolves `commit_docs` to
+    // `false` and returns SKIPPED_COMMIT_DOCS_FALSE first, never reaching
+    // the gitignored reason), so `commit_docs` is never set anywhere and the
+    // skip is driven purely by `.gitignore` containing `.planning/`.
+    let tmpDir;
+
+    beforeEach(() => {
+      tmpDir = createTempGitProject();
+      // .planning/ already exists from createTempGitProject's setup, and no
+      // config.json is written — commit_docs is left completely absent.
+      const gitignorePath = path.join(tmpDir, '.gitignore');
+      fs.writeFileSync(gitignorePath, '.planning/\n');
+      git(['add', gitignorePath], tmpDir);
+      git(['commit', '-m', 'chore: add gitignore'], tmpDir);
+
+      const statePath = path.join(tmpDir, '.planning', 'STATE.md');
+      if (!fs.existsSync(statePath)) {
+        fs.writeFileSync(statePath, '---\nproject: test\n---\n# State\n');
+      }
+      fs.appendFileSync(statePath, '\n<!-- token edit for #3585 gitignore-auto-detect parity anchor -->\n');
+    });
+
+    afterEach(() => cleanup(tmpDir));
+
+    test('G1: commit returns skipped:true with reason SKIPPED_GITIGNORED (parity anchor for the enum member the comment claims is kept in sync)', () => {
+      const result = runGsdTools(
+        'commit "docs(test): noop" --files .planning/STATE.md',
+        tmpDir,
+      );
+      assert.ok(result.success, `gsd-tools commit should exit 0 even when skipped: ${result.error || ''}`);
+      const envelope = JSON.parse(result.output);
+      assert.strictEqual(envelope.skipped, true, 'envelope must carry skipped:true for the gitignore auto-detect path');
+      assert.strictEqual(
+        envelope.reason,
+        COMMIT_REASON.SKIPPED_GITIGNORED,
+        'reason must be the canonical skipped_gitignored code (frozen enum) — this is the '
+        + 'behavioral pin for the member describe block B never exercises',
+      );
+    });
+
+    test('G2: gitignore auto-detect skip leaves the git index empty (no .planning/ staged)', () => {
+      runGsdTools(
+        'commit "docs(test): noop" --files .planning/STATE.md',
+        tmpDir,
+      );
+      const stagedAll = git(['diff', '--cached', '--name-only'], tmpDir);
+      const stagedPlanning = stagedAll
+        .split(/\r?\n/)
+        .map(s => s.trim())
+        .filter(s => s.startsWith('.planning/'));
+      assert.deepStrictEqual(
+        stagedPlanning,
+        [],
+        'no .planning/ files should be staged when .planning/ is gitignored',
+      );
+    });
+
+    test('G3: gitignore auto-detect skip produces no new commits', () => {
+      const headBefore = git(['rev-parse', 'HEAD'], tmpDir).trim();
+      runGsdTools(
+        'commit "docs(test): noop" --files .planning/STATE.md',
+        tmpDir,
+      );
+      const headAfter = git(['rev-parse', 'HEAD'], tmpDir).trim();
+      assert.strictEqual(
+        headAfter,
+        headBefore,
+        'HEAD must not advance when .planning/ is gitignored',
       );
     });
   });
