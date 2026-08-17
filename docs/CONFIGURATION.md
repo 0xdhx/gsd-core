@@ -505,6 +505,31 @@ If none match, the starting directory is returned unchanged. Explicit `--project
 
 If `.planning/` is in `.gitignore`, `commit_docs` is automatically `false` regardless of config.json. This prevents git errors.
 
+#### Caveat: `.gitignore` does not affect files git already tracks
+
+Adding `.planning/` to `.gitignore` stops git from picking up **new** files there. It has no effect
+on files already committed — git keeps tracking those, so `git add -A` keeps staging them even
+though `commit_docs` now resolves to `false`. Because GSD's default is `commit_docs: true`, most
+existing projects have already committed `.planning/`, which makes this the common case rather than
+the edge case.
+
+`/gsd-health` reports this contradiction as **`W029`**:
+
+```
+W029  .planning/ is gitignored but N file(s) are still tracked by git
+      Fix: git rm -r --cached .planning/ && git commit -m "chore: stop tracking planning docs"
+```
+
+The warning is advisory. GSD never untracks files for you — `--repair` deliberately will not act on
+`W029`, because removing files from the index is destructive and the timing is yours to choose.
+
+Once you run the `git rm -r --cached` above, `.planning/` is untracked, the ignore rule takes full
+effect, and the warning clears.
+
+Note: a file deliberately force-added under an otherwise-ignored `.planning/` (`git add -f
+.planning/keep.md`) triggers this same warning — there is no reliable way to distinguish an
+intentional force-add from the accidental case above, so `W029` is expected in that situation too.
+
 ---
 
 ## Hook Settings
@@ -523,7 +548,7 @@ The prompt injection guard hook (`gsd-prompt-guard.js`) is always active and can
 
 ### Private Planning Setup
 
-When `planning.commit_docs` is `false` and `.planning/` is listed in `.gitignore`, GSD treats planning artefacts as local-only. `planning.search_gitignored: true` ensures broad searches still include the `.planning/` directory in this configuration. See [Configure private planning](how-to/configure-model-profiles.md) for setup steps.
+When `planning.commit_docs` is `false` and `.planning/` is listed in `.gitignore`, GSD treats planning artifacts as local-only. `planning.search_gitignored: true` ensures broad searches still include the `.planning/` directory in this configuration. See [Keep planning docs out of a shared repo](how-to/keep-planning-docs-private.md) for the full setup, including untracking files git is already tracking.
 
 ---
 
