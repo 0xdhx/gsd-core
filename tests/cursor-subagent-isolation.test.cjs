@@ -29,6 +29,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 const { SENTINEL_RELATIVE_PATH, SENTINEL_STALE_MS } = require('../hooks/lib/isolation-sentinel.js');
+const { REASON_CODE } = require('../hooks/lib/isolation-deny-reason.js');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { gitOrThrow, toLegacyResult } = require('./helpers/git-fixture.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
@@ -995,5 +996,52 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
       'orchestrator-worktree',
       'the explicit config override wins over both marker and defaults',
     );
+  });
+});
+
+// ─── #3582: cold tree (no gsd-core/bin/lib/*.cjs) — self-heal surfacing ────
+//
+// Mirrors tests/gsd-agent-isolation-guard.test.cjs's identical #3582 case for
+// the sibling Claude guard. evaluateRootIsolation now calls
+// ensureRuntimeBuild() immediately after the GSD-project existence check —
+// before resolveFallbackIsolation's runtime-name-policy.cjs/
+// capability-registry.cjs requires or resolveIsolationEvidence's
+// runtime-homes.cjs/worktree-safety.cjs requires — so a missing compiled
+// runtime library denies with the seam's own actionable message rather than
+// the generic "could not read or resolve ... configuration" text (#3050).
+// Simulated hermetically via tests/helpers/cold-runtime-lib-fixture.cjs — the
+// REAL gsd-core/bin/lib/ is never touched.
+describe('gsd-cursor-subagent-start.js: #3582 cold tree — RuntimeBuildError surfaces distinctly', () => {
+  const { buildColdInstallTree } = require('./helpers/cold-runtime-lib-fixture.cjs');
+
+  test('missing compiled runtime library -> DENY (fail-closed) with the seam\'s own actionable message, not the generic config-unreadable text', (t) => {
+    const cold = buildColdInstallTree();
+    t.after(cold.cleanup);
+    const project = createTempDir('gsd-cs-cold-');
+    t.after(() => cleanup(project));
+    fs.mkdirSync(path.join(project, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(project, '.planning', 'config.json'), JSON.stringify({ runtime: 'cursor' }));
+
+    const env = { ...process.env };
+    delete env.GSD_RUNTIME;
+    delete env.CURSOR_CONFIG_DIR;
+    const r = toLegacyResult(runNode([path.join(cold.hooksDir, 'gsd-cursor-subagent-start.js')], {
+      input: JSON.stringify(subagentPayload([project])),
+      cwd: require('node:os').tmpdir(),
+      env,
+      timeoutMs: PROBE_TIMEOUT_MS,
+    }));
+    assert.equal(r.status, 0, `this hook always exits 0; stdout: ${r.stdout} stderr: ${r.stderr}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.permission, 'deny');
+    // Typed reason code (CONTRIBUTING.md "Prohibited: Raw Text Matching on
+    // Test Outputs" — assert the stable code, not the free-form
+    // `user_message` prose). RUNTIME_BUILD_FAILED and CONFIG_UNREADABLE are
+    // distinct codes, so this equality check itself proves the build
+    // failure is NOT misreported as the generic unreadable-config case.
+    assert.equal(out.reason_code, REASON_CODE.RUNTIME_BUILD_FAILED);
+    // `user_message` remains free-form operator-facing text — not asserted here.
+    assert.equal(typeof out.user_message, 'string');
+    assert.ok(out.user_message.length > 0);
   });
 });

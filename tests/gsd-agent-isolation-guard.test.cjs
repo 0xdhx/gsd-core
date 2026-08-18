@@ -54,6 +54,7 @@ const { toLegacyResult, gitOrThrow } = require('./helpers/git-fixture.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { createTempDir, createTempProject, runGsdTools, cleanup } = require('./helpers.cjs');
 const { SENTINEL_RELATIVE_PATH, SENTINEL_STALE_MS, readSentinel } = require('../hooks/lib/isolation-sentinel.js');
+const { REASON_CODE } = require('../hooks/lib/isolation-deny-reason.js');
 const { runtimes } = require('../gsd-core/bin/lib/capability-registry.cjs');
 
 const HOOK_PATH = path.join(__dirname, '..', 'hooks', 'gsd-agent-isolation-guard.js');
@@ -1269,5 +1270,54 @@ describe('#2486 regression: inspect-dispatch-isolation is the sentinel-free read
     );
     assert.equal(inspectedJson.isolation, 'orchestrator-worktree', 'precondition: codex is the orchestrator-worktree case');
     assert.ok(inspectedJson.exec, 'precondition: this branch actually populates exec, so the comparison means something');
+  });
+});
+
+// ─── #3582: cold tree (no gsd-core/bin/lib/*.cjs) — self-heal surfacing ────
+//
+// gsd-core/bin/lib/*.cjs are tsc build artifacts (ADR-457), gitignored and
+// absent on a raw plugin-marketplace / git-clone install that never ran
+// `npm run build:lib`. Before #3582, resolveRegistryIsolation's
+// require('../gsd-core/bin/lib/runtime-name-policy.cjs') threw a bare
+// "Cannot find module", which resolveIsolationState's catch folded into the
+// SAME generic "could not read or resolve ... configuration" reason as an
+// unreadable config.json (row 8/12 above) — a misreport of a completely
+// different failure (#3050 lesson). The fix: resolveRegistryIsolation now
+// calls ensureRuntimeBuild() first; a RuntimeBuildError surfaces its own
+// actionable message instead. Simulated hermetically via a fixture install
+// tree that copies hooks/ + the seam module but never gsd-core/bin/lib/ or
+// tsconfig.build.json (tests/helpers/cold-runtime-lib-fixture.cjs) — the
+// REAL gsd-core/bin/lib/ is never touched.
+describe('gsd-agent-isolation-guard.js: #3582 cold tree — RuntimeBuildError surfaces distinctly', () => {
+  const { buildColdInstallTree } = require('./helpers/cold-runtime-lib-fixture.cjs');
+
+  test('missing compiled runtime library -> DENY (fail-closed) with the seam\'s own actionable message, not the generic config-unreadable text', (t) => {
+    const cold = buildColdInstallTree();
+    t.after(cold.cleanup);
+    const project = mkProject('gsd-aig-cold-');
+    t.after(() => cleanup(project));
+    writeConfig(project, JSON.stringify({ runtime: 'claude' }));
+
+    const env = { ...process.env };
+    delete env.GSD_RUNTIME;
+    const r = runHookSeam(path.join(cold.hooksDir, 'gsd-agent-isolation-guard.js'), [], {
+      input: JSON.stringify(agentPayload()),
+      cwd: project,
+      env,
+      timeoutMs: PROBE_TIMEOUT_MS,
+    });
+    const result = toLegacyResult(r);
+    assert.equal(result.status, 2, `expected fail-closed DENY; stdout: ${result.stdout} stderr: ${result.stderr}`);
+    const out = JSON.parse(result.stdout);
+    assert.equal(out.decision, 'block');
+    // Typed reason code (CONTRIBUTING.md "Prohibited: Raw Text Matching on
+    // Test Outputs" — assert the stable code, not the free-form `reason`
+    // prose). RUNTIME_BUILD_FAILED and CONFIG_UNREADABLE are distinct codes,
+    // so this equality check itself proves the build failure is NOT
+    // misreported as the generic unreadable-config case (rows 8/12 above).
+    assert.equal(out.reason_code, REASON_CODE.RUNTIME_BUILD_FAILED);
+    // `reason` remains free-form operator-facing text — not asserted here.
+    assert.equal(typeof out.reason, 'string');
+    assert.ok(out.reason.length > 0);
   });
 });
