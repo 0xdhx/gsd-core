@@ -1384,6 +1384,8 @@ PHASE_REQ_IDS="${PHASE_REQ_IDS:-TBD}"
 Read the `activeHooks` array from `PLAN_POST_HOOKS_JSON` in-context. If the
 `gap-analysis` gate hook is absent (capability inactive), skip this step.
 
+⚠ **Validate `check` before shell use** (third-party manifest input) — `loop-hook-dispatch.md` § `gate`.
+
 **For each active entry where `kind == "gate"`** (process in array order). **Dispatch by check shape** (the registry validates exactly one of `query`/`predicate`/`agentVerdict`):
 
 ```bash
