@@ -1415,11 +1415,15 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         // PATH search already worked there, and the #3275 acceptance contract
         // holds macOS/Linux behavior unchanged. A name that resolves to nothing
         // falls back to the declared name so the ENOENT still surfaces (#3086).
-        const isWin = process.platform === 'win32';
-        const target = isWin ? (resolveSpawnBinary(binary) || binary) : binary;
-        const winShim = isWin && /\.(cmd|bat)$/i.test(path.basename(target));
-        const spawnBinary = winShim ? (process.env.ComSpec || 'cmd.exe') : target;
-        const spawnArgv = winShim ? ['/d', '/s', '/c', target, ...argv] : argv;
+        // #3411: the resolve-then-mediate pair is one seam call now. Both halves had
+        // private copies here; `projectSpawnInvocation` owns them, so a fix to either
+        // reaches every spawn site instead of only this one.
+        //
+        // Unlike execTool, this lane adopts the RESOLVED path even for a non-batch
+        // binary: that is the behavior #3445 shipped and `deps.hasBinary` answers
+        // from the same resolver, so probe and spawn must agree on the exact file.
+        const { projectSpawnInvocation } = require('./lib/shell-command-projection.cjs');
+        const { command: spawnBinary, args: spawnArgv, windowsVerbatimArguments } = projectSpawnInvocation(binary, argv);
         const r = cp.spawnSync(spawnBinary, spawnArgv, {
           input: opts.input,
           encoding: 'utf8',
@@ -1431,6 +1435,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           // child only. Passing a fresh object leaves `process.env` untouched, so nothing leaks
           // into the orchestrating session or into the next lane.
           ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+          ...(windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         });
         return {
           status: r.status,
@@ -3617,32 +3622,16 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
  *
  * Path-like names (any '/' or '\') bypass the PATH scan: the name is already an
  * address, so it passes through when the file exists and is a file.
+ *
+ * #3411: the scan itself now lives in the declared platform seam
+ * (`src/shell-command-projection.cts` → `resolveExecutableBinary`). This function is
+ * the `bin/` entry point onto it and holds no copy of the logic — `CONTEXT.md`
+ * declares that file "All OS-facing I/O; single platform seam", and a private
+ * duplicate here is what made it untrue.
  */
 function resolveSpawnBinary(name, platform = process.platform, env = process.env) {
-  if (!name) return null;
-  if (name.includes('/') || name.includes('\\')) {
-    try { return fs.statSync(name).isFile() ? name : null; } catch { return null; }
-  }
-  const segments = String(env.PATH || '').split(path.delimiter).filter(Boolean);
-  if (platform !== 'win32') {
-    for (const dir of segments) {
-      const candidate = path.join(dir, name);
-      try {
-        if (fs.statSync(candidate).isFile()) return candidate;
-      } catch { /* next candidate */ }
-    }
-    return null;
-  }
-  const exts = String(env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean);
-  for (const dir of segments) {
-    for (const ext of exts) {
-      const candidate = path.join(dir, name + ext);
-      try {
-        if (fs.statSync(candidate).isFile()) return candidate;
-      } catch { /* next candidate */ }
-    }
-  }
-  return null;
+  const { resolveExecutableBinary } = require('./lib/shell-command-projection.cjs');
+  return resolveExecutableBinary(name, { platform, env });
 }
 
 const HOST_COMMAND_ROUTERS = {
