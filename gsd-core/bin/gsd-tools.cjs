@@ -20,6 +20,9 @@
  *   resolve-model <agent-type>         Get model for agent based on profile
  *   find-phase <phase>                 Find phase directory by number
  *   commit <message> [--files f1 f2] [--no-verify]   Commit planning docs
+ *   commit-docs-guard enable|disable   Opt-in .git/hooks/pre-commit guard
+ *                                       that refuses a commit staging
+ *                                       .planning/ when commit_docs is false
  *   commit-to-subrepo <msg> --files f1 f2  Route commits to sub-repos
  *   verify-summary <path>              Verify a SUMMARY.md file
  *   generate-slug <text>               Convert text to URL-safe slug
@@ -928,6 +931,17 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
 
   function routeCheckCommit({ args, cwd, raw, error }) {
     commands.cmdCheckCommit(cwd, raw);
+  }
+
+  function routeCommitDocsGuard({ args, cwd, raw, error }) {
+    const subcommand = args[1];
+    if (subcommand === 'enable') {
+      commands.cmdCommitDocsGuardEnable(cwd, raw);
+    } else if (subcommand === 'disable') {
+      commands.cmdCommitDocsGuardDisable(cwd, raw);
+    } else {
+      error('Unknown commit-docs-guard subcommand. Available: enable, disable', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+    }
   }
 
   function routeCommitToSubrepo({ args, cwd, raw, error }) {
@@ -3678,6 +3692,7 @@ const HOST_COMMAND_ROUTERS = {
     'find-phase': routeFindPhase,
     'commit': routeCommit,
     'check-commit': routeCheckCommit,
+    'commit-docs-guard': routeCommitDocsGuard,
     'commit-to-subrepo': routeCommitToSubrepo,
     'pr-subrepo': routePrSubrepo,
     'verify-summary': routeVerifySummary,
@@ -3945,7 +3960,7 @@ function runWithTimeout(argv) {
 // independently hand-maintained sites and nothing previously caught them
 // drifting apart when a query command was added to only one or two.
 const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <field>] [--cwd <path>] [--ws <name>] [--json-errors]\n' +
-  'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-to-subrepo, pr-subrepo, ' +
+  'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-docs-guard, commit-to-subrepo, pr-subrepo, ' +
   'config-ensure-section, config-get, config-new-project, config-path, config-set, migrate-config, normalize-test-command, ' +
   'context-predicates, current-timestamp, detect-custom-files, docs-init, drift-guard, effort, extract-messages, find-phase, ' +
   'from-gsd2, frontmatter, gap-analysis, generate-claude-md, generate-claude-profile, ' +
