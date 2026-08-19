@@ -40,6 +40,7 @@ describe('execute-phase command: --wave flag', () => {
 
   test('objective describes wave-filter execution', () => {
     const content = fs.readFileSync(COMMAND_PATH, 'utf-8');
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own command .md content, fixed-size author-controlled content
     const objectiveMatch = content.match(/<objective>([\s\S]*?)<\/objective>/);
     assert.ok(objectiveMatch, 'should have <objective> section');
     assert.ok(objectiveMatch[1].includes('--wave N'), 'objective should mention --wave N');
@@ -486,6 +487,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
 
   test('workflow emits a wave-start heartbeat (A: wave-boundary checkpoint)', () => {
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*wave \{N\}\/\{M\} starting/.test(workflow),
       'workflow should emit a wave-start [checkpoint] marker before spawning agents'
     );
@@ -493,6 +495,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
 
   test('workflow emits a wave-complete heartbeat (A: wave-boundary checkpoint)', () => {
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*wave \{N\}\/\{M\} complete/.test(workflow),
       'workflow should emit a wave-complete [checkpoint] marker after spot-checks'
     );
@@ -500,6 +503,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
 
   test('workflow emits a plan-start heartbeat (B: plan-boundary checkpoint)', () => {
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*plan \{plan_id\} starting/.test(workflow),
       'workflow should emit a plan-start [checkpoint] marker before each Task() dispatch'
     );
@@ -507,6 +511,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
 
   test('workflow emits a plan-complete heartbeat (B: plan-boundary checkpoint)', () => {
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*plan \{plan_id\} complete/.test(workflow),
       'workflow should emit a plan-complete [checkpoint] marker after executor returns'
     );
@@ -514,10 +519,12 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
 
   test('workflow handles plan failure and checkpoint-gate heartbeats too', () => {
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*plan \{plan_id\} failed/.test(workflow),
       'workflow should emit a plan-failed [checkpoint] marker on executor error'
     );
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*plan \{plan_id\} checkpoint/.test(workflow),
       'workflow should emit a heartbeat when a plan returns a human-gate checkpoint'
     );
@@ -565,6 +572,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
     assert.ok(spawnIdx !== -1 && waitIdx !== -1, 'spawn and wait steps must exist');
     const step3 = workflow.slice(spawnIdx, waitIdx);
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses a slice of maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*plan \{plan_id\} starting/.test(step3),
       'plan-start heartbeat should be emitted inside step 3 (spawn executor agents)'
     );
@@ -576,6 +584,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
     assert.ok(waitIdx !== -1 && hookIdx !== -1, 'wait + hook steps must exist');
     const step4 = workflow.slice(waitIdx, hookIdx);
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses a slice of maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*plan \{plan_id\} complete/.test(step4),
       'plan-complete heartbeat should be emitted in step 4 (wait for agents)'
     );
@@ -585,6 +594,7 @@ describe('bug #2410: execute-phase emits checkpoint heartbeats', () => {
     assert.ok(reportIdx !== -1 && failureIdx !== -1, 'report + failure steps must exist');
     const step6 = workflow.slice(reportIdx, failureIdx);
     assert.ok(
+      // eslint-disable-next-line local/no-unbounded-quantifier -- parses a slice of maintainer-authored execute-phase.md workflow, bounded prose, not adversarial input
       /\[checkpoint\][^\r\n]*wave \{N\}\/\{M\} complete/.test(step6),
       'wave-complete heartbeat should be emitted in step 6 (report completion)'
     );
@@ -702,11 +712,24 @@ describe('execute-phase: inter-wave worktree base re-check (#1369)', () => {
     assert.ok(refIdx < step1Idx, 'wave-guard @-reference must appear before step 1');
   });
 
-  test('step 0.5 guards on RUNTIME=claude (worktree isolation is Claude Code-specific)', () => {
+  // #2652: previously required `RUNTIME = "claude"`, encoding the pre-#2584 premise
+  // that worktree isolation is Claude-specific. #2584 replaced that with the
+  // negotiated dispatch.isolation capability — Cursor declares harness-worktree too,
+  // and the harness fork-base caching this guard exists for is a property of the
+  // isolation model, not of the runtime name.
+  test('step 0.5 guards on the negotiated capability, not a runtime id', () => {
     const content = fs.readFileSync(WAVE_GUARD_PATH, 'utf-8');
     assert.ok(
-      content.includes('RUNTIME') && (content.includes('"claude"') || content.includes("'claude'")),
-      'step 0.5 must guard on RUNTIME=claude'
+      content.includes('ISOLATION') && content.includes('harness-worktree'),
+      'step 0.5 must guard on ISOLATION = harness-worktree'
+    );
+    assert.ok(
+      !/\[\s*"\$RUNTIME"\s*=/.test(content),
+      'step 0.5 must NOT branch on a RUNTIME literal (#2584/#2652)'
+    );
+    assert.ok(
+      content.includes('ISOLATION=none'),
+      'degrade must clear ISOLATION as well as USE_WORKTREES — dispatch reads ISOLATION (#2652)'
     );
   });
 
@@ -780,11 +803,21 @@ describe('execute-phase: between-wave manifest reset (#1369, #3384)', () => {
     assert.ok(refPtr < idx8, 'between-wave @-reference must appear before step 8');
   });
 
-  test('step 7c guards on RUNTIME=claude for worktree-specific operations', () => {
+  // #2652: see the step 0.5 note above — migrated from the runtime-name premise to
+  // the negotiated dispatch.isolation capability.
+  test('step 7c guards on the negotiated capability, not a runtime id', () => {
     const content = fs.readFileSync(BETWEEN_WAVE_PATH, 'utf-8');
     assert.ok(
-      content.includes('RUNTIME') && (content.includes('"claude"') || content.includes("'claude'")),
-      'step 7c must guard on RUNTIME=claude'
+      content.includes('ISOLATION') && content.includes('harness-worktree'),
+      'step 7c must guard on ISOLATION = harness-worktree'
+    );
+    assert.ok(
+      !/\[\s*"\$RUNTIME"\s*=/.test(content),
+      'step 7c must NOT branch on a RUNTIME literal (#2584/#2652)'
+    );
+    assert.ok(
+      content.includes('ISOLATION=none'),
+      'degrade must clear ISOLATION as well as USE_WORKTREES — dispatch reads ISOLATION (#2652)'
     );
   });
 });
@@ -875,3 +908,30 @@ describe('bug #3096: ai-integration-phase sequential ordering and Edit-only disc
 });
   });
 }
+
+// ─── Issue #3210: auto-mode carve-out exempts precondition-unmet checkpoints ─
+//
+// The checkpoint_handling auto-spawn rule dispatched on checkpoint type alone;
+// a checkpoint returned because a task's <precondition> was unmet would have
+// been auto-approved with a synthetic "approved" — re-approving the very
+// checkpoint the executor refused to auto-approve (it reports Gate:
+// blocking-human). This file owns the execute-phase.md host-workflow contract.
+
+describe('issue #3210: execute-phase auto-mode carve-out exempts precondition-unmet checkpoints', () => {
+  test('the checkpoint_handling auto-spawn rule names precondition-unmet checkpoints', () => {
+    const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
+    const open = content.indexOf('<step name="checkpoint_handling">');
+    assert.ok(open !== -1, 'checkpoint_handling step not found');
+    const close = content.indexOf('</step>', open);
+    const step = content.slice(open, close);
+    const splitLines = require('../gsd-core/bin/lib/text-lines.cjs').splitLines;
+    const carveOut = splitLines(step).find((l) => l.includes('Carve-out'));
+    assert.ok(carveOut, 'checkpoint_handling must keep the blocking-human carve-out');
+    assert.match(
+      carveOut,
+      /precondition/i,
+      'the auto-mode carve-out must state that a precondition-unmet checkpoint reports ' +
+      'blocking-human and is never auto-approved (#3210)'
+    );
+  });
+});

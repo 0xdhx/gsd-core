@@ -22,8 +22,30 @@ process.env['GSD_TEST_MODE'] = '1';
 const {
   copyWithPathReplacement,
   installCodexConfig,
-  _copyStaged,
+  _resolveUserArtifactStagingRoot: _installJsResolveUserArtifactStagingRoot,
+  _tryResolveUserArtifactStagingRoot: _installJsTryResolveUserArtifactStagingRoot,
+  install,
+  uninstall,
 } = require('../bin/install.js');
+const {
+  _copyStaged,
+} = require('../gsd-core/bin/lib/install-engine.cjs');
+
+// #2875 (epic #2866 Phase 6): user-artifact-staging confinement rows (E1-E5).
+// Top-level (not inside any of the folded `__foldDescribe` sections below,
+// which each scope their own requires to their own closure).
+const {
+  assertDestWithinConfigHome: _uasAssertDestWithinConfigHome,
+} = require('../gsd-core/bin/lib/runtime-artifact-install-plan.cjs');
+const {
+  _resolveUserArtifactStagingRoot,
+  _tryResolveUserArtifactStagingRoot,
+} = require('../gsd-core/bin/lib/install-engine.cjs');
+const {
+  recoverOrphanedUserArtifacts,
+  stageUserArtifacts,
+  restoreStagedUserArtifacts,
+} = require('../gsd-core/bin/lib/user-artifact-staging.cjs');
 
 // ---------------------------------------------------------------------------
 // copyWithPathReplacement
@@ -1752,574 +1774,6 @@ describe('N3: Windows-separator confinement logic (path.win32 semantics)', () =>
 }
 
 // ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-2998-pristine-dir-populated.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-2998-pristine-dir-populated (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #2998: gsd-pristine/ snapshot is documented but never populated by
- * the installer. saveLocalPatches declared a pristineDir variable and
- * promised "saves pristine copies (from manifest) to gsd-pristine/ to
- * enable three-way merge during reapply-patches" -- but no code ever
- * wrote to that directory. Effect: the /gsd-reapply-patches Step 5
- * verifier (#2972) silently degrades to its over-broad fallback heuristic
- * ("every significant backup line"), exactly the silent-success-on-lost-
- * content failure mode #2969 was designed to prevent.
- *
- * Fix: new populatePristineDir({...}) helper runs the install transform
- * pipeline (copyWithPathReplacement) into a tmp staging dir, then copies
- * out the modified-file paths into gsd-pristine/. saveLocalPatches now
- * accepts a pristineCtx and calls the helper when local patches are
- * detected.
- */
-
-const { test, describe } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
-const crypto = require('node:crypto');
-
-const ROOT = path.join(__dirname, '..');
-const INSTALL = require(path.join(ROOT, 'bin', 'install.js'));
-const { cleanup } = require('./helpers.cjs');
-
-function sha256(content) {
-  return crypto.createHash('sha256').update(content).digest('hex');
-}
-
-describe('Bug #2998: populatePristineDir is exported and writes pristine for modified files', () => {
-  test('exported as a function', () => {
-    assert.equal(typeof INSTALL.populatePristineDir, 'function',
-      'expected populatePristineDir in install.js exports (#2998)');
-  });
-
-  test('returns 0 when no files are modified (no-op)', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-'));
-    try {
-      const written = INSTALL.populatePristineDir({
-        packageSrc: ROOT,
-        pristineDir: path.join(tmp, 'gsd-pristine'),
-        modified: [],
-        runtime: 'claude',
-        pathPrefix: '$HOME/.claude/',
-        isGlobal: true,
-      });
-      assert.equal(written, 0);
-    } finally {
-      cleanup(tmp);
-    }
-  });
-
-  test('writes one pristine file per modified path that exists in source', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-'));
-    const pristineDir = path.join(tmp, 'gsd-pristine');
-    try {
-      // Pick a real installed-side relPath from the package source. The
-      // install transforms map source `gsd-core/<rel>` to installed
-      // `gsd-core/<rel>` for skills-aware runtimes (like claude),
-      // so the relPath is the same on both sides.
-      const candidate = path.join('gsd-core', 'workflows', 'reapply-patches.md');
-      const sourcePath = path.join(ROOT, candidate);
-      assert.equal(fs.existsSync(sourcePath), true,
-        `precondition: source file exists at ${candidate}`);
-      const written = INSTALL.populatePristineDir({
-        packageSrc: ROOT,
-        pristineDir,
-        modified: [candidate],
-        runtime: 'claude',
-        pathPrefix: '$HOME/.claude/',
-        isGlobal: true,
-      });
-      assert.equal(written, 1, 'expected exactly one pristine file written');
-      const out = path.join(pristineDir, candidate);
-      assert.equal(fs.existsSync(out), true, `expected pristine file at ${out}`);
-      // The pristine content should be the transformed version (not raw source):
-      // copyWithPathReplacement substitutes ~/.claude/ for the runtime path prefix.
-      // For claude+global, the prefix is $HOME/.claude/ which equals the original,
-      // so the transform is effectively identity here. We assert the content is a
-      // non-empty markdown file rather than asserting on transform specifics.
-      const content = fs.readFileSync(out, 'utf-8');
-      assert.ok(content.length > 0, 'pristine file should be non-empty');
-    } finally {
-      cleanup(tmp);
-    }
-  });
-
-  test('skips paths not present in source (does not corrupt pristine with stale data)', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-'));
-    const pristineDir = path.join(tmp, 'gsd-pristine');
-    try {
-      const written = INSTALL.populatePristineDir({
-        packageSrc: ROOT,
-        pristineDir,
-        modified: ['gsd-core/this-path-does-not-exist.md'],
-        runtime: 'claude',
-        pathPrefix: '$HOME/.claude/',
-        isGlobal: true,
-      });
-      assert.equal(written, 0, 'expected zero pristine files for non-existent source paths');
-      const out = path.join(pristineDir, 'gsd-core/this-path-does-not-exist.md');
-      assert.equal(fs.existsSync(out), false, 'pristine should not contain ghost paths');
-    } finally {
-      cleanup(tmp);
-    }
-  });
-
-  test('pristine files have stable content (transformations are deterministic)', () => {
-    // Determinism is what makes the verifier's hash check meaningful:
-    // backup-meta.json records pristine_hashes computed at this same step,
-    // so re-running with the same inputs must yield byte-identical files.
-    const tmp1 = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-d1-'));
-    const tmp2 = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-d2-'));
-    try {
-      const candidate = path.join('gsd-core', 'workflows', 'reapply-patches.md');
-      const ctx = {
-        packageSrc: ROOT,
-        modified: [candidate],
-        runtime: 'claude',
-        pathPrefix: '$HOME/.claude/',
-        isGlobal: true,
-      };
-      INSTALL.populatePristineDir(Object.assign({ pristineDir: path.join(tmp1, 'gsd-pristine') }, ctx));
-      INSTALL.populatePristineDir(Object.assign({ pristineDir: path.join(tmp2, 'gsd-pristine') }, ctx));
-      const a = fs.readFileSync(path.join(tmp1, 'gsd-pristine', candidate));
-      const b = fs.readFileSync(path.join(tmp2, 'gsd-pristine', candidate));
-      assert.equal(sha256(a), sha256(b), 'two runs of the same inputs must yield identical pristine content');
-    } finally {
-      cleanup(tmp1);
-      cleanup(tmp2);
-    }
-  });
-});
-
-// ─── #3004 CR follow-up: multi-root pristine expansion ─────────────────────
-
-describe('Bug #2998 (#3004 CR): pristine expansion covers every manifest install root', () => {
-  test('paths under agents/ are staged via copyWithPathReplacement, not silently skipped', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-multi-'));
-    const pristineDir = path.join(tmp, 'gsd-pristine');
-    try {
-      const candidate = path.join('agents', 'gsd-planner.md');
-      const sourcePath = path.join(ROOT, candidate);
-      assert.equal(fs.existsSync(sourcePath), true,
-        `precondition: source file exists at ${candidate}`);
-      const written = INSTALL.populatePristineDir({
-        packageSrc: ROOT,
-        pristineDir,
-        modified: [candidate],
-        runtime: 'claude',
-        pathPrefix: '$HOME/.claude/',
-        isGlobal: true,
-      });
-      assert.equal(written, 1, 'expected agents/ path to be staged and copied to pristine');
-      assert.equal(fs.existsSync(path.join(pristineDir, candidate)), true);
-    } finally {
-      cleanup(tmp);
-    }
-  });
-
-  test('a mix of gsd-core/ and agents/ paths in modified list are all staged', () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2998-mix-'));
-    const pristineDir = path.join(tmp, 'gsd-pristine');
-    try {
-      const a = path.join('gsd-core', 'workflows', 'reapply-patches.md');
-      const b = path.join('agents', 'gsd-planner.md');
-      assert.equal(fs.existsSync(path.join(ROOT, a)), true);
-      assert.equal(fs.existsSync(path.join(ROOT, b)), true);
-      const written = INSTALL.populatePristineDir({
-        packageSrc: ROOT,
-        pristineDir,
-        modified: [a, b],
-        runtime: 'claude',
-        pathPrefix: '$HOME/.claude/',
-        isGlobal: true,
-      });
-      assert.equal(written, 2, 'expected both top-level dirs to be staged');
-      assert.equal(fs.existsSync(path.join(pristineDir, a)), true);
-      assert.equal(fs.existsSync(path.join(pristineDir, b)), true);
-    } finally {
-      cleanup(tmp);
-    }
-  });
-});
-
-describe('Bug #2998: saveLocalPatches no longer leaves the pristineDir variable unused', () => {
-  test('saveLocalPatches accepts a pristineCtx and exposes the helper for direct testing', () => {
-    // Structural assertion: the function exists with the new signature shape.
-    // Behavioral end-to-end is covered by the populatePristineDir tests above
-    // (that helper is what saveLocalPatches calls internally).
-    assert.equal(typeof INSTALL.populatePristineDir, 'function');
-    // The signature for saveLocalPatches isn't exported, but the helper IS,
-    // and it's the unit of behavior the bug is about. Asserting on the helper
-    // is the structural-IR equivalent of the no-source-grep convention.
-  });
-});
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
-// Folded from tests/bug-3407-pristine-stale-content.test.cjs — consolidation epic #1969 (B1 #1970)
-// ────────────────────────────────────────────────────────────────────────
-{
-  const { describe: __foldDescribe } = require('node:test');
-  __foldDescribe("folded:bug-3407-pristine-stale-content (consolidation epic #1969 B1 #1970)", () => {
-'use strict';
-
-process.env.GSD_TEST_MODE = '1';
-
-/**
- * Bug #3407: Installer leaves stale content in gsd-pristine/
- *
- * Root cause: populatePristineDir() in saveLocalPatches() snapshots from
- * pristineCtx.packageSrc — the NEWLY-downloaded release tree — and writes
- * those bytes into gsd-pristine/.  For files changed between the old and new
- * release, this writes the NEW bytes into the pristine baseline instead of
- * the OLD bytes.  The three-way-diff verifier then classifies upstream-changed
- * lines as user-added → Step 5a gate fails with false FAIL_USER_LINES_MISSING.
- *
- * The #3657 fix (OK_PRISTINE_DRIFT_DETECTED) was a symptom workaround: the
- * verifier detects hash mismatch (backup-meta.json records old-release hash
- * but gsd-pristine/ has new-release bytes) and skips to over-broad mode
- * instead of false-failing.  The root-cause stale write was never fixed.
- *
- * Fix: when a correctly-populated gsd-pristine/ already exists from the
- * previous install (i.e., the file's sha256 matches the originalHash recorded
- * in the manifest), preserve it — do NOT wipe and re-populate from the new
- * release source.  This ensures gsd-pristine/ holds old-release bytes even
- * after an upgrade where the file content changed upstream.
- *
- * Regression contract (byte-comparison):
- *   After saveLocalPatches() is called with a user-modified file whose
- *   gsd-pristine/ entry was correctly set by the previous install, the
- *   gsd-pristine/ file MUST still contain the old-release bytes, not the
- *   new-release bytes supplied in pristineCtx.packageSrc.
- *
- * Closes: #3407
- */
-
-const { test, describe, beforeEach } = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const os = require('node:os');
-const crypto = require('node:crypto');
-
-const ROOT = path.join(__dirname, '..');
-const INSTALL = require(path.join(ROOT, 'bin', 'install.js'));
-const { cleanup } = require('./helpers.cjs');
-
-const MANIFEST_NAME = 'gsd-file-manifest.json';
-const PATCHES_DIR_NAME = 'gsd-local-patches';
-
-function sha256(content) {
-  return crypto.createHash('sha256').update(content instanceof Buffer ? content : Buffer.from(content)).digest('hex');
-}
-
-// ─── Bug #3407: gsd-pristine/ must preserve OLD-release bytes across upgrade ──
-
-describe('Bug #3407: saveLocalPatches preserves old-release pristine across upgrade', () => {
-  let tmpDir;
-  let configDir;
-  let fakeSrcDir;
-
-  beforeEach((t) => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3407-'));
-    configDir = path.join(tmpDir, 'config');
-    fakeSrcDir = path.join(tmpDir, 'new-release-src');
-    fs.mkdirSync(configDir, { recursive: true });
-    fs.mkdirSync(fakeSrcDir, { recursive: true });
-    t.after(() => {
-      cleanup(tmpDir);
-    });
-  });
-
-  /**
-   * Core regression test.
-   *
-   * Timeline:
-   *   Install v1: file content = OLD_RELEASE_CONTENT, gsd-pristine/ROOT_FILE
-   *               = OLD_RELEASE_CONTENT (correctly set by previous install),
-   *               manifest hash = sha256(OLD_RELEASE_CONTENT)
-   *   User edits: configDir/ROOT_FILE = USER_MODIFIED_CONTENT
-   *   Upgrade v2: pristineCtx.packageSrc has NEW_RELEASE_CONTENT for ROOT_FILE
-   *   saveLocalPatches is called before the wipe.
-   *
-   * Expected AFTER fix: gsd-pristine/ROOT_FILE still == OLD_RELEASE_CONTENT
-   * Actual BEFORE fix:  gsd-pristine/ROOT_FILE == NEW_RELEASE_CONTENT (stale)
-   */
-  test('gsd-pristine/ retains old-release bytes when upgrading a user-modified file', () => {
-    const OLD_RELEASE_CONTENT = '# Old Release Content\nThis is v1 pristine.\n';
-    const NEW_RELEASE_CONTENT = '# New Release Content\nThis is v2 — upstream changed this line.\n';
-    const USER_MODIFIED_CONTENT = '# Old Release Content\nThis is v1 pristine.\n## User addition\nUser customization here.\n';
-
-    const oldHash = sha256(OLD_RELEASE_CONTENT);
-
-    // Simulate a root-level installed file. Root-level files in the manifest
-    // are denoted without a subdirectory (slash-free relPath).
-    const relPath = 'test-root-file.md';
-
-    // Set up configDir: user-modified installed file + manifest recording old hash
-    fs.writeFileSync(path.join(configDir, relPath), USER_MODIFIED_CONTENT);
-    fs.writeFileSync(
-      path.join(configDir, MANIFEST_NAME),
-      JSON.stringify({ version: '1.0.0', files: { [relPath]: oldHash } }, null, 2)
-    );
-
-    // Set up fakeSrcDir (new release): the file has NEW content
-    fs.writeFileSync(path.join(fakeSrcDir, relPath), NEW_RELEASE_CONTENT);
-
-    // Set up gsd-pristine/ with OLD content (as correctly populated by previous install)
-    const pristineDir = path.join(configDir, 'gsd-pristine');
-    fs.mkdirSync(pristineDir, { recursive: true });
-    fs.writeFileSync(path.join(pristineDir, relPath), OLD_RELEASE_CONTENT);
-
-    // Call saveLocalPatches with the new release as packageSrc (the buggy scenario)
-    INSTALL.saveLocalPatches(configDir, {
-      packageSrc: fakeSrcDir,
-      runtime: 'claude',
-      pathPrefix: '$HOME/.claude/',
-      isGlobal: true,
-    });
-
-    // Assert: gsd-pristine/ must still contain OLD-release bytes
-    const pristineFile = path.join(pristineDir, relPath);
-    assert.ok(
-      fs.existsSync(pristineFile),
-      `gsd-pristine/${relPath} must exist after saveLocalPatches`
-    );
-
-    const actualPristineContent = fs.readFileSync(pristineFile, 'utf8');
-    assert.equal(
-      sha256(actualPristineContent),
-      oldHash,
-      [
-        `gsd-pristine/${relPath} must contain OLD-release bytes (sha256=${oldHash.slice(0, 12)}…)`,
-        `but got sha256=${sha256(actualPristineContent).slice(0, 12)}…`,
-        `(If equal to sha256(NEW_RELEASE_CONTENT)=${sha256(NEW_RELEASE_CONTENT).slice(0, 12)}… then #3407 is NOT fixed)`,
-      ].join(' ')
-    );
-
-    // Secondary: confirm backup-meta records the old hash (not new)
-    const backupMeta = JSON.parse(
-      fs.readFileSync(path.join(configDir, PATCHES_DIR_NAME, 'backup-meta.json'), 'utf8')
-    );
-    assert.ok(
-      Object.prototype.hasOwnProperty.call(backupMeta.pristine_hashes, relPath),
-      'backup-meta.json must record pristine_hash for modified file'
-    );
-    assert.equal(
-      backupMeta.pristine_hashes[relPath],
-      oldHash,
-      'backup-meta.json pristine_hash must equal old-release hash (not new-release hash)'
-    );
-  });
-
-  /**
-   * Regression test for Codex finding: when gsd-pristine/ entry is absent
-   * (e.g., post-buggy-run deletion or first upgrade without prior pristine)
-   * but the file is UNCHANGED between old and new release, the hash-validated
-   * regeneration path must restore the pristine entry using new-release source.
-   *
-   * When sha256(newReleaseBytesForFile) === originalHash, the file is identical
-   * between releases — new-release generated bytes ARE the old-release pristine
-   * and may be safely promoted.
-   *
-   * Previously (before the regeneration path was added): missing entries were
-   * left absent unconditionally, causing permanent over-broad fallback even
-   * when the file was unchanged upstream.
-   */
-  test('gsd-pristine/ is regenerated for missing entries when file is unchanged between releases', () => {
-    const SHARED_RELEASE_CONTENT = '# Shared Content\nThis file is identical in v1 and v2.\n';
-    const USER_MODIFIED_CONTENT = '# Shared Content\nThis file is identical in v1 and v2.\n## User addition\nCustom.\n';
-
-    const oldHash = sha256(SHARED_RELEASE_CONTENT);
-    const relPath = 'test-unchanged-file.md';
-
-    // configDir has user-modified file + manifest with old-release hash
-    fs.writeFileSync(path.join(configDir, relPath), USER_MODIFIED_CONTENT);
-    fs.writeFileSync(
-      path.join(configDir, MANIFEST_NAME),
-      JSON.stringify({ version: '1.0.0', files: { [relPath]: oldHash } }, null, 2)
-    );
-
-    // fakeSrcDir (new release) has the SAME content — file was not changed upstream
-    fs.writeFileSync(path.join(fakeSrcDir, relPath), SHARED_RELEASE_CONTENT);
-
-    // NOTE: gsd-pristine/ does NOT exist (simulating post-buggy-run or first-time scenario)
-
-    INSTALL.saveLocalPatches(configDir, {
-      packageSrc: fakeSrcDir,
-      runtime: 'claude',
-      pathPrefix: '$HOME/.claude/',
-      isGlobal: true,
-    });
-
-    // The regeneration path should have detected that sha256(new-release candidate)
-    // === originalHash, and promoted the candidate into gsd-pristine/.
-    const pristineFile = path.join(configDir, 'gsd-pristine', relPath);
-    assert.ok(
-      fs.existsSync(pristineFile),
-      [
-        `gsd-pristine/${relPath} must exist after hash-validated regeneration.`,
-        `When new-release bytes hash to originalHash, the file was unchanged between`,
-        `releases and the candidate should be promoted to restore the pristine baseline.`,
-      ].join(' ')
-    );
-
-    const actualContent = fs.readFileSync(pristineFile, 'utf8');
-    assert.equal(
-      sha256(actualContent),
-      oldHash,
-      [
-        `gsd-pristine/${relPath} must contain bytes matching originalHash after regeneration`,
-        `(sha256=${oldHash.slice(0, 12)}…)`,
-      ].join(' ')
-    );
-  });
-
-  /**
-   * Stale-pristine recovery test (pre-fix bug artifact).
-   *
-   * Timeline:
-   *   Buggy run:  gsd-pristine/<rel> was written with NEW_RELEASE_CONTENT
-   *               (the exact #3407 artifact — stale bytes from a buggy populatePristineDir).
-   *   Fix run:    saveLocalPatches detects the hash mismatch
-   *               (sha256(NEW_RELEASE_CONTENT) !== originalHash recorded in manifest),
-   *               removes the stale entry, then attempts regeneration.
-   *
-   * When the file CHANGED between releases (NEW !== OLD):
-   *   - The stale entry is removed.
-   *   - Regeneration discards the new-release candidate (hash mismatch).
-   *   - gsd-pristine/<rel> must be ABSENT (over-broad fallback — correct).
-   *
-   * When the file is UNCHANGED between releases (NEW === OLD):
-   *   - The stale entry (which happens to have correct bytes despite the bug) is
-   *     detected as correct (hash matches originalHash) and PRESERVED.
-   *   - gsd-pristine/<rel> must remain present with the correct bytes.
-   *
-   * This test covers the "file changed across release boundary" case.
-   * The "unchanged" case is already covered by the regeneration test above.
-   */
-  test('stale gsd-pristine/ entry (new-release bytes) is removed when file changed between releases', () => {
-    const OLD_RELEASE_CONTENT = '# Old Release\nv1 content here.\n';
-    const NEW_RELEASE_CONTENT = '# New Release\nv2 content — upstream changed this.\n';
-    const USER_MODIFIED_CONTENT = '# Old Release\nv1 content here.\n## User section\nCustom work.\n';
-
-    const oldHash = sha256(OLD_RELEASE_CONTENT);
-    const relPath = 'test-stale-recovery.md';
-
-    // configDir: user-modified file + manifest recording OLD hash
-    fs.writeFileSync(path.join(configDir, relPath), USER_MODIFIED_CONTENT);
-    fs.writeFileSync(
-      path.join(configDir, MANIFEST_NAME),
-      JSON.stringify({ version: '1.0.0', files: { [relPath]: oldHash } }, null, 2)
-    );
-
-    // fakeSrcDir (new release): contains the NEW content
-    fs.writeFileSync(path.join(fakeSrcDir, relPath), NEW_RELEASE_CONTENT);
-
-    // Pre-populate gsd-pristine/ with NEW_RELEASE_CONTENT — the exact pre-fix bug artifact.
-    // This simulates a prior buggy run that wrote new-release bytes into the pristine baseline.
-    const STALE_BYTES = NEW_RELEASE_CONTENT; // named constant for clarity
-    const pristineDir = path.join(configDir, 'gsd-pristine');
-    fs.mkdirSync(pristineDir, { recursive: true });
-    fs.writeFileSync(path.join(pristineDir, relPath), STALE_BYTES);
-
-    // Verify the pre-condition: stale bytes do NOT match the original hash.
-    // If this assert fails, the test fixture is wrong (not a fix regression).
-    assert.notEqual(
-      sha256(STALE_BYTES),
-      oldHash,
-      'test fixture check: stale bytes must differ from originalHash'
-    );
-
-    INSTALL.saveLocalPatches(configDir, {
-      packageSrc: fakeSrcDir,
-      runtime: 'claude',
-      pathPrefix: '$HOME/.claude/',
-      isGlobal: true,
-    });
-
-    // The fix must detect the hash mismatch (stale entry) and remove it.
-    // The regeneration path discards the new-release candidate (its hash !== oldHash).
-    // Result: gsd-pristine/<rel> must be ABSENT — over-broad fallback is the safe outcome.
-    const pristineFile = path.join(pristineDir, relPath);
-    assert.strictEqual(
-      fs.existsSync(pristineFile),
-      false,
-      [
-        `expected gsd-pristine/${relPath} to be absent after stale-pristine recovery.`,
-        `The stale entry (new-release bytes, sha256=${sha256(STALE_BYTES).slice(0, 12)}…)`,
-        `must be removed; regeneration must discard the candidate because`,
-        `sha256(new-release)=${sha256(NEW_RELEASE_CONTENT).slice(0, 12)}… !== originalHash=${oldHash.slice(0, 12)}….`,
-        `Presence of the file means the stale bytes were NOT cleaned up (pre-fix behavior).`,
-      ].join(' ')
-    );
-  });
-
-  /**
-   * Second scenario: gsd-pristine/ does NOT pre-exist (first upgrade with no
-   * prior pristine population).  In this case there is no way to obtain the
-   * old-release pristine bytes — populatePristineDir must NOT write the new-
-   * release bytes either.  The correct outcome is: gsd-pristine/ stays empty
-   * for this file, and the verifier falls back to over-broad mode (safe).
-   */
-  test('gsd-pristine/ stays empty when no prior pristine exists (first upgrade, no stale write)', () => {
-    const OLD_RELEASE_CONTENT = '# Old Release Content\nThis is v1.\n';
-    const NEW_RELEASE_CONTENT = '# New Release Content\nThis is v2 — changed.\n';
-    const USER_MODIFIED_CONTENT = '# Old Release Content\nThis is v1.\n## User addition\nCustom.\n';
-
-    const oldHash = sha256(OLD_RELEASE_CONTENT);
-    const relPath = 'test-first-upgrade.md';
-
-    // configDir has user-modified file + manifest
-    fs.writeFileSync(path.join(configDir, relPath), USER_MODIFIED_CONTENT);
-    fs.writeFileSync(
-      path.join(configDir, MANIFEST_NAME),
-      JSON.stringify({ version: '1.0.0', files: { [relPath]: oldHash } }, null, 2)
-    );
-
-    // fakeSrcDir (new release) has new content
-    fs.writeFileSync(path.join(fakeSrcDir, relPath), NEW_RELEASE_CONTENT);
-
-    // NOTE: gsd-pristine/ does NOT exist yet (first upgrade)
-
-    INSTALL.saveLocalPatches(configDir, {
-      packageSrc: fakeSrcDir,
-      runtime: 'claude',
-      pathPrefix: '$HOME/.claude/',
-      isGlobal: true,
-    });
-
-    const pristineFile = path.join(configDir, 'gsd-pristine', relPath);
-    assert.strictEqual(
-      fs.existsSync(pristineFile),
-      false,
-      [
-        `expected gsd-pristine/${relPath} to be absent when file changed across release boundary.`,
-        `Writing new-release bytes as pristine for a file whose hash is unknown leads to`,
-        `false FAIL_USER_LINES_MISSING in the reapply-patches verifier (#3407).`,
-        `Over-broad fallback mode is the correct outcome here.`,
-      ].join(' ')
-    );
-  });
-});
-
-// The former "Antipattern hunt" describe block (structural typeof checks only) was
-// removed — it provided no real behavioral coverage and was a vacuous-truth pattern
-// per /test-rigor skill. Behavioral tests for populatePristineDir are covered above.
-  });
-}
-
-
-// ────────────────────────────────────────────────────────────────────────
 // Folded from tests/bug-2995-post-install-script-paths.test.cjs — consolidation epic #1969 (B6 #1975)
 // ────────────────────────────────────────────────────────────────────────
 {
@@ -2852,14 +2306,28 @@ describe('#2393: GSD_ALLOW_SYMLINKED_DEST opt-in for intentional symlinked-dest 
     }
   });
 
-  // Documented edge case: a broken symlink (target missing) is silently passed by
-  // both the default and opt-in paths. fs.existsSync follows the link and returns
-  // false, so the component loop terminates before the symlink check fires. This is
-  // pre-existing behavior — the fix preserves it. Subsequent mkdir may then fail or
-  // create the path through the resolved target; that's the caller's responsibility,
-  // not the symlink-escape guard's. Test pins the current behavior so any future
-  // change (e.g. switching to lstatSync for existence) is intentional.
-  test('broken symlink: silently passed (current behavior, preserved by fix)', (t) => {
+  // #2875 defect fix — REVERSES the previously-pinned "silently passed" contract
+  // this test used to name. The old reasoning ("existsSync(cursor) follows the
+  // link -> false -> loop terminates before the symlink check ever fires; the
+  // caller's subsequent mkdir/write is responsible for whatever happens next")
+  // no longer holds: an adversarial reviewer showed the "caller's responsibility"
+  // it rested on is unenforceable in practice — user-artifact-staging.cts's
+  // recovery path reads a staged file NAME out of an attacker-influenceable
+  // on-disk record (`record.json`) and writes through it without a human in the
+  // loop to notice a bad write; a dangling symlink planted at that destination
+  // (e.g. `<configDir>/USER-PROFILE.md -> <outside>/authorized_keys`) let the
+  // actual copy/write follow it and land attacker-chosen content OUTSIDE the
+  // install root, reproduced end-to-end. hasExistingSymlinkBetween now probes
+  // each path segment with `lstatSync` FIRST (see install-engine.cts's own doc
+  // comment on this change), which — unlike `existsSync` — never follows a
+  // symlink and succeeds for a dangling one, so a dangling symlink is now
+  // correctly seen AS a symlink component instead of "nothing here". The guard's
+  // promise is now: a dangling symlink anywhere on the path between root and
+  // destDir is refused exactly like a live one — default refuses outright,
+  // opt-in attempts to follow it (`realpathSync`) and, finding no target,
+  // refuses too (fail-closed on a broken symlink, same posture used elsewhere in
+  // this function for a `realpathSync` failure).
+  test('broken symlink: now refused by both the default and opt-in paths (#2875 fix)', (t) => {
     const configHome = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2393-broken-'));
     try {
       const danglingLink = path.join(configHome, 'skills');
@@ -2872,18 +2340,19 @@ describe('#2393: GSD_ALLOW_SYMLINKED_DEST opt-in for intentional symlinked-dest 
       }
       const destDir = path.join(danglingLink, 'gsd-foo');
 
-      // existsSync(danglingLink) follows the link → false → loop returns false early.
-      // Same behavior with and without opt-in. Test documents this so a future
-      // refactor (e.g. lstatSync-based existence) is a deliberate behavior change.
+      // lstatSync(danglingLink) succeeds (it IS a symlink, just a dangling one) —
+      // the segment loop now sees it as a symlink component and refuses.
       assert.strictEqual(
         hasExistingSymlinkBetween(configHome, destDir),
-        false,
-        'broken symlink: component loop terminates early (existsSync follows link → false)',
+        true,
+        'broken symlink: default path now refuses — lstatSync sees the dangling symlink as a symlink component',
       );
+      // Opt-in attempts to follow it via realpathSync, which throws ENOENT for a
+      // missing target — refused (fail-closed), not silently passed through.
       assert.strictEqual(
         hasExistingSymlinkBetween(configHome, destDir, { allowOptInFollow: true }),
-        false,
-        'broken symlink with opt-in: same early-termination behavior',
+        true,
+        'broken symlink with opt-in: realpathSync on a dangling target fails, so this refuses too (fail-closed)',
       );
     } finally {
       try { fs.unlinkSync(path.join(configHome, 'skills')); } catch { /* already gone */ }
@@ -3065,5 +2534,651 @@ describe('_installNativePluginIfDeclared write-confinement', () => {
       cleanup(configDir);
       cleanup(src);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2875 (epic #2866 Phase 6): User Artifact Staging confinement — E1-E5
+// (.gsd/phase/feat-2875-materialization-primitives/50-test-matrix.md
+// "E. Confinement"). Every row reuses assertDestWithinConfigHome /
+// hasExistingSymlinkBetween rather than a bespoke check — see
+// _resolveUserArtifactStagingRoot's own doc comment (install-engine.cts) and
+// user-artifact-staging.cts's module doc "Confinement".
+// ---------------------------------------------------------------------------
+
+describe('#2875: user-artifact-staging confinement (E1-E5)', () => {
+  test('E1: the staging root resolves through assertDestWithinConfigHome — an escaping subpath is refused by the SAME guard _resolveUserArtifactStagingRoot uses', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e1-'));
+    try {
+      // The real staging subpath ('.gsd-staging/user-artifacts') is a fixed
+      // literal that can never escape — so this asserts the PROPERTY the
+      // call site depends on directly against the same primitive, rather
+      // than trying to force an unreachable escape through the real API.
+      assert.throws(
+        () => _uasAssertDestWithinConfigHome(configDir, path.join('..', '..', 'etc', 'staging')),
+        /escap|strict subpath|configHome/i,
+      );
+      // The real call resolves cleanly and stays confined.
+      const stagingRoot = _resolveUserArtifactStagingRoot(configDir);
+      assert.ok(path.resolve(stagingRoot).startsWith(path.resolve(configDir) + path.sep));
+    } finally {
+      cleanup(configDir);
+    }
+  });
+
+  test('E2: recovery refuses a record naming a destDir outside confinement — never writes outside it', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e2-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e2-outside-'));
+    try {
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      const entryDir = path.join(stagingRoot, 'attackerentry0000');
+      fs.mkdirSync(path.join(entryDir, 'files'), { recursive: true });
+      fs.writeFileSync(path.join(entryDir, 'files', 'pwned.md'), 'attacker-controlled content');
+      // The record is attacker-influenced data — it names a destDir OUTSIDE
+      // configDir entirely.
+      fs.writeFileSync(
+        path.join(entryDir, 'record.json'),
+        JSON.stringify({ destDir: outside, names: ['pwned.md'], timestamp: new Date().toISOString() }),
+      );
+
+      const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+      assert.equal(result.recovered.length, 0);
+      assert.equal(result.skipped.length, 1);
+      assert.equal(result.skipped[0].reason, 'destDir-outside-confinement');
+      assert.ok(!fs.existsSync(path.join(outside, 'pwned.md')), 'must never write outside confinement');
+    } finally {
+      cleanup(configDir);
+      cleanup(outside);
+    }
+  });
+
+  test('E3: ..-traversal in a staged file name is rejected', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e3-'));
+    try {
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      const destDir = path.join(configDir, 'gsd-core');
+      fs.mkdirSync(destDir, { recursive: true });
+      const entryDir = path.join(stagingRoot, 'traversalentry000');
+      fs.mkdirSync(path.join(entryDir, 'files'), { recursive: true });
+      fs.writeFileSync(
+        path.join(entryDir, 'record.json'),
+        JSON.stringify({ destDir: path.resolve(destDir), names: ['../../../etc/passwd'], timestamp: new Date().toISOString() }),
+      );
+      const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+      assert.equal(result.recovered.length, 0, 'traversal name must never be restored');
+      // Neither the previous assertion (checked a path one level further up
+      // than production ever resolves, so it could never fail) nor a naive
+      // `resolve(destDir, name)` check (which, on a Linux runner, resolves to
+      // the REAL /etc/passwd — a file that pre-exists on disk regardless of
+      // whether this guard works, so `!existsSync(...)` fails unconditionally
+      // and proves nothing) exercises what the guard actually does. Trace the
+      // real call order in recoverOrphanedUserArtifacts: `srcPath =
+      // assertDestWithinConfigHome(filesDir, name)` is computed and throws
+      // FIRST — filesDir (`<stagingRoot>/<entry>/files`) is nested several
+      // levels below configDir, and `../../../etc/passwd` resolved against it
+      // still escapes filesDir's own root, so this throw fires before
+      // `destPath` (against confinedDestDir) is ever computed and before any
+      // read/write is attempted. The observable, platform-independent proof
+      // that the traversal was rejected — not merely that some unrelated
+      // system file didn't get overwritten — is that destDir's own directory
+      // listing stays exactly as this test left it: no file materialized
+      // there via the traversal name.
+      assert.deepStrictEqual(
+        fs.readdirSync(destDir), [],
+        'a rejected traversal name must never result in any file being written into destDir',
+      );
+    } finally {
+      cleanup(configDir);
+    }
+  });
+
+  test('E4: a symlinked staging root is refused — same refusal as the existing dest guard', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e4-'));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e4-elsewhere-'));
+    try {
+      // Pre-create .gsd-staging as a symlink pointing outside configDir —
+      // exactly the threat hasExistingSymlinkBetween's root-symlink refusal
+      // (install-engine.cts) already covers for every other write on this
+      // call tree.
+      fs.symlinkSync(elsewhere, path.join(configDir, '.gsd-staging'));
+      assert.throws(
+        () => _resolveUserArtifactStagingRoot(configDir),
+        /symlink/i,
+      );
+    } finally {
+      cleanup(configDir);
+      cleanup(elsewhere);
+    }
+  });
+
+  test('E5: a NUL byte in a staged file name is rejected', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e5-'));
+    try {
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      const destDir = path.join(configDir, 'gsd-core');
+      fs.mkdirSync(destDir, { recursive: true });
+      const entryDir = path.join(stagingRoot, 'nulbyteentry00000');
+      fs.mkdirSync(path.join(entryDir, 'files'), { recursive: true });
+      fs.writeFileSync(
+        path.join(entryDir, 'record.json'),
+        JSON.stringify({ destDir: path.resolve(destDir), names: ['USER-PROFILE\u0000.md'], timestamp: new Date().toISOString() }),
+      );
+      let result;
+      assert.doesNotThrow(() => { result = recoverOrphanedUserArtifacts(stagingRoot, configDir); });
+      assert.equal(result.recovered.length, 0, 'NUL-byte name must never be restored');
+    } finally {
+      cleanup(configDir);
+    }
+  });
+
+  // #2875 defect fix: C2's "never overwrite" guard was `existsSync`-based,
+  // which FOLLOWS symlinks and reports `false` for a DANGLING one — invisible
+  // to the guard, so it never refused. A dangling symlink AT the recovered
+  // destination let `copyFileSync`/`symlinkSync` (which DO follow it) write
+  // outside `configDir`.
+  test('E6: a dangling symlink at the recovered destination is treated as already-present, never written through', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e6-cfg-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e6-outside-'));
+    try {
+      const destDir = path.join(configDir, 'gsd-core');
+      fs.mkdirSync(destDir, { recursive: true });
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      fs.writeFileSync(path.join(destDir, 'USER-PROFILE.md'), 'orphaned-content');
+      // user-artifact-staging.cts's owner-liveness guard (recoverOrphanedUserArtifacts)
+      // treats a record whose `runId` belongs to a currently-live process as
+      // "not an orphan yet" and skips the ENTIRE entry with reason
+      // 'owner-still-live' — before ever reaching the per-name
+      // dest-already-present check this test pins. `stageUserArtifacts`
+      // defaults `runId` to `String(process.pid)`, i.e. THIS test process,
+      // which is trivially alive for the whole duration of this in-process
+      // test. A real crashed run has a genuinely DEAD pid, so simulating one
+      // here requires an explicit dead `runId` — same convention
+      // tests/user-artifact-staging.test.cjs's C15 already establishes.
+      const deadPid = '999999';
+      stageUserArtifacts(destDir, ['USER-PROFILE.md'], stagingRoot, { runId: deadPid });
+      cleanup(path.join(destDir, 'USER-PROFILE.md'));
+
+      const outsideTarget = path.join(outside, 'authorized_keys');
+      fs.symlinkSync(outsideTarget, path.join(destDir, 'USER-PROFILE.md'));
+      assert.ok(!fs.existsSync(outsideTarget), 'the symlink target must not exist — this is the DANGLING case');
+
+      const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+      assert.equal(result.recovered.length, 0, 'must refuse — the dangling symlink counts as already-present');
+      assert.equal(result.skipped.length, 1);
+      assert.equal(result.skipped[0].reason, 'dest-already-present');
+      assert.ok(!fs.existsSync(outsideTarget), 'must never write through the dangling symlink to outsideTarget');
+      assert.ok(fs.lstatSync(path.join(destDir, 'USER-PROFILE.md')).isSymbolicLink(), 'the dangling symlink itself is left untouched');
+    } finally {
+      cleanup(configDir);
+      cleanup(outside);
+    }
+  });
+
+  // #2875 defect fix: restoreStagedUserArtifacts had no guard at all against
+  // a dangling symlink at the destination — the identical hole as E6.
+  test('E7: restoreStagedUserArtifacts refuses a dangling symlink at the destination', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e7-cfg-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e7-outside-'));
+    try {
+      const destDir = path.join(configDir, 'gsd-core');
+      fs.mkdirSync(destDir, { recursive: true });
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      fs.writeFileSync(path.join(destDir, 'USER-PROFILE.md'), 'current-content');
+      const staged = stageUserArtifacts(destDir, ['USER-PROFILE.md'], stagingRoot);
+      cleanup(path.join(destDir, 'USER-PROFILE.md'));
+
+      const outsideTarget = path.join(outside, 'authorized_keys');
+      fs.symlinkSync(outsideTarget, path.join(destDir, 'USER-PROFILE.md'));
+
+      restoreStagedUserArtifacts(destDir, staged);
+
+      assert.ok(!fs.existsSync(outsideTarget), 'must never write through the dangling symlink to outsideTarget');
+      assert.ok(
+        fs.lstatSync(path.join(destDir, 'USER-PROFILE.md')).isSymbolicLink(),
+        'the dangling symlink itself is left untouched, not overwritten',
+      );
+    } finally {
+      cleanup(configDir);
+      cleanup(outside);
+    }
+  });
+
+  // #2875 defect fix: assertDestWithinConfigHome is pure lexical path math
+  // and cannot see a symlinked ANCESTOR directory between configDir and a
+  // recorded destDir — only hasExistingSymlinkBetween's component-by-
+  // component walk can. Recovery previously never applied it to the
+  // recorded destDir at all — this is E2 STRENGTHENED: E2 above only covers
+  // a destDir that is lexically outside configDir entirely, which
+  // assertDestWithinConfigHome alone already refused; this row covers the
+  // case that actually failed before this fix.
+  test('E8: recovery refuses a destDir reached only through a symlinked ANCESTOR directory', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e8-cfg-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e8-outside-'));
+    try {
+      fs.symlinkSync(outside, path.join(configDir, 'linkdir'));
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      const entryDir = path.join(stagingRoot, 'e8entry00000000');
+      fs.mkdirSync(path.join(entryDir, 'files'), { recursive: true });
+      fs.writeFileSync(path.join(entryDir, 'files', 'USER-PROFILE.md'), 'attacker-controlled content');
+      // The record names a destDir that is LEXICALLY inside configDir
+      // (assertDestWithinConfigHome alone would accept it) but only
+      // reachable by walking through the `linkdir` symlink to `outside`.
+      fs.writeFileSync(
+        path.join(entryDir, 'record.json'),
+        JSON.stringify({
+          destDir: path.join(configDir, 'linkdir', 'sub'),
+          names: ['USER-PROFILE.md'],
+          timestamp: new Date().toISOString(),
+        }),
+      );
+
+      const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+      assert.equal(result.recovered.length, 0, 'must refuse — destDir is reached only through a symlinked ancestor');
+      assert.equal(result.skipped.length, 1);
+      assert.equal(result.skipped[0].reason, 'destDir-symlink-escape');
+      assert.ok(
+        !fs.existsSync(path.join(outside, 'sub', 'USER-PROFILE.md')),
+        'must never write outside configDir via the symlinked ancestor',
+      );
+    } finally {
+      cleanup(configDir);
+      cleanup(outside);
+    }
+  });
+
+  // #2875 defect fix: `names` accepted any non-escaping subpath, including
+  // one containing a path separator, contrary to this module's flat-name
+  // contract (every real caller stages exactly one flat filename) — the
+  // module doc previously claimed separator names were already rejected;
+  // they were not.
+  test('E9: a staged/recorded name containing a path separator is rejected, never nested under destDir', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e9-cfg-'));
+    try {
+      const destDir = path.join(configDir, 'gsd-core');
+      fs.mkdirSync(destDir, { recursive: true });
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      const entryDir = path.join(stagingRoot, 'e9entry000000000');
+      fs.mkdirSync(path.join(entryDir, 'files', 'nested'), { recursive: true });
+      fs.writeFileSync(path.join(entryDir, 'files', 'nested', 'x.md'), 'should never land');
+      fs.writeFileSync(
+        path.join(entryDir, 'record.json'),
+        JSON.stringify({ destDir: path.resolve(destDir), names: ['nested/x.md'], timestamp: new Date().toISOString() }),
+      );
+
+      const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+      assert.equal(result.recovered.length, 0, 'a separator-containing name must never be restored');
+      assert.ok(!fs.existsSync(path.join(destDir, 'nested', 'x.md')), 'must never create a nested subpath under destDir');
+    } finally {
+      cleanup(configDir);
+    }
+  });
+
+  // #2875 defect fix (security — source-side symlink escape): the ancestor-
+  // symlink guard (E8) covered only `destDir`. A real `entryDir` whose
+  // `files` CHILD is a symlink to an unrelated victim directory (e.g.
+  // `/etc`, `~/.ssh`) was dereferenced by every per-file `existsSync`/
+  // `stagedCopy` read below `filesDir`, copying victim-readable content into
+  // an attacker-named path inside `configDir`.
+  test('E10: recovery refuses an entryDir whose `files` child is a symlink — never dereferences the source side', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e10-cfg-'));
+    const victim = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e10-victim-'));
+    try {
+      fs.writeFileSync(path.join(victim, 'attacker-chosen-name.md'), 'VICTIM SECRET CONTENT');
+      const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+      const entryDir = path.join(stagingRoot, 'e10entry0000000');
+      fs.mkdirSync(entryDir, { recursive: true });
+      fs.symlinkSync(victim, path.join(entryDir, 'files'));
+      const destDir = path.join(configDir, 'gsd-core');
+      fs.mkdirSync(destDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(entryDir, 'record.json'),
+        JSON.stringify({ destDir: path.resolve(destDir), names: ['attacker-chosen-name.md'], timestamp: new Date().toISOString() }),
+      );
+
+      const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+      assert.equal(result.recovered.length, 0, 'must refuse — the files/ child is a symlink to an untrusted directory');
+      assert.equal(result.skipped.length, 1);
+      assert.equal(result.skipped[0].reason, 'files-symlink-escape');
+      assert.ok(
+        !fs.existsSync(path.join(destDir, 'attacker-chosen-name.md')),
+        'the victim directory\'s content must never be copied into destDir',
+      );
+    } finally {
+      cleanup(configDir);
+      cleanup(victim);
+    }
+  });
+
+  // #2875 defect fix (security/correctness — cwd-dependent confinement): a
+  // RELATIVE `record.destDir` made `path.relative(configHome, record.destDir)`
+  // resolve the relative argument against `process.cwd()` internally, not
+  // against `configHome` — so recovery's behavior for a forged or malformed
+  // record depended on whatever directory the CLI happened to be invoked
+  // from, rather than being a deterministic function of `configDir`.
+  // `stageUserArtifacts` (this module's own writer) always records an
+  // ALREADY-resolved absolute `destDir`; a relative one only ever reaches
+  // recovery via a forged/hand-edited record.
+  test('E11: recovery refuses a RELATIVE record.destDir — confinement never depends on process.cwd()', (t) => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e11-cfg-'));
+    t.after(() => cleanup(configDir));
+    const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+    const entryDir = path.join(stagingRoot, 'e11entry0000000');
+    fs.mkdirSync(path.join(entryDir, 'files'), { recursive: true });
+    fs.writeFileSync(path.join(entryDir, 'files', 'x.md'), 'x');
+    fs.writeFileSync(
+      path.join(entryDir, 'record.json'),
+      JSON.stringify({ destDir: 'gsd-core', names: ['x.md'], timestamp: new Date().toISOString() }),
+    );
+
+    // Run from a cwd that resolves the relative destDir straight back to
+    // configDir (mirrors the real cline-local call shape, where targetDir
+    // === process.cwd()) — the exact case that must NOT be treated as
+    // "correctly resolved" just because the coincidence lines up.
+    const previousCwd = process.cwd();
+    t.after(() => process.chdir(previousCwd));
+    process.chdir(configDir);
+    const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+    assert.equal(result.recovered.length, 0, 'a relative destDir must never be accepted, regardless of cwd');
+    assert.equal(result.skipped.length, 1);
+    assert.equal(result.skipped[0].reason, 'destDir-outside-confinement');
+  });
+
+  // #2875 security-review finding: E10 covers the default (no opt-in) case.
+  // `GSD_ALLOW_SYMLINKED_DEST` is documented (install-engine.cts
+  // `isSymlinkedDestOptIn`) as relaxing only the DESTINATION-side
+  // pre-existing-symlink refusal — the user asserting they own/trust a
+  // symlinked WRITE destination. `entryDir`/`filesDir` here is the staging
+  // SOURCE, GSD-owned internal state this module creates itself, never a
+  // user-authored layout — the opt-in must NOT relax this read-side check.
+  test('E12: recovery refuses the source-side `files/` symlink even with GSD_ALLOW_SYMLINKED_DEST=1 — the dest opt-in never relaxes the source-side read', (t) => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e12-cfg-'));
+    const victim = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-e12-victim-'));
+    t.after(() => {
+      cleanup(configDir);
+      cleanup(victim);
+    });
+    fs.writeFileSync(path.join(victim, 'attacker-chosen-name.md'), 'VICTIM SECRET CONTENT');
+    const stagingRoot = path.join(configDir, '.gsd-staging', 'user-artifacts');
+    const entryDir = path.join(stagingRoot, 'e12entry0000000');
+    fs.mkdirSync(entryDir, { recursive: true });
+    try {
+      fs.symlinkSync(victim, path.join(entryDir, 'files'));
+    } catch (_e) {
+      t.skip('symlink creation unsupported on this platform/privilege');
+      return;
+    }
+    const destDir = path.join(configDir, 'gsd-core');
+    fs.mkdirSync(destDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(entryDir, 'record.json'),
+      JSON.stringify({ destDir: path.resolve(destDir), names: ['attacker-chosen-name.md'], timestamp: new Date().toISOString() }),
+    );
+
+    process.env.GSD_ALLOW_SYMLINKED_DEST = '1';
+    t.after(() => delete process.env.GSD_ALLOW_SYMLINKED_DEST);
+    const result = recoverOrphanedUserArtifacts(stagingRoot, configDir);
+
+    assert.equal(result.recovered.length, 0, 'must refuse — the source-side files/ symlink is never relaxed by the dest opt-in');
+    assert.equal(result.skipped.length, 1);
+    assert.equal(result.skipped[0].reason, 'files-symlink-escape');
+    assert.ok(
+      !fs.existsSync(path.join(destDir, 'attacker-chosen-name.md')),
+      'the victim directory\'s content must never be copied into destDir, even with the opt-in set',
+    );
+  });
+
+  // -------------------------------------------------------------------------
+  // Parity: install-engine.cts's `_resolveUserArtifactStagingRoot` is
+  // deliberately duplicated (not shared) into bin/install.js, to avoid a
+  // circular `require` between the two (see that function's own doc comment
+  // in both files). This codebase names unguarded duplication across
+  // parallel surfaces "Generative Fix Divergence" and requires a parity
+  // assertion that fails the moment the two copies diverge — same inputs,
+  // same resolved root, same refusal behavior.
+  // -------------------------------------------------------------------------
+
+  test('parity: install-engine.cts and bin/install.js copies of _resolveUserArtifactStagingRoot resolve the SAME root for the same configDir', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-parity-happy-'));
+    try {
+      const fromEngine = _resolveUserArtifactStagingRoot(configDir);
+      const fromInstallJs = _installJsResolveUserArtifactStagingRoot(configDir);
+      assert.equal(fromInstallJs, fromEngine, 'both copies must resolve to the identical staging root');
+    } finally {
+      cleanup(configDir);
+    }
+  });
+
+  test('parity: both copies refuse a symlinked staging root identically', () => {
+    const configDirEngine = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-parity-sym-engine-'));
+    const configDirInstallJs = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-parity-sym-installjs-'));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-parity-sym-elsewhere-'));
+    try {
+      fs.symlinkSync(elsewhere, path.join(configDirEngine, '.gsd-staging'));
+      fs.symlinkSync(elsewhere, path.join(configDirInstallJs, '.gsd-staging'));
+
+      let engineThrew = false;
+      let engineMessage = '';
+      try {
+        _resolveUserArtifactStagingRoot(configDirEngine);
+      } catch (err) {
+        engineThrew = true;
+        engineMessage = err.message;
+      }
+      let installJsThrew = false;
+      let installJsMessage = '';
+      try {
+        _installJsResolveUserArtifactStagingRoot(configDirInstallJs);
+      } catch (err) {
+        installJsThrew = true;
+        installJsMessage = err.message;
+      }
+
+      assert.ok(engineThrew, 'install-engine.cts copy must refuse a symlinked staging root');
+      assert.ok(installJsThrew, 'bin/install.js copy must refuse a symlinked staging root');
+      // Both messages must carry the same refusal shape (symlink refusal),
+      // even though configDir differs between the two (each needs its own
+      // sandbox — the throw itself, not the literal path, is what parity
+      // checks here).
+      assert.match(engineMessage, /symlink/i);
+      assert.match(installJsMessage, /symlink/i);
+    } finally {
+      cleanup(configDirEngine);
+      cleanup(configDirInstallJs);
+      cleanup(elsewhere);
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Parity: the DEGRADE-not-abort wrapper (`_tryResolveUserArtifactStagingRoot`)
+  // is ALSO duplicated verbatim into bin/install.js (same doc-comment
+  // rationale as the throwing version above). "Same inputs, same resolved
+  // root, same refusal" above does not cover "same degrade": a caller-facing
+  // regression where one copy started throwing again (bricking the command)
+  // while the other correctly degraded to `null` would slip past the tests
+  // above, since neither calls the wrapper.
+  // -------------------------------------------------------------------------
+
+  test('parity: install-engine.cts and bin/install.js copies of _tryResolveUserArtifactStagingRoot resolve the SAME root for the same configDir (happy path)', (t) => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-try-parity-happy-'));
+    t.after(() => cleanup(configDir));
+    const fromEngine = _tryResolveUserArtifactStagingRoot(configDir);
+    const fromInstallJs = _installJsTryResolveUserArtifactStagingRoot(configDir);
+    assert.notEqual(fromEngine, null, 'the engine copy must resolve (not degrade) on a clean configDir');
+    assert.equal(fromInstallJs, fromEngine, 'both copies must resolve to the identical staging root');
+  });
+
+  test('parity: both copies of _tryResolveUserArtifactStagingRoot degrade to null (never throw) for the SAME symlinked staging root', (t) => {
+    const configDirEngine = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-try-parity-sym-engine-'));
+    const configDirInstallJs = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-try-parity-sym-installjs-'));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uas-try-parity-sym-elsewhere-'));
+    t.after(() => {
+      cleanup(configDirEngine);
+      cleanup(configDirInstallJs);
+      cleanup(elsewhere);
+    });
+    fs.symlinkSync(elsewhere, path.join(configDirEngine, '.gsd-staging'));
+    fs.symlinkSync(elsewhere, path.join(configDirInstallJs, '.gsd-staging'));
+
+    let engineThrew = false;
+    let engineResult;
+    try {
+      engineResult = _tryResolveUserArtifactStagingRoot(configDirEngine);
+    } catch {
+      engineThrew = true;
+    }
+    let installJsThrew = false;
+    let installJsResult;
+    try {
+      installJsResult = _installJsTryResolveUserArtifactStagingRoot(configDirInstallJs);
+    } catch {
+      installJsThrew = true;
+    }
+
+    assert.equal(engineThrew, false, 'the engine copy\'s try-wrapper must never throw — this is the whole point of the wrapper');
+    assert.equal(installJsThrew, false, 'the bin/install.js copy\'s try-wrapper must never throw either');
+    assert.equal(engineResult, null, 'the engine copy must degrade to null for a refused staging root');
+    assert.equal(installJsResult, null, 'the bin/install.js copy must degrade to null identically');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// migrateLegacyDevPreferencesToSkill — dangling-symlink leaf write (security
+// review finding, found while closing the #2875 agents-descriptor migration
+// gap): existsSync(skillFile) follows symlinks and reports false for a
+// dangling one, and the symlink-escape guard only walked to the PARENT
+// directory, never lstat-checking the leaf file itself — so a dangling
+// symlink planted exactly at the skill-file destination sailed through both
+// checks and writeFileSync (which DOES follow symlinks) wrote attacker
+// content to the symlink's target.
+// ---------------------------------------------------------------------------
+
+describe('migrateLegacyDevPreferencesToSkill — dangling-symlink leaf write', () => {
+  const { migrateLegacyDevPreferencesToSkill } = require('../gsd-core/bin/lib/install-engine.cjs');
+
+  test('refuses to write through a dangling symlink planted at the skill-file leaf', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-migrate-sym-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-migrate-sym-outside-'));
+    const attackerTarget = path.join(outside, 'authorized_keys');
+    try {
+      const skillDir = path.join(configDir, 'skills', 'gsd-dev-preferences');
+      fs.mkdirSync(skillDir, { recursive: true });
+      const skillFile = path.join(skillDir, 'SKILL.md');
+      fs.symlinkSync(attackerTarget, skillFile); // dangling — target does not exist
+
+      const saved = new Map([['dev-preferences.md', 'attacker-controlled content\n']]);
+
+      assert.throws(
+        () => migrateLegacyDevPreferencesToSkill(configDir, saved, 'claude', 'global'),
+        /symlink/i,
+        'must refuse to write through a symlinked skill-file leaf',
+      );
+      assert.ok(!fs.existsSync(attackerTarget), 'attacker target must never be created/written');
+    } finally {
+      cleanup(configDir);
+      cleanup(outside);
+    }
+  });
+
+  test('a real, already-migrated skill file (not a symlink) still short-circuits as before', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-migrate-real-'));
+    try {
+      const skillDir = path.join(configDir, 'skills', 'gsd-dev-preferences');
+      fs.mkdirSync(skillDir, { recursive: true });
+      const skillFile = path.join(skillDir, 'SKILL.md');
+      fs.writeFileSync(skillFile, 'already migrated\n', 'utf8');
+
+      const saved = new Map([['dev-preferences.md', 'new content\n']]);
+      const migrated = migrateLegacyDevPreferencesToSkill(configDir, saved, 'claude', 'global');
+
+      assert.strictEqual(migrated, false, 'must not clobber an existing real skill file');
+      assert.strictEqual(fs.readFileSync(skillFile, 'utf8'), 'already migrated\n');
+    } finally {
+      cleanup(configDir);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// uninstallRuntimeArtifacts — staged legacy dev-preferences.md symlink
+// dereference (security review finding). Sibling call sites
+// (_runLegacyInstallMigrations, bin/install.js's own uninstall()) already
+// lstat-guard a staged name before readFileSync; this uninstall call site did
+// not, so a symlinked staged dev-preferences.md had its referent's bytes read
+// into SKILL.md, and a symlink to a directory threw EISDIR uncaught.
+// ---------------------------------------------------------------------------
+
+describe('uninstallRuntimeArtifacts — staged dev-preferences.md symlink dereference', () => {
+  const { uninstallRuntimeArtifacts } = require('../gsd-core/bin/lib/install-engine.cjs');
+
+  test('a symlinked staged dev-preferences.md is skipped (never dereferenced) and uninstall does not throw', () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uninstall-sym-'));
+    const secretFile = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-uninstall-sym-secret-'));
+    const secretPath = path.join(secretFile, 'id_rsa');
+    fs.writeFileSync(secretPath, 'PRIVATE KEY MATERIAL\n', 'utf8');
+    try {
+      // Claude global uses the legacy commands/gsd/ location.
+      const legacyDir = path.join(configDir, 'commands', 'gsd');
+      fs.mkdirSync(legacyDir, { recursive: true });
+      fs.symlinkSync(secretPath, path.join(legacyDir, 'dev-preferences.md'));
+
+      // Must not throw (no EISDIR/unhandled error) and must never migrate the
+      // symlink's referent content into any installed skill file.
+      assert.doesNotThrow(() => uninstallRuntimeArtifacts('claude', configDir, 'global'));
+
+      const skillFile = path.join(configDir, 'skills', 'gsd-dev-preferences', 'SKILL.md');
+      if (fs.existsSync(skillFile)) {
+        const content = fs.readFileSync(skillFile, 'utf8');
+        assert.ok(!content.includes('PRIVATE KEY MATERIAL'), 'the symlink referent must never be migrated into SKILL.md');
+      }
+    } finally {
+      cleanup(configDir);
+      cleanup(secretFile);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #2875 defect fix (security/regression): a staging-root resolution failure
+// (e.g. `.gsd-staging/user-artifacts` is/contains a symlink) must DEGRADE —
+// skip staging for that step, warn — rather than abort install()/uninstall()
+// entirely. Before this fix, `_resolveUserArtifactStagingRoot` was called
+// UNGUARDED as the first statement of both, so a hostile/broken
+// `.gsd-staging` path bricked BOTH commands, including uninstall — the
+// remedy for the first problem.
+// ---------------------------------------------------------------------------
+
+describe('install()/uninstall() degrade (never abort) on a staging-root resolution failure', () => {
+  function withHostileStagingSymlink(runFn) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-staging-degrade-'));
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-staging-degrade-elsewhere-'));
+    const previousCwd = process.cwd();
+    process.chdir(tmp);
+    try {
+      fs.mkdirSync(path.join(tmp, '.gsd-staging'));
+      fs.symlinkSync(elsewhere, path.join(tmp, '.gsd-staging', 'user-artifacts'));
+      runFn(tmp);
+    } finally {
+      process.chdir(previousCwd);
+      cleanup(tmp);
+      cleanup(elsewhere);
+    }
+  }
+
+  test('install() proceeds and still writes gsd-core/ when the staging root is a hostile symlink', () => {
+    withHostileStagingSymlink((tmp) => {
+      assert.doesNotThrow(() => install(false, 'cline'), 'install() must degrade, never throw, on a staging-root failure');
+      assert.ok(fs.existsSync(path.join(tmp, 'gsd-core')), 'gsd-core/ must still be installed despite the staging-root failure');
+    });
+  });
+
+  test('uninstall() proceeds and still removes gsd-core/ when the staging root is a hostile symlink', () => {
+    withHostileStagingSymlink((tmp) => {
+      // Bypass the (also-degrading) install() path to set up a realistic
+      // pre-existing gsd-core/ without depending on install() itself.
+      fs.mkdirSync(path.join(tmp, 'gsd-core'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'gsd-core', 'USER-PROFILE.md'), 'user content');
+      assert.doesNotThrow(() => uninstall(false, 'cline'), 'uninstall() must degrade, never throw, on a staging-root failure');
+      assert.ok(!fs.existsSync(path.join(tmp, 'gsd-core')), 'gsd-core/ must still be removed despite the staging-root failure');
+    });
   });
 });

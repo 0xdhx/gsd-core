@@ -9,13 +9,14 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const fc = require('./helpers/fast-check-setup.cjs');
-const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
+const { runGsdTools, createTempProject, createTempDir, cleanup } = require('./helpers.cjs');
 const {
   buildCheckpoint,
   CHECKPOINT_FRAMES,
   CHECKPOINT_LANGUAGE_ALIASES,
   resolveCheckpointFrame,
   checkpointBoxLine,
+  parseDeferredItems,
 } = require('../gsd-core/bin/lib/uat.cjs');
 
 describe('audit-uat command', () => {
@@ -430,6 +431,78 @@ All checks passed.
     assert.strictEqual(output.summary.total_items, 0,
       `status: passed file should produce 0 outstanding items, got ${output.summary.total_items}`);
     assert.strictEqual(output.summary.total_files, 0);
+  });
+
+  // #3511: a cross-phase, stray, or ad-hoc UAT/VERIFICATION file sitting in
+  // this phase's directory must not surface under this phase's audit-uat
+  // entry; this phase's own UAT/VERIFICATION artifacts must keep reporting
+  // exactly as before (non-stray case unchanged).
+  test('#3511: cross-phase stray UAT/VERIFICATION files in the same dir do not surface; own artifacts still do', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '03-foo');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    // This phase's own UAT — must still report its pending item.
+    fs.writeFileSync(path.join(phaseDir, '03-UAT.md'), [
+      '---', 'status: partial', '---', '',
+      '## Tests', '',
+      '### 1. Own Test', 'expected: Works', 'result: pending', '',
+    ].join('\n'));
+    // This phase's own VERIFICATION — must still report its human-needed item.
+    fs.writeFileSync(path.join(phaseDir, '03-VERIFICATION.md'), [
+      '---', 'status: human_needed', 'phase: 03-foo', '---', '',
+      '## Human Verification', '',
+      '1. Own human check',
+    ].join('\n'));
+
+    // Cross-phase strays sitting in the SAME directory — token "04", not "03".
+    fs.writeFileSync(path.join(phaseDir, '04-UAT.md'), [
+      '---', 'status: partial', '---', '',
+      '## Tests', '',
+      '### 1. Stray Test', 'expected: Works', 'result: pending', '',
+    ].join('\n'));
+    fs.writeFileSync(path.join(phaseDir, '04-VERIFICATION.md'), [
+      '---', 'status: human_needed', 'phase: 04-bar', '---', '',
+      '## Human Verification', '',
+      '1. Stray human check',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+
+    assert.strictEqual(output.summary.total_files, 2,
+      `only this phase's own 2 files must be scanned; got: ${JSON.stringify(output.results.map(r => r.file))}`);
+    assert.strictEqual(output.summary.total_items, 2,
+      `1 own UAT item + 1 own VERIFICATION item, strays excluded; got: ${output.summary.total_items}`);
+    assert.strictEqual(output.summary.by_phase['03'], 2, 'own phase must be credited both items');
+    assert.ok(!('04' in output.summary.by_phase), 'the cross-phase stray must not appear in by_phase at all');
+    assert.ok(!result.output.includes('04-UAT.md'), 'stray UAT filename must never surface in the output');
+    assert.ok(!result.output.includes('04-VERIFICATION.md'), 'stray VERIFICATION filename must never surface in the output');
+    assert.ok(output.results.some(r => r.file === '03-UAT.md' && r.items.some(i => i.name === 'Own Test')));
+    assert.ok(output.results.some(r => r.file === '03-VERIFICATION.md' && r.items.some(i => i.name === 'Own human check')));
+  });
+
+  // #3511 follow-up: over-exclusion check on the #2528 digit-leading-slug
+  // family. "05-80-20-cleanup" tokenizes to "05-80-20" (mis-absorbed past
+  // the digit run scaffold actually writes into), so a literal token compare
+  // excluded the phase's own report — audit-uat reported total_files: 0.
+  test('#3511 follow-up: own UAT file still surfaces from the digit-leading-slug dir "05-80-20-cleanup" (over-exclusion check)', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '05-80-20-cleanup');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, '05-UAT.md'), [
+      '---', 'status: partial', '---', '',
+      '## Tests', '',
+      '### 1. Own Test', 'expected: Works', 'result: pending', '',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+
+    assert.strictEqual(output.summary.total_files, 1,
+      `own UAT file in a digit-leading-slug dir must still surface; got: ${JSON.stringify(output)}`);
+    assert.strictEqual(output.summary.by_phase['05'], 1);
   });
 
   // Regression: #2286 — parseUatItems never scanned a `## Gaps` section, so a
@@ -1412,5 +1485,862 @@ awaiting: user response
     ].join('\n');
 
     assert.strictEqual(result.output, expected);
+  });
+});
+
+// ─── cmdAuditUat behavioral coverage (#2287 deferred-items.md) ─────────────
+
+describe('#2287 cmdAuditUat: deferred-items.md awareness', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('no deferred-items.md present (0 entries) → no results, no false positive', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '.gitkeep'), '');
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.results, []);
+    assert.strictEqual(output.summary.total_items, 0);
+    assert.strictEqual(output.summary.total_files, 0);
+  });
+
+  test('deferred-items.md with only a resolved entry (0 unresolved) → no result surfaced', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- Already handled unrelated lint warning.',
+      '  status: resolved',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.results, [],
+      'a fully-resolved deferred-items.md must not surface any result');
+    assert.strictEqual(output.summary.total_items, 0);
+  });
+
+  test('deferred-items.md with 1 unresolved entry → surfaced in structured JSON output', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- Found an unrelated pre-existing test failure in `some-other-module` while working on',
+      '  this phase\'s task. Out of scope for this task — logged here per SCOPE BOUNDARY.',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.summary.total_items, 1);
+    assert.strictEqual(output.summary.total_files, 1);
+    assert.strictEqual(output.summary.by_category.deferred, 1);
+    assert.strictEqual(output.summary.by_phase['01'], 1);
+
+    const deferredResult = output.results.find(r => r.type === 'deferred');
+    assert.ok(deferredResult, 'a deferred-typed result must be present');
+    assert.strictEqual(deferredResult.phase, '01');
+    assert.strictEqual(deferredResult.file, 'deferred-items.md');
+    assert.strictEqual(
+      deferredResult.file_path,
+      '.planning/phases/01-foundation/deferred-items.md',
+    );
+    assert.strictEqual(deferredResult.items.length, 1);
+    assert.match(deferredResult.items[0].name, /unrelated pre-existing test failure/);
+    assert.strictEqual(deferredResult.items[0].result, 'unresolved');
+    assert.strictEqual(deferredResult.items[0].category, 'deferred');
+  });
+
+  test('deferred-items.md with 2+ entries (mixed resolved/unresolved) → only unresolved surfaced', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- First unrelated finding, still open.',
+      '- Second unrelated finding, also still open.',
+      '- Third finding, already fixed separately.',
+      '  status: resolved',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const deferredResult = output.results.find(r => r.type === 'deferred');
+    assert.ok(deferredResult);
+    assert.strictEqual(deferredResult.items.length, 2,
+      'exactly the 2 unresolved entries must surface; the resolved 3rd must not');
+    const names = deferredResult.items.map(i => i.name);
+    assert.ok(names.some(n => n.includes('First unrelated finding')));
+    assert.ok(names.some(n => n.includes('Second unrelated finding')));
+    assert.ok(!names.some(n => n.includes('Third finding')));
+  });
+
+  test('deferred entries surface across multiple phase directories', () => {
+    const phase1 = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    const phase2 = path.join(tmpDir, '.planning', 'phases', '02-auth');
+    fs.mkdirSync(phase1, { recursive: true });
+    fs.mkdirSync(phase2, { recursive: true });
+
+    fs.writeFileSync(path.join(phase1, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- Phase 1 unrelated finding.',
+    ].join('\n'));
+    fs.writeFileSync(path.join(phase2, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- Phase 2 unrelated finding.',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const deferredResults = output.results.filter(r => r.type === 'deferred');
+    assert.strictEqual(deferredResults.length, 2);
+    assert.strictEqual(output.summary.total_items, 2);
+    assert.strictEqual(output.summary.by_phase['01'], 1);
+    assert.strictEqual(output.summary.by_phase['02'], 1);
+  });
+
+  test('an entry with a garbled/missing status fails safe and is surfaced (not silently dropped)', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- An entry with no status field at all.',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.summary.total_items, 1,
+      'missing status must SURFACE the entry, not silently drop it');
+  });
+
+  test('existing UAT/VERIFICATION scanning is unchanged when a deferred-items.md is also present', () => {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(phaseDir, { recursive: true });
+
+    fs.writeFileSync(path.join(phaseDir, '01-UAT.md'), [
+      '---',
+      'status: testing',
+      'phase: 01-foundation',
+      'started: 2025-01-01T00:00:00Z',
+      'updated: 2025-01-01T00:00:00Z',
+      '---',
+      '',
+      '## Tests',
+      '',
+      '### 1. Login Form',
+      'expected: Form displays with email and password fields',
+      'result: pending',
+    ].join('\n'));
+
+    fs.writeFileSync(path.join(phaseDir, 'deferred-items.md'), [
+      '## Deferred Items',
+      '',
+      '- An unrelated out-of-scope finding.',
+    ].join('\n'));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.results.length, 2, 'both the UAT file and deferred-items.md must surface as separate results');
+    const uatResult = output.results.find(r => r.type === 'uat');
+    const deferredResult = output.results.find(r => r.type === 'deferred');
+    assert.ok(uatResult, 'existing uat-type result must still be present');
+    assert.strictEqual(uatResult.items.length, 1);
+    assert.strictEqual(uatResult.items[0].result, 'pending');
+    assert.ok(deferredResult, 'new deferred-type result must be present');
+    assert.strictEqual(deferredResult.items.length, 1);
+  });
+});
+
+// ─── forensic_audit workflow-prose source-contract guard (#2287) ──────────
+
+// #2994 fragmentization moved the --forensic-gated forensic_audit step out of
+// progress.md into gsd-core/workflows/progress/steps/forensic-audit.md behind
+// a section marker. Read that step file directly — it is the sole remaining
+// source of the forensic_audit step body these guards assert on.
+const PROGRESS_MD = path.join(__dirname, '..', 'gsd-core', 'workflows', 'progress', 'steps', 'forensic-audit.md');
+
+describe('#2287 progress.md forensic_audit: deferred-items.md contract', () => {
+  const content = fs.readFileSync(PROGRESS_MD, 'utf-8');
+  const stepStart = content.indexOf('<step name="forensic_audit">');
+  const stepEnd = content.indexOf('</step>', stepStart);
+  const section = stepStart !== -1 && stepEnd !== -1 ? content.slice(stepStart, stepEnd) : '';
+
+  test('forensic_audit step exists', () => {
+    assert.notEqual(stepStart, -1, 'progress.md (or its extracted progress/steps/forensic-audit.md) must contain the forensic_audit step');
+  });
+
+  test('forensic_audit now runs 7 checks (was 6) and globs deferred-items.md', () => {
+    assert.ok(/running 7 deep checks/i.test(section),
+      'forensic_audit must advertise 7 deep checks (was 6) now that deferred-items.md is read');
+    assert.ok(/\.planning\/phases\/\*\/deferred-items\.md/.test(section),
+      'forensic_audit must glob .planning/phases/*/deferred-items.md');
+  });
+
+  test('the new check reports unresolved deferred items with the same ✓/⚠ semantics as the other checks', () => {
+    assert.ok(/check\s*7/i.test(section),
+      'a 7th check must be present');
+    assert.ok(/unresolved deferred items/i.test(section),
+      'the check must be framed around unresolved deferred items');
+    assert.ok(/✓[^\n]*no unresolved deferred items/i.test(section),
+      'the check must emit a ✓ pass line when no unresolved deferred items exist');
+    assert.ok(/⚠[^\n]*unresolved deferred items found/i.test(section),
+      'the check must emit a ⚠ warning line when unresolved deferred items exist');
+  });
+
+  test('an entry is resolved only via an explicit status: resolved field (fail-safe otherwise)', () => {
+    assert.ok(/status:\s*resolved/i.test(section),
+      'the resolved/unresolved parsing rule must be documented in the step prose');
+  });
+
+  test('the verdict summary now gates on 7 checks (was 6)', () => {
+    assert.ok(/after all 7 checks/i.test(section),
+      'the verdict section must say "after all 7 checks"');
+    assert.ok(/if all 7 checks passed/i.test(section),
+      'the verdict section must say "if all 7 checks passed"');
+    assert.ok(!/after all 6 checks/i.test(section) && !/if all 6 checks passed/i.test(section),
+      'stale "6 checks" phrasing must not remain in the step');
+  });
+});
+
+// ─── parseDeferredItems property test (#2287) ──────────────────────────────
+
+describe('#2287 parseDeferredItems: property (status: resolved fail-safe)', () => {
+  // Single-line entry text: no newlines (would break bullet-entry splitting),
+  // non-empty after trim, and never itself SHAPED like a `status:` field line
+  // (that would be indistinguishable from a real field regardless of intent).
+  const plainText = fc.string({ minLength: 1, maxLength: 40 })
+    .map((s) => s.replace(/[\r\n]/g, ' ').trim())
+    .filter((s) => s.length > 0 && !/^status:/i.test(s));
+
+  // Decoy: entry text that CONTAINS a `status: resolved`-shaped substring
+  // mid-line (not at line start) — must never be misread as a resolved
+  // marker, since extractGapEntryFields only recognises a field anchored to
+  // the START of its own trimmed line (see parseDeferredItems' doc comment).
+  const decoyText = plainText.map((s) => `${s} status: resolved trailing note`);
+
+  const textArb = fc.oneof(plainText, decoyText);
+  const entryArb = fc.record({ text: textArb, resolved: fc.boolean() });
+
+  test('property: an entry is surfaced iff it is NOT marked status: resolved; surfaced count == non-resolved count', () => {
+    fc.assert(
+      fc.property(
+        fc.array(entryArb, { maxLength: 20 }),
+        (rawEntries) => {
+          // Index-prefix for uniqueness so surfaced items can be mapped back
+          // to their source entry unambiguously even with colliding random text.
+          const entries = rawEntries.map((e, i) => ({ text: `E${i}_${e.text}`, resolved: e.resolved }));
+
+          const lines = ['## Deferred Items', ''];
+          for (const e of entries) {
+            lines.push(`- ${e.text}`);
+            if (e.resolved) lines.push('  status: resolved');
+          }
+          const content = lines.join('\n');
+
+          const items = parseDeferredItems(content);
+          const surfacedNames = new Set(items.map((it) => it.name));
+
+          const expectedUnresolved = entries.filter((e) => !e.resolved);
+          const expectedResolved = entries.filter((e) => e.resolved);
+
+          // Total surfaced count equals the count of non-resolved entries.
+          assert.strictEqual(items.length, expectedUnresolved.length);
+
+          // Every non-resolved entry IS surfaced (including status:-shaped
+          // decoy substrings embedded mid-line — those must not flip the
+          // outcome).
+          for (const e of expectedUnresolved) {
+            assert.ok(surfacedNames.has(e.text), `expected unresolved entry to surface: ${e.text}`);
+          }
+
+          // No status:-resolved entry is EVER surfaced.
+          for (const e of expectedResolved) {
+            assert.ok(!surfacedNames.has(e.text), `status: resolved entry must never surface: ${e.text}`);
+          }
+
+          // Every returned item carries the fixed deferred category/result shape.
+          for (const item of items) {
+            assert.strictEqual(item.result, 'unresolved');
+            assert.strictEqual(item.category, 'deferred');
+          }
+        }
+      )
+    );
+  });
+});
+
+// ─── #2766: archived phase dirs, and GFM-table-shaped deferred/gaps ────────
+
+const UAT_ONE_PENDING = [
+  '---',
+  'status: partial',
+  'phase: 01-foundation',
+  '---',
+  '',
+  '## Current Test',
+  '',
+  '[awaiting human testing]',
+  '',
+  '## Tests',
+  '',
+  '### 1. A scenario nobody ever ran',
+  'expected: something observable happens',
+  'result: [pending]',
+  '',
+  '## Summary',
+  '',
+  'total: 1',
+  'pending: 1',
+  '',
+  '## Gaps',
+  '',
+].join('\n');
+
+/** Write a UAT file whose `## Gaps` section holds `gapsBody`. */
+function uatWithGaps(gapsBody) {
+  return [
+    '---',
+    'status: complete',
+    'phase: 50-gaps',
+    '---',
+    '',
+    '## Current Test',
+    '',
+    '[testing complete]',
+    '',
+    '## Tests',
+    '',
+    '### 1. A passing scenario',
+    'expected: this one is fine',
+    'result: pass',
+    '',
+    '## Summary',
+    '',
+    'total: 1',
+    'passed: 1',
+    '',
+    '## Gaps',
+    '',
+    gapsBody,
+    '',
+  ].join('\n');
+}
+
+// ─── Bug 1: archived phase dirs ───────────────────────────────────────────────
+
+describe('#2766 cmdAuditUat: archived phase directories', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('phases ONLY in the archive → items surfaced, not a hard error', () => {
+    const archiveDir = path.join(
+      tmpDir, '.planning', 'milestones', 'v1.0-phases', '01-foundation',
+    );
+    fs.mkdirSync(archiveDir, { recursive: true });
+    fs.writeFileSync(path.join(archiveDir, '01-UAT.md'), UAT_ONE_PENDING);
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.summary.total_items, 1);
+    assert.strictEqual(output.results.length, 1);
+    assert.strictEqual(output.results[0].phase, '01');
+    assert.strictEqual(output.results[0].archived_milestone, 'v1.0');
+    assert.match(output.results[0].file_path, /milestones\/v1\.0-phases\//);
+  });
+
+  test('active and archived trees are both scanned', () => {
+    const activeDir = path.join(tmpDir, '.planning', 'phases', '40-current');
+    fs.mkdirSync(activeDir, { recursive: true });
+    fs.writeFileSync(path.join(activeDir, '40-UAT.md'), UAT_ONE_PENDING);
+
+    const archiveDir = path.join(
+      tmpDir, '.planning', 'milestones', 'v1.0-phases', '01-foundation',
+    );
+    fs.mkdirSync(archiveDir, { recursive: true });
+    fs.writeFileSync(path.join(archiveDir, '01-UAT.md'), UAT_ONE_PENDING);
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const byPhase = new Map(output.results.map(r => [r.phase, r]));
+    assert.ok(byPhase.has('01'), `archived phase missing: ${JSON.stringify([...byPhase.keys()])}`);
+    assert.ok(byPhase.has('40'), `active phase missing: ${JSON.stringify([...byPhase.keys()])}`);
+    assert.strictEqual(byPhase.get('01').archived_milestone, 'v1.0');
+    assert.strictEqual(byPhase.get('40').archived_milestone, undefined);
+  });
+
+  test('multiple archived milestones are all scanned', () => {
+    for (const [version, phase] of [['v1.0', '01-foundation'], ['v2.0', '07-later']]) {
+      const dir = path.join(tmpDir, '.planning', 'milestones', `${version}-phases`, phase);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${phase.slice(0, 2)}-UAT.md`), UAT_ONE_PENDING);
+    }
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.summary.total_items, 2);
+    assert.deepStrictEqual(
+      output.results.map(r => r.archived_milestone).sort(),
+      ['v1.0', 'v2.0'],
+    );
+  });
+
+  test('an empty active phases dir still succeeds with no items (pre-existing behavior)', () => {
+    // createTempProject() ships an empty `.planning/phases/`, so this is the
+    // shape the existing uat.test.cjs "no UAT files" case covers — the archive
+    // change must not turn it into an error.
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.results, []);
+    assert.strictEqual(output.summary.total_items, 0);
+  });
+
+  test('no phases dir AND no archive still errors — no false all-clear', (t) => {
+    // A bare temp dir with a .planning/ that has NO phases subdir and no
+    // milestones archive — built from createTempDir rather than by deleting
+    // createTempProject's phases dir, so nothing is torn down mid-test.
+    const bare = createTempDir();
+    t.after(() => cleanup(bare));
+
+    fs.mkdirSync(path.join(bare, '.planning'), { recursive: true });
+
+    const result = runGsdTools('audit-uat --raw', bare);
+    assert.strictEqual(result.success, false, 'expected a failure when no phases exist at all');
+  });
+});
+
+// ─── Bug 2: table-shaped deferred-items.md ────────────────────────────────────
+
+describe('#2766 parseDeferredItems: GFM table shape', () => {
+  const names = (md) => parseDeferredItems(md).map(i => i.name);
+
+  test('header + delimiter → header dropped, data rows surfaced', () => {
+    assert.deepStrictEqual(
+      names([
+        '## Discovered during 01-03',
+        '',
+        '| Test | Failing seeds |',
+        '|------|---------------|',
+        '| test_a | 0, 1 |',
+        '| test_b | 424242 |',
+      ].join('\n')),
+      ['test_a — 0, 1', 'test_b — 424242'],
+    );
+  });
+
+  test('later columns are preserved, not truncated to the first cell', () => {
+    const [name] = names('| T | seeds |\n|---|---|\n| test_a | 0, 1, 424242 |');
+    assert.match(name, /0, 1, 424242/);
+  });
+
+  test('headerless table → every row surfaced', () => {
+    assert.deepStrictEqual(
+      names('| test_a | 0 |\n| test_b | 1 |'),
+      ['test_a — 0', 'test_b — 1'],
+    );
+  });
+
+  test('row marked resolved/done/pass is suppressed', () => {
+    assert.deepStrictEqual(
+      names([
+        '| Test | Seeds | Status |',
+        '|---|---|---|',
+        '| test_open | 0 | open |',
+        '| test_fixed | 1 | resolved |',
+        '| test_done | 2 | DONE |',
+      ].join('\n')),
+      ['test_open — 0 — open'],
+    );
+  });
+
+  test('two prose-separated tables → each drops its own header', () => {
+    assert.deepStrictEqual(
+      names([
+        '| T1 | x |', '|---|---|', '| one | 1 |',
+        '',
+        'some prose in between',
+        '',
+        '| T2 | y |', '|---|---|', '| two | 2 |',
+      ].join('\n')),
+      ['one — 1', 'two — 2'],
+    );
+  });
+
+  test('bullets and a table in one file → union, no double-counting', () => {
+    const got = names([
+      '## Deferred Items',
+      '',
+      '- a bullet-shaped deferred entry',
+      '',
+      '| Test | Seeds |',
+      '|---|---|',
+      '| test_a | 0 |',
+    ].join('\n'));
+    assert.strictEqual(got.length, 2, JSON.stringify(got));
+    assert.ok(got.some(n => n.includes('bullet-shaped')));
+    assert.ok(got.some(n => n.startsWith('test_a')));
+  });
+
+  test('bullet-only file unchanged (no regression on #2287)', () => {
+    assert.deepStrictEqual(
+      names('## Deferred Items\n\n- entry one\n- entry two\n'),
+      ['entry one', 'entry two'],
+    );
+  });
+
+  test('explicit status: resolved bullet still suppressed (no regression on #2287)', () => {
+    const got = names(
+      '## Deferred Items\n\n- truth: "closed thing"\n  status: resolved\n- truth: "open thing"\n',
+    );
+    assert.strictEqual(got.length, 1, JSON.stringify(got));
+    assert.match(got[0], /open thing/);
+  });
+
+  test('no table and no bullets → zero items, no throw', () => {
+    assert.deepStrictEqual(names('# Notes\n\njust prose, nothing actionable.\n'), []);
+  });
+});
+
+// ─── #3457: heading-delimited deferred entries ────────────────────────────────
+
+describe('#3457 parseDeferredItems: heading-delimited entries', () => {
+  const items = (md) => parseDeferredItems(md);
+  const names = (md) => items(md).map(i => i.name);
+
+  test('issue minimal repro: heading + sibling field bullets = ONE item', () => {
+    const got = items([
+      '# Deferred Items',
+      '',
+      '## Deferred Items',
+      '',
+      '### Widget layout suite — 3 failing assertions',
+      '',
+      '- **What:** three assertions fail on widget alignment.',
+      '- **Cause:** a pre-existing uncommitted edit in the working tree.',
+      '- **Scope:** out of this plan\'s scope.',
+      '- **Disposition:** NOT fixed here; left for a follow-up plan.',
+    ].join('\n'));
+
+    assert.strictEqual(got.length, 1, JSON.stringify(got.map(i => i.name)));
+    assert.match(got[0].name, /Widget layout suite — 3 failing assertions/);
+    assert.match(got[0].name, /three assertions fail/);
+    assert.strictEqual(got[0].result, 'unresolved');
+    assert.strictEqual(got[0].category, 'deferred');
+  });
+
+  test('flat shape: `#` title + `##` entries — title is not an item', () => {
+    const got = names([
+      '# Deferred Items',
+      '',
+      '## DEF-01 renderer fix',
+      '',
+      '- **What:** a.',
+      '',
+      '## DEF-02 seed drift',
+      '',
+      '- **What:** b.',
+    ].join('\n'));
+
+    assert.strictEqual(got.length, 2, JSON.stringify(got));
+    assert.match(got[0], /^DEF-01 renderer fix/);
+    assert.match(got[1], /^DEF-02 seed drift/);
+  });
+
+  test('container shape: `##` group label + `###` entries — group is not an item, entries not collapsed', () => {
+    // The shape both shallow-boundary rules get wrong: "count all headings"
+    // counts the group; "shallowest level" collapses both entries into one.
+    const got = names([
+      '# Deferred Items',
+      '',
+      '## Plan 28-02 provenance',
+      '',
+      '### Entry A — flaky seed',
+      '',
+      '- **What:** a.',
+      '',
+      '### Entry B — slow build',
+      '',
+      '- **What:** b.',
+    ].join('\n'));
+
+    assert.strictEqual(got.length, 2, JSON.stringify(got));
+    assert.match(got[0], /^Entry A — flaky seed/);
+    assert.match(got[1], /^Entry B — slow build/);
+    // A following entry's heading must not be swallowed into the previous
+    // entry's name (the pre-fix bullet-split folded it in).
+    assert.ok(!got[0].includes('Entry B'), got[0]);
+  });
+
+  test('mixed shape: loose preamble bullets before a later heading group stay one-per-bullet', () => {
+    const got = names([
+      '# Deferred Items',
+      '',
+      '- loose preamble item one',
+      '- loose preamble item two',
+      '',
+      '## Group under here',
+      '',
+      '### Entry C',
+      '- **What:** c.',
+    ].join('\n'));
+
+    assert.deepStrictEqual(
+      got.map(n => n.replace(/\s+- \*\*What:\*\*.*$/, '')),
+      ['loose preamble item one', 'loose preamble item two', 'Entry C'],
+      JSON.stringify(got),
+    );
+  });
+
+  test('mixed depths: childless `##` entry alongside a `##` group with `###` children — all counted', () => {
+    // The case "deepest heading level present" rules miss: the childless ##
+    // is shallower than the deepest level in the file but is still an entry.
+    const got = names([
+      '# Deferred Items',
+      '',
+      '## Group with children',
+      '',
+      '### Entry A',
+      '- **What:** a.',
+      '',
+      '### Entry B',
+      '- **What:** b.',
+      '',
+      '## Standalone entry',
+      '',
+      '- **What:** standalone.',
+    ].join('\n'));
+
+    assert.strictEqual(got.length, 3, JSON.stringify(got));
+    assert.ok(got.some(n => /^Standalone entry/.test(n)), JSON.stringify(got));
+  });
+
+  test('no headings at all → one-bullet-per-item, unchanged names (no regression)', () => {
+    assert.deepStrictEqual(
+      names('## Deferred Items\n\n- entry one\n- entry two\n'),
+      ['entry one', 'entry two'],
+    );
+  });
+
+  test('bolded `- **Status:** resolved` under a leaf heading resolves the entry', () => {
+    const got = names([
+      '## Deferred Items',
+      '',
+      '### Item resolved inline',
+      '',
+      '- **What:** x.',
+      '- **Status:** resolved',
+    ].join('\n'));
+
+    assert.deepStrictEqual(got, [], JSON.stringify(got));
+  });
+
+  test('bolded `- **Status:** resolved` with no headings: resolves itself, never surfaces as its own item', () => {
+    // The issue's negative control: previously count = 2 with a literal
+    // `**Status:** resolved` pseudo-entry; must match the bare form's count = 1.
+    const got = names('## Deferred Items\n\n- **What:** one deferred item.\n- **Status:** resolved\n');
+
+    assert.strictEqual(got.length, 1, JSON.stringify(got));
+    assert.match(got[0], /\*\*What:\*\* one deferred item\./);
+    assert.ok(!got.some(n => /Status/.test(n)), JSON.stringify(got));
+  });
+
+  test('bare `status: resolved` controls keep working (no regression on #2287)', () => {
+    // Headless continuation form.
+    assert.strictEqual(names('## Deferred Items\n\n- a\n  status: resolved\n- b\n').length, 1);
+    // Bare status as a sibling bullet under a leaf heading.
+    assert.strictEqual(names([
+      '## Deferred Items',
+      '',
+      '### Item resolved bare',
+      '',
+      '- **What:** x.',
+      '  status: resolved',
+    ].join('\n')).length, 0);
+  });
+
+  test('leaf heading over a table-only body → table rows only, no double-count', () => {
+    // parseDeferredTableItems owns the rows; the heading must not add an item.
+    const got = names([
+      '## Discovered during 01-03',
+      '',
+      '| Test | Failing seeds |',
+      '|------|---------------|',
+      '| test_a | 0, 1 |',
+    ].join('\n'));
+
+    assert.deepStrictEqual(got, ['test_a — 0, 1'], JSON.stringify(got));
+  });
+
+  test('prose-only or bare headings contribute no items', () => {
+    // "Prose is not an item" is this parser's pre-existing contract (#2766
+    // `# Notes` case) — heading mode must not start counting prose sections.
+    assert.deepStrictEqual(names('## Deferred Items\n\n### Musings\n\njust prose here.\n'), []);
+    assert.deepStrictEqual(names('## Deferred Items\n\n### A bare heading with no body\n'), []);
+  });
+
+  test('CRLF files: heading entries still split and resolve', () => {
+    const got = names('## Deferred Items\r\n\r\n### Entry\r\n\r\n- **What:** x.\r\n- **Status:** resolved\r\n');
+
+    assert.deepStrictEqual(got, [], JSON.stringify(got));
+  });
+
+  test('mid-line `status: resolved` decoy under a heading must not resolve the entry', () => {
+    // The #2287 decoy invariant, ported to the heading shape: a status-shaped
+    // phrase inside entry prose is never a field.
+    const got = items([
+      '## Deferred Items',
+      '',
+      '### Entry with decoy prose',
+      '',
+      '- note: saw a status: resolved message in the log',
+    ].join('\n'));
+
+    assert.strictEqual(got.length, 1, JSON.stringify(got.map(i => i.name)));
+    assert.strictEqual(got[0].result, 'unresolved');
+  });
+});
+
+// ─── Bug 3: table-shaped ## Gaps section ──────────────────────────────────────
+
+describe('#2766 parseGapsItems: GFM table shape', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  /** Run audit-uat over a phase whose UAT file has `gapsBody` as its Gaps section. */
+  function gapsItems(gapsBody) {
+    const phaseDir = path.join(tmpDir, '.planning', 'phases', '50-gaps');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '50-UAT.md'), uatWithGaps(gapsBody));
+
+    const result = runGsdTools('audit-uat --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    const uat = output.results.find(r => r.type === 'uat');
+    return uat ? uat.items : [];
+  }
+
+  test('header-mapped table → truth/status/reason/test extracted', () => {
+    const items = gapsItems([
+      '| Truth | Status | Reason | Test |',
+      '|-------|--------|--------|------|',
+      '| Login should redirect | failed | User reported a 500 | 1 |',
+    ].join('\n'));
+
+    assert.strictEqual(items.length, 1, JSON.stringify(items));
+    assert.strictEqual(items[0].name, 'Login should redirect');
+    assert.strictEqual(items[0].result, 'failed');
+    assert.strictEqual(items[0].reason, 'User reported a 500');
+    assert.strictEqual(items[0].test, 1);
+  });
+
+  test('status: resolved row suppressed, open row kept', () => {
+    const items = gapsItems([
+      '| Truth | Status |',
+      '|-------|--------|',
+      '| closed thing | resolved |',
+      '| open thing | failed |',
+    ].join('\n'));
+
+    assert.strictEqual(items.length, 1, JSON.stringify(items.map(i => i.name)));
+    assert.strictEqual(items[0].name, 'open thing');
+  });
+
+  test('no status column → surfaced as unknown, not dropped', () => {
+    const items = gapsItems('| Truth | Note |\n|---|---|\n| something is off | see logs |');
+
+    assert.strictEqual(items.length, 1, JSON.stringify(items));
+    assert.strictEqual(items[0].result, 'unknown');
+    assert.strictEqual(items[0].name, 'something is off');
+  });
+
+  test('unrecognizable header → joined cells + unknown status', () => {
+    const items = gapsItems('| Alpha | Beta |\n|---|---|\n| xxx | yyy |');
+
+    assert.strictEqual(items.length, 1, JSON.stringify(items));
+    assert.strictEqual(items[0].result, 'unknown');
+    assert.match(items[0].name, /xxx/);
+    assert.match(items[0].name, /yyy/);
+  });
+
+  test('headerless table → explicit resolved cell still suppressed', () => {
+    const items = gapsItems('| open thing | failed |\n| closed thing | resolved |');
+
+    assert.strictEqual(items.length, 1, JSON.stringify(items.map(i => i.name)));
+    assert.match(items[0].name, /open thing/);
+  });
+
+  test('bullets and a table in one Gaps section → union, no double-counting', () => {
+    const items = gapsItems([
+      '- truth: "a bullet gap"',
+      '  status: failed',
+      '',
+      '| Truth | Status |',
+      '|---|---|',
+      '| a table gap | failed |',
+    ].join('\n'));
+
+    assert.strictEqual(items.length, 2, JSON.stringify(items.map(i => i.name)));
+    assert.ok(items.some(i => i.name === 'a bullet gap'));
+    assert.ok(items.some(i => i.name === 'a table gap'));
+  });
+
+  test('bullet-only Gaps unchanged (no regression on #2286)', () => {
+    const items = gapsItems('- truth: "only a bullet"\n  status: failed\n  reason: "because"\n');
+
+    assert.strictEqual(items.length, 1, JSON.stringify(items));
+    assert.strictEqual(items[0].name, 'only a bullet');
+    assert.strictEqual(items[0].reason, 'because');
   });
 });

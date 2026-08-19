@@ -69,12 +69,15 @@ build/
 /tsconfig.build.tsbuildinfo
 /gsd-core/bin/lib/commonjs-marker.cjs
 /gsd-core/bin/lib/broken-windows.cjs
+/gsd-core/bin/lib/complexity-trigger.cjs
+/gsd-core/bin/lib/refactor-trigger-command-router.cjs
 /gsd-core/bin/lib/host-integration.cjs
 /gsd-core/bin/lib/host-integration-sdk.cjs
 /gsd-core/bin/lib/host-integration-adapters/imperative-hook-bus.cjs
 /gsd-core/bin/lib/host-integration-adapters/cline-sdk-binding.cjs
 /gsd-core/bin/lib/handshake-serialized.cjs
 /gsd-core/bin/lib/install-effort-resolver.cjs
+/gsd-core/bin/lib/install-model-override-resolver.cjs
 /gsd-core/bin/lib/install-engine.cjs
 /gsd-core/bin/lib/embedding-adapter.cjs
 /gsd-core/bin/lib/adapter-declarative.cjs
@@ -98,6 +101,8 @@ build/
 /gsd-core/bin/lib/capability-consent.cjs
 /gsd-core/bin/lib/capability-lock.cjs
 /gsd-core/bin/lib/markdown-sectionizer.cjs
+# #3311: new module (milestone lock) — emitted artifact, never edited.
+/gsd-core/bin/lib/milestone-lock.cjs
 # #2657: these two (markdown-table.cjs, write-set.cjs) already had the
 # pattern below since #2248, but stayed tracked because `git rm --cached`
 # was never run — same untracking fix as the seven lines that follow.
@@ -132,6 +137,7 @@ build/
 /gsd-core/bin/lib/command-arg-projection.cjs
 /gsd-core/bin/lib/clock.cjs
 /gsd-core/bin/lib/ui-safety-gate.cjs
+/gsd-core/bin/lib/ui-frontend-evidence.cjs
 /gsd-core/bin/lib/review-reviewer-selection.cjs
 /gsd-core/bin/lib/review-lane-descriptor.cjs
 /gsd-core/bin/lib/review-lane-invocation.cjs
@@ -192,9 +198,31 @@ build/
 /gsd-core/bin/lib/worktree-base-ref.cjs
 /gsd-core/bin/lib/worktree-safety.cjs
 /gsd-core/bin/lib/planning-workspace.cjs
+/gsd-core/bin/lib/planning-scope.cjs
+/gsd-core/bin/lib/planning-snapshot.cjs
+/gsd-core/bin/lib/pattern.cjs
+/gsd-core/bin/lib/text-lines.cjs
+/gsd-core/bin/lib/token-scanner.cjs
+/gsd-core/bin/lib/health-diagnostic-types.cjs
+/gsd-core/bin/lib/health-diagnostic.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/root-existence.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/state-consistency.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/config-validation.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/phase-structure.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/agent-install.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/roadmap-disk-consistency.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/worktree-health.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/milestone-archive-hygiene.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/consistency.cjs
+/gsd-core/bin/lib/health-diagnostic-rules/install-surface-shadowing.cjs
 /gsd-core/bin/lib/command-roster.cjs
 /gsd-core/bin/lib/runtime-artifact-conversion.cjs
 /gsd-core/bin/lib/runtime-artifact-layout.cjs
+/gsd-core/bin/lib/install-scope.cjs
+/gsd-core/bin/lib/install-fs-adapter.cjs
+/gsd-core/bin/lib/user-artifact-staging.cjs
+/gsd-core/bin/lib/installed-surface-resolver.cjs
+/gsd-core/bin/lib/install-shadow-report.cjs
 /gsd-core/bin/lib/runtime-config-adapter-registry.cjs
 /gsd-core/bin/lib/runtime-hooks-surface.cjs
 /gsd-core/bin/lib/command-routing-hub.cjs
@@ -236,6 +264,7 @@ build/
 /gsd-core/bin/lib/onboard-projection.cjs
 /gsd-core/bin/lib/agent-command-router.cjs
 /gsd-core/bin/lib/agent-install-check.cjs
+/gsd-core/bin/lib/codex-agent-toml.cjs
 /gsd-core/bin/lib/task-command-router.cjs
 /gsd-core/bin/lib/validate-command-router.cjs
 /gsd-core/bin/lib/workstream-inventory.cjs
@@ -257,12 +286,22 @@ build/
 /gsd-core/bin/lib/roadmap.cjs
 /gsd-core/bin/lib/audit.cjs
 /gsd-core/bin/lib/git-base-branch.cjs
+/gsd-core/bin/lib/host-runtime-detection.cjs
 __pycache__/
 *.pyc
 .venv/
 venv/
 target/
 vendor/
+# Vendored third-party artifacts under version control on purpose — see
+# gsd-core/bin/lib/vendor/README.md. bin/** must have zero external requires
+# (installed trees ship with no node_modules), so this one directory is a
+# deliberate, tracked exception to the blanket `vendor/` ignore above.
+!/gsd-core/bin/lib/vendor/
+# Source-side twin (tsc resolves a .cts module's relative imports against
+# src/, not the output dir) of the same vendored artifact — see
+# scripts/lint-vendored-deps.cjs, which keeps both copies in sync.
+!/src/vendor/
 *.log
 .cache/
 tmp/

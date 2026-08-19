@@ -266,11 +266,13 @@ done
 if [ -f ".planning/PROJECT.md" ]; then
   cp .planning/PROJECT.md "${RUN_DIR}/gsd-review-project.md"
 fi
-if ls "${PHASE_DIR}/"*"-CONTEXT.md" >/dev/null 2>&1; then
-  cat "${PHASE_DIR}/"*"-CONTEXT.md" > "${RUN_DIR}/gsd-review-context.md"
+_CTX=( "${PHASE_DIR}"/*-CONTEXT.md )
+if [ ${#_CTX[@]} -gt 0 ]; then
+  cat "${_CTX[@]}" > "${RUN_DIR}/gsd-review-context.md"
 fi
-if ls "${PHASE_DIR}/"*"-RESEARCH.md" >/dev/null 2>&1; then
-  cat "${PHASE_DIR}/"*"-RESEARCH.md" > "${RUN_DIR}/gsd-review-research.md"
+_RESEARCH=( "${PHASE_DIR}"/*-RESEARCH.md )
+if [ ${#_RESEARCH[@]} -gt 0 ]; then
+  cat "${_RESEARCH[@]}" > "${RUN_DIR}/gsd-review-research.md"
 fi
 if [ -f ".planning/REQUIREMENTS.md" ]; then
   cp .planning/REQUIREMENTS.md "${RUN_DIR}/gsd-review-requirements.md"
@@ -421,12 +423,31 @@ names, each gets its own `## <Adapter> Review (<instance>)` section, and ≥2 sa
 instances print a one-line shared-adapter caveat. Format in
 `gsd-core/references/reviewer-instances.md`.
 
+**Resolved model (#2295):** each lane's `review-lane invoke --json` line in
+`{run_dir}/gsd-review-lane-results.jsonl` carries a `model` object; render `models:` from
+its `value` and `model_sources:` from its `source`. Both maps carry exactly one entry per
+reviewer that appears in `reviewers:` — the two key sets always match. Write the literal
+`unknown` rather than omitting a key: an omitted key is indistinguishable from the feature
+not having run, and a reader must be able to tell *no model recorded* from *nothing to
+look at*. Emit every `models:`/`model_sources:` value as a DOUBLE-QUOTED YAML scalar — a
+legitimate model id can contain `:` (`llama3:70b`, `qwen2.5:7b`), which is unquotable as a
+bare scalar; a control character is already refused at the recording seam, so quoting is
+what closes the remaining `:`/`#`/leading-`-` cases. When GSD applied a reasoning effort to
+a lane, its `value` already carries a `(reasoning=<level>)` suffix (e.g.
+`gpt-5.6-sol (reasoning=high)`) — render it as-is, without re-deriving or re-formatting it.
+
 ```markdown
 ---
 phase: {N}
 reviewers: [gemini, claude, codex, coderabbit, opencode, qwen, cursor, antigravity, ollama, lm_studio, llama_cpp]  # populate at runtime with only the reviewers actually invoked
 reviewed_at: {ISO timestamp}
 plans_reviewed: [{list of PLAN.md files}]
+models:                   # resolved model per reviewer; `unknown` when not recoverable
+  codex: "gpt-5.6-sol (reasoning=low)"
+  antigravity: "unknown"
+model_sources:            # how each value above was determined
+  codex: "banner"
+  antigravity: "unknown"
 trimmed_reviewers:        # only present if at least one reviewer was trimmed
   ollama:
     budget: 6000
@@ -464,7 +485,7 @@ trimmed_reviewers:        # only present if at least one reviewer was trimmed
 
 ## Consensus Summary
 
-{synthesize common concerns across all reviewers. CodeRabbit is a diff-only reviewer (it never received the source-grounding prompt), so do not weight its verdict as a grounded plan review — fold in its diff findings, but base plan-level consensus on the prompt-fed reviewers. A reviewer output carrying the `[reviewed-without-repo-access]` marker (or beginning with `REVIEWED-WITHOUT-REPO-ACCESS`) ran without repo access (#2176) — treat it the same way: note its concerns, but do not count its verdict at full consensus weight.}
+{synthesize common concerns across all reviewers. CodeRabbit is a diff-only reviewer (it never received the source-grounding prompt), so do not weight its verdict as a grounded plan review — fold in its diff findings, but base plan-level consensus on the prompt-fed reviewers. A reviewer output carrying the `[reviewed-without-repo-access]` marker (or beginning with `REVIEWED-WITHOUT-REPO-ACCESS`) ran without repo access (#2176) — treat it the same way: note its concerns, but do not count its verdict at full consensus weight. A reviewer output carrying the `[reviewed-without-source-citations]` marker (#3194) declared source-grounded evidence but cited no `file:line` evidence, so it reviewed the plan text only — treat it the same way: note its concerns, but do not count its verdict at full consensus weight.}
 
 ### Agreed Strengths
 {strengths mentioned by 2+ reviewers}

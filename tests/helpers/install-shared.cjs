@@ -24,6 +24,7 @@ const { runNode } = require('./process-seam.cjs');
 const {
   resolveRuntimeArtifactLayout,
 } = require('../../gsd-core/bin/lib/runtime-artifact-layout.cjs');
+const { escapeRegex: escapeRegExp } = require('../../gsd-core/bin/lib/pattern.cjs');
 
 const INSTALL_SCRIPT = path.join(__dirname, '..', '..', 'bin', 'install.js');
 const MANIFEST_NAME = 'gsd-file-manifest.json';
@@ -154,6 +155,11 @@ const PKG_VERSION = require('../../package.json').version;
 // that cause hash drift between local (PKG_VERSION=1.x.x) and CI (PKG_VERSION=1.x.x-rc.N):
 // the PKG_VERSION normalization below replaces only the *current* version, but
 // CHANGELOG.md references prior-release versions, so the normalized hash diverges.
+// gsd-file-manifest.json's exclusion was revisited deliberately for #2872: the
+// manifest gained `manifestVersion`/`runtime`/`scope` fields, all of which are
+// deterministic and would not by themselves force an exclusion, but `timestamp`
+// — the original reason this file is volatile — is unchanged by #2872, so the
+// exclusion still holds for exactly the same reason it always has.
 const VOLATILE_FILES = new Set([
   'gsd-file-manifest.json',
   'gsd-install-state.json',
@@ -185,18 +191,22 @@ const HOOK_CONFIG_FILES = new Set(['settings.json', 'settings.local.json', 'hook
 // platform-stable `[features] hooks = true` flag — the real hook commands
 // live in Codex's separate hooks.json, already excluded above). Blanket-
 // excluding the 'config.toml' basename would silently blind Codex's fixture
-// to any future regression there. Kimi's config.toml instead lives OUTSIDE
-// its GSD configDir at runtime (resolveKimiHooksTomlDir resolves ~/.kimi, a
-// sibling of the configDir ~/.config/agents) — it only appears inside this
-// harness's walked tree at all because runMinimalInstall sets HOME to the
-// same temp root used as --config-dir, collapsing the two into one directory
-// for the isolated test run. So it is excluded by its exact relative path
-// under that collapsed root, not by basename.
-// Both Kimi products' native config.toml embeds a platform-varying node-runner
-// command, so neither belongs in the golden-tracked emitted manifest. kimi-code
-// resolves its own root since #2755 — listing only `.kimi/config.toml` here made
-// kimi-code's config.toml newly manifest-visible and unattributable.
-const HOOK_CONFIG_RELATIVE_PATHS = new Set(['.kimi/config.toml', '.kimi-code/config.toml']);
+// to any future regression there — and it would blind kimi-code's too: since
+// #3547 the harness installs into each runtime's REAL global subdirectory, so
+// kimi-code's hooks config.toml sits at its configDir root (rel `config.toml`)
+// and is legitimately manifest-visible. Tracking it is safe now: the
+// install-tree fixture carries paths only, and the ADR-2719 differential
+// compares base-vs-current on the same machine, so the platform-varying
+// node-runner command embedded in the TOML never crosses platforms inside a
+// gate (that was a golden-content-era hazard, and the goldens are gone).
+// Kimi CLI's config.toml (KIMI_SHARE_DIR root ~/.kimi) lives OUTSIDE its GSD
+// configDir (~/.config/agents) and never enters the walk. The pre-#3547
+// relative-path exclusions ('.kimi/config.toml', '.kimi-code/config.toml')
+// existed only for the collapsed shape — where the walked root was the HOME
+// itself and those HOME-level siblings were inside it; with no walker rooting
+// at HOME anymore they matched nothing and were removed (#3547). kimi-code
+// resolves its own root since #2755.
+const HOOK_CONFIG_RELATIVE_PATHS = new Set();
 
 // Path prefixes excluded from the parity manifest. `gsd-core/bin/lib/` holds the
 // tsc-built runtime artifacts (compiled from src/*.cts) that the install COPIES
@@ -222,9 +232,6 @@ function stripAnsi(str) {
 // A version string can itself contain regex metacharacters (`.`, and — via
 // prerelease/build metadata — `-`/`+`), so it must be escaped before being spliced
 // into a RegExp source, or e.g. the `.` in "1.9.0" would match ANY character.
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // Loosely semver-shaped: leading `MAJOR.MINOR.PATCH`, optional `-prerelease` and/or
 // `+build` metadata (e.g. `1.9.0`, `1.9.0-rc.1`, `1.9.0+abc`). Deliberately loose
@@ -520,7 +527,15 @@ function simulateHookCopy(hooksSrc, hooksDest) {
 /** Build a clean env for spawned installer processes.
  *  Must strip GSD_TEST_MODE so the child runs the real install, not the no-op guard. */
 function installerEnv(overrides = {}) {
-  const env = { ...process.env, ...overrides };
+  // #3156: delegate to the ONE canonical raw-installer-spawn env rather than
+  // carrying a second shape of it. The installer writes GSD's own user store to
+  // <home>/.gsd/defaults.json through os.homedir() DIRECTLY
+  // (bin/install.js writeNonClaudeDefaults, #2834), which reads no GSD variable,
+  // so no config-location scrub can reach it — only a sandboxed HOME can. Every
+  // caller that already passes an explicit { HOME, USERPROFILE } still wins:
+  // overrides spread last.
+  const { installSpawnEnv } = require('../helpers.cjs');
+  const env = installSpawnEnv(overrides);
   delete env.GSD_TEST_MODE;
   return env;
 }
@@ -559,8 +574,31 @@ function runMinimalInstall({ runtime, scope, extraArgs = [], installScript = INS
     let cwd = process.cwd();
     const args = [installScript, `--${runtime}`];
     if (scope === 'global') {
-      args.push('--global', '--config-dir', root);
-      configDir = root;
+      // #3547 — install into the runtime's REAL global config home: the strict
+      // subdirectory of the sandbox HOME a genuine global install resolves
+      // (RUNTIME_META.globalSuffix mirrors the registry's getGlobalConfigDir
+      // for every runtime). The previous `--config-dir <root>` collapsed
+      // configDir onto HOME, so computePathPrefix emitted bare `$HOME/`
+      // prefixes and the emitted bytes referenced `$HOME/gsd-core/…` — a path
+      // no real install produces — leaving every emitted-artifact gate
+      // (ADR-2719 differential, install-tree fixtures, the 19-family baseline)
+      // blind to drift confined to the real global shape (#3544 evidence: 54
+      // includes rewritten on live installs, zero manifest/fixture diffs). The
+      // explicit flag stays: hermeticity-by-override is immune to ambient
+      // redirect envs (CI runners export XDG_CONFIG_HOME, which redefines the
+      // opencode/kilo XDG descriptors' resolution when no explicit dir wins).
+      const globalMeta = RUNTIME_META[runtime];
+      if (!globalMeta || !globalMeta.globalSuffix) {
+        // #3023 lesson: a silent `path.join(root, undefined)` here throws a
+        // bare TypeError naming neither the runtime nor the map at fault; a
+        // runtime without a known global home must fail loudly before any
+        // install spawns.
+        throw new Error(
+          `runMinimalInstall: no RUNTIME_META.globalSuffix for runtime "${runtime}" — refusing to guess a global config dir (#3547)`,
+        );
+      }
+      configDir = path.join(root, globalMeta.globalSuffix);
+      args.push('--global', '--config-dir', configDir);
     } else {
       args.push('--local');
       cwd = root;

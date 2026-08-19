@@ -545,6 +545,16 @@ When multiple executors run within the same wave, two mechanisms prevent conflic
 1. `--no-verify` commits — Parallel agents skip pre-commit hooks (which can cause build lock contention, e.g., cargo lock fights in Rust projects). The orchestrator runs `git hook run pre-commit` once after each wave completes.
 2. **STATE.md file locking** — All `writeStateMd()` calls use lockfile-based mutual exclusion (`STATE.md.lock` with `O_EXCL` atomic creation). This prevents the read-modify-write race condition where two agents read STATE.md, modify different fields, and the last writer overwrites the other's changes. Includes stale lock detection (10s timeout) and spin-wait with jitter.
 
+#### The STATE.md Write Path
+
+Locking decides *who* writes. A separate contract decides *what survives the write*.
+
+STATE.md carries the same fact in two places — YAML frontmatter and the document body — and the body is authoritative. Every write therefore re-derives frontmatter from the body, which raises the question the write path exists to answer: when a re-derived value disagrees with the one already in frontmatter, which wins?
+
+`FIELD_CLASSIFICATION` (`src/state-transition.cts`) answers it per field, declaring a `preservation` policy — `preserve-when-unchanged`, `preserve-always`, `preserve-if-placeholder`, `derive`, `clear` — that `applyStatePreservation` executes after `syncStateFrontmatter` re-derives.
+
+**[ADR-3408](adr/3408-state-write-path-preservation.md) is the normative contract** for that path: one executor per declared policy, one write seam, and reports computed from what was actually persisted rather than from what the caller intended to write. Where the contract and the code disagree, the code is the defect. It is the write-side counterpart of [ADR-3180](adr/3180-planning-semantic-model-single-owner.md), which gave each read-side derivation a single owner.
+
 ---
 
 ## Data Flow
@@ -779,8 +789,19 @@ The installer (`bin/install.js`, ~10,700 lines) handles:
 5. **Path normalization** — Replaces `~/.claude/` paths with runtime-specific paths
 6. **Settings integration** — Registers hooks in runtime's `settings.json`
 7. **Patch backup** — Since v1.17, backs up locally modified files to `gsd-local-patches/` for `/gsd-update --reapply`
-8. **Manifest tracking** — Writes `gsd-file-manifest.json` for clean uninstall
+8. **Manifest tracking** — Writes `gsd-file-manifest.json` for clean uninstall. The manifest also records which `runtime` and which `scope` (`global`/`local`) wrote it, under a `manifestVersion` schema field, so a reader can answer "which surfaces are installed, at which scopes" without inferring it from the directory the file sits in ([ADR 2866](adr/2866-install-surface-resolution.md), #2872). Manifests written before that carry no such fields and are read without error — no reinstall is required. See [Installer Migrations → File Manifest](installer-migrations.md#file-manifest)
 9. **Uninstall mode** — `--uninstall` removes all GSD files, hooks, and settings
+
+`installRuntimeArtifacts` (`install-engine.cjs`) returns the executed plan it ran — per kind, per
+scope, including on the combined OpenCode/Kilo family path, which previously early-returned `void` —
+rather than being observable only by re-reading disk afterward. Its destination-writing IO (copies,
+removals, snapshot/restore, best-effort cleanup) now routes through an injectable fs seam,
+`install-fs-adapter.cjs`, so a full install can be exercised against a fake adapter with zero real
+destination IO; locating this package's own source tree remains real by design (a destination-fake
+is never seeded with the repo's own paths). Writes stay byte-identical and existing `void`-ignoring
+callers are unaffected. This completes [ADR 58](adr/58-runtime-install-policy-module.md)'s
+`registry → adapter → helpers → cleanup` rollout — the `cleanup` step had not previously landed
+(#2874, epic #2866 Phase 5).
 
 Install-time file moves, stale-artifact cleanup, config rewrites, and user-data
 preservation are governed by the Installer Migration Module. See
@@ -791,6 +812,8 @@ installs, classifying known runtime install surfaces before later migrations
 remove or rewrite anything.
 
 The plan drift guard (`plan_review.source_grounding`) — which verifies symbol references in generated plans against live source before execution — is specified in [ADR 22](adr/22-plan-drift-guard.md).
+
+The same switch gates a second, cross-artifact axis: a fact-drift pass that compares the *same* fact as stated in `ROADMAP.md`, `PLAN.md`, `STATE.md` and `CONTEXT.md` and reports contradictions (a phase status, a success criterion, a requirement ID, a glossary term) with both locations and the authoritative side named. Where the source-grounding axis grounds a plan against code, this one grounds the planning artifacts against each other. It keys on contradicting knowledge rather than similar-looking text, and is advisory only — it never sets `hardBlock` and never contributes to the convergence counts.
 
 ### Platform Handling
 
@@ -877,6 +900,16 @@ For a conceptual overview of how the hook and guard layers fit into the broader 
 - Scans content for prompt injection patterns (role override, instruction bypass, system tag injection)
 - Advisory-only — logs detection, does not block
 - Patterns are inlined (subset of `security.cjs`) for hook independence
+
+**Read Injection Scanner** (`gsd-read-injection-scanner.js`):
+
+- Triggers on `Read` / `WebFetch` / `WebSearch` PostToolUse events
+- Advisory by default; blocks only `HIGH` severity, and only when `security.injection_blocking` is `true`
+- Severity is `LOW` for 1-2 matched patterns, `HIGH` for 3 or more
+- Skips content shorter than 20 characters, and skips excluded paths (`.planning/`, `REVIEW.md`, `CHECKPOINT*`, security/injection docs, and GSD's own staged hook bundle)
+- Rule ids: the `MD-LINK-*` markdown-link rules mirrored from `security.cjs`'s `MARKDOWN_LINK_PATTERNS`, plus `INJECTION-PATTERN`, `INVISIBLE-UNICODE`, and `UNICODE-TAG-BLOCK`
+- Patterns are shared with `gsd-prompt-guard.js` via `hooks/lib/injection-patterns.js` (#3504); the markdown-link list is inlined for hook independence
+- **Output contract:** `hookSpecificOutput` carries both `additionalContext` (the human-readable advisory sentence) and `findings` — an array of `{ ruleId, match }` records naming each rule that fired. `findings` is the structured surface; the advisory is rendered from it, so the two cannot disagree. `match` is `null` for rules with no captured text (`INVISIBLE-UNICODE`, `UNICODE-TAG-BLOCK`). Consumers should read `findings` rather than parsing the advisory text.
 
 **Workflow Guard** (`gsd-workflow-guard.js`):
 

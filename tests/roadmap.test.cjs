@@ -241,9 +241,13 @@ describe('roadmap analyze command', () => {
   });
 
   test('parses phases with goals and disk status', () => {
+    // #3217 (ADR-3180 §7.6 rule 4): no version token — no STATE.md exists to
+    // resolve which milestone "v1.0" names, so a version-bearing title here
+    // would window as UNSCOPED (§7.1 row 4), not the free-form COMPLETE
+    // window this test's disk-status counting depends on.
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'ROADMAP.md'),
-      `# Roadmap v1.0
+      `# Roadmap
 
 ### Phase 1: Foundation
 **Goal:** Set up infrastructure
@@ -261,6 +265,9 @@ describe('roadmap analyze command', () => {
     fs.mkdirSync(p1, { recursive: true });
     fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    // Disk-strict completion (ADR-3180 §7.4, #3186): a passing
+    // *-VERIFICATION.md is what makes phase 1 count as complete now.
+    fs.writeFileSync(path.join(p1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
 
     const p2 = path.join(tmpDir, '.planning', 'phases', '02-authentication');
     fs.mkdirSync(p2, { recursive: true });
@@ -392,6 +399,39 @@ describe('roadmap analyze disk status variants', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.phases[0].disk_status, 'researched', 'disk_status should be researched');
     assert.strictEqual(output.phases[0].has_research, true, 'has_research should be true');
+  });
+
+  test('#3511-class: roadmap analyze has_research/has_context ignore another phase\'s misplaced artifact', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+### Phase 1: Setup
+**Goal:** Build the foundation
+
+### Phase 2: API
+**Goal:** Build the API
+`
+    );
+
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(p1, { recursive: true });
+    // Phase 02's directory holds ONLY a stray artifact whose filename token
+    // ("01-") belongs to phase 01, not to this directory's own phase (02).
+    const p2 = path.join(tmpDir, '.planning', 'phases', '02-api');
+    fs.mkdirSync(p2, { recursive: true });
+    fs.writeFileSync(path.join(p2, '01-RESEARCH.md'), '# Research for phase 01');
+    fs.writeFileSync(path.join(p2, '01-CONTEXT.md'), '# Context for phase 01');
+
+    const result = runGsdTools('roadmap analyze', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const phase2 = output.phases.find((p) => p.number === '2');
+    assert.strictEqual(phase2.has_research, false,
+      'phase 2 must not report has_research from a file that belongs to phase 1');
+    assert.strictEqual(phase2.has_context, false,
+      'phase 2 must not report has_context from a file that belongs to phase 1');
   });
 
   test('returns discussed status for phase dir with only CONTEXT.md', () => {
@@ -1108,6 +1148,7 @@ describe('roadmap update-plan-progress command', () => {
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses ROADMAP.md the test itself wrote via a fixed fixture string, bounded, not adversarial input
     const rowMatch = roadmap.match(/^\|[^\r\n]*50\. Build[^\r\n]*$/m);
     assert.ok(rowMatch, 'table row should exist');
     const cells = rowMatch[0].split('|').slice(1, -1).map(c => c.trim());
@@ -1885,6 +1926,7 @@ const THREE_PLAN_ROADMAP = `# Roadmap
 describe('bug #2661: execute-plan.md update_roadmap gating', () => {
   const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
   const stepMatch = content.match(
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     /<step name="update_roadmap">([\s\S]*?)<\/step>/
   );
   const step = stepMatch && stepMatch[1];
@@ -2815,9 +2857,14 @@ describe('bug #557 — <details>/<summary> active milestone strip', () => {
     );
   });
 
-  // ── Health check W021: milestone_complete vs unstarted phases ─────────────
+  // ── Health check W026: milestone_complete vs unstarted phases ─────────────
+  // Phase 11 (#3309): this subject moved off the pre-migration 'W021' code
+  // onto the new 'W026' code (the split-off half of the two-subject
+  // conflation the design doc's "New codes for the two split subjects"
+  // section documents) — the OTHER W021 subject, phase_id_convention
+  // mismatch, kept its code.
 
-  test('validate health emits W021 when STATE says milestone complete but ROADMAP has unstarted phases', () => {
+  test('validate health emits W026 when STATE says milestone complete but ROADMAP has unstarted phases', () => {
     const planning = path.join(tmpDir, '.planning');
     // ROADMAP still has active phases in it
     fs.writeFileSync(path.join(planning, 'ROADMAP.md'), ROADMAP_DETAILS_SUMMARY, 'utf-8');
@@ -2842,11 +2889,19 @@ Phase: Milestone v1.3 complete
 
     const output = JSON.parse(result.output);
     const warnings = output.warnings || [];
-    const w021 = warnings.find(w => w.code === 'W021');
+    const w026 = warnings.find(w => w.code === 'W026');
     assert.ok(
-      w021 !== undefined,
-      `Expected W021 warning (milestone-status vs. roadmap-progress incoherence). ` +
+      w026 !== undefined,
+      `Expected W026 warning (milestone-status vs. roadmap-progress incoherence). ` +
       `Got warnings: ${JSON.stringify(warnings.map(w => w.code))}`
+    );
+    // W021/W026 independence (Phase 11, #3309 split): this fixture's subject
+    // is the W026 one (milestone-complete vs. unstarted phases) — it must
+    // NOT also produce a W021 (phase_id_convention mismatch, an unrelated
+    // subject this config.json-less fixture never triggers).
+    assert.ok(
+      warnings.every(w => w.code !== 'W021'),
+      `W026 fixture must not also fire W021: ${JSON.stringify(warnings.map(w => w.code))}`
     );
   });
 });
@@ -3685,6 +3740,114 @@ describe('bug #2978: roadmap validate performs structural validation', () => {
       assert.ok(result.success, `BOM-prefixed roadmap must exit 0; got: ${result.error}`);
       const payload = JSON.parse(result.output);
       assert.deepStrictEqual(payload.warnings, [], 'BOM is not corruption');
+    } finally { cleanup(tmpDir); }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// bug #3263: roadmap validate is silent when the active milestone window is
+// truncated (phase entries exist in the document but are excluded from the
+// resolved window). The scope discriminator (#3184) already classifies this
+// as SCOPE.TRUNCATED; validate must surface it as V005 + non-zero exit.
+// Matrix: .gsd/bug/fix-3263-milestone-window-truncation-retest/50-test-matrix.md
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('bug #3263: roadmap validate warns on a truncated milestone window', () => {
+  function writeFixture(tmpDir, roadmapContent, stateFields) {
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmapContent);
+    if (stateFields) {
+      const lines = ['---'];
+      for (const [k, v] of Object.entries(stateFields)) lines.push(`${k}: ${v}`);
+      lines.push('---', '');
+      fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), lines.join('\n'));
+    }
+  }
+
+  test('window closed before its phase entries → V005 warning, non-zero exit', () => {
+    const tmpDir = createTempProject('gsd-3263-truncated-');
+    try {
+      // v3.0's window closes at the intervening `## v4.0 Next` heading,
+      // before the phase entries — which exist in the document, under v4.0.
+      writeFixture(tmpDir, [
+        '# Roadmap',
+        '',
+        '## v3.0 In Progress 🚧',
+        '',
+        'Some preamble notes. No phase headings here.',
+        '',
+        '## v4.0 Next',
+        '',
+        '### Phase 1: Foo',
+        '',
+        '### Phase 2: Bar',
+      ].join('\n'), { milestone: 'v3.0' });
+      const result = runGsdTools(['roadmap', 'validate', '--raw'], tmpDir);
+      assert.strictEqual(result.success, false, 'truncated window must exit non-zero');
+      const payload = JSON.parse(result.output);
+      const v005 = payload.warnings.find((w) => w.code === 'V005');
+      assert.ok(v005, `truncated window must produce a V005 warning; got: ${JSON.stringify(payload)}`);
+      assert.ok(v005.message.length > 0, 'V005 carries a message');
+    } finally { cleanup(tmpDir); }
+  });
+
+  test('phases inside the window → no V005, exit 0 (no false positive)', () => {
+    const tmpDir = createTempProject('gsd-3263-normal-');
+    try {
+      writeFixture(tmpDir, [
+        '# Roadmap',
+        '',
+        '## v3.0 In Progress 🚧',
+        '',
+        '### Phase 1: Foo',
+        '',
+        '### Phase 2: Bar',
+        '',
+        '## v4.0 Next',
+        '',
+        'Later plans.',
+      ].join('\n'), { milestone: 'v3.0' });
+      const result = runGsdTools(['roadmap', 'validate', '--raw'], tmpDir);
+      assert.ok(result.success, `normal roadmap must exit 0; got: ${result.error}`);
+      const payload = JSON.parse(result.output);
+      assert.deepStrictEqual(payload.warnings, [], 'normal roadmap must have no warnings');
+    } finally { cleanup(tmpDir); }
+  });
+
+  test('genuinely phase-less milestone → V004 only, no V005', () => {
+    const tmpDir = createTempProject('gsd-3263-empty-');
+    try {
+      writeFixture(tmpDir, [
+        '# Roadmap',
+        '',
+        '## v1.0 Current 🚧',
+        '',
+        'Nothing planned yet.',
+      ].join('\n'), { milestone: 'v1.0' });
+      const result = runGsdTools(['roadmap', 'validate', '--raw'], tmpDir);
+      assert.strictEqual(result.success, false, 'phase-less roadmap must exit non-zero');
+      const payload = JSON.parse(result.output);
+      assert.ok(payload.warnings.some((w) => w.code === 'V004'),
+        `V004 still owns the no-phase-entries case; got: ${JSON.stringify(payload)}`);
+      assert.ok(!payload.warnings.some((w) => w.code === 'V005'),
+        `a genuinely phase-less milestone must not produce V005; got: ${JSON.stringify(payload)}`);
+    } finally { cleanup(tmpDir); }
+  });
+
+  test('unscoped versioned roadmap (no STATE.md milestone) → no V005 over-fire', () => {
+    const tmpDir = createTempProject('gsd-3263-unscoped-');
+    try {
+      // No STATE.md: scope is UNSCOPED, not TRUNCATED — must not fire V005.
+      writeFixture(tmpDir, [
+        '# Roadmap',
+        '',
+        '## v1.0 Old ✅ SHIPPED',
+        '',
+        '### Phase 1: Foo',
+      ].join('\n'));
+      const result = runGsdTools(['roadmap', 'validate', '--raw'], tmpDir);
+      assert.ok(result.success, `unscoped roadmap must exit 0; got: ${result.error}`);
+      const payload = JSON.parse(result.output);
+      assert.deepStrictEqual(payload.warnings, [], 'unscoped roadmap must have no warnings');
     } finally { cleanup(tmpDir); }
   });
 });

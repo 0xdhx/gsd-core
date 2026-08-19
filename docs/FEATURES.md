@@ -182,6 +182,9 @@
   - [External-Job Capability](#155-external-job-capability)
   - [API-Coverage Gate](#156-api-coverage-gate)
   - [State Rebuild & Configurable Graph Path](#157-state-rebuild--configurable-graph-path)
+  - [Broken-Windows Ledger](#158-broken-windows-ledger)
+  - [Complexity-Triggered Refactor](#159-complexity-triggered-refactor)
+  - [Archive Quick Tasks at Milestone Close](#160-archive-quick-tasks-at-milestone-close)
 
 ---
 
@@ -487,6 +490,7 @@
 - REQ-PHASE-03: Remove MUST renumber all subsequent phases
 - REQ-PHASE-04: Remove MUST prevent removing phases that have been executed
 - REQ-PHASE-05: All operations MUST update ROADMAP.md and create/remove phase directories
+- REQ-PHASE-06: Bare-number phase lookup MUST resolve digit-leading slug names consistently across phase verbs, preserve project-code-prefixed result shaping, and fail loudly when multiple directories match
 
 ---
 
@@ -643,7 +647,7 @@
 
 ### 19. Health Validation
 
-**Command:** `/gsd-health [--repair]`
+**Command:** `/gsd-health [--repair] [--backfill]`
 
 **Purpose:** Validate `.planning/` directory integrity and auto-repair issues.
 
@@ -652,7 +656,8 @@
 - REQ-HEALTH-02: System MUST validate configuration consistency
 - REQ-HEALTH-03: System MUST detect orphaned plans without summaries
 - REQ-HEALTH-04: System MUST check phase numbering and roadmap sync
-- REQ-HEALTH-05: `--repair` flag MUST auto-fix recoverable issues
+- REQ-HEALTH-05: `--repair` flag MUST auto-fix recoverable issues except DESTRUCTIVE-risk ones, which it MUST report but never auto-apply
+- REQ-HEALTH-06: `--backfill` flag MUST synthesize missing MILESTONES.md entries from archived milestone snapshots
 
 ---
 
@@ -1264,6 +1269,12 @@ Each reviewer is a **declared lane**: its binary, prompt and output channels, ti
 - `review.default_reviewers` may include configured `review.reviewer_instances` names; each instance runs as an independent reviewer identity backed by its configured adapter/model. Instance names are not CLI flags.
 - Use `--all` for a full pre-merge sweep without changing project defaults.
 - For local model servers with small context windows, set `review.max_prompt_tokens_per_reviewer` to auto-trim prompts per reviewer — see [Prompt budgets for small-context reviewers](../docs/CONFIGURATION.md#prompt-budgets-for-small-context-reviewers) in CONFIGURATION.md.
+
+**Why record which model produced a review (#2295):** `reviewers:` in the frontmatter recorded which CLIs ran, but not which model each one resolved to. Without a pin, the model is whatever the CLI's own config or internal default happens to pick, so a "Codex vs Antigravity" comparison could quietly be a frontier model against a cheap-tier default with nothing in the record to say so — and a CLI update, or an unrelated config edit, could silently make past and future reviews incomparable.
+
+The fix records the model *and its provenance*. Provenance is what makes the value trustworthy: `pinned` (from `review.models.<slug>`) is certain, while `banner` and `transcript` are recovered from third-party CLI output this project does not own — a startup banner or an undocumented session log.
+
+That third-party dependence is a real trade-off, held honestly rather than papered over: the `banner` and `transcript` arms read formats GSD does not control, so they are best-effort by design and degrade to `unknown` rather than guessing or failing the run. A recorded `unknown` is a real answer — a wrong model name attributed to a review would be worse than none.
 
 ---
 
@@ -2222,6 +2233,7 @@ Test suite that scans all agent, workflow, and command files for embedded inject
 - REQ-EXPLORE-02: Session MUST offer to route outputs to the appropriate GSD artifact
 - REQ-EXPLORE-03: An optional topic argument MUST prime the first question
 - REQ-EXPLORE-04: Exploration MUST optionally spawn a research agent for technical feasibility
+- REQ-EXPLORE-05: A research pass MUST disposition each surfaced claim (admit / refute / abstain) and route every abstention to a visible Unresolved Ledger — never smoothing an ungrounded claim into the narrative as confident prose
 
 ---
 
@@ -3371,3 +3383,34 @@ The load-bearing wire is the `plan-phase` lift into `must_haves.prohibitions`, s
 **Backward compatibility:** A project with no `.planning/WINDOWS.md` reports `open_count: 0` and ships cleanly; the gate only activates once windows are recorded.
 
 **Configuration:** `graphify.graph_path`
+
+### 159. Complexity-Triggered Refactor
+
+**Behavior:** An `execute:post` step measures the complexity of the files a phase touched (decision-point counting over comment- and literal-stripped source, no external dependency) and surfaces a scoped refactor proposal at `.planning/phases/<N>/<NN>-REFACTOR.md` when a function's score exceeds `refactor.complexity_threshold` or its growth over its recorded anchor exceeds `refactor.complexity_jump_delta` — whichever trips first, both reported. Trigger semantics are strictly greater (ESLint's `complexity: {max: N}` convention), so a score exactly equal to the threshold does not trigger. The anchor is set the first time a function is observed and moves only when the proposal is dispositioned via `refactor accept` or `refactor decline` — never when the score alone improves — so the jump delta is cumulative growth since the last conscious decision about that function, not the change made in a single phase. Advisory by default: the proposal is informational only, never edits code, and never blocks. Opt-in `refactor.trigger_strict` records an untriaged proposal as an open `deviation` entry in the broken-windows ledger (#1950) instead — it does not block on its own; ship-blocking is broken-windows' existing `ship:pre` gate, enabled separately with `workflow.windows_enforce`. Without broken-windows installed, strict mode still records the proposal locally and says so. Enabling `refactor.trigger_strict` without `workflow.windows_enforce` also on (or with broken-windows absent) surfaces a typed `refactor_strict_not_enforcing` warning on every triggering evaluate, naming the exact remediation, so this enforcement gap is never silent. A declined proposal resolves its ledger entry as `waived` with the recorded reason; an accepted one resolves as `fixed`. The metric is approximate by construction: biased against a flat `switch`, blind to nesting depth, JS/TS-family only, and a renamed function loses its anchor (issue #1953).
+
+**Commands:** `gsd-tools refactor evaluate | status | accept | decline`.
+
+**Config:** `refactor.trigger_enabled` (master gate, default `false`), `refactor.complexity_threshold` (default `15`), `refactor.complexity_jump_delta` (default `5`), `refactor.trigger_strict` (default `false`). See [Configuration Reference](CONFIGURATION.md#refactor-trigger-settings).
+
+**Backward compatibility:** Off by default. When `refactor.trigger_enabled` is `false` the hook never runs and writes nothing; a project that never enables it is completely unaffected.
+
+---
+
+### 160. Archive Quick Tasks at Milestone Close
+
+**Command:** `/gsd-complete-milestone` (forward path), `/gsd-cleanup` (retroactive path), `gsd-tools milestone complete --archive-quick` / `gsd-tools milestone archive-quick <version>` (#2142)
+
+**Behavior:** `.planning/quick/` otherwise accumulates one directory per `/gsd-quick` task forever. `/gsd-complete-milestone` now offers a Yes/Skip prompt — when accepted, it moves every directory under `.planning/quick/` into `.planning/milestones/<version>-quick/`, (re)writes that archive directory's `README.md` (an index built by scanning the archive directory, one entry per task, linked to its `SUMMARY.md` when one exists), and clears the data rows of `STATE.md`'s `### Quick Tasks Completed` table while preserving its header and detected column variant. `/gsd-cleanup` offers the same archival retroactively, for milestones that were already closed before their quick tasks were swept, via the narrower `milestone archive-quick <version>` command — identical move/index/reset behavior, but without touching `ROADMAP.md`, `REQUIREMENTS.md`, `MILESTONES.md`, or milestone-completion guards, so it can be re-run safely against an already-completed milestone.
+
+**Why opt-in.** Phase-directory archival is default-ON (#1871) — omitting a phase directory from an archive would silently leave stale execution history in the way of the next milestone's roadmap. Quick tasks carry no such downstream conflict, so archival here defaults OFF: a user who never passes `--archive-quick` sees zero behavior change. This is a deliberate asymmetry with phase archival, not an oversight.
+
+**Why bucket-all, not per-milestone.** `.planning/quick/` is a flat directory with no on-disk record of which milestone a given task belongs to. Splitting tasks per milestone was considered and rejected — inferring provenance from dates (creation time vs. a milestone's shipped date) is a proxy, not a fact, and a wrong inference on a one-way `mv` is silently irreversible. Archival instead buckets everything currently in `.planning/quick/` into the one milestone being completed (or, on the retroactive path, the one milestone chosen), and says so in the confirmation prompt.
+
+**Why the index is built from disk, not from `STATE.md`'s table.** The `### Quick Tasks Completed` table is a running log a workflow step appends to — it demonstrably drifts from what's actually in `.planning/quick/` (the motivating case: 53 rows against 49 directories, ~22 rows pointing at directories that no longer existed, 18 directories with no row at all). Building the archive's `README.md` index by scanning the archive directory itself, rather than trusting the table, means the index can never inherit that drift; a re-run's index also naturally includes entries a prior run already archived, since it's re-derived from what's physically present.
+
+**Known limits:**
+- No per-milestone provenance — bucket-all is the only option (see above).
+- A `### Quick Tasks Completed` table whose columns match neither registered variant (with/without a Status column) is left untouched with a warning rather than reset, since clearing it would risk destroying rows under a schema GSD doesn't recognize.
+- A `STATE.md` with no `### Quick Tasks Completed` section at all is a normal, silent no-op for the reset step — the section is created lazily by `/gsd-quick`, not present in the project template.
+
+See [Archiving quick tasks](how-to/handle-quick-and-fast-tasks.md#archiving-quick-tasks) for the full walkthrough.

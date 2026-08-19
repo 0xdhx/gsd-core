@@ -11,6 +11,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execGit, platformWriteSync, platformReadSync, toNativePath, posixNormalize } from './shell-command-projection.cjs';
 import { realClock } from './clock.cjs';
+import { escapeRegex } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- io.cjs is an export= CommonJS module
 import io = require('./io.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- config-loader.cjs is an export= CommonJS module
@@ -35,6 +36,7 @@ import { maskIfSecret } from './secrets.cjs';
 import scanPhasePlans = require('./plan-scan.cjs');
 import { stateExtractField } from './state-document.cjs';
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
+import { resolveReportedRuntime } from './host-runtime-detection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- commands.cjs is an export= CommonJS module
 import commandsMod = require('./commands.cjs');
 import { validatePath, loadTrustedGlobalRoots } from './security.cjs';
@@ -76,19 +78,18 @@ const {
   listCodebaseMapFiles,
 } = onboardProjection;
 
-const { output, error } = io;
+const { output, error, ERROR_REASON } = io;
 const { loadConfig, loadConfigResolved } = configLoader;
 const { resolveModelInternal, resolveGranularityInternal, assertValidGranularityOverride } = modelResolver;
-const { findPhaseInternal } = phaseLocator;
+const { findPhaseInternal, listMilestonePhaseDirs } = phaseLocator;
 const {
   getRoadmapPhaseInternal,
   getMilestoneInfo,
-  getMilestonePhaseFilter,
   stripShippedMilestones,
   extractCurrentMilestone,
 } = roadmapParser;
 const { pathExistsInternal, generateSlugInternal, toPosixPath } = coreUtils;
-const { escapeRegex, normalizePhaseName, phaseTokenMatches, stripProjectCodePrefix, PHASE_NUMBER_TOKEN_SOURCE, isForeignPrefixedPhaseQuery } = phaseId;
+const { normalizePhaseName, matchPhaseDirs, stripProjectCodePrefix, PHASE_NUMBER_TOKEN_SOURCE, isForeignPrefixedPhaseQuery, isSentinelPhaseId, extractPhaseToken, scopeToPhase } = phaseId;
 const { pruneOrphanedWorktrees } = worktreeSafety;
 
 const {
@@ -96,13 +97,15 @@ const {
   planningDir,
   planningRoot,
   listAvailableWorkstreams,
-  getActiveWorkstream,
+  peekActiveWorkstream,
+  diagnoseUnresolvedActiveWorkstream,
+  describeUnresolvedWorkstreamReason,
   findContextMdIn,
 } = planningWorkspace;
 
 const { determinePhaseStatus } = commandsMod;
 const { extractFrontmatter } = frontmatterMod;
-const { readVerificationStatus } = verificationMod;
+const { isPhaseComplete, resolveVerificationFile, resolveUatFile } = verificationMod;
 const { evaluateUatPassed } = uatPredicateMod;
 const { resolveLoopHooks } = loopResolverMod;
 const { loadRegistry } = capabilityLoaderMod;
@@ -244,9 +247,9 @@ interface PhaseCompletionProjection {
 
 function projectCompletionStatus(
   implementationComplete: boolean,
-  verificationPassed: boolean,
+  phaseComplete: boolean,
 ): string {
-  if (implementationComplete && verificationPassed) return 'complete';
+  if (phaseComplete) return 'complete';
   if (implementationComplete) return 'executed';
   return 'incomplete';
 }
@@ -259,32 +262,42 @@ function buildPhaseCompletionProjection(
   summaryCount: number,
   slashRuntime: string,
 ): PhaseCompletionProjection {
+  // ADR-3180 §7.4 (issue #3186) / DO-NOT-MIGRATE exemption
+  // (scripts/lint-completion-predicate-drift.cjs FUNCTION_SCOPED_EXEMPTIONS,
+  // declared deviation): `implementation_complete` answers "are the plans
+  // done" (a `scanPhasePlans`-shaped different question, per the design's
+  // 0.x-split), NOT "is the phase complete" — it is kept for the
+  // 'executed'-vs-'planned' disk_status distinction downstream consumers
+  // still rely on, which `isPhaseComplete`'s locked `{ complete, verification
+  // }` return shape does not carry.
   const implementationComplete = planCount > 0 && summaryCount >= planCount;
   const phaseFullDir = phaseDir ? path.join(cwd, phaseDir) : '';
-  // #2617: ONE verification-routing seam. init used to re-derive next_command
-  // from the status with its own projector, which had drifted from the router's
-  // table — it appended the phase number and answered `human_needed`; the table
-  // did neither. The router now owns both the content and the runtime
-  // projection, and init passes the phase number it already knows (its phaseDir
+  // #3168 / ADR-3180 §7.4 (disk-strict, #2957): route through the canonical
+  // owner (`src/verification.cts` · `isPhaseComplete`), which calls
+  // readVerificationStatus UNCONDITIONALLY — plan count is NOT a
+  // precondition. A zero-plan phase with a passing `*-VERIFICATION.md` is
+  // complete; init used to gate the read on `implementationComplete` and
+  // synthesize a `not_required` sentinel instead, which is the #3168 defect.
+  // #2617: the router still owns both the message content and the runtime
+  // projection; init passes the phase number it already knows (its phaseDir
   // is unresolved in some branches, where the router could not derive one).
-  const verificationStatus = implementationComplete
-    ? readVerificationStatus(phaseFullDir, { runtime: slashRuntime, phaseNumber })
-    : { status: 'not_required', next_action: '', next_command: '' };
+  const completionResult = isPhaseComplete(phaseFullDir, { runtime: slashRuntime, phaseNumber });
+  const verificationStatus = completionResult.value.verification;
   const projectedVerificationStatus = verificationStatus.status;
   const projectedVerificationAction = verificationStatus.next_action;
   const verificationPassed = projectedVerificationStatus === 'passed';
-  const phaseComplete = implementationComplete && verificationPassed;
+  const phaseComplete = completionResult.value.complete;
 
   return {
     implementation_complete: implementationComplete,
     verification_status: projectedVerificationStatus,
     verification_passed: verificationPassed,
     phase_complete: phaseComplete,
-    completion_status: projectCompletionStatus(implementationComplete, verificationPassed),
+    completion_status: projectCompletionStatus(implementationComplete, phaseComplete),
     verification_next_action: projectedVerificationAction,
     verification_next_command: verificationStatus.next_command,
-    // #3057 B3: only readVerificationStatus's result ever carries this flag —
-    // the `not_required` synthetic object above never does.
+    // #3057 B3: readVerificationStatus's result carries this flag when its
+    // internal staleness check could not run to completion.
     verification_stale_check_indeterminate: 'staleCheckIndeterminate' in verificationStatus
       && verificationStatus.staleCheckIndeterminate === true,
   };
@@ -305,7 +318,8 @@ function getLatestCompletedMilestone(cwd: string): { version: string; name: stri
 
 function withProjectRoot(cwd: string, result: Record<string, unknown>): Record<string, unknown> {
   result['project_root'] = cwd;
-  const activeRuntime = resolveRuntime(cwd);
+  // #3245: the reported agent_runtime gets a host-detection rung below the two explicit sources; every other resolveRuntime caller keeps the old ladder (ADR-2313 scope boundary).
+  const activeRuntime = resolveReportedRuntime(cwd);
   const agentStatus = checkAgentsInstalled(activeRuntime, cwd);
   result['agents_installed'] = agentStatus.agents_installed;
   result['missing_agents'] = agentStatus.missing_agents;
@@ -506,7 +520,12 @@ function detectHasPriorPhases(cwd: string, phaseInfo: Record<string, unknown> | 
       } catch {
         continue;
       }
-      if (files.some((f) => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md')) {
+      // #3511-class: scope the raw listing to THIS entry's own phase artifacts
+      // before the bare `.some()` predicate runs, so a stray `07-VERIFICATION.md`
+      // physically sitting in another phase's directory cannot make that
+      // directory appear to have its own verification report.
+      const scopedFiles = scopeToPhase(files, entry.name);
+      if (scopedFiles.some((f) => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md')) {
         return true;
       }
     }
@@ -694,7 +713,11 @@ function detectUiPhaseActive(cwd: string, phaseInfo: Record<string, unknown> | n
       // comments elsewhere in this file), same technique as detectHasPriorPhases above.
       const dirName = path.basename(rawDir);
       const files = fs.readdirSync(path.join(planningDir(cwd), 'phases', dirName));
-      hasUiSpecFile = files.some((f) => f.endsWith('-UI-SPEC.md') || f === 'UI-SPEC.md');
+      // #3511-class: scope the raw listing to this phase dir before the
+      // phase-numbered -UI-SPEC.md predicate, so a stray cross-phase
+      // UI-SPEC file cannot flip this phase's ui-phase-active flag.
+      const scopedFiles = scopeToPhase(files, dirName);
+      hasUiSpecFile = scopedFiles.some((f) => f.endsWith('-UI-SPEC.md') || f === 'UI-SPEC.md');
     } catch {
       hasUiSpecFile = false;
     }
@@ -814,6 +837,17 @@ function buildSectionManifestField(
   }
 }
 
+/**
+ * #3216 review Finding 1: `getMilestoneInfo(cwd).value` unwrap-and-cast was
+ * repeated identically (comment included) at five init call sites — factored
+ * out once so the cast and its `?? {}` "no milestone resolved" fallback live
+ * in exactly one place. Behavior-preserving: same call, same fallback, same
+ * cast, for every caller.
+ */
+function milestoneRecord(cwd: string): Record<string, unknown> {
+  return (getMilestoneInfo(cwd).value ?? {}) as unknown as Record<string, unknown>;
+}
+
 function cmdInitExecutePhase(
   cwd: string,
   phase: string,
@@ -826,7 +860,16 @@ function cmdInitExecutePhase(
 
   const config = loadConfig(cwd);
   let phaseInfo = guardedFindPhase(cwd, phase, config.project_code);
-  const milestone = getMilestoneInfo(cwd) as unknown as Record<string, unknown>;
+  // #3216: getMilestoneInfo now returns a ScopedResult — `.value` carries the
+  // MilestoneInfo (or null on any non-COMPLETE scope). NOT display-only: when
+  // `branching_strategy === 'milestone'`, `milestone['version']`/`['name']`
+  // below feed `branch_name` construction (see the milestone_branch_template
+  // branch below), so an unresolved milestone changes the constructed branch
+  // name, not merely what gets printed. bracket-access below naturally reads
+  // `undefined` when unresolved; the `milestone_version`/`milestone_name`
+  // output fields below coerce that to an explicit `null` (#3216 review
+  // Finding 2) so the key is never silently omitted from the JSON bundle.
+  const milestone = milestoneRecord(cwd);
 
   const roadmapPhase = guardedGetRoadmapPhase(cwd, phase, config.project_code);
   phaseInfo = applyRoadmapFallback(phaseInfo, roadmapPhase, (rp) => {
@@ -857,6 +900,14 @@ function cmdInitExecutePhase(
 
   const wf = (config.workflow ?? {}) as Record<string, unknown>;
 
+  // #3188: these paths are null when the file is absent, matching the contract
+  // the conditional sibling fields (context_path, patterns_path, ...) already
+  // honour and that ultraplan-phase.md / execute-phase.md gate on. Hoisted so
+  // the existence check and the emitted path share one source of truth.
+  const statePath = path.join(planningDir(cwd), 'STATE.md');
+  const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
+  const requirementsPath = path.join(planningDir(cwd), 'REQUIREMENTS.md');
+
   const result: Record<string, unknown> = {
     executor_model: resolveModelInternal(cwd, 'gsd-executor'),
     verifier_model: resolveModelInternal(cwd, 'gsd-verifier'),
@@ -878,7 +929,17 @@ function cmdInitExecutePhase(
       ? toPosixPath(path.join(cwd, phaseInfo['directory'] as string))
       : null,
     phase_number: phaseInfo?.['phase_number'] || null,
-    phase_name: phaseInfo?.['phase_name'] || null,
+    // #3171: prefer the ROADMAP's curated display name for `phase_name`. When
+    // the phase directory already exists on disk, the disk-lookup path
+    // (searchPhaseInDir) derives phase_name from the directory-name remainder
+    // — itself an already-slugified value (`phase.add` writes `${num}-${slug}`
+    // dirs), so phase_name and phase_slug come out byte-identical. An
+    // orchestrator wiring this field into `state begin-phase --name` then
+    // lands a raw slug in STATE.md's current_phase_name. The ROADMAP carries
+    // the human-curated display name (`### Phase N: <Name>`); prefer it,
+    // matching the no-disk fallback above. phase_slug stays disk-derived — it
+    // correctly feeds branch-name construction below and is unchanged here.
+    phase_name: (roadmapPhase?.['phase_name']) || (phaseInfo?.['phase_name']) || null,
     phase_slug: phaseInfo?.['phase_slug'] || null,
     phase_req_ids,
 
@@ -906,27 +967,28 @@ function cmdInitExecutePhase(
             .replace('{slug}', (phaseInfo['phase_slug'] as string) || 'phase')
         : config.branching_strategy === 'milestone'
           ? (config.milestone_branch_template as string)
-              .replace('{milestone}', milestone['version'] as string)
+              .replace('{milestone}', (milestone['version'] as string | undefined) ?? '')
               .replace(
                 '{slug}',
-                generateSlugInternal(milestone['name'] as string) || 'milestone',
+                generateSlugInternal(milestone['name'] as string | undefined) || 'milestone',
               )
           : null,
 
-    milestone_version: milestone['version'],
-    milestone_name: milestone['name'],
-    milestone_slug: generateSlugInternal(milestone['name'] as string),
+    milestone_version: milestone['version'] ?? null,
+    milestone_name: milestone['name'] ?? null,
+    milestone_slug: generateSlugInternal(milestone['name'] as string | undefined),
 
     state_exists: fs.existsSync(path.join(planningDir(cwd), 'STATE.md')),
     roadmap_exists: fs.existsSync(path.join(planningDir(cwd), 'ROADMAP.md')),
     config_exists: fs.existsSync(path.join(planningDir(cwd), 'config.json')),
     // #2376: emit absolute paths — see comment above on phase_dir.
-    state_path: toPosixPath(path.join(planningDir(cwd), 'STATE.md')),
-    roadmap_path: toPosixPath(path.join(planningDir(cwd), 'ROADMAP.md')),
+    // #3188: null when the file is absent (parity with patterns_path/context_path).
+    state_path: fs.existsSync(statePath) ? toPosixPath(statePath) : null,
+    roadmap_path: fs.existsSync(roadmapPath) ? toPosixPath(roadmapPath) : null,
     config_path: toPosixPath(path.join(planningDir(cwd), 'config.json')),
     // #2376: execute-phase.md's verify_phase_goal step reads this instead of
     // hardcoding '.planning/REQUIREMENTS.md' into the gsd-verifier spawn prompt.
-    requirements_path: toPosixPath(path.join(planningDir(cwd), 'REQUIREMENTS.md')),
+    requirements_path: fs.existsSync(requirementsPath) ? toPosixPath(requirementsPath) : null,
   };
 
   if (options['validate']) {
@@ -1018,6 +1080,12 @@ function cmdInitPlanPhase(
 
   const wf = (config.workflow ?? {}) as Record<string, unknown>;
 
+  // #3188: see cmdInitExecutePhase — null when absent, parity with the
+  // conditional sibling fields in this same result object.
+  const statePath = path.join(planningDir(cwd), 'STATE.md');
+  const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
+  const requirementsPath = path.join(planningDir(cwd), 'REQUIREMENTS.md');
+
   const result: Record<string, unknown> = {
     researcher_model: resolveModelInternal(cwd, 'gsd-phase-researcher'),
     planner_model: resolveModelInternal(cwd, 'gsd-planner'),
@@ -1065,9 +1133,10 @@ function cmdInitPlanPhase(
     roadmap_exists: fs.existsSync(path.join(planningDir(cwd), 'ROADMAP.md')),
 
     // #2376: absolute — see comment on phase_dir above.
-    state_path: toPosixPath(path.join(planningDir(cwd), 'STATE.md')),
-    roadmap_path: toPosixPath(path.join(planningDir(cwd), 'ROADMAP.md')),
-    requirements_path: toPosixPath(path.join(planningDir(cwd), 'REQUIREMENTS.md')),
+    // #3188: null when the file is absent (parity with patterns_path below).
+    state_path: fs.existsSync(statePath) ? toPosixPath(statePath) : null,
+    roadmap_path: fs.existsSync(roadmapPath) ? toPosixPath(roadmapPath) : null,
+    requirements_path: fs.existsSync(requirementsPath) ? toPosixPath(requirementsPath) : null,
 
     patterns_path: null,
   };
@@ -1076,33 +1145,64 @@ function cmdInitPlanPhase(
     const phaseDirFull = path.join(cwd, phaseInfo['directory'] as string);
     try {
       const files = fs.readdirSync(phaseDirFull);
-      const contextFile = findContextMdIn(phaseDirFull);
+      const phaseDirName = path.basename(phaseDirFull);
+      // #3511 BLOCKER-3: scope the raw listing to THIS phase's own artifacts
+      // before any bare `.find()` predicate runs, so a `04-UAT.md` (or
+      // `04-RESEARCH.md`/`04-REVIEWS.md`/`04-PATTERNS.md`) sitting in phase
+      // 03's directory cannot win a phase-03 lookup — the same
+      // `isPhaseArtifact` membership rule `resolveVerificationFile` already
+      // applies via `phaseDirName` below. `findContextMdIn` is passed the
+      // scoped array (rather than the raw directory path) so this call site
+      // alone is scoped; its other call sites are unaffected.
+      const scopedFiles = scopeToPhase(files, phaseDirName);
+      const contextFile = findContextMdIn(scopedFiles);
       if (contextFile) {
         result['context_path'] = toPosixPath(path.join(phaseDirFull, contextFile));
       }
-      const researchFile = files.find(
+      const researchFile = scopedFiles.find(
         (f) => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md',
       );
       if (researchFile) {
         result['research_path'] = toPosixPath(path.join(phaseDirFull, researchFile));
       }
-      const verificationFile = files.find(
-        (f) => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md',
-      );
+      // #3473 F2: routed through the shared resolver — readdir order is
+      // filesystem-dependent, so the prior hand-rolled `.find()` could pick
+      // either file when a phase held both a canonical report and an ad-hoc
+      // `-CORRECTION-VERIFICATION.md` worksheet (#3357).
+      // #3492: pin selection to THIS phase's own token so a stray cross-phase
+      // or sentinel-numbered canonically-shaped file cannot outrank this
+      // phase's own (possibly non-canonical) report.
+      const phaseToken = extractPhaseToken(phaseDirName);
+      const verificationFile = resolveVerificationFile(files, {
+        allowBare: true,
+        phaseToken,
+        phaseDirName,
+      });
       if (verificationFile) {
         result['verification_path'] = toPosixPath(path.join(phaseDirFull, verificationFile));
       }
-      const uatFile = files.find((f) => f.endsWith('-UAT.md') || f === 'UAT.md');
+      // #3518: routed through the shared UAT resolver — the prior hand-rolled
+      // `.find()` over unsorted readdir order had no phase check and no
+      // ordering, so a stray cross-phase 02-UAT.md could become this phase's
+      // uat_path, filesystem-dependently. Pinned to this phase's own token
+      // (same rule as verification_path above), and phase-scoped via
+      // phaseDirName (#3511) so the alphabetically-first fallback tier also
+      // excludes cross-phase strays.
+      const uatFile = resolveUatFile(files, {
+        allowBare: true,
+        phaseToken,
+        phaseDirName,
+      });
       if (uatFile) {
         result['uat_path'] = toPosixPath(path.join(phaseDirFull, uatFile));
       }
-      const reviewsFile = files.find(
+      const reviewsFile = scopedFiles.find(
         (f) => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md',
       );
       if (reviewsFile) {
         result['reviews_path'] = toPosixPath(path.join(phaseDirFull, reviewsFile));
       }
-      const patternsFile = files.find(
+      const patternsFile = scopedFiles.find(
         (f) => f.endsWith('-PATTERNS.md') || f === 'PATTERNS.md',
       );
       if (patternsFile) {
@@ -1209,22 +1309,14 @@ function cmdInitNewProject(cwd: string, raw: boolean, options: Record<string, un
 
 function cmdInitNewMilestone(cwd: string, raw: boolean, options: Record<string, unknown> = {}): void {
   const config = loadConfig(cwd);
-  const milestone = getMilestoneInfo(cwd) as unknown as Record<string, unknown>;
+  const milestone = milestoneRecord(cwd);
   const latestCompleted = getLatestCompletedMilestone(cwd);
   const phasesDir = path.join(planningDir(cwd), 'phases');
-  let phaseDirCount = 0;
-
-  try {
-    if (fs.existsSync(phasesDir)) {
-      const isDirInMilestone = getMilestonePhaseFilter(cwd);
-      phaseDirCount = fs
-        .readdirSync(phasesDir, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && isDirInMilestone(entry.name))
-        .length;
-    }
-  } catch {
-    /* intentionally empty */
-  }
+  // #3185 (ADR-3180 Decision 1): "how many phase directories belong to the
+  // CURRENT milestone" is exactly the scoped question listMilestonePhaseDirs
+  // owns — routed through it instead of a local readdirSync + hand-rolled
+  // window filter (which also never excluded sentinels, unlike the owner).
+  const phaseDirCount = listMilestonePhaseDirs(phasesDir, { cwd }).value.length;
 
   const wf = (config.workflow ?? {}) as Record<string, unknown>;
 
@@ -1236,8 +1328,12 @@ function cmdInitNewMilestone(cwd: string, raw: boolean, options: Record<string, 
     commit_docs: config.commit_docs,
     research_enabled: wf['research'],
 
-    current_milestone: milestone['version'],
-    current_milestone_name: milestone['name'],
+    // #3216 review Finding 2: `?? null` so an unresolved milestone still emits
+    // the key with an explicit `null` rather than letting JSON.stringify drop
+    // it — an omitted key reaches the prompt layer's `{current_milestone}`
+    // placeholder as literal, un-substituted text.
+    current_milestone: milestone['version'] ?? null,
+    current_milestone_name: milestone['name'] ?? null,
     latest_completed_milestone: latestCompleted?.version || null,
     latest_completed_milestone_name: latestCompleted?.name || null,
     phase_dir_count: phaseDirCount,
@@ -1278,7 +1374,13 @@ function cmdInitNewMilestone(cwd: string, raw: boolean, options: Record<string, 
   // source as `cmdInitTransition`: `GSD_WORKSTREAM` env, falling back to the
   // stored active-workstream pointer (mirrors `cmdInitProgress`'s own
   // resolution above).
-  const resolvedWorkstream = process.env['GSD_WORKSTREAM'] || getActiveWorkstream(cwd);
+  //
+  // #3579 root-cause fix: this is a read-only informational field (no write
+  // follows), so use the non-mutating peek — getActiveWorkstream's self-heal
+  // would otherwise silently delete a stale/invalid pointer as a side effect
+  // of building a JSON report field, and (per #3579) could change what a
+  // LATER resolution in the same process observes.
+  const resolvedWorkstream = process.env['GSD_WORKSTREAM'] || peekActiveWorkstream(cwd);
   const workstreamActive = !!resolvedWorkstream;
   const flatMode = !workstreamActive;
 
@@ -1298,7 +1400,7 @@ function cmdInitQuick(
   options: Record<string, unknown> = {},
 ): void {
   const config = loadConfig(cwd);
-  const now = new Date();
+  const now = new Date(realClock.now());
   const slug = description ? generateSlugInternal(description)?.substring(0, 40) : null;
 
   const yy = String(now.getFullYear()).slice(-2);
@@ -1854,6 +1956,12 @@ function cmdInitPhaseOp(cwd: string, phase: string, raw: boolean): void {
     }
   }
 
+  // #3188: see cmdInitExecutePhase — null when absent, parity with the
+  // conditional sibling fields in this same result object.
+  const statePath = path.join(planningDir(cwd), 'STATE.md');
+  const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
+  const requirementsPath = path.join(planningDir(cwd), 'REQUIREMENTS.md');
+
   const result: Record<string, unknown> = {
     commit_docs: config.commit_docs,
     brave_search:
@@ -1889,36 +1997,62 @@ function cmdInitPhaseOp(cwd: string, phase: string, raw: boolean): void {
     planning_exists: fs.existsSync(planningDir(cwd)),
 
     // #2376: absolute — see comment on phase_dir above.
-    state_path: toPosixPath(path.join(planningDir(cwd), 'STATE.md')),
-    roadmap_path: toPosixPath(path.join(planningDir(cwd), 'ROADMAP.md')),
-    requirements_path: toPosixPath(path.join(planningDir(cwd), 'REQUIREMENTS.md')),
+    // #3188: null when the file is absent (parity with context_path/research_path).
+    state_path: fs.existsSync(statePath) ? toPosixPath(statePath) : null,
+    roadmap_path: fs.existsSync(roadmapPath) ? toPosixPath(roadmapPath) : null,
+    requirements_path: fs.existsSync(requirementsPath) ? toPosixPath(requirementsPath) : null,
   };
 
   if (phaseInfo?.['directory']) {
     const phaseDirFull = path.join(cwd, phaseInfo['directory'] as string);
     try {
       const files = fs.readdirSync(phaseDirFull);
-      const contextFile = findContextMdIn(phaseDirFull);
+      const phaseDirName = path.basename(phaseDirFull);
+      // #3511 BLOCKER-3: see the parallel site above — scope before any bare
+      // `.find()` predicate so a misfiled cross-phase artifact cannot win.
+      const scopedFiles = scopeToPhase(files, phaseDirName);
+      const contextFile = findContextMdIn(scopedFiles);
       if (contextFile) {
         result['context_path'] = toPosixPath(path.join(phaseDirFull, contextFile));
       }
-      const researchFile = files.find(
+      const researchFile = scopedFiles.find(
         (f) => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md',
       );
       if (researchFile) {
         result['research_path'] = toPosixPath(path.join(phaseDirFull, researchFile));
       }
-      const verificationFile = files.find(
-        (f) => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md',
-      );
+      // #3473 F2: routed through the shared resolver — readdir order is
+      // filesystem-dependent, so the prior hand-rolled `.find()` could pick
+      // either file when a phase held both a canonical report and an ad-hoc
+      // `-CORRECTION-VERIFICATION.md` worksheet (#3357).
+      // #3492: pin selection to THIS phase's own token so a stray cross-phase
+      // or sentinel-numbered canonically-shaped file cannot outrank this
+      // phase's own (possibly non-canonical) report.
+      const phaseToken = extractPhaseToken(phaseDirName);
+      const verificationFile = resolveVerificationFile(files, {
+        allowBare: true,
+        phaseToken,
+        phaseDirName,
+      });
       if (verificationFile) {
         result['verification_path'] = toPosixPath(path.join(phaseDirFull, verificationFile));
       }
-      const uatFile = files.find((f) => f.endsWith('-UAT.md') || f === 'UAT.md');
+      // #3518: routed through the shared UAT resolver — the prior hand-rolled
+      // `.find()` over unsorted readdir order had no phase check and no
+      // ordering, so a stray cross-phase 02-UAT.md could become this phase's
+      // uat_path, filesystem-dependently. Pinned to this phase's own token
+      // (same rule as verification_path above), and phase-scoped via
+      // phaseDirName (#3511) so the alphabetically-first fallback tier also
+      // excludes cross-phase strays.
+      const uatFile = resolveUatFile(files, {
+        allowBare: true,
+        phaseToken,
+        phaseDirName,
+      });
       if (uatFile) {
         result['uat_path'] = toPosixPath(path.join(phaseDirFull, uatFile));
       }
-      const reviewsFile = files.find(
+      const reviewsFile = scopedFiles.find(
         (f) => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md',
       );
       if (reviewsFile) {
@@ -1997,7 +2131,7 @@ function cmdInitTodos(cwd: string, area: string | undefined, raw: boolean): void
 
 function cmdInitMilestoneOp(cwd: string, raw: boolean): void {
   const config = loadConfig(cwd);
-  const milestone = getMilestoneInfo(cwd) as unknown as Record<string, unknown>;
+  const milestone = milestoneRecord(cwd);
 
   let phaseCount = 0;
   let completedPhases = 0;
@@ -2012,7 +2146,8 @@ function cmdInitMilestoneOp(cwd: string, raw: boolean): void {
     const phasePattern = new RegExp(`#{2,4}\\s*Phase\\s+(${PHASE_NUMBER_TOKEN_SOURCE})(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:`, 'gi');
     let m: RegExpExecArray | null;
     while ((m = phasePattern.exec(currentSection)) !== null) {
-      if (/^999(?:\.|$)/.test(m[1])) continue;
+      // #3185: canonical sentinel predicate (SENTINEL_RANGES [0,999]) — this was a local 999-only literal that admitted Phase 0.
+      if (isSentinelPhaseId(m[1])) continue;
       roadmapPhaseNumbers.push(m[1]);
     }
   } catch {
@@ -2050,8 +2185,12 @@ function cmdInitMilestoneOp(cwd: string, raw: boolean): void {
     }
   } else {
     try {
-      const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
-      const dirs = entries.filter((e) => e.isDirectory()).map((e) => e.name);
+      // #3185 (ADR-3180 Decision 1): the ROADMAP heading scan above found no
+      // current-milestone phase headings — fall back to asking the canonical
+      // owner "which phase directories belong to the current milestone"
+      // directly, instead of a hand-rolled readdirSync over every directory
+      // on disk (which also never excluded sentinels, unlike the owner).
+      const dirs = listMilestonePhaseDirs(phasesDir, { cwd }).value;
       phaseCount = dirs.length;
       for (const dir of dirs) {
         try {
@@ -2080,9 +2219,13 @@ function cmdInitMilestoneOp(cwd: string, raw: boolean): void {
   const result: Record<string, unknown> = {
     commit_docs: config.commit_docs,
 
-    milestone_version: milestone['version'],
-    milestone_name: milestone['name'],
-    milestone_slug: generateSlugInternal(milestone['name'] as string),
+    // #3216 review Finding 2: `?? null` so an unresolved milestone still emits
+    // the key with an explicit `null` rather than letting JSON.stringify drop
+    // it — an omitted key reaches the prompt layer's `{milestone_version}`
+    // placeholder as literal, un-substituted text.
+    milestone_version: milestone['version'] ?? null,
+    milestone_name: milestone['name'] ?? null,
+    milestone_slug: generateSlugInternal(milestone['name'] as string | undefined),
 
     phase_count: phaseCount,
     completed_phases: completedPhases,
@@ -2138,7 +2281,7 @@ function cmdInitMapCodebase(cwd: string, raw: boolean): void {
 
 function cmdInitManager(cwd: string, raw: boolean): void {
   const config = loadConfig(cwd);
-  const milestone = getMilestoneInfo(cwd) as unknown as Record<string, unknown>;
+  const milestone = milestoneRecord(cwd);
   const _slashRuntime = resolveRuntime(cwd);
 
   const paths = planningPaths(cwd);
@@ -2152,18 +2295,13 @@ function cmdInitManager(cwd: string, raw: boolean): void {
   const rawContent = fs.readFileSync(paths.roadmap, 'utf-8');
   const content = extractCurrentMilestone(rawContent, cwd);
   const phasesDir = paths.phases;
-  const isDirInMilestone = getMilestonePhaseFilter(cwd);
 
-  const _phaseDirEntries = (() => {
-    try {
-      return fs
-        .readdirSync(phasesDir, { withFileTypes: true })
-        .filter((e) => e.isDirectory())
-        .map((e) => e.name);
-    } catch {
-      return [];
-    }
-  })();
+  // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
+  // CURRENT milestone" is the scoped question listMilestonePhaseDirs owns —
+  // routed through it instead of a hand-rolled readdirSync + a separate
+  // getMilestonePhaseFilter window check (which also never excluded
+  // sentinels, unlike the owner).
+  const _phaseDirEntries = listMilestonePhaseDirs(phasesDir, { cwd }).value;
 
   const _checkboxStates = new Map<string, boolean>();
   const _cbPattern = new RegExp(`-\\s*\\[(x| )\\]\\s*.*Phase\\s+(${PHASE_NUMBER_TOKEN_SOURCE})[:\\s]`, 'gi');
@@ -2213,8 +2351,11 @@ function cmdInitManager(cwd: string, raw: boolean): void {
     );
 
     try {
-      const dirs = _phaseDirEntries.filter(isDirInMilestone);
-      const dirMatch = dirs.find((d) => phaseTokenMatches(d, normalized));
+      // #3185 (ADR-3180 Decision 2) moved this lookup off the
+      // milestone-scoped set and onto the physical one; that scope choice is
+      // kept. Only the matcher is this PR's: matchPhaseDirs resolves
+      // digit-leading directory names the token predicate cannot (#2528).
+      const dirMatch = matchPhaseDirs(_phaseDirEntries, normalized).matches[0];
 
       if (dirMatch) {
         const fullDir = path.join(phasesDir, dirMatch);
@@ -2222,8 +2363,13 @@ function cmdInitManager(cwd: string, raw: boolean): void {
         const phaseFiles = fs.readdirSync(fullDir);
         planCount = listPhasePlanFiles(fullDir).length;
         summaryCount = listPhaseSummaryFiles(fullDir).length;
-        hasContext = findContextMdIn(fullDir) !== null;
-        hasResearch = phaseFiles.some(
+        // #3511-class: scope the raw listing to THIS phase's own artifacts
+        // before the hasContext/hasResearch predicates run, so a stray
+        // cross-phase `-CONTEXT.md`/`-RESEARCH.md` sitting in this directory
+        // cannot win this phase's lookup.
+        const scopedFiles = scopeToPhase(phaseFiles, dirMatch);
+        hasContext = findContextMdIn(scopedFiles) !== null;
+        hasResearch = scopedFiles.some(
           (f) => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md',
         );
         completion = buildPhaseCompletionProjection(
@@ -2243,7 +2389,7 @@ function cmdInitManager(cwd: string, raw: boolean): void {
         else if (hasContext) diskStatus = 'discussed';
         else diskStatus = 'empty';
 
-        const nowMs = Date.now();
+        const nowMs = realClock.now();
         let newestMtime = 0;
         for (const f of phaseFiles) {
           try {
@@ -2262,18 +2408,20 @@ function cmdInitManager(cwd: string, raw: boolean): void {
       /* intentionally empty */
     }
 
+    // ADR-3180 §7.4 (disk-strict, #2957, maintainer decision 2026-08-08):
+    // `roadmapComplete` is reported below as metadata only — it carries NO
+    // machine authority over `diskStatus`. The #3033 checkbox override that
+    // used to live here (treating a zero-plan phase as complete whenever the
+    // ROADMAP checkbox was ticked, layered on top of
+    // buildPhaseCompletionProjection's own output) is DELETED, not
+    // generalized: `diskStatus` now comes entirely from `completion`, which
+    // already routes through the canonical owner (`isPhaseComplete`) and
+    // itself resolves a zero-plan phase as complete whenever a passing
+    // `*-VERIFICATION.md` exists (#3168) — with no dependency on the
+    // checkbox. A zero-plan phase whose completion previously relied SOLELY
+    // on a ticked checkbox (no passing verification) now reports incomplete;
+    // this is the deliberate Tier-2 break (ADR-3180 §7.4 Decision 3).
     const roadmapComplete = _checkboxStates.get(phaseNum) || false;
-    // #3033: a zero-plan phase (split parent — intentionally plan-less, holds
-    // shared context for sub-phases) whose roadmap checkbox is marked complete
-    // must resolve as complete. The original gate required completion.phase_complete
-    // (derived from plan/summary counts), which is always false for zero-plan
-    // phases — so the checkbox override never fired and the parent was permanently
-    // stuck as 'researched' (an in-progress state eligible for current-phase
-    // selection). Now: when the roadmap marks it complete AND it has zero plans,
-    // treat it as complete regardless of the plan-count derivation.
-    if (roadmapComplete && (completion.phase_complete || planCount === 0) && diskStatus !== 'complete') {
-      diskStatus = 'complete';
-    }
 
     phases.push({
       number: phaseNum,
@@ -2387,7 +2535,8 @@ function cmdInitManager(cwd: string, raw: boolean): void {
   const recommendedActions: Record<string, unknown>[] = [];
   for (const phase of phases) {
     if (phase['disk_status'] === 'complete') continue;
-    if (/^999(?:\.|$)/.test(phase['number'] as string)) continue;
+    // #3185: canonical sentinel predicate (SENTINEL_RANGES [0,999]) — this was a local 999-only literal that admitted Phase 0.
+    if (isSentinelPhaseId(phase['number'])) continue;
 
     if (phase['disk_status'] === 'executed') {
       recommendedActions.push({
@@ -2455,7 +2604,8 @@ function cmdInitManager(cwd: string, raw: boolean): void {
     return true;
   });
 
-  const nonBacklogPhases = phases.filter((p) => !/^999(?:\.|$)/.test(p['number'] as string));
+  // #3185: canonical sentinel predicate (SENTINEL_RANGES [0,999]) — this was a local 999-only literal that admitted Phase 0.
+  const nonBacklogPhases = phases.filter((p) => !isSentinelPhaseId(p['number'] as string));
   const completedCount = nonBacklogPhases.filter((p) => p['phase_complete'] === true).length;
 
   const sanitizeFlags = (rawVal: unknown): string => {
@@ -2484,8 +2634,12 @@ function cmdInitManager(cwd: string, raw: boolean): void {
   };
 
   const result: Record<string, unknown> = {
-    milestone_version: milestone['version'],
-    milestone_name: milestone['name'],
+    // #3216 review Finding 2: `?? null` so an unresolved milestone still emits
+    // the key with an explicit `null` rather than letting JSON.stringify drop
+    // it — an omitted key reaches the prompt layer's `{milestone_version}`
+    // placeholder as literal, un-substituted text.
+    milestone_version: milestone['version'] ?? null,
+    milestone_name: milestone['name'] ?? null,
     phases,
     phase_count: phases.length,
     completed_count: completedCount,
@@ -2621,7 +2775,7 @@ function cmdInitDocsUpdate(cwd: string, raw: boolean, options: Record<string, un
  * `state:chunked-mode`/`state:plan-strategy-converge`). This DELIBERATELY
  * does not replace `update.md`'s own `parse_update_channel` case-statement
  * (`TAG="next"`/`TAG="latest"`) — issue #815's regression test
- * (`tests/issue-815-update-next-channel.test.cjs`) asserts that literal
+ * (`tests/update-workflow.test.cjs`) asserts that literal
  * case-statement text stays in `update.md` verbatim (the npm dist-tag
  * selection has to run in the workflow's own shell before any `gsd_run`
  * round-trip), so `next_channel` exists purely to gate the `channel-banner`
@@ -2671,7 +2825,9 @@ function cmdInitUpdate(cwd: string, raw: boolean, options: Record<string, unknow
  * pure JSON consumer with no `gsd_run` call of its own.
  */
 function cmdInitTransition(cwd: string, raw: boolean, options: Record<string, unknown> = {}): void {
-  const resolvedWorkstream = process.env['GSD_WORKSTREAM'] || getActiveWorkstream(cwd);
+  // #3579 root-cause fix: read-only informational field — peek, don't
+  // self-heal (see cmdInitNewMilestone's identical rationale above).
+  const resolvedWorkstream = process.env['GSD_WORKSTREAM'] || peekActiveWorkstream(cwd);
   const workstreamActive = !!resolvedWorkstream;
 
   const result: Record<string, unknown> = {
@@ -2759,7 +2915,7 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
     /* intentionally empty */
   }
   const config = loadConfig(cwd);
-  const milestone = getMilestoneInfo(cwd) as unknown as Record<string, unknown>;
+  const milestone = milestoneRecord(cwd);
   const _slashRuntime = resolveRuntime(cwd);
 
   // #1912: fail safe in workstream mode with no active workstream. With no active
@@ -2768,12 +2924,33 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
   // Mirror planningDir's resolution (GSD_WORKSTREAM env > stored active pointer) so
   // an explicit --ws (which sets GSD_WORKSTREAM) satisfies the check.
   const _availableWorkstreams = listAvailableWorkstreams(cwd);
-  const _resolvedWorkstream = process.env['GSD_WORKSTREAM'] || getActiveWorkstream(cwd);
+  // #3579 root-cause fix: this is a check, not a consuming read — use the
+  // non-mutating peek so an unresolvable pointer isn't self-healed (cleared)
+  // here and then found "absent" by diagnoseUnresolvedActiveWorkstream below,
+  // which would misreport a present-but-bad marker as no marker at all.
+  const _resolvedWorkstream = process.env['GSD_WORKSTREAM'] || peekActiveWorkstream(cwd);
   if (_availableWorkstreams.length > 0 && !_resolvedWorkstream) {
+    // #3579: getActiveWorkstream now inherits a pointer-less session's read
+    // from the shared .planning/active-workstream marker, so reaching this
+    // branch with a marker actually present means the marker EXISTED but
+    // didn't resolve (invalid name, or its workstream dir is gone) — a
+    // materially different situation from "nothing was ever set" and one
+    // that deserves its own diagnostic instead of the generic message below.
+    const _diagnosis = diagnoseUnresolvedActiveWorkstream(cwd);
+    if (_diagnosis.present) {
+      error(
+        `init.progress requires a workstream in workstream mode — the active-workstream marker names '${_diagnosis.value}', but it did not resolve: ${describeUnresolvedWorkstreamReason(_diagnosis.reason)}. Root STATE.md (likely stale) would be reported otherwise. ` +
+          `Pass --ws <name> or run ${formatGsdSlash('workstream set', _slashRuntime) as string} to point it at an existing workstream. ` +
+          `Available workstreams: ${_availableWorkstreams.join(', ')}`,
+        ERROR_REASON.WORKSTREAM_MODE_MARKER_UNRESOLVED,
+        { marker_value: _diagnosis.value, marker_reason: _diagnosis.reason },
+      );
+    }
     error(
       `init.progress requires a workstream in workstream mode — no active workstream is set, so root STATE.md (likely stale) would be reported. ` +
         `Pass --ws <name> or run ${formatGsdSlash('workstream set', _slashRuntime) as string} first. ` +
         `Available workstreams: ${_availableWorkstreams.join(', ')}`,
+      ERROR_REASON.WORKSTREAM_MODE_NONE_ACTIVE,
     );
   }
 
@@ -2806,21 +2983,16 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
     /* intentionally empty */
   }
 
-  const isDirInMilestone = getMilestonePhaseFilter(cwd);
   const seenPhaseNums = new Set<string>();
 
   try {
-    const entries = fs.readdirSync(phasesDir, { withFileTypes: true });
-    const dirs = entries
-      .filter((e) => e.isDirectory())
-      .map((e) => e.name)
-      .filter(isDirInMilestone)
-      .sort((a, b) => {
-        const pa = a.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
-        const pb = b.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
-        if (!pa || !pb) return a.localeCompare(b);
-        return parseInt(pa[1], 10) - parseInt(pb[1], 10);
-      });
+    // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
+    // CURRENT milestone" — routed through the canonical owner instead of a
+    // hand-rolled readdirSync + isDirInMilestone filter + local sort (which
+    // also never excluded sentinels, unlike the owner; the final `phases`
+    // array is re-sorted below anyway, so dropping the local sort here is
+    // behavior-preserving).
+    const dirs = listMilestonePhaseDirs(phasesDir, { cwd }).value;
 
     for (const dir of dirs) {
       const dirMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})-?(.*)`, 'i'));
@@ -2833,7 +3005,12 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
 
       const plans = listPhasePlanFiles(phasePath);
       const summaries = listPhaseSummaryFiles(phasePath);
-      const hasResearch = phaseFiles.some(
+      // #3511-class: scope the raw listing to THIS phase's own artifacts
+      // before the hasResearch predicate runs, so a stray cross-phase
+      // `-RESEARCH.md` sitting in this directory cannot win this phase's
+      // lookup.
+      const scopedPhaseFiles = scopeToPhase(phaseFiles, dir);
+      const hasResearch = scopedPhaseFiles.some(
         (f) => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md',
       );
       const phaseDirRel = toPosixPath(
@@ -2923,6 +3100,25 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
     (a, b) => parseInt(a['number'] as string, 10) - parseInt(b['number'] as string, 10),
   );
 
+  // #3581: the frontier is ROADMAP ORDER, not artifact presence. The disk loop
+  // above could claim nextPhase from a stray out-of-order artifact directory
+  // (a phase-9 UAT evidence dir while roadmap phase 8 was pending and
+  // unscaffolded), silently skipping 8 — and init.progress then disagreed with
+  // roadmap.analyze on the same tree. Re-derive from the sorted union: the
+  // first phase that has not begun ('pending' | 'not_started') and is not
+  // roadmap-complete wins; artifacts still feed each entry's status and
+  // completion (corroborating evidence) but no longer outrank the ordering.
+  // Aligned trees derive the identical frontier as the loops above; an
+  // all-complete milestone finds none and keeps nextPhase null for the
+  // completion flow.
+  {
+    const frontier = phases.find((p) => {
+      const st = p['status'];
+      return (st === 'pending' || st === 'not_started') && p['roadmap_complete'] !== true;
+    });
+    if (frontier) nextPhase = frontier;
+  }
+
   let pausedAt: string | null = null;
   const state = platformReadSync(path.join(planningDir(cwd), 'STATE.md'));
   if (state !== null) {
@@ -2950,8 +3146,12 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
 
     commit_docs: config.commit_docs,
 
-    milestone_version: milestone['version'],
-    milestone_name: milestone['name'],
+    // #3216 review Finding 2: `?? null` so an unresolved milestone still emits
+    // the key with an explicit `null` rather than letting JSON.stringify drop
+    // it — an omitted key reaches the prompt layer's `{milestone_version}`
+    // placeholder as literal, un-substituted text.
+    milestone_version: milestone['version'] ?? null,
+    milestone_name: milestone['name'] ?? null,
 
     phases,
     phase_count: phases.length,
@@ -3641,7 +3841,7 @@ function buildSkillManifest(cwd: string, skillsDir: string | null = null): Skill
 
       const description = (frontmatter['description'] as string) || '';
       const triggers: string[] = [];
-      const bodyMatch = content.match(/^---[\s\S]*?---\s*\n([\s\S]*)$/);
+      const bodyMatch = content.match(/^---[\s\S]*?---\s*\r?\n([\s\S]*)$/);
       if (bodyMatch) {
         const body = bodyMatch[1];
         const triggerLines = body.match(/^TRIGGER\s+when:\s*(.+)$/gmi);

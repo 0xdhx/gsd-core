@@ -8,8 +8,6 @@
  *   - extractOneLinerFromBody
  *   - pathExistsInternal
  *   - generateSlugInternal
- *   - filterPlanFiles
- *   - filterSummaryFiles
  *   - getPhaseFileStats
  *   - readSubdirectories
  *   - timeAgo
@@ -30,6 +28,7 @@ const path = require('node:path');
 const os = require('node:os');
 
 const coreUtils = require('../gsd-core/bin/lib/core-utils.cjs');
+const { SCOPE } = require('../gsd-core/bin/lib/planning-scope.cjs');
 const { cleanup } = require('./helpers.cjs');
 
 // ─── toPosixPath ─────────────────────────────────────────────────────────────
@@ -338,43 +337,6 @@ describe('generateSlugInternal', () => {
   });
 });
 
-// ─── filterPlanFiles ──────────────────────────────────────────────────────────
-
-describe('filterPlanFiles', () => {
-  test('returns only PLAN.md and *-PLAN.md files', () => {
-    const files = ['PLAN.md', '01-PLAN.md', 'SUMMARY.md', 'README.md', 'foo-PLAN.md'];
-    assert.deepEqual(coreUtils.filterPlanFiles(files), ['PLAN.md', '01-PLAN.md', 'foo-PLAN.md']);
-  });
-
-  test('empty array → empty array', () => {
-    assert.deepEqual(coreUtils.filterPlanFiles([]), []);
-  });
-
-  test('no matching files → empty array', () => {
-    assert.deepEqual(coreUtils.filterPlanFiles(['SUMMARY.md', 'CONTEXT.md']), []);
-  });
-
-  test('case-sensitive: plan.md is not matched', () => {
-    assert.deepEqual(coreUtils.filterPlanFiles(['plan.md', 'Plan.md']), []);
-  });
-});
-
-// ─── filterSummaryFiles ───────────────────────────────────────────────────────
-
-describe('filterSummaryFiles', () => {
-  test('returns only SUMMARY.md and *-SUMMARY.md files', () => {
-    const files = ['SUMMARY.md', '01-SUMMARY.md', 'PLAN.md', 'foo-SUMMARY.md'];
-    assert.deepEqual(coreUtils.filterSummaryFiles(files), ['SUMMARY.md', '01-SUMMARY.md', 'foo-SUMMARY.md']);
-  });
-
-  test('empty array → empty array', () => {
-    assert.deepEqual(coreUtils.filterSummaryFiles([]), []);
-  });
-
-  test('no matching files → empty array', () => {
-    assert.deepEqual(coreUtils.filterSummaryFiles(['PLAN.md', 'CONTEXT.md']), []);
-  });
-});
 
 // ─── readSubdirectories ───────────────────────────────────────────────────────
 
@@ -493,6 +455,52 @@ describe('getPhaseFileStats', () => {
     const stats = coreUtils.getPhaseFileStats(tmpDir);
     assert.strictEqual(stats.hasContext, true);
   });
+
+  // ─── #3183 (ADR-3180 Decision 2): scope field + degrade-not-throw ─────────
+
+  test('#3183 row 17: scope is COMPLETE for a readable, empty phase dir', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    const stats = coreUtils.getPhaseFileStats(tmpDir);
+    assert.strictEqual(stats.scope, SCOPE.COMPLETE);
+  });
+
+  test('#3183 row 15: scope is UNREADABLE and getPhaseFileStats does not throw for a nonexistent dir', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    const missing = path.join(tmpDir, 'does-not-exist');
+    assert.doesNotThrow(() => coreUtils.getPhaseFileStats(missing));
+    const stats = coreUtils.getPhaseFileStats(missing);
+    assert.strictEqual(stats.scope, SCOPE.UNREADABLE);
+    assert.deepEqual(stats.plans, []);
+    assert.deepEqual(stats.summaries, []);
+    assert.strictEqual(stats.hasResearch, false);
+    assert.strictEqual(stats.hasContext, false);
+    assert.strictEqual(stats.hasVerification, false);
+    assert.strictEqual(stats.hasReviews, false);
+  });
+
+  test('#3183 row 7 regression: nested plans/PLAN-01.md ONLY is reported (used to report 0)', () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    fs.mkdirSync(path.join(tmpDir, 'plans'));
+    fs.writeFileSync(path.join(tmpDir, 'plans', 'PLAN-01.md'), '# Plan\n');
+    const stats = coreUtils.getPhaseFileStats(tmpDir);
+    assert.deepEqual(stats.plans, ['plans/PLAN-01.md']);
+  });
+
+  test('#3511 BLOCKER-2 regression: a cross-phase stray VERIFICATION.md is scoped out of hasVerification', () => {
+    // Dir is phase 03's own directory ("03-test" → token "03"); the only
+    // VERIFICATION.md present belongs to phase 04. scopeToPhase must exclude
+    // it, so hasVerification reads false — an unscoped implementation would
+    // wrongly report phase 03 as verified off phase 04's report.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cu-test-'));
+    const phaseDir = path.join(tmpDir, '03-test');
+    fs.mkdirSync(phaseDir);
+    fs.writeFileSync(path.join(phaseDir, '03-01-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(path.join(phaseDir, '03-01-SUMMARY.md'), '# Summary\n');
+    fs.writeFileSync(path.join(phaseDir, '04-VERIFICATION.md'), '---\nstatus: passed\n---\n');
+    const stats = coreUtils.getPhaseFileStats(phaseDir);
+    assert.strictEqual(stats.hasVerification, false,
+      `hasVerification must be false — the only VERIFICATION.md belongs to phase 04, not 03; got scopedFiles-derived: ${stats.hasVerification}`);
+  });
 });
 
 // ─── extractOneLinerFromBody ──────────────────────────────────────────────────
@@ -510,33 +518,38 @@ describe('extractOneLinerFromBody', () => {
     assert.strictEqual(coreUtils.extractOneLinerFromBody(''), null);
   });
 
+  // #3170: extractOneLinerFromBody anchors to a Summary/Overview/Accomplishments
+  // heading (the function is summary-specific — both callers extract a SUMMARY
+  // deliverable one-liner). These fixtures use Summary-shaped headings; the
+  // extraction mechanism under test (heading + bold → bold, frontmatter strip,
+  // colon-label → prose, CRLF, unicode) is unchanged.
   test('extracts bold text after a heading as one-liner', () => {
-    const content = '# Phase Title\n\n**Implement the feature**\n\nMore details here.\n';
+    const content = '# Phase Summary\n\n**Implement the feature**\n\nMore details here.\n';
     assert.strictEqual(coreUtils.extractOneLinerFromBody(content), 'Implement the feature');
   });
 
   test('returns null when no bold text after heading', () => {
-    const content = '# Phase Title\n\nSome prose without bold.\n';
+    const content = '# Phase Summary\n\nSome prose without bold.\n';
     assert.strictEqual(coreUtils.extractOneLinerFromBody(content), null);
   });
 
   test('strips frontmatter before searching', () => {
-    const content = '---\nstatus: done\n---\n# Title\n\n**One liner here**\n';
+    const content = '---\nstatus: done\n---\n# Summary\n\n**One liner here**\n';
     assert.strictEqual(coreUtils.extractOneLinerFromBody(content), 'One liner here');
   });
 
   test('when bold ends with colon, returns text after the bold', () => {
-    const content = '# Title\n\n**Objective:** Complete the work\n';
+    const content = '# Summary\n\n**Objective:** Complete the work\n';
     assert.strictEqual(coreUtils.extractOneLinerFromBody(content), 'Complete the work');
   });
 
   test('CRLF line endings are normalized', () => {
-    const content = '# Title\r\n\r\n**Bold line**\r\nmore\r\n';
+    const content = '# Summary\r\n\r\n**Bold line**\r\nmore\r\n';
     assert.strictEqual(coreUtils.extractOneLinerFromBody(content), 'Bold line');
   });
 
   test('adversarial: unicode in bold text', () => {
-    const content = '# Title\n\n**中文 one-liner**\n\nMore.\n';
+    const content = '# Summary\n\n**中文 one-liner**\n\nMore.\n';
     assert.strictEqual(coreUtils.extractOneLinerFromBody(content), '中文 one-liner');
   });
 });

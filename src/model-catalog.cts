@@ -157,6 +157,29 @@ export const KNOWN_PROVIDERS: Set<string> = new Set(
     .map(([name]) => name)
 );
 
+// ─── #3241 — Anthropic-flavored model detection ──────────────────────────────
+//
+// Moved here from src/model-resolver.cts (the "seam decision" in
+// .gsd/phase/feat-3241-codex-omit-model-by-default/40-design.md): this leaf
+// module is the one common dependency both model-resolver and the (layering-
+// restricted) install-time Codex-posture checks can share without pulling
+// model-resolver's config-loader dependency chain into a "pure read/verify"
+// caller. model-resolver re-exports both names for back-compat.
+//
+// #2310 — True if `model` is an Anthropic-flavored value that must never appear as a
+// Codex agent `.toml` `model`. Two forms: (a) a bare Claude Agent-tool tier alias
+// (opus/sonnet/haiku/fable — CLAUDE_AGENT_ALIASES below); (b) any Claude model id in
+// any provider namespacing — `claude-*`, `anthropic/claude-*`, `us.anthropic.claude-*`
+// (the forms the catalog assigns to opencode/hermes/kilo, reachable on a Codex .toml
+// via the runtime-resolver path). No OpenAI/Codex model id contains "claude", so a
+// case-insensitive substring test is a safe, exhaustive guard for (b). Codex/ChatGPT
+// rejects all of these.
+export const CLAUDE_AGENT_ALIASES: Set<string> = new Set(['opus', 'sonnet', 'haiku', 'fable']);
+
+export function isAnthropicFlavoredModel(model: unknown): boolean {
+  return typeof model === 'string' && (CLAUDE_AGENT_ALIASES.has(model) || model.toLowerCase().includes('claude'));
+}
+
 export function nextTier(currentTier: string): string | null {
   const order = ['light', 'standard', 'heavy'];
   const idx = order.indexOf(String(currentTier));
@@ -302,6 +325,13 @@ export function renderEffortArgv(
  * Render a universal effort string for a specific runtime.
  */
 export function renderEffortForRuntime(runtime: string, universalEffort: string): RenderedEffort {
+  // #3533 (10d): 'inherit' is not a wire level on ANY runtime — it means
+  // "omit the key / pass no argument and follow the session/host default".
+  // Renderers must never emit it as a literal; null param/channel tells
+  // resolve-execution consumers there is no propagation.
+  if (universalEffort === 'inherit') {
+    return { value: 'inherit', param: null, channel: null };
+  }
   const spec = EFFORT_RENDERING[runtime];
   if (!spec) {
     return { value: universalEffort, param: null, channel: null };
@@ -311,6 +341,37 @@ export function renderEffortForRuntime(runtime: string, universalEffort: string)
     param: spec.param,
     channel: spec.channel,
   };
+}
+
+/**
+ * #3531 (10c) — Merge a config `effort.routing_tier_defaults` block over the
+ * manifest tier defaults instead of replacing them. A partial config must not
+ * discard built-ins: per tier, a valid override value wins and an invalid one
+ * is ignored so the manifest value for that tier surfaces (ADR-443 D1's
+ * "invalid values fall through" holds within the merged layer).
+ *
+ * Pure: returns a new object and never mutates either input — the manifest
+ * constants (`CANONICAL_CONFIG_DEFAULTS`, the catalog cache) stay frozen. The
+ * validator is injected because `EFFORT_SET` lives in model-resolver, which
+ * imports this leaf (a reverse import would be a cycle); both effort
+ * resolvers pass their own `(v) => typeof v === 'string' && EFFORT_SET.has(v)`.
+ */
+export function mergeEffortTierDefaults(
+  manifest: Record<string, string> | null | undefined,
+  override: unknown,
+  isValid: (v: unknown) => boolean,
+): Record<string, string> {
+  const merged: Record<string, string> = { ...(manifest || {}) };
+  if (override && typeof override === 'object' && !Array.isArray(override)) {
+    for (const [tier, value] of Object.entries(override as Record<string, unknown>)) {
+      // House pollution guard (mirrors _deepMergeConfig in config-loader): the
+      // string-only validator already makes these inert, but an explicit skip
+      // keeps this merge safe even if a caller's validator is ever relaxed.
+      if (tier === '__proto__' || tier === 'constructor' || tier === 'prototype') continue;
+      if (isValid(value)) merged[tier] = value as string;
+    }
+  }
+  return merged;
 }
 
 // ─── Fast mode propagation ───────────────────────────────────────────────────

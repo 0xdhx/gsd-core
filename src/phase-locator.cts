@@ -11,7 +11,7 @@
  *
  * Dependencies (leaf modules only — no loadConfig):
  *   - node:fs / node:path (stdlib)
- *   - ./phase-id.cjs       (normalizePhaseName, phaseTokenMatches, extractPhaseToken)
+ *   - ./phase-id.cjs       (normalizePhaseName, matchPhaseDirs, phaseNumberForMatch)
  *   - ./core-utils.cjs     (readSubdirectories, getPhaseFileStats, extractCanonicalPlanId, toPosixPath)
  *   - ./planning-workspace.cjs (planningDir)
  */
@@ -20,10 +20,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdModule = require('./phase-id.cjs');
-const { normalizePhaseName, phaseTokenMatches, extractPhaseToken } = phaseIdModule;
+const { normalizePhaseName, matchPhaseDirs, phaseNumberForMatch, isSentinelPhaseId, comparePhaseNum } = phaseIdModule;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtilsModule = require('./core-utils.cjs');
-const { readSubdirectories, getPhaseFileStats, extractCanonicalPlanId, toPosixPath } = coreUtilsModule;
+const { readSubdirectories, getPhaseFileStats, extractCanonicalPlanId, toPosixPath, findUnsummarizedPlans } = coreUtilsModule;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningDir } = planningWorkspace;
@@ -33,6 +33,13 @@ const { extractFrontmatter } = frontmatterModule;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planDependencyGraphModule = require('./plan-dependency-graph.cjs');
 const { computeHaltPropagation, buildSummaryFileIndex, isSummaryFileHalted } = planDependencyGraphModule;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import roadmapParserModule = require('./roadmap-parser.cjs');
+const { getMilestonePhaseFilter } = roadmapParserModule;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningScopeMod = require('./planning-scope.cjs');
+const { SCOPE } = planningScopeMod;
+type Scope = planningScopeMod.Scope;
 
 // ─── Phase search types ───────────────────────────────────────────────────────
 
@@ -114,9 +121,27 @@ interface ArchiveVersionDir {
  * exactly the shape that let the original #2855 bug (hardcoded root path)
  * exist in one copy and not the other. Sharing this seam means a future
  * change to how the archive tree is located only needs to happen once.
- * Most-recent-milestone-first order (reverse-sorted directory names).
+ * Most-recent-milestone-first order, compared numerically segment-by-segment
+ * on the version (e.g. `v1.10` before `v1.9`) — NOT lexicographically. A
+ * lexicographic `.sort().reverse()` (the prior implementation) ranks `v1.9`
+ * ahead of `v1.10` because the string `"1.9"` sorts after `"1.10"`; that is
+ * deterministic but wrong for every double-digit-or-higher minor/patch
+ * version, and #3458 is what first surfaces archived phases in audit output
+ * where the misordering becomes user-visible.
  * Never throws: an absent/unreadable milestones/ dir yields [].
  */
+function compareArchiveVersionDesc(aName: string, bName: string): number {
+  const aParts = (aName.match(/^v([\d.]+)-phases$/)?.[1] ?? '').split('.').map(Number);
+  const bParts = (bName.match(/^v([\d.]+)-phases$/)?.[1] ?? '').split('.').map(Number);
+  const len = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < len; i++) {
+    const a = aParts[i] ?? 0;
+    const b = bParts[i] ?? 0;
+    if (a !== b) return b - a; // descending: newest (numerically largest) first
+  }
+  return 0;
+}
+
 function listArchiveVersionDirs(cwd: string): ArchiveVersionDir[] {
   const milestonesDir = path.join(planningDir(cwd), 'milestones');
   if (!fs.existsSync(milestonesDir)) return [];
@@ -126,8 +151,7 @@ function listArchiveVersionDirs(cwd: string): ArchiveVersionDir[] {
     return milestoneEntries
       .filter(e => e.isDirectory() && /^v[\d.]+-phases$/.test(e.name))
       .map(e => e.name)
-      .sort()
-      .reverse()
+      .sort(compareArchiveVersionDesc)
       .map(archiveName => ({
         version: archiveName.match(/^(v[\d.]+)-phases$/)![1],
         archivePath: path.join(milestonesDir, archiveName),
@@ -140,7 +164,10 @@ function listArchiveVersionDirs(cwd: string): ArchiveVersionDir[] {
 function searchPhaseInDir(baseDir: string, relBase: string, normalized: string): PhaseSearchResult | null {
   try {
     const dirs = readSubdirectories(baseDir, true);
-    const matches = dirs.filter(d => phaseTokenMatches(d, normalized));
+    // #2528: canonical two-pass selection (exact token match, then the
+    // bare-integer leading-digit-run fallback) shared with the find-phase and
+    // phase-plan-index scans — see phase-id.cts::matchPhaseDirs.
+    const { matches, usedBareFallback } = matchPhaseDirs(dirs, normalized);
     if (matches.length === 0) return null;
 
     // #2237: fail loud when multiple directories match the same bare phase
@@ -169,7 +196,7 @@ function searchPhaseInDir(baseDir: string, relBase: string, normalized: string):
 
     const match = matches[0];
 
-    const phaseToken = extractPhaseToken(match);
+    const phaseToken = phaseNumberForMatch(match, usedBareFallback);
     const phaseNumber = phaseToken || normalized;
     const afterToken = match.slice(phaseToken ? phaseToken.length : 0).replace(/^-/, '');
     const phaseName = afterToken || null;
@@ -178,18 +205,13 @@ function searchPhaseInDir(baseDir: string, relBase: string, normalized: string):
     const plans = unsortedPlans.sort();
     const summaries = unsortedSummaries.sort();
 
-    const completedPlanIds = new Set(
-      summaries.flatMap(s => {
-        const exact = s.replace('-SUMMARY.md', '').replace('SUMMARY.md', '');
-        const canonical = extractCanonicalPlanId(s);
-        return canonical === exact ? [exact] : [exact, canonical];
-      })
-    );
-    const incompletePlans = plans.filter(p => {
-      const planId = p.replace('-PLAN.md', '').replace('PLAN.md', '');
-      const canonical = extractCanonicalPlanId(p);
-      return !completedPlanIds.has(planId) && !completedPlanIds.has(canonical);
-    });
+    // #3183 (ADR-3180 Decision 2): the summary→plan pairing used to be a
+    // bespoke rule local to this function (a third pairing rule alongside
+    // scanPhasePlans's completion check and countMatchedSummaries). Routed
+    // through the canonical core-utils.findUnsummarizedPlans instead, which
+    // shares its `summaryCandidates` matching rule with countMatchedSummaries
+    // so the count and this named list can never disagree.
+    const incompletePlans = findUnsummarizedPlans(plans, summaries);
 
     // #2830: reverse lookup from a completed plan's id (exact or canonical) to
     // its actual summary filename. Shared builder (also used by phase.cts's
@@ -292,6 +314,101 @@ function findPhaseInternal(cwd: string, phase: unknown): PhaseSearchResult | nul
   return null;
 }
 
+/**
+ * #3185 (epic #3180 Phase 3, ADR-3180 Decision 1 row "Phase enumeration"):
+ * the SINGLE canonical owner of "which phase directories belong to the current
+ * milestone". Applies the milestone window AND the sentinel filter, in that
+ * order, and returns the surviving directory names.
+ *
+ * Before this existed the derivation had four independent implementations and
+ * only `cmdRoadmapAnalyze` carried both halves; `cmdProgressRender`,
+ * `cmdStats` and `cmdPhasesList` each carried neither or one.
+ *
+ * TWO THINGS THIS GETS RIGHT THAT A HEADING-SIDE FILTER CANNOT:
+ *
+ * 1. The sentinel test runs against DIRECTORY NAMES and is UNCONDITIONAL.
+ *    `getMilestonePhaseFilter` excludes sentinels from its ROADMAP HEADING
+ *    set, but when that set is empty it degrades to a literal `() => true`
+ *    pass-all predicate and never consults the heading set at all — so its
+ *    own sentinel exclusion becomes unreachable exactly when it is needed,
+ *    and every directory on disk (backlog included) is reported as a
+ *    current-milestone phase. That degrade is the #3167 symptom path.
+ *
+ * 2. The sentinel predicate is the canonical `isSentinelPhaseId`
+ *    (`src/phase-id.cts`, SENTINEL_RANGES [0, 999]), not a local literal.
+ *    The rule had five copies and three different regexes before this phase,
+ *    and they disagreed about Phase 0.
+ *
+ * The pass-all degrade is narrowed MINIMALLY: it stays over-inclusive for
+ * non-sentinel directories, so a project whose window declares no phases
+ * still sees its real phase directories. Only sentinels are refused.
+ *
+ * `scope` distinguishes a REAL empty from a NON-answer (ADR-3180 Decision 2):
+ * an absent `phasesDir` is a real empty (a new project genuinely has no
+ * phases) and inherits the window's scope, whereas a `phasesDir` that exists
+ * but cannot be read is UNREADABLE.
+ *
+ * `opts.ws` is tri-state, matching `planningDir`'s own contract: `undefined`
+ * (the default — do not pass `ws` at all) resolves the AMBIENT workstream
+ * from `GSD_WORKSTREAM`; `null` FORCES the project root regardless of any
+ * ambient workstream; a string forces that specific workstream.
+ */
+function listMilestonePhaseDirs(
+  phasesDir: string,
+  opts: {
+    cwd?: string;
+    ws?: string | null;
+    versionOverride?: string | null;
+    phaseIdConvention?: string | null;
+  } = {},
+): { value: string[]; scope: Scope } {
+  // #3597: `ws` must default to `undefined`, NOT `null`. `undefined` means
+  // "resolve the ambient workstream" (mirrors planningDir's own contract,
+  // src/planning-workspace.cts:124); `null` means "force the project root".
+  // Every cwd-bearing caller derives `phasesDir` ambiently (planningPaths(cwd)
+  // / planningDir(cwd) with no explicit ws), so defaulting `ws` to `null` here
+  // forced the milestone WINDOW to the root ROADMAP while the caller's
+  // `phasesDir` stayed workstream-scoped — numerator and denominator drawn
+  // from different scoped sets (ADR-3180 §7.6 rule 3 violation). That is what
+  // made `--ws <name> progress` read `phase_scope: "unreadable"` and withhold
+  // `percent` once `workstream create` migrated the root ROADMAP away.
+  const { cwd, ws, versionOverride = null, phaseIdConvention = null } = opts;
+
+  // Without a cwd there is nothing to scope AGAINST — the caller asked for an
+  // unscoped read, which is a real answer (mirrors extractCurrentMilestoneScoped's
+  // row 1). Sentinels are still refused: they are never milestone phases.
+  let inWindow: (dirName: string) => boolean = () => true;
+  let scope: Scope = SCOPE.COMPLETE;
+  if (cwd) {
+    const filter = getMilestonePhaseFilter(cwd, versionOverride, phaseIdConvention, ws);
+    inWindow = filter;
+    scope = filter.scope;
+  }
+
+  // An ABSENT phases dir is a real empty, not a failure: a freshly-created
+  // project genuinely has no phase directories yet. Distinguishing this from
+  // the unreadable case below is the whole point of the scope discriminator.
+  if (!fs.existsSync(phasesDir)) return { value: [], scope };
+
+  let names: string[];
+  try {
+    names = fs.readdirSync(phasesDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name);
+  } catch {
+    // The directory EXISTS but could not be read (EACCES/EIO). An empty list
+    // here is a NON-answer and must not be reported as "this milestone has no
+    // phases" — that collapse is the defect class this epic removes.
+    return { value: [], scope: SCOPE.UNREADABLE };
+  }
+
+  const value = names
+    .filter((name) => inWindow(name) && !isSentinelPhaseId(name, phaseIdConvention ?? undefined))
+    .sort((a, b) => comparePhaseNum(a, b));
+
+  return { value, scope };
+}
+
 function getArchivedPhaseDirs(cwd: string): ArchivedPhaseDir[] {
   // #2855: same workstream-scoped resolution as findPhaseInternal above, via
   // the shared listArchiveVersionDirs helper. `phase.list --include-archived`
@@ -319,4 +436,5 @@ export = {
   searchPhaseInDir,
   findPhaseInternal,
   getArchivedPhaseDirs,
+  listMilestonePhaseDirs,
 };

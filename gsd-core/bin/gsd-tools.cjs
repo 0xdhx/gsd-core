@@ -20,6 +20,9 @@
  *   resolve-model <agent-type>         Get model for agent based on profile
  *   find-phase <phase>                 Find phase directory by number
  *   commit <message> [--files f1 f2] [--no-verify]   Commit planning docs
+ *   commit-docs-guard enable|disable   Opt-in .git/hooks/pre-commit guard
+ *                                       that refuses a commit staging
+ *                                       .planning/ when commit_docs is false
  *   commit-to-subrepo <msg> --files f1 f2  Route commits to sub-repos
  *   verify-summary <path>              Verify a SUMMARY.md file
  *   generate-slug <text>               Convert text to URL-safe slug
@@ -68,6 +71,14 @@
  *   milestone complete <version>       Archive milestone, create MILESTONES.md
  *     [--name <name>]
  *     [--no-archive-phases]          Skip moving phase dirs to milestones/vX.Y-phases/ (archived by default)
+ *     [--archive-quick]              Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the
+ *                                    Quick Tasks Completed table (#2142; opt-in, default OFF)
+ *
+ *   milestone archive-quick <version>  Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the
+ *                                      Quick Tasks Completed table, WITHOUT the milestone complete close-out
+ *                                      (no ROADMAP/REQUIREMENTS/MILESTONES.md writes, no completion guards);
+ *                                      safe against an already-completed milestone (#2142 escalation)
+ *     [--dry-run]                     Preview what would move, mutates nothing
  *
  * User Story Validation:
  *   user-story validate --story "..."  Validate "As a / I want to / so that" format
@@ -80,6 +91,7 @@
  *   drift-guard severity --status <S>    Classify a symbol verdict into { severity, hardBlock }
  *     [--authority <A>]                  Status: VERIFIED|MISSING|AMBIGUOUS|UNCHECKABLE
  *                                        Authority: grep|intel|treesitter|lsp|scip (default: config-resolved)
+ *   drift-guard phase-status [--phase N]     Compare STATE.md vs ROADMAP.md phase status
  *
  * Validation:
  *   validate consistency               Check phase numbering, disk/roadmap sync
@@ -259,8 +271,7 @@ try {
   }
 } catch { /* advisory — never block */ }
 
-const { getActiveWorkstream } = require('./lib/planning-workspace.cjs');
-const { resolveActiveWorkstream, applyResolvedWorkstreamEnv } = require('./lib/active-workstream-store.cjs');
+const { resolveActiveWorkstream, applyResolvedWorkstreamEnv, peekActiveWorkstream } = require('./lib/active-workstream-store.cjs');
 const state = require('./lib/state.cjs');
 const phase = require('./lib/phase.cjs');
 const roadmap = require('./lib/roadmap.cjs');
@@ -305,7 +316,7 @@ const { routeCheckCommand } = require('./lib/check-command-router.cjs');
 const { routeTaskCommand } = require('./lib/task-command-router.cjs');
 const { parseNamedArgs, parseMultiwordArg } = require('./lib/command-arg-projection.cjs');
 const { cmdGitBaseBranch } = require('./lib/git-base-branch.cjs');
-const { getEffectiveAuthority, classifyDriftSeverity } = require('./lib/plan-drift-guard.cjs');
+const { getEffectiveAuthority, classifyDriftSeverity, comparePhaseStatus } = require('./lib/plan-drift-guard.cjs');
 
 // ─── Bridge collapsed (Phase 4) ────────────────────────────────────────────────
 // Non-family commands now run through their CJS handlers directly. Keep the
@@ -921,6 +932,17 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     commands.cmdCheckCommit(cwd, raw);
   }
 
+  function routeCommitDocsGuard({ args, cwd, raw, error }) {
+    const subcommand = args[1];
+    if (subcommand === 'enable') {
+      commands.cmdCommitDocsGuardEnable(cwd, raw);
+    } else if (subcommand === 'disable') {
+      commands.cmdCommitDocsGuardDisable(cwd, raw);
+    } else {
+      error('Unknown commit-docs-guard subcommand. Available: enable, disable', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+    }
+  }
+
   function routeCommitToSubrepo({ args, cwd, raw, error }) {
     const message = args[1];
           const filesIndex = args.indexOf('--files');
@@ -1285,30 +1307,45 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       return;
     }
 
-    // Effort argv is resolved per lane by the host's own execution policy, exactly as the legs did
-    // via `resolve-execution … --pick effort_argv_string`. A lane whose slug is not a known host
-    // simply gets none.
-    // Resolved through the SAME `resolve-execution` surface the bash legs used
-    // (`--host <slug> --pick effort_argv_string`), so the host's negotiated effortSurface still
-    // decides whether an argument is emitted and the catalog still owns the syntax (ADR-1239 #2481,
-    // ADR-443's escalation ladder). `cmdResolveExecution` writes to stdout and exits, so it cannot
-    // be called in-process for a value — this spawns the same bounded query the legs did, once per
-    // selected lane. A lane whose slug is not a known host resolves to no effort argument at all.
+    // Effort argv is resolved per lane by the host's own execution policy, through the SAME
+    // `resolve-execution` surface the bash legs used (`--host <slug>`), so the host's negotiated
+    // effortSurface still decides whether an argument is emitted and the catalog still owns the
+    // syntax (ADR-1239 #2481, ADR-443's escalation ladder). `cmdResolveExecution` writes to
+    // stdout and exits, so it cannot be called in-process for a value — this spawns the same
+    // bounded query the legs did, once per selected lane. A lane whose slug is not a known host
+    // resolves to no effort argument at all.
+    //
+    // NOT `--raw` and NOT `--pick` (#2295). `--raw` prints only the resolved EFFORT ('low') with
+    // no host-specific rendering at all. `--pick effort_argv_string` used to be the answer — the
+    // rendered array re-joined into a string ('-c model_reasoning_effort=low') — but the caller
+    // then had to `.split(/\s+/)` that string back apart to get an argv array, and re-splitting a
+    // string the callee just joined is a lossy round trip: any argv element that legitimately
+    // contains a space would come back split into two argv elements, corrupting the very argv it
+    // was rendered to preserve. Reading the UNPICKED object instead gives both `effort_argv` (a
+    // real string array, used verbatim, no re-splitting) and `effort_argv_value` (the bare level,
+    // #2295's `plan.effort`) from the one spawn.
+    const EMPTY_EFFORT = { argv: [], value: null };
     const effortFor = (slug) => {
       try {
         const r = cp.spawnSync(
           process.execPath,
-          [__filename, 'query', 'resolve-execution', 'gsd-plan-checker',
-            // NOT `--raw`: that prints the resolved EFFORT ('low'), ignoring --pick. The picked
-            // field is what carries the host-specific syntax ('--effort low' for claude,
-            // '-c model_reasoning_effort=low' for codex), which is the whole point of asking.
-            '--host', slug, '--pick', 'effort_argv_string'],
+          [__filename, 'query', 'resolve-execution', 'gsd-plan-checker', '--host', slug],
           { cwd, encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024 },
         );
-        if (r.status !== 0) return [];
-        const s = String(r.stdout || '').trim();
-        return s ? s.split(/\s+/).filter(Boolean) : [];
-      } catch { return []; }
+        if (r.status !== 0) return EMPTY_EFFORT;
+        let parsed;
+        try {
+          parsed = JSON.parse(String(r.stdout || ''));
+        } catch { return EMPTY_EFFORT; }
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return EMPTY_EFFORT;
+        const argv = Array.isArray(parsed.effort_argv)
+          ? parsed.effort_argv.filter((a) => typeof a === 'string' && a !== '')
+          : [];
+        const value = typeof parsed.effort_argv_value === 'string' && parsed.effort_argv_value
+          ? parsed.effort_argv_value
+          : null;
+        return { argv, value };
+      } catch { return EMPTY_EFFORT; }
     };
 
     /**
@@ -1341,7 +1378,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       // so losing all of them to one bad manifest is strictly worse. Belt and braces on purpose.
       let r;
       try {
-        r = resolveLanePlan({ lane, configGet, runDir, repoRoot, effortArgs: effortFor(slug) });
+        const effort = effortFor(slug);
+        r = resolveLanePlan({ lane, configGet, runDir, repoRoot, effortArgs: effort.argv, effortValue: effort.value });
       } catch (e) {
         return { slug, ok: false, reason: 'malformed_lane', detail: `resolver threw: ${e && e.message ? e.message : String(e)}` };
       }
@@ -1385,10 +1423,23 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         // ENOENT (CreateProcess cannot start .cmd). Apply the same #2667 shim
         // gate used in runWithTimeout: detect .cmd/.bat and mediate through
         // cmd.exe /d /s /c with an explicit argv array (no shell:true).
-        const isWin = process.platform === 'win32';
-        const winShim = isWin && /\.(cmd|bat)$/i.test(path.basename(binary));
-        const spawnBinary = winShim ? (process.env.ComSpec || 'cmd.exe') : binary;
-        const spawnArgv = winShim ? ['/d', '/s', '/c', binary, ...argv] : argv;
+        //
+        // #3275: descriptors declare BARE names, so the gate above never saw an
+        // extension — resolve through the shared PATH+PATHEXT resolver FIRST
+        // (the same one `hasBinary` uses, so probe and spawn can never disagree
+        // about what the lane's binary is). POSIX keeps the bare name: Node's own
+        // PATH search already worked there, and the #3275 acceptance contract
+        // holds macOS/Linux behavior unchanged. A name that resolves to nothing
+        // falls back to the declared name so the ENOENT still surfaces (#3086).
+        // #3411: the resolve-then-mediate pair is one seam call now. Both halves had
+        // private copies here; `projectSpawnInvocation` owns them, so a fix to either
+        // reaches every spawn site instead of only this one.
+        //
+        // Unlike execTool, this lane adopts the RESOLVED path even for a non-batch
+        // binary: that is the behavior #3445 shipped and `deps.hasBinary` answers
+        // from the same resolver, so probe and spawn must agree on the exact file.
+        const { projectSpawnInvocation } = require('./lib/shell-command-projection.cjs');
+        const { command: spawnBinary, args: spawnArgv, windowsVerbatimArguments } = projectSpawnInvocation(binary, argv);
         const r = cp.spawnSync(spawnBinary, spawnArgv, {
           input: opts.input,
           encoding: 'utf8',
@@ -1396,6 +1447,11 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           killSignal: 'SIGKILL',
           maxBuffer: 64 * 1024 * 1024,
           shell: false, // argv array only — never a shell string (no interpolation of config values)
+          // #2483: a lane's declared env pairs merged OVER this process's environment, for this
+          // child only. Passing a fresh object leaves `process.env` untouched, so nothing leaks
+          // into the orchestrating session or into the next lane.
+          ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+          ...(windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         });
         return {
           status: r.status,
@@ -1424,24 +1480,13 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       // all (a probe that costs a process is a probe you avoid running, which is how the original
       // Kimi probe ended up unbounded), and `shell: true` with an args array is deprecated in
       // Node 26 (DEP0190) because the arguments are concatenated rather than escaped.
-      hasBinary: (name) => {
-        if (!name || name.includes('/') || name.includes('\\')) {
-          try { return fsx.statSync(name).isFile(); } catch { return false; }
-        }
-        const exts = process.platform === 'win32'
-          ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
-          : [''];
-        for (const dir of (process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
-          for (const ext of exts) {
-            const candidate = path.join(dir, name + ext);
-            try {
-              const st = fsx.statSync(candidate);
-              if (st.isFile()) return true;
-            } catch { /* next candidate */ }
-          }
-        }
-        return false;
-      },
+      //
+      // #3275: the scan lives in `resolveSpawnBinary` now, SHARED with `deps.spawn`
+      // above. Two private copies of "what is this declared binary?" is how the
+      // defect hid: the probe resolved WITH PATHEXT while spawn resolved WITHOUT,
+      // so a lane reported available for a spawn that could never start. One
+      // resolver, both seams — if one changes, the other changes with it.
+      hasBinary: (name) => resolveSpawnBinary(name) !== null,
       configGet,
       homeDir: os.homedir(),
       warn: (m) => process.stderr.write(`${m}\n`),
@@ -1493,12 +1538,14 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
           `model override (it declares no modelConfigKey). The review will use the CLI's own default.\n`,
         );
       }
+      const instanceEffort = effortFor(entry.slug);
       const overridden = resolveLanePlan({
         lane,
         configGet: (k) => (key && k === key ? instanceModel : configGet(k)),
         runDir,
         repoRoot,
-        effortArgs: effortFor(entry.slug),
+        effortArgs: instanceEffort.argv,
+        effortValue: instanceEffort.value,
       });
       if (overridden.ok) {
         // Preserve any instance retargeting already applied above.
@@ -1575,7 +1622,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
   function routeDispatchShouldFlatten({ args, cwd, raw, error }) {
     // #1708 / #853: typed query replacing the `RUNTIME === 'codex'` prose rule.
           //
-          // Resolves the current runtime (GSD_RUNTIME > config.runtime > 'claude'),
+          // Resolves the current runtime (GSD_RUNTIME > config.runtime > per-install
+          // .gsd-runtime marker > 'claude'),
           // looks up registry.runtimes[id].runtime.hostIntegration.dispatch, and
           // calls shouldFlattenDispatch(dispatch) from host-integration.cjs.
           //
@@ -1629,7 +1677,8 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // #853) for exactly this reason — it replaced a `RUNTIME === 'codex'`
     // prose rule.
     //
-    // Resolves the current runtime (GSD_RUNTIME > config.runtime > 'claude'),
+    // Resolves the current runtime (GSD_RUNTIME > config.runtime > per-install
+    // .gsd-runtime marker > 'claude'),
     // reads registry.runtimes[id].runtime.hostIntegration.dispatch.isolation,
     // and validates it against the closed vocabulary.
     //
@@ -1664,12 +1713,83 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     // `per-plan-worktree-gate.md`) override the naturally-resolved mode
     // while still going through this single write path. Best-effort: a
     // sentinel write failure here must never fail the wave.
-    const VALID_ISOLATION = new Set(['harness-worktree', 'orchestrator-worktree', 'none']);
+    const decision = resolveDispatchIsolationDecision({ args, cwd });
+    const runtimeId = decision.runtimeId;
+    let { isolation, exec, harnessFlag } = decision;
+
+    // `--force-isolation <mode>` overrides the naturally-resolved mode with
+    // context this resolver has no way to see on its own (e.g. the #2474
+    // per-plan submodule intersection). Invalid/unrecognized values are
+    // ignored rather than erroring — this is a best-effort recording call,
+    // not a hard usage gate. Forcing to 'none' clears harnessFlag/exec since
+    // neither applies to sequential dispatch.
+    const forceIdx = args.indexOf('--force-isolation');
+    const forcedIsolation = forceIdx !== -1 ? args[forceIdx + 1] : undefined;
+    if (forcedIsolation && DISPATCH_ISOLATION_VOCABULARY.has(forcedIsolation)) {
+      isolation = forcedIsolation;
+      if (isolation === 'none') {
+        harnessFlag = null;
+        exec = null;
+      }
+    }
+
+    const phaseIdx = args.indexOf('--phase');
+    const phaseArg = phaseIdx !== -1 && args[phaseIdx + 1] && !args[phaseIdx + 1].startsWith('--')
+      ? args[phaseIdx + 1]
+      : null;
+    const planIdx = args.indexOf('--plan');
+    const planArg = planIdx !== -1 && args[planIdx + 1] && !args[planIdx + 1].startsWith('--')
+      ? args[planIdx + 1]
+      : null;
+
+    // Side-effect write (#3045 CORE REDESIGN) — see the doc comment above.
+    // Never allowed to affect this query's own stdout contract or throw.
+    try {
+      writeDispatchIsolationSentinel(cwd, { isolation, harnessFlag, phase: phaseArg, plan: planArg });
+    } catch {
+      // writeDispatchIsolationSentinel already swallows its own errors into
+      // a { recorded: false } result; this catch is defense in depth only.
+    }
+
+    if (args.indexOf('--json') !== -1) {
+      output({ runtime: runtimeId, isolation, exec, harnessFlag }, raw);
+    } else {
+      process.stdout.write(isolation);
+    }
+  }
+
+  const DISPATCH_ISOLATION_VOCABULARY = new Set(['harness-worktree', 'orchestrator-worktree', 'none']);
+
+  /**
+   * Shared, side-effect-free resolution of the negotiated dispatch isolation:
+   * runtime (GSD_RUNTIME > config.runtime > per-install .gsd-runtime marker >
+   * 'claude') → declared
+   * `dispatch.isolation` → harness-flag / orchestrator-exec degrade rules.
+   * Extracted (#2486) so `routeDispatchIsolation` (the #3045 recording
+   * dispatch path) and `routeInspectDispatchIsolation` (the read-only
+   * inspection path) share exactly one negotiation implementation and cannot
+   * drift apart. Resolution only — the caller decides whether the decision is
+   * recorded to the sentinel.
+   */
+  function resolveDispatchIsolationDecision({ args, cwd }) {
     let isolation = 'none';
     let runtimeId = null;
     let exec = null;
     let harnessFlag = null;
     try {
+      // Deliberately `resolveRuntime`, NOT `resolveActiveRuntime`/`loadConfig`:
+      // loadConfig normalizes and rewrites legacy keys back to disk, and this
+      // resolver backs the sentinel-free `inspect-dispatch-isolation` verb,
+      // which must never write. resolveRuntime reads config.json directly.
+      //
+      // KNOWN LIMITATION, tracked separately: resolveRuntime stops at
+      // GSD_RUNTIME > config.runtime > 'claude' and does not consult the
+      // per-install `.gsd-runtime` marker, so on a non-Claude install whose
+      // project config carries no `runtime` key this resolves 'claude'. That is
+      // open-gsd/gsd-core#2395 — a pre-existing defect in the canonical
+      // resolver, not introduced here, and deliberately NOT fixed in this PR
+      // (its blast radius reaches every consumer of that resolver, so it is
+      // being handled on its own).
       const { resolveRuntime } = require('./lib/runtime-slash.cjs');
       runtimeId = resolveRuntime(cwd);
 
@@ -1678,7 +1798,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
         ? registry.runtimes[runtimeId]
         : null;
       const declared = runtimeEntry?.runtime?.hostIntegration?.dispatch?.isolation ?? null;
-      if (typeof declared === 'string' && VALID_ISOLATION.has(declared)) {
+      if (typeof declared === 'string' && DISPATCH_ISOLATION_VOCABULARY.has(declared)) {
         isolation = declared;
       }
 
@@ -1721,41 +1841,52 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
       exec = null;
       harnessFlag = null;
     }
+    return { runtimeId, isolation, exec, harnessFlag };
+  }
 
-    // `--force-isolation <mode>` overrides the naturally-resolved mode with
-    // context this resolver has no way to see on its own (e.g. the #2474
-    // per-plan submodule intersection). Invalid/unrecognized values are
-    // ignored rather than erroring — this is a best-effort recording call,
-    // not a hard usage gate. Forcing to 'none' clears harnessFlag/exec since
-    // neither applies to sequential dispatch.
-    const forceIdx = args.indexOf('--force-isolation');
-    const forcedIsolation = forceIdx !== -1 ? args[forceIdx + 1] : undefined;
-    if (forcedIsolation && VALID_ISOLATION.has(forcedIsolation)) {
-      isolation = forcedIsolation;
-      if (isolation === 'none') {
-        harnessFlag = null;
-        exec = null;
-      }
+  function routeInspectDispatchIsolation({ args, cwd, raw }) {
+    // #2486: sentinel-free sibling of `dispatch-isolation` for INSPECTION
+    // surfaces — /gsd:health's W025 check and /gsd:settings' Worktrees
+    // branching. The dispatch verb above intentionally records its resolved
+    // decision to the isolation sentinel as an unconditional side effect
+    // (#3045 CORE REDESIGN): correct for executor dispatch, where the record
+    // must be structurally unskippable — but wrong for a read-only
+    // diagnostic. A health check that records a phase:null/plan:null
+    // sentinel can hard-block every executor dispatch for the sentinel's
+    // lifetime, across sessions sharing the main checkout. Inspection
+    // surfaces call this verb instead. Two claims, both narrower than
+    // "side-effect-free", and both exactly true (#2486 review, Majors 2 & 4):
+    //
+    //  1. SENTINEL-FREE, not write-free. This route writes nothing itself, and
+    //     in particular never writes .gsd/dispatch-isolation-sentinel.json —
+    //     the only write that can hard-block a later executor dispatch. It is
+    //     NOT an unconditional claim of total filesystem purity: like every
+    //     gsd-tools invocation, it runs the shared bootstrap and
+    //     active-workstream resolution first. As of #3579's root-cause fix
+    //     that bootstrap resolves via the non-mutating peekActiveWorkstream
+    //     (never unlinks); an actual stale/invalid pointer is still
+    //     self-healed, but only by whichever verb's own getActiveWorkstream
+    //     call later consumes it for real — this inspection route makes no
+    //     such call, so it is now also side-effect-free on the pointer file.
+    //
+    //  2. SHARED NEGOTIATION, for the arguments this verb accepts. Both verbs
+    //     call resolveDispatchIsolationDecision, so the natural resolution
+    //     cannot drift. It is NOT a claim of byte-identical output for every
+    //     argv: routeDispatchIsolation applies --force-isolation AFTER the
+    //     shared helper returns, so the same argv could otherwise yield
+    //     'none' there and the declared capability here. Rather than let a
+    //     caller receive a silently different answer, this verb REJECTS the
+    //     recording-only knobs outright — they exist to be recorded, and a
+    //     read has nothing to record.
+    const RECORDING_ONLY_ARGS = ['--force-isolation', '--phase', '--plan'];
+    const rejected = RECORDING_ONLY_ARGS.filter((flag) => args.indexOf(flag) !== -1);
+    if (rejected.length > 0) {
+      error(
+        `inspect-dispatch-isolation: ${rejected.join(', ')} ${rejected.length === 1 ? 'is a' : 'are'} recording-only argument${rejected.length === 1 ? '' : 's'} and cannot be used on the inspection verb — it resolves the runtime's DECLARED capability and records nothing. Use 'query dispatch-isolation' if you need the override applied and the decision recorded.`,
+        ERROR_REASON.USAGE,
+      );
     }
-
-    const phaseIdx = args.indexOf('--phase');
-    const phaseArg = phaseIdx !== -1 && args[phaseIdx + 1] && !args[phaseIdx + 1].startsWith('--')
-      ? args[phaseIdx + 1]
-      : null;
-    const planIdx = args.indexOf('--plan');
-    const planArg = planIdx !== -1 && args[planIdx + 1] && !args[planIdx + 1].startsWith('--')
-      ? args[planIdx + 1]
-      : null;
-
-    // Side-effect write (#3045 CORE REDESIGN) — see the doc comment above.
-    // Never allowed to affect this query's own stdout contract or throw.
-    try {
-      writeDispatchIsolationSentinel(cwd, { isolation, harnessFlag, phase: phaseArg, plan: planArg });
-    } catch {
-      // writeDispatchIsolationSentinel already swallows its own errors into
-      // a { recorded: false } result; this catch is defense in depth only.
-    }
-
+    const { runtimeId, isolation, exec, harnessFlag } = resolveDispatchIsolationDecision({ args, cwd });
     if (args.indexOf('--json') !== -1) {
       output({ runtime: runtimeId, isolation, exec, harnessFlag }, raw);
     } else {
@@ -1906,6 +2037,50 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
            }
   }
 
+  function routeResolveAgent({ args, cwd, raw, error }) {
+    // #1689: resolve a per-plan agent_hint specialist name to the subagent_type
+           // an Agent() call should use. Returns the name unchanged when a
+           // matching agent file exists in the active runtime's agent dir(s);
+           // 'gsd-executor' when the name is absent, blank, or does not resolve.
+           // Fail-closed is the fallback (gsd-executor) — never echo an
+           // unvalidated name, which would make Agent() error and block the wave.
+           //
+           // Output:
+           //   --raw (default) -> prints the resolved type (the hint, or 'gsd-executor')
+           //   --json          -> prints { runtime, requested, resolved, fallback }
+    const FALLBACK = 'gsd-executor';
+    try {
+      const nameIdx = args.indexOf('--name');
+      const requested = nameIdx !== -1 ? args[nameIdx + 1] : '';
+      const { resolveRuntime } = require('./lib/runtime-slash.cjs');
+      const runtimeId = resolveRuntime(cwd);
+      const { resolveAgentHint } = require('./lib/agent-install-check.cjs');
+      let resolved = FALLBACK;
+      let resolvedOk = false; // true only when resolveAgentHint returned a hit
+      if (requested && !requested.startsWith('-')) {
+        const hit = resolveAgentHint(requested, runtimeId, cwd);
+        if (hit !== null) {
+          resolved = hit;
+          resolvedOk = true;
+        }
+      }
+      // `fallback` = we did NOT honor a resolvable hint (absent/flag-shaped name,
+      // the named agent did not resolve, or resolution errored). Requesting
+      // gsd-executor explicitly and resolving to it is NOT a fallback.
+      const fellBack = !resolvedOk;
+      const jsonIdx = args.indexOf('--json');
+      if (jsonIdx !== -1) {
+        output({ runtime: runtimeId, requested: requested || null, resolved, fallback: fellBack }, raw);
+      } else {
+        process.stdout.write(String(resolved));
+      }
+    } catch {
+      // Fail-closed: degrade to the legacy executor on any error so dispatch
+      // never blocks on resolution.
+      process.stdout.write(FALLBACK);
+    }
+  }
+
   function routeAgentSkills({ args, cwd, raw, error }) {
     // --json emits typed IR { agent_type, block, skills_count } for test assertions
           // (#455). Default (no flag) outputs raw XML so workflow shell expansions work.
@@ -2006,9 +2181,20 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             const force = args.includes('--force');
             // #2118: --dry-run prints a preview plan without mutating.
             const dryRun = args.includes('--dry-run');
-            milestone.cmdMilestoneComplete(cwd, args[2], { name: milestoneName, archivePhases, force, dryRun }, raw);
+            // #2142: quick-task archival is opt-in (default OFF) — unlike
+            // --no-archive-phases' inverted shape, absence of this flag means
+            // "do nothing" rather than "skip a default-on behavior".
+            const archiveQuick = args.includes('--archive-quick');
+            milestone.cmdMilestoneComplete(cwd, args[2], { name: milestoneName, archivePhases, force, dryRun, archiveQuick }, raw);
+          } else if (subcommand === 'archive-quick') {
+            // #2142 escalation: narrow archival-only entry point (does NOT
+            // touch ROADMAP/REQUIREMENTS/MILESTONES.md, runs no completion
+            // guards) — safe to call against an already-completed milestone,
+            // unlike `milestone complete --archive-quick`.
+            const dryRun = args.includes('--dry-run');
+            milestone.cmdQuickArchive(cwd, args[2], { dryRun }, raw);
           } else {
-            error('Unknown milestone subcommand. Available: complete', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+            error('Unknown milestone subcommand. Available: complete, archive-quick', ERROR_REASON.SDK_UNKNOWN_COMMAND);
           }
   }
 
@@ -3283,12 +3469,188 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             return;
           }
 
+          if (subcommand === 'phase-status') {
+            // #1956: deterministic STATE.md-vs-ROADMAP.md phase-status drift.
+            const { planningDir } = require('./lib/planning-workspace.cjs');
+            const { stateExtractField, stateCurrentPositionSlice } = require('./lib/state-document.cjs');
+            const { findRoadmapProgressTable } = require('./lib/roadmap-parser.cjs');
+            const { phaseKeyFromProse } = require('./lib/phase-id.cjs');
+            // STATE.md's YAML frontmatter carries its own lowercase `status:`
+            // scalar ahead of the body's `## Current Position` prose "Status:"
+            // line; stateExtractField's non-scoped regex would otherwise match
+            // that frontmatter line first (it comes first in the file) and
+            // silently report the wrong value. Strip frontmatter so extraction
+            // is scoped to the body.
+            const { stripFrontmatter } = require('./lib/frontmatter.cjs');
+
+            const phaseIdx = args.indexOf('--phase');
+            const phaseArg = (phaseIdx !== -1 && args[phaseIdx + 1] && !args[phaseIdx + 1].startsWith('--'))
+              ? args[phaseIdx + 1]
+              : undefined;
+
+            const dir = planningDir(cwd);
+            const statePath = path.join(dir, 'STATE.md');
+            const roadmapPath = path.join(dir, 'ROADMAP.md');
+
+            let stateContent = null;
+            try {
+              stateContent = fs.readFileSync(statePath, 'utf-8');
+            } catch {
+              // missing_state below
+            }
+            if (stateContent === null) {
+              const phase = phaseArg !== undefined ? phaseKeyFromProse(phaseArg) : null;
+              output({
+                verdict: 'uncheckable',
+                reason: 'missing_state',
+                phase,
+                stateStatus: null,
+                roadmapStatus: null,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            let roadmapContent = null;
+            try {
+              roadmapContent = fs.readFileSync(roadmapPath, 'utf-8');
+            } catch {
+              // missing_roadmap below
+            }
+
+            const stateBody = stripFrontmatter(stateContent);
+            // #1956 fix: scope extraction to `## Current Position` (or `###`
+            // in the bootstrap template) so a historical `Phase:` / `Status:`
+            // line in an archive section (e.g. `## Session Continuity
+            // Archive`) can't shadow the real one — same #2956 scope state.cts
+            // uses for current_phase, via the shared owner in
+            // state-document.cjs.
+            //
+            // Deliberately NO whole-body fallback here. `state.cts`'s WRITE
+            // path falls back to the whole body when no Current Position
+            // heading is found (legacy behavior it must preserve for
+            // backward-compatible writes) — but that fallback is wrong for a
+            // READ that feeds a drift finding: a STATE.md with no Current
+            // Position heading is exactly the shape that let a stray historical
+            // `Status:` line elsewhere in the body shadow the real value and
+            // fabricate a 'drifted' verdict. A guess is worse than an
+            // abstention for a drift detector, so an absent Current Position
+            // section reports 'uncheckable' instead of guessing from the whole
+            // document.
+            const currentPositionBody = stateCurrentPositionSlice(stateBody);
+            if (currentPositionBody === null) {
+              const phase = phaseArg !== undefined ? phaseKeyFromProse(phaseArg) : null;
+              output({
+                verdict: 'uncheckable',
+                reason: 'no_current_position',
+                phase,
+                stateStatus: null,
+                roadmapStatus: null,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            // Resolve the target phase: --phase if given, else whatever
+            // STATE.md's Current Position reports as current.
+            const phase = phaseArg !== undefined
+              ? phaseKeyFromProse(phaseArg)
+              : phaseKeyFromProse(stateExtractField(currentPositionBody, 'Phase'));
+
+            if (roadmapContent === null) {
+              output({
+                verdict: 'uncheckable',
+                reason: 'missing_roadmap',
+                phase,
+                stateStatus: null,
+                roadmapStatus: null,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            const stateStatus = stateExtractField(currentPositionBody, 'Status');
+
+            // #1956/#2012: scoped to `## Progress` first (decoy-avoidance) —
+            // see findRoadmapProgressTable's doc comment (roadmap-parser.cts).
+            const table = findRoadmapProgressTable(roadmapContent);
+            const matchedRow = table
+              ? table.rows.find((row) => phaseKeyFromProse(row.Phase) === phase && phase !== null)
+              : undefined;
+
+            if (!matchedRow) {
+              const result = comparePhaseStatus({ stateStatus, roadmapStatus: null });
+              output({
+                verdict: 'uncheckable',
+                reason: 'phase_not_in_roadmap',
+                phase,
+                stateStatus,
+                roadmapStatus: null,
+                stateRank: result.stateRank,
+                roadmapRank: result.roadmapRank,
+                authority: 'STATE.md',
+              }, raw);
+              return;
+            }
+
+            const roadmapStatus = matchedRow.Status;
+            const result = comparePhaseStatus({ stateStatus, roadmapStatus });
+            output({
+              verdict: result.verdict,
+              phase,
+              stateStatus,
+              roadmapStatus,
+              stateRank: result.stateRank,
+              roadmapRank: result.roadmapRank,
+              authority: 'STATE.md',
+            }, raw);
+            return;
+          }
+
           error(
-            `Unknown drift-guard subcommand: ${subcommand || '(none)'}. Available: authority, severity`,
+            `Unknown drift-guard subcommand: ${subcommand || '(none)'}. Available: authority, severity, phase-status`,
             ERROR_REASON.SDK_UNKNOWN_COMMAND,
           );
   }
 
+
+/**
+ * #3275: resolve a DECLARED command name to the file a spawn can actually start.
+ *
+ * Lane descriptors (src/review-lane-descriptor.cts) declare BARE, platform-unaware
+ * binary names ('codex', 'gemini', 'kimi', 'agy'), and `review-lane invoke`'s
+ * `deps.spawn` + `deps.hasBinary` both need the on-disk form of that name. Before
+ * this helper existed they disagreed: `hasBinary` scanned PATH WITH PATHEXT (so
+ * probes reported lanes AVAILABLE on Windows) while `spawn` received the bare name
+ * — `CreateProcess` performs no PATHEXT resolution, so every spawn-transport lane
+ * ENOENT'd there, and the #3086 `.cmd`/`.bat` cmd.exe mediation gate never fired
+ * because the declared name never carried an extension. One shared resolver is the
+ * only shape that cannot drift back apart.
+ *
+ * win32: tries PATHEXT entries ONLY — never the bare name. npm global installs
+ * drop an EXTENSIONLESS POSIX sh shim (`...\npm\codex`) next to `codex.CMD`; a
+ * bare-name-first scan resolves to it, the mediation gate sees no `.cmd`, and the
+ * ENOENT returns unchanged (field-reported on Windows 11 — see the #3275 issue
+ * comment pinning exactly this pitfall).
+ *
+ * POSIX: answers EXISTENCE only (the old `hasBinary` contract, preserved
+ * byte-for-byte) by scanning PATH for the bare name. `deps.spawn` does NOT consult
+ * this on POSIX — the bare name goes to spawnSync unchanged and Node's own PATH
+ * search does the work, so macOS/Linux behavior is untouched (#3275 acceptance).
+ *
+ * Path-like names (any '/' or '\') bypass the PATH scan: the name is already an
+ * address, so it passes through when the file exists and is a file.
+ *
+ * #3411: the scan itself now lives in the declared platform seam
+ * (`src/shell-command-projection.cts` → `resolveExecutableBinary`). This function is
+ * the `bin/` entry point onto it and holds no copy of the logic — `CONTEXT.md`
+ * declares that file "All OS-facing I/O; single platform seam", and a private
+ * duplicate here is what made it untrue.
+ */
+function resolveSpawnBinary(name, platform = process.platform, env = process.env) {
+  const { resolveExecutableBinary } = require('./lib/shell-command-projection.cjs');
+  return resolveExecutableBinary(name, { platform, env });
+}
 
 const HOST_COMMAND_ROUTERS = {
   // Each entry wraps its `route*Command` router so it receives the module-scope
@@ -3339,6 +3701,7 @@ const HOST_COMMAND_ROUTERS = {
     'find-phase': routeFindPhase,
     'commit': routeCommit,
     'check-commit': routeCheckCommit,
+    'commit-docs-guard': routeCommitDocsGuard,
     'commit-to-subrepo': routeCommitToSubrepo,
     'pr-subrepo': routePrSubrepo,
     'verify-summary': routeVerifySummary,
@@ -3357,8 +3720,10 @@ const HOST_COMMAND_ROUTERS = {
     'normalize-test-command': routeNormalizeTestCommand,
     'dispatch-should-flatten': routeDispatchShouldFlatten,
     'dispatch-isolation': routeDispatchIsolation,
+    'inspect-dispatch-isolation': routeInspectDispatchIsolation,
     'record-dispatch-isolation': routeRecordDispatchIsolation,
     'resolve-dispatch-type': routeResolveDispatchType,
+    'resolve-agent': routeResolveAgent,
     'agent-skills': routeAgentSkills,
     'skill-manifest': routeSkillManifest,
     'history-digest': routeHistoryDigest,
@@ -3604,14 +3969,14 @@ function runWithTimeout(argv) {
 // independently hand-maintained sites and nothing previously caught them
 // drifting apart when a query command was added to only one or two.
 const TOP_LEVEL_USAGE = 'Usage: gsd-tools <command> [args] [--raw] [--pick <field>] [--cwd <path>] [--ws <name>] [--json-errors]\n' +
-  'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-to-subrepo, pr-subrepo, ' +
+  'Commands: agent, agent-skills, assumption-delta, audit-open, audit-uat, check, check-commit, commit, commit-docs-guard, commit-to-subrepo, pr-subrepo, ' +
   'config-ensure-section, config-get, config-new-project, config-path, config-set, migrate-config, normalize-test-command, ' +
   'context-predicates, current-timestamp, detect-custom-files, docs-init, drift-guard, effort, extract-messages, find-phase, ' +
   'from-gsd2, frontmatter, gap-analysis, generate-claude-md, generate-claude-profile, ' +
   'generate-dev-preferences, generate-slug, graphify, history-digest, init, intel, ' +
   'capability, classify-confidence, git, learnings, list-seeds, list-todos, loop, milestone, package-legitimacy, phase, phase-plan-index, phases, profile-questionnaire, ' +
   'profile-sample, progress, project-instruction-file, prompt-budget, quick-tasks-append, requirements, research-plan, research-store, resolve-granularity, resolve-model, restore-custom-files, roadmap, scaffold, smart-entry, state, ' +
-  'config-set-model-profile, dispatch-isolation, dispatch-should-flatten, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-dispatch-type, ' +
+  'config-set-model-profile, dispatch-isolation, dispatch-should-flatten, inspect-dispatch-isolation, record-dispatch-isolation, estimate-calibrate, estimate-calibration, estimate-check, resolve-agent, resolve-dispatch-type, ' +
   'resolve-execution, review-lane, skill-manifest, skills-root, state-snapshot, stats, summary-extract, teams-status, todo, uat, update-context, verification, websearch, windows, ' +
   'task, template, user-story, validate, verify, verify-path-exists, verify-summary, eval, workstream, worktree\n\n' +
   'Global flags:\n' +
@@ -3769,8 +4134,21 @@ async function main() {
   // Priority: --ws flag > GSD_WORKSTREAM env var > session/shared pointer > null.
   let workstreamContext = null;
   try {
+    // #3579 root-cause fix: this bootstrap resolution only decides whether to
+    // populate GSD_WORKSTREAM env for downstream routing — it is a check, not
+    // the consuming read. Using the mutating getActiveWorkstream here
+    // self-healed (cleared) a present-but-unresolvable pointer BEFORE the
+    // dispatched command's own resolution/diagnostic ran, so a second read in
+    // the same process (e.g. a subcommand's own getActiveWorkstream call, or
+    // a fail-safe guard's diagnoseUnresolvedActiveWorkstream) observed
+    // already-cleared state — silently falling through to a fallback marker
+    // it should never have inherited (isolation violation), or losing the
+    // evidence a diagnostic needed to explain why nothing resolved. peek
+    // shares the identical resolution logic and only differs by never
+    // calling adapter.clear(); self-heal still happens, exactly once, at
+    // whichever call site actually consumes the workstream for real.
     workstreamContext = resolveActiveWorkstream(cwd, args, process.env, {
-      getStored: getActiveWorkstream,
+      getStored: peekActiveWorkstream,
     });
     args = workstreamContext.args;
     // Set env var so all modules (planningDir, planningPaths) auto-resolve workstream paths.
@@ -4024,5 +4402,8 @@ module.exports = {
   TOP_LEVEL_USAGE,
   skipsRootResolution,
   resolveMainWorktreeCwd,
+  // #3275: exported for tests — the shared PATH+PATHEXT resolver behind
+  // review-lane invoke's `deps.spawn` / `deps.hasBinary` seams.
+  resolveSpawnBinary,
 };
 

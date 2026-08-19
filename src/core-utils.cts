@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseIdModule = require('./phase-id.cjs');
-const { comparePhaseNum } = phaseIdModule;
+const { comparePhaseNum, scopeToPhase } = phaseIdModule;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { findContextMdIn } = planningWorkspace;
@@ -69,16 +69,27 @@ function detectSubRepos(cwd: string): string[] {
 function extractOneLinerFromBody(content: string | null | undefined): string | null {
   if (!content) return null;
   const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const body = normalized.replace(/^---\n[\s\S]*?\n---\n*/, '');
-  const match = body.match(/^#[^\n]*\n+\*\*([^*\n]+)\*\*([^\n]*)/m);
-  if (!match) return null;
-  const boldInner = match[1].trim();
-  const afterBold = match[2];
-  if (/:\s*$/.test(boldInner)) {
-    const prose = afterBold.trim();
-    return prose.length > 0 ? prose : null;
+  const body = normalized.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n*/, '');
+  // #3170: anchor to a summary-shaped heading (Summary / Overview /
+  // Accomplishments) so an incidental first heading (a rule list, task
+  // breakdown, deviation note) does not contribute its first bold run as the
+  // deliverable one-liner. Iterate headings in document order and extract from
+  // the first summary-shaped one that has a bold run; fall back to null (not the
+  // wrong text) when no such heading exists.
+  const headingRe = /^#+\s*([^\n]*)\n+\*\*([^*\n]+)\*\*([^\n]*)/gm;
+  let match: RegExpExecArray | null;
+  while ((match = headingRe.exec(body)) !== null) {
+    if (!/summary|overview|accomplish/i.test(match[1])) continue;
+    const boldInner = match[2].trim();
+    const afterBold = match[3];
+    if (/:\s*$/.test(boldInner)) {
+      const prose = afterBold.trim();
+      if (prose.length > 0) return prose;
+    } else if (boldInner.length > 0) {
+      return boldInner;
+    }
   }
-  return boldInner.length > 0 ? boldInner : null;
+  return null;
 }
 
 // ─── Misc utilities ───────────────────────────────────────────────────────────
@@ -154,16 +165,6 @@ function transliterateForSlug(text: string): string {
 
 // ─── Phase file helpers ──────────────────────────────────────────────────────
 
-/** Filter a file list to just PLAN.md / *-PLAN.md entries. */
-function filterPlanFiles(files: string[]): string[] {
-  return files.filter(f => f.endsWith('-PLAN.md') || f === 'PLAN.md');
-}
-
-/** Filter a file list to just SUMMARY.md / *-SUMMARY.md entries. */
-function filterSummaryFiles(files: string[]): string[] {
-  return files.filter(f => f.endsWith('-SUMMARY.md') || f === 'SUMMARY.md');
-}
-
 interface PhaseFileStats {
   plans: string[];
   summaries: string[];
@@ -171,20 +172,78 @@ interface PhaseFileStats {
   hasContext: boolean;
   hasVerification: boolean;
   hasReviews: boolean;
+  scope: string;
+}
+
+// Minimal shape this module needs from plan-scan.cjs's scanPhasePlans result.
+interface PlanScanResultShape {
+  planFiles: string[];
+  summaryFiles: string[];
+  scope: string;
 }
 
 /**
  * Read a phase directory and return counts/flags for common file types.
+ *
+ * #3183 (ADR-3180 Decision 2): `plans`/`summaries` are derived from the
+ * canonical `scanPhasePlans` rather than a local re-derivation, so this
+ * primitive can no longer diverge from the single owner of live-plan
+ * counting. `scanPhasePlans`
+ * lives in plan-scan.cjs, which itself imports `countMatchedSummaries` from
+ * THIS module — a top-level import here would be circular, so the require
+ * is deferred (lazy, inside the function body) to break the cycle at load
+ * time. This mirrors the lazy-require seam already used elsewhere in this
+ * repo (see src/audit-command-router.cts) for the same "module A needs
+ * module B which needs module A" shape.
+ *
+ * `hasResearch`/`hasContext`/`hasVerification`/`hasReviews` stay on the raw
+ * `readdirSync` listing — they are not plan-scan concerns.
+ *
+ * #3511 BLOCKER-2: the raw listing is scoped through `scopeToPhase` (keyed on
+ * `path.basename(phaseDir)`) before any of the four artifact predicates run,
+ * so a stray cross-phase file (e.g. `04-VERIFICATION.md` sitting inside phase
+ * 03's directory) cannot flip `hasResearch`/`hasContext`/`hasVerification`/
+ * `hasReviews` true for a phase it does not belong to — the same membership
+ * rule every other aggregate phase-directory scan (`uat.cts`, `audit.cts`,
+ * `phase.cts`, `state.cts`) already routes through. `hasContext` is scoped by
+ * passing the already-scoped array into `findContextMdIn` at this call site
+ * only — `findContextMdIn` itself is unchanged and its other 4 call sites
+ * (roadmap.cts, gap-checker.cts, init.cts) are unaffected.
+ *
+ * Degrades on an unreadable directory instead of throwing: empty arrays,
+ * every flag false, scope UNREADABLE (mirroring scanPhasePlans's own
+ * degrade path).
  */
 function getPhaseFileStats(phaseDir: string): PhaseFileStats {
-  const files = fs.readdirSync(phaseDir);
+  // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-unsafe-assignment
+  const scanPhasePlans: (dir: string) => PlanScanResultShape = require('./plan-scan.cjs');
+  const scan = scanPhasePlans(phaseDir);
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(phaseDir);
+  } catch {
+    return {
+      plans: scan.planFiles,
+      summaries: scan.summaryFiles,
+      hasResearch: false,
+      hasContext: false,
+      hasVerification: false,
+      hasReviews: false,
+      scope: scan.scope,
+    };
+  }
+
+  const scopedFiles = scopeToPhase(files, path.basename(phaseDir));
+
   return {
-    plans: filterPlanFiles(files),
-    summaries: filterSummaryFiles(files),
-    hasResearch: files.some(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md'),
-    hasContext: findContextMdIn(files) !== null,
-    hasVerification: files.some(f => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md'),
-    hasReviews: files.some(f => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md'),
+    plans: scan.planFiles,
+    summaries: scan.summaryFiles,
+    hasResearch: scopedFiles.some(f => f.endsWith('-RESEARCH.md') || f === 'RESEARCH.md'),
+    hasContext: findContextMdIn(scopedFiles) !== null,
+    hasVerification: scopedFiles.some(f => f.endsWith('-VERIFICATION.md') || f === 'VERIFICATION.md'),
+    hasReviews: scopedFiles.some(f => f.endsWith('-REVIEWS.md') || f === 'REVIEWS.md'),
+    scope: scan.scope,
   };
 }
 
@@ -305,6 +364,34 @@ function summaryCandidates(plan: string): string[] {
   ];
   const extended = base.match(/^(\d+)-PLAN-(\d+)/i);
   if (extended) candidates.push(dir + extended[1] + '-' + extended[2] + '-SUMMARY.md');
+  // #3183: canonical-id form. Restores the coverage of the pre-migration
+  // bespoke I001 rule (verify.cts, pre-#3183, via validate.cjs's now-unused
+  // `canonicalPlanStem` — behaviourally identical to `extractCanonicalPlanId`,
+  // confirmed empirically), which matched a plan carrying a descriptive slug
+  // after its <phase>-<plan> id — e.g. `68-01-scaffolding-PLAN.md` — against
+  // a summary named only by the bare id — `68-01-SUMMARY.md`. None of the
+  // three candidates above produce that filename.
+  //
+  // Narrowed to the case `extractCanonicalPlanId` actually extracted an
+  // <id>-<id> pair (its result differs from the plan's own PLAN-stripped
+  // base). When no pair is found it falls back to returning that same base
+  // unchanged, which would otherwise push a redundant candidate identical to
+  // the `<stem>-SUMMARY.md` form above (e.g. `setup-PLAN.md` -> canonical
+  // 'setup' -> 'setup-SUMMARY.md', already candidate #2) rather than the
+  // original rule's actual behavior of matching only real id pairs.
+  //
+  // Collision, matching the original rule byte-for-behaviour: two plans that
+  // share the same <phase>-<plan> id but differ only in their descriptive
+  // slug (`68-01-alpha-PLAN.md` + `68-01-beta-PLAN.md`) both generate the
+  // SAME candidate `68-01-SUMMARY.md` and therefore BOTH read as summarized
+  // off one shared summary file. This is not a new regression: the
+  // pre-migration bespoke rule collapsed the same way (it populated one
+  // `summaryBases` Set keyed by canonical stem, so any plan whose canonical
+  // stem hit the set counted as matched, with no cardinality check against
+  // how many plans shared that stem).
+  const planStem = base.replace(/-PLAN$/i, '');
+  const canonicalId = extractCanonicalPlanId(base + '.md');
+  if (canonicalId !== planStem) candidates.push(dir + canonicalId + '-SUMMARY.md');
   return candidates;
 }
 
@@ -324,6 +411,24 @@ function findUnsummarizedPlans(planFiles: string[], summaryFiles: string[]): str
   return planFiles.filter((plan) => !summaryCandidates(plan).some((c) => summarySet.has(c)));
 }
 
+/**
+ * #3183: the mirror image of `findUnsummarizedPlans` — the summary files in
+ * `summaryFiles` that do NOT pair with ANY plan in `planFiles`, using the
+ * identical `summaryCandidates` matching rule as `countMatchedSummaries` /
+ * `findUnsummarizedPlans`. Callers that must name orphaned summaries (a
+ * stray non-plan summary, or a summary whose plan was renamed/removed) need
+ * this instead of a bespoke exact-suffix Set-diff, which cannot recognize
+ * the nested or extended naming forms `summaryCandidates` already handles —
+ * a divergence that produced false "orphan summary" warnings.
+ */
+function findOrphanSummaries(planFiles: string[], summaryFiles: string[]): string[] {
+  const claimed = new Set<string>();
+  for (const plan of planFiles) {
+    for (const candidate of summaryCandidates(plan)) claimed.add(candidate);
+  }
+  return summaryFiles.filter((s) => !claimed.has(s));
+}
+
 export = {
   toPosixPath,
   detectSubRepos,
@@ -331,12 +436,11 @@ export = {
   pathExistsInternal,
   generateSlugInternal,
   transliterateForSlug,
-  filterPlanFiles,
-  filterSummaryFiles,
   getPhaseFileStats,
   readSubdirectories,
   timeAgo,
   extractCanonicalPlanId,
   countMatchedSummaries,
   findUnsummarizedPlans,
+  findOrphanSummaries,
 };

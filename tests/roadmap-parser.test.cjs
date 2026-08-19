@@ -21,8 +21,10 @@ const { describe, test, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const fc = require('fast-check');
 
 const roadmapParser = require('../gsd-core/bin/lib/roadmap-parser.cjs');
+const { SCOPE } = require('../gsd-core/bin/lib/planning-scope.cjs');
 const { createTempProject, cleanup, runGsdTools } = require('./helpers.cjs');
 
 const {
@@ -357,6 +359,242 @@ describe('roadmap-parser: extractCurrentMilestone', () => {
     const payload = JSON.parse(result.output);
     assert.strictEqual(payload.phase_count, 2, `expected phase_count 2, got ${payload.phase_count} (phases dropped — #2947)`);
   });
+
+  // ─── #3235: the preamble strip's conditional wraps the REPLACE, not the pattern.
+  // The previous form selected between the strip regex and a `/$/` sentinel, making
+  // the do-not-strip branch an identity replacement (CodeQL js/identity-replacement,
+  // alert 53). These pin BOTH branches so the restructure cannot move behavior. ──────
+
+  test('#3235 — Phase Details heading is stripped even when preamble phase details are preserved', () => {
+    // The do-not-strip branch must leave `### Phase N:` blocks alone WITHOUT also
+    // disabling the unconditional `Phase Details` heading strip. Pulling that second
+    // replace inside the conditional would regress #730 invisibly: no existing #2947
+    // fixture carries a `Phase Details` heading, so the suite would stay green.
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Milestones',
+      '',
+      '- 🚧 **v9.0 Test Milestone** — Phases 1-2 (in progress)',
+      '',
+      '## Phase Details',
+      '',
+      '## Phases',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+      '### Phase 2: Beta',
+      '',
+      '**Goal:** do beta',
+      '',
+      '## Progress',
+      '',
+      '### v9.0 phase progress',
+      '',
+      '| Phase | Status |',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(result.includes('Phase 1: Alpha'), 'do-not-strip branch preserves preamble phase details');
+    assert.ok(result.includes('Phase 2: Beta'), 'do-not-strip branch preserves every preamble phase detail');
+    assert.ok(!result.includes('## Phase Details'), 'the Phase Details heading strip is unconditional and must still run');
+  });
+
+  test('#3235 — preamble phase details are still stripped when the milestone section has its own', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Preamble',
+      '',
+      '### Phase 7: PreambleGhost',
+      '',
+      '**Goal:** should be stripped',
+      '',
+      '## 🚧 v9.0 Current',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(result.includes('Phase 1: Alpha'), 'selected milestone phases retained');
+    assert.ok(!result.includes('PreambleGhost'), 'preamble phase-detail heading stripped on the strip branch');
+    assert.ok(!result.includes('should be stripped'), 'the stripped heading takes its body with it');
+    assert.ok(result.includes('## Preamble'), 'a non-Phase preamble heading is untouched');
+  });
+
+  test('#3235 — preamble strip honors the #{2,4} heading-depth bounds', () => {
+    // Boundary coverage: limit-1 (h1) and limit+1 (h5) survive; h2 and h4 are stripped.
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '# Phase 90: DepthOne',
+      '',
+      '## Phase 91: DepthTwo',
+      '',
+      '#### Phase 93: DepthFour',
+      '',
+      '##### Phase 94: DepthFive',
+      '',
+      '## 🚧 v9.0 Current',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(result.includes('DepthOne'), 'h1 is below the #{2,4} floor and survives');
+    assert.ok(!result.includes('DepthTwo'), 'h2 is at the floor and is stripped');
+    assert.ok(!result.includes('DepthFour'), 'h4 is at the ceiling and is stripped');
+    assert.ok(result.includes('DepthFive'), 'h5 is above the #{2,4} ceiling and survives');
+  });
+
+  test('#3235 — #1729 pre-colon tag tolerance survives in the hoisted strip', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Preamble',
+      '',
+      '### Phase 8 (deferred): TaggedGhost',
+      '',
+      '**Goal:** should be stripped',
+      '',
+      '## 🚧 v9.0 Current',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(!result.includes('TaggedGhost'), '`### Phase 8 (deferred):` still matches the strip (#1729)');
+    assert.ok(result.includes('Phase 1: Alpha'), 'selected milestone phases retained');
+  });
+
+  // The fixture below carries its own `## Phase Details` heading in the preamble.
+  // The LF-only sibling test above can't catch a CRLF-specific regression in the
+  // `[^\n]*` / `\n?` tail of the Phase Details strip regex — those tail tokens are
+  // LF-anchored, so only a CRLF document can prove the strip still consumes the
+  // heading (and only the heading, leaving no orphaned `\r`) when line endings are
+  // `\r\n` throughout.
+  test('#3235 — CRLF roadmap preserves preamble phases on the do-not-strip branch', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Milestones',
+      '',
+      '- 🚧 **v9.0 Test Milestone**',
+      '',
+      '## Phase Details',
+      '',
+      '## Phases',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+      '## Progress',
+      '',
+      '### v9.0 phase progress',
+      '',
+      '| Phase | Status |',
+    ].join('\n').replace(/\n/g, '\r\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(result.includes('Phase 1: Alpha'), 'CRLF preamble phases preserved');
+    assert.ok(result.includes('\r\n'), 'CRLF line endings preserved in the extracted section');
+    assert.ok(!/^#{1,4}[ \t]*Phase Details\b/m.test(result), 'the unconditional Phase Details strip also runs under CRLF');
+    assert.ok(!/\r(?!\n)/.test(result), 'the CRLF strip leaves no orphaned CR behind');
+  });
+
+  test('#3235 — property: Phase Details strip is unconditional and #{2,4} bounds hold across generated preambles', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+
+    // The alphabet below is deliberately a fixed list of literal line shapes, NOT
+    // derived from the parser's own regexes (CONTRIBUTING.md #2371: document-shaped,
+    // not writer-seeded).
+    const PREAMBLE_LINE = fc.constantFrom(
+      '## Phase 11: PreTwo',
+      '### Phase 12: PreThree',
+      '#### Phase 13: PreFour',
+      '# Phase 14: PreOne',
+      '##### Phase 15: PreFive',
+      '## Phase Details',
+      '#### Phase Details — trailing',
+      'prose line',
+      '**Goal:** something',
+      '',
+      '---',
+      '| Phase | Status |',
+    );
+
+    for (const hasOwnDetails of [true, false]) {
+      const prop = fc.property(
+        fc.array(PREAMBLE_LINE, { minLength: 0, maxLength: 12 }),
+        (preambleLines) => {
+          const doc = [
+            '# ROADMAP',
+            '',
+            ...preambleLines,
+            '',
+            '## 🚧 v9.0 Current',
+            '',
+            ...(hasOwnDetails
+              ? ['### Phase 1: OwnPhase', '', '**Goal:** own goal']
+              : ['just prose, no phase headings']),
+          ].join('\n');
+
+          writeRoadmap(tmpDir, doc);
+          const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+          const result = extractCurrentMilestone(roadmap, tmpDir);
+
+          // Invariant 1 (ALWAYS): no Phase Details heading survives, on either branch.
+          if (/^#{1,4}[ \t]*Phase Details\b/m.test(result)) return false;
+
+          // Invariant 2 (ALWAYS): markers outside the strip regex's #{2,4} bound
+          // survive if they were present in the input.
+          if (preambleLines.includes('# Phase 14: PreOne') && !result.includes('PreOne')) return false;
+          if (preambleLines.includes('##### Phase 15: PreFive') && !result.includes('PreFive')) return false;
+
+          if (hasOwnDetails) {
+            // Invariant 3: the milestone section has its own Phase headings, so
+            // every preamble Phase heading (#{2,4}) must be stripped.
+            if (result.includes('PreTwo') || result.includes('PreThree') || result.includes('PreFour')) {
+              return false;
+            }
+          } else {
+            // Invariant 4: the milestone section has no Phase headings of its own,
+            // so preamble Phase headings (#{2,4}) are preserved on the do-not-strip branch.
+            for (const marker of ['PreTwo', 'PreThree', 'PreFour']) {
+              const appeared = preambleLines.some((line) => line.includes(marker));
+              if (appeared && !result.includes(marker)) return false;
+            }
+          }
+
+          return true;
+        },
+      );
+
+      fc.assert(prop, { seed: 20260809, numRuns: 300, verbose: true });
+    }
+  });
 });
 
 // ─── replaceInCurrentMilestone ────────────────────────────────────────────────
@@ -512,25 +750,26 @@ describe('roadmap-parser: getMilestoneInfo', () => {
   beforeEach(() => { tmpDir = createTempProject(); });
   afterEach(() => { cleanup(tmpDir); });
 
-  test('returns default when ROADMAP.md missing', () => {
+  test('returns UNREADABLE scope (value null) when ROADMAP.md missing (#3216: the v1.0/"milestone" default was deleted per ADR-3180 §7.2 rule 4)', () => {
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v1.0');
-    assert.strictEqual(info.name, 'milestone');
+    assert.deepStrictEqual(info, { value: null, scope: SCOPE.UNREADABLE });
   });
 
   test('reads version from STATE.md and heading name', () => {
     writeState(tmpDir, { milestone: 'v2.0' });
     writeRoadmap(tmpDir, '## v2.0: The Big Launch\n### Phase 1: Setup\n');
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v2.0');
-    assert.match(info.name, /Big Launch/);
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v2.0');
+    assert.match(info.value.name, /Big Launch/);
   });
 
   test('falls back to 🚧 WIP marker when STATE.md has no milestone', () => {
     writeRoadmap(tmpDir, '## 🚧 **v1.5 Work In Progress**\n### Phase 1: Do stuff\n');
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v1.5');
-    assert.match(info.name, /Work In Progress/i);
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v1.5');
+    assert.match(info.value.name, /Work In Progress/i);
   });
 
   test('extracts from heading when no STATE.md and no WIP marker', () => {
@@ -539,8 +778,9 @@ describe('roadmap-parser: getMilestoneInfo', () => {
       '### Phase 1: Not started',
     ].join('\n'));
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v3.0');
-    assert.match(info.name, /Future Milestone/);
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v3.0');
+    assert.match(info.value.name, /Future Milestone/);
   });
 
   test('skips completed ✅ milestones', () => {
@@ -550,7 +790,8 @@ describe('roadmap-parser: getMilestoneInfo', () => {
     ].join('\n'));
     const info = getMilestoneInfo(tmpDir);
     // Should not use the ✅-prefixed version as the current milestone
-    assert.strictEqual(info.version, 'v2.0');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v2.0');
   });
 });
 
@@ -580,8 +821,9 @@ describe('roadmap-parser: getMilestoneInfo #2135 — milestone_name clobber', ()
       '### Phase 36: Something',
     ].join('\n'));
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v1.8');
-    assert.strictEqual(info.name, 'user session cleanup');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v1.8');
+    assert.strictEqual(info.value.name, 'user session cleanup');
   });
 
   test('case B: nameless ## heading + 🚧 marker carries the real name', () => {
@@ -594,32 +836,36 @@ describe('roadmap-parser: getMilestoneInfo #2135 — milestone_name clobber', ()
       '### Phase 1: Hypothesis',
     ].join('\n'));
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v1.9');
-    assert.strictEqual(info.name, 'Falsifiability');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v1.9');
+    assert.strictEqual(info.value.name, 'Falsifiability');
   });
 
   test('case C: canonical ## vX.Y: Name (no regression)', () => {
     writeState(tmpDir, { gsd_state_version: '1.0', milestone: 'v2.0' });
     writeRoadmap(tmpDir, '## v2.0: The Big Launch\n### Phase 1: Setup\n');
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v2.0');
-    assert.strictEqual(info.name, 'The Big Launch');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v2.0');
+    assert.strictEqual(info.value.name, 'The Big Launch');
   });
 
   test('case D: canonical ## vX.Y — Name (em-dash delimiter stripped)', () => {
     writeState(tmpDir, { gsd_state_version: '1.0', milestone: 'v2.5' });
     writeRoadmap(tmpDir, '## v2.5 — Galaxy Release\n### Phase 1: Start\n');
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v2.5');
-    assert.strictEqual(info.name, 'Galaxy Release');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v2.5');
+    assert.strictEqual(info.value.name, 'Galaxy Release');
   });
 
   test('case E: 🚧 bullet only, no ## heading (no regression)', () => {
     writeState(tmpDir, { gsd_state_version: '1.0', milestone: 'v1.5' });
     writeRoadmap(tmpDir, 'Some intro text.\n\n- 🚧 **v1.5 Quick Fix** — minor\n');
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.version, 'v1.5');
-    assert.strictEqual(info.name, 'Quick Fix');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.version, 'v1.5');
+    assert.strictEqual(info.value.name, 'Quick Fix');
   });
 
   test('anchored regex never matches a ## heading quoted inside backticks mid-line', () => {
@@ -632,7 +878,8 @@ describe('roadmap-parser: getMilestoneInfo #2135 — milestone_name clobber', ()
       '## v3.0: Real Name',
     ].join('\n'));
     const info = getMilestoneInfo(tmpDir);
-    assert.strictEqual(info.name, 'Real Name');
+    assert.strictEqual(info.scope, SCOPE.COMPLETE);
+    assert.strictEqual(info.value.name, 'Real Name');
   });
 });
 
@@ -985,6 +1232,53 @@ describe('roadmap-parser: getMilestonePhaseFilter', () => {
     const filter = getMilestonePhaseFilter(tmpDir);
     assert.strictEqual(filter('02-01-setup'), true, 'bracket-prefixed phase 2-01 matched');
     assert.strictEqual(filter('02-02-build'), true, 'bracket-prefixed phase 2-02 matched');
+  });
+
+  // #3213: the custom-ID branch used a greedy capture
+  // `^([A-Za-z][A-Za-z0-9]*(?:-[A-Za-z0-9]+)*)` that swallowed the whole
+  // hyphenated directory name (A-tool-output-contract → captured
+  // "A-tool-output-contract", not "A"). Every letter-named phase directory
+  // (GSD's own Phase A:..Phase L: convention; ADR-612 first-class non-numeric
+  // IDs) was silently excluded and milestone counts were fabricated over
+  // whatever numeric dir survived. The fix is a segment-boundary membership
+  // test: a dir belongs if it equals a declared phase ID or begins with id + "-".
+  test('#3213: letter-named phase dir is included in the milestone', () => {
+    writeRoadmap(tmpDir, [
+      '## v1.0: Letters',
+      '### Phase A: Tool Output Contract',
+      '**Goal:** contract',
+      '',
+      '### Phase 01: Inventory',
+      '**Goal:** inventory',
+    ].join('\n'));
+
+    const filter = getMilestonePhaseFilter(tmpDir);
+    assert.strictEqual(filter.phaseCount, 2, 'Phase A + Phase 01 declared');
+    assert.strictEqual(filter('A-tool-output-contract'), true, 'letter phase A dir must be in-milestone (#3213)');
+    assert.strictEqual(filter('01-inventory'), true, 'numeric phase 01 dir still matches');
+    assert.strictEqual(filter('B-evidence-artifact-contract'), false, 'undeclared letter phase B stays excluded');
+  });
+
+  test('#3213: letter-named phases A..L all count (not just the numeric dir)', () => {
+    const headings = ['## v1.0: Alpha', '### Phase 00: Inventory', '**Goal:** inv', ''];
+    for (const letter of ['A','B','C','D','E','F','G','H','I','J','K','L']) {
+      headings.push(`### Phase ${letter}: Phase ${letter}`, '**Goal:** g', '');
+    }
+    writeRoadmap(tmpDir, headings.join('\n'));
+
+    const filter = getMilestonePhaseFilter(tmpDir);
+    assert.strictEqual(filter.phaseCount, 13, 'Phase 00 + A..L = 13 phases');
+    assert.strictEqual(filter('00-inventory-approval-gate'), true, '00 in-milestone');
+    const dirFor = {
+      A: 'A-tool-output-contract',
+      B: 'B-evidence-artifact-contract',
+      C: 'C-attention-triage',
+      L: 'L-framework-distribution',
+    };
+    for (const [letter, dir] of Object.entries(dirFor)) {
+      assert.strictEqual(filter(dir), true, `letter phase ${letter} dir "${dir}" must be in-milestone (#3213)`);
+    }
+    assert.strictEqual(filter('M-not-declared'), false, 'undeclared letter M stays excluded');
   });
 });
 
@@ -2726,10 +3020,12 @@ describe('feat-3594: roadmap parser does not crash on ANY corpus fixture', () =>
 // ─── #1881: an unreadable ROADMAP is not an absent one ───────────────────────
 //
 // getRoadmapPhaseInternal returns null for a read failure exactly as it does for
-// "phase not found", and getMilestoneInfo returns {v1.0, milestone} — which reads
-// as a brand-new project — for a read failure exactly as it does for "no ROADMAP
-// yet". Per ADR-1411's "corrupt is not absent" amendment both return values are
-// preserved and the cause is surfaced out of band instead.
+// "phase not found", and getMilestoneInfo (#3216: now {value, scope}) returns
+// {value:null, scope:SCOPE.UNREADABLE} for a read failure exactly as it does for
+// "no ROADMAP yet" — the shared return shape stays sentinel-identical between the
+// two causes; only the out-of-band diagnostic distinguishes them. Per ADR-1411's
+// "corrupt is not absent" amendment both return values are preserved and the
+// cause is surfaced out of band instead.
 //
 // The discriminator is the errno, and it is load-bearing in the silent direction:
 // getMilestoneInfo has no existsSync guard, so platformReadSync's null-for-ENOENT
@@ -2822,7 +3118,7 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
     const dir = project(t, HEALTHY);
     let info;
     const emitted = emissionsDuring(() => { info = getMilestoneInfo(dir); });
-    assert.deepStrictEqual(info, { version: 'v2.3', name: 'Alpha' });
+    assert.deepStrictEqual(info, { value: { version: 'v2.3', name: 'Alpha' }, scope: SCOPE.COMPLETE });
     assert.strictEqual(emitted, 0);
   });
 
@@ -2836,14 +3132,14 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
     assert.strictEqual(emitted, 1);
   });
 
-  test('an unreadable roadmap is reported on a milestone lookup, and still returns the default', (t) => {
+  test('an unreadable roadmap is reported on a milestone lookup, and returns {value:null, scope:UNREADABLE} (#3216: the plausible-looking v1.0 default was deleted)', (t) => {
     _resetUnusableInputWarningsForTests();
     const dir = project(t, HEALTHY);
     failReads(t, (p) => p.endsWith('ROADMAP.md'), eacces());
     let info;
     const emitted = emissionsDuring(() => { info = getMilestoneInfo(dir); });
-    assert.deepStrictEqual(info, { version: 'v1.0', name: 'milestone' },
-      'the plausible-looking default must be preserved exactly');
+    assert.deepStrictEqual(info, { value: null, scope: SCOPE.UNREADABLE },
+      'a read fault must surface as UNREADABLE, never a fabricated version/name');
     assert.strictEqual(emitted, 1);
   });
 
@@ -2857,7 +3153,7 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
       info = getMilestoneInfo(dir);
     });
     assert.strictEqual(phase, null);
-    assert.deepStrictEqual(info, { version: 'v1.0', name: 'milestone' });
+    assert.deepStrictEqual(info, { value: null, scope: SCOPE.UNREADABLE });
     assert.strictEqual(emitted, 0, 'a missing ROADMAP.md must never be reported as unreadable');
   });
 
@@ -2883,7 +3179,8 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
     });
     assert.strictEqual(phase, null);
     assert.strictEqual(emitted, 0);
-    assert.ok(info, 'still returns a milestone default');
+    assert.deepStrictEqual(info, { value: null, scope: SCOPE.UNSCOPED },
+      'no version token anywhere reachable — UNSCOPED, not a fabricated version');
   });
 
   test('an unreadable STATE.md alone stays silent — the inner catch is deliberate', (t) => {
@@ -2897,7 +3194,7 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
     failReads(t, (p) => p.endsWith('STATE.md'), eacces());
     let info;
     const emitted = emissionsDuring(() => { info = getMilestoneInfo(dir); });
-    assert.deepStrictEqual(info, { version: 'v2.3', name: 'Alpha' });
+    assert.deepStrictEqual(info, { value: { version: 'v2.3', name: 'Alpha' }, scope: SCOPE.COMPLETE });
     assert.strictEqual(emitted, 0);
   });
 
@@ -2980,7 +3277,7 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
     emissionsDuring(() => {
       assert.doesNotThrow(() => { info = getMilestoneInfo(dir); });
     });
-    assert.deepStrictEqual(info, { version: 'v1.0', name: 'milestone' });
+    assert.deepStrictEqual(info, { value: null, scope: SCOPE.UNREADABLE });
   });
 
   test('getRoadmapPhaseInternal does not throw when the read fails', (t) => {
@@ -3014,7 +3311,7 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
       assert.doesNotThrow(() => { info = getMilestoneInfo(dir); });
       assert.doesNotThrow(() => { phase = getRoadmapPhaseInternal(dir, '1'); });
     });
-    assert.deepStrictEqual(info, { version: 'v1.0', name: 'milestone' });
+    assert.deepStrictEqual(info, { value: null, scope: SCOPE.UNREADABLE });
     assert.strictEqual(phase, null);
     assert.strictEqual(emitted, 0,
       'the path never resolved, so there is no file to name');
@@ -3028,3 +3325,123 @@ describe('#1881 unreadable ROADMAP vs absent ROADMAP', () => {
     assert.strictEqual(UNUSABLE_REASON.ROADMAP_UNREADABLE, 'roadmap_unreadable');
   });
 });
+
+// ─── #3577: markdown-table phase listings ────────────────────────────────────
+// Self-contained block: a ROADMAP whose current-milestone phase listing is a
+// GFM table (`| Phase | ... |` header, id in the first data cell) declared real
+// phases that every enumeration surface reported as absent (phase_count: 0,
+// found: false) — the #2199 bullet blind spot's table sibling. Surfaces: the
+// lookup chain (get-phase/phase-op), scanMilestonePhaseIds (milestone filter +
+// scope probe), hasPhaseEntries (window classification), and roadmap analyze's
+// enumerator. The canonical RoadmapProgress table also leads with `Phase` —
+// schema discrimination is load-bearing.
+{
+  const { describe: d3, test: t3, beforeEach: be3, afterEach: ae3 } = require('node:test');
+  const a3 = require('node:assert/strict');
+  const fs3 = require('node:fs');
+  const path3 = require('node:path');
+  const { createTempProject: ctp3, cleanup: cu3, runGsdTools: rgt3 } = require('./helpers.cjs');
+  const rp3 = require('../gsd-core/bin/lib/roadmap-parser.cjs');
+  const writeRoadmap3 = (d, c) => fs3.writeFileSync(path3.join(d, '.planning', 'ROADMAP.md'), c);
+
+  const TABLE_ROADMAP = [
+    '# Roadmap: Table Repro', '',
+    '## Milestone v2.0', '',
+    '| Phase | Focus | Requirements | Success criteria (preview) |',
+    '| --- | --- | --- | --- |',
+    '| 20 | Alpha focus | R1 | Works |',
+    '| 21 | Beta focus | R2 | Works too |',
+    '',
+  ].join('\n');
+
+  d3('#3577 markdown-table phase listings resolve across surfaces', () => {
+    let tmpDir;
+    be3(() => { tmpDir = ctp3('fix-3577-'); });
+    ae3(() => { cu3(tmpDir); });
+
+    t3('#3577: roadmap get-phase finds a table-declared phase', () => {
+      writeRoadmap3(tmpDir, TABLE_ROADMAP);
+      const p20 = rp3.getRoadmapPhaseInternal(tmpDir, '20');
+      a3.ok(p20 && p20.found, 'phase 20 must resolve from its table row');
+      a3.match(p20.phase_name, /Alpha focus/);
+      const absent = rp3.getRoadmapPhaseInternal(tmpDir, '99');
+      a3.ok(!absent || !absent.found, 'an absent phase must not resolve');
+    });
+
+    t3('#3577: init phase-op resolves a table-declared phase (third named tool)', () => {
+      writeRoadmap3(tmpDir, TABLE_ROADMAP);
+      const r = rgt3(['init', 'phase-op', '20'], tmpDir);
+      a3.ok(r.success, `init phase-op failed: ${r.error}`);
+      const out = JSON.parse(r.output);
+      a3.ok(out.found !== false, `phase-op must resolve the table-declared phase; got ${r.output.slice(0, 200)}`);
+    });
+
+    t3('#3577: scanMilestonePhaseIds sees table-declared ids (milestone filter)', () => {
+      writeRoadmap3(tmpDir, TABLE_ROADMAP);
+      const scoped = rp3.extractCurrentMilestoneScoped(
+        fs3.readFileSync(path3.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf8'),
+        tmpDir,
+      );
+      const ids = rp3.scanMilestonePhaseIds(scoped.value);
+      a3.ok(ids.has('20') || [...ids].some((i) => i.replace(/^0+/, '') === '20'), `ids must contain 20; got ${[...ids]}`);
+      a3.ok(ids.has('21') || [...ids].some((i) => i.replace(/^0+/, '') === '21'), `ids must contain 21; got ${[...ids]}`);
+    });
+
+    t3('#3577: roadmap analyze counts table-declared phases', () => {
+      writeRoadmap3(tmpDir, TABLE_ROADMAP);
+      const r = rgt3(['roadmap', 'analyze', 'json'], tmpDir);
+      a3.ok(r.success, `roadmap analyze json failed: ${r.error}`);
+      const out = JSON.parse(r.output);
+      a3.ok(Array.isArray(out.phases), `expected phases array; got ${r.output.slice(0, 200)}`);
+      a3.strictEqual(out.phases.length, 2, `both table phases counted; got ${out.phases.length}`);
+      a3.ok(out.phases.some((p) => /Alpha focus/.test(p.phase_name || p.name || '')), 'phase 20 named from column 2');
+    });
+
+    t3('#3577: the canonical progress table is not a phase listing; fenced examples excluded', () => {
+      writeRoadmap3(tmpDir, [
+        '# Roadmap', '', '## v1.0', '',
+        '## Progress', '',
+        '| Phase | Plans Complete | Status | Completed |',
+        '| --- | --- | --- | --- |',
+        '| 3 | 1/2 | In Progress | |',
+        '',
+        '```md',
+        '| Phase | Focus |',
+        '| --- | --- |',
+        '| 77 | fenced example |',
+        '```',
+        '',
+      ].join('\n'));
+      const scoped = rp3.extractCurrentMilestoneScoped(
+        fs3.readFileSync(path3.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf8'),
+        tmpDir,
+      );
+      const ids = [...rp3.scanMilestonePhaseIds(scoped.value)].map((i) => i.replace(/^0+/, ''));
+      a3.ok(!ids.includes('3'), `a RoadmapProgress row is a progress marker, not a declaration; got ${ids}`);
+      a3.ok(!ids.includes('77'), `a fenced table example must not count; got ${ids}`);
+      const p77 = rp3.getRoadmapPhaseInternal(tmpDir, '77');
+      a3.ok(!p77 || !p77.found, 'a fenced table row must not resolve');
+    });
+
+    t3('#3577: heading and table declarations union without duplicates; decimals count, 999 excluded', () => {
+      writeRoadmap3(tmpDir, [
+        '# Roadmap', '', '## v1.0', '',
+        '### Phase 1: Heading Form', '**Goal:** g', '',
+        '| Phase | Focus |',
+        '| --- | --- |',
+        '| 1 | heading dup guard |',
+        '| 2.5 | decimal row |',
+        '| 999 | icebox row |',
+        '',
+      ].join('\n'));
+      const r = rgt3(['roadmap', 'analyze', 'json'], tmpDir);
+      a3.ok(r.success, `analyze failed: ${r.error}`);
+      const out = JSON.parse(r.output);
+      const nums = out.phases.map((p) => p.phase_number || p.number).sort();
+      a3.ok(nums.includes('1'), 'heading phase present');
+      a3.strictEqual(nums.filter((n) => n === '1' || n === '01').length, 1, `id declared in BOTH heading and table counts once; got ${nums}`);
+      a3.ok(nums.some((n) => n.replace(/^0+/, '') === '2.5'), `decimal table id counted; got ${nums}`);
+      a3.ok(!nums.some((n) => /^0*999/.test(n)), `icebox 999 excluded; got ${nums}`);
+    });
+  });
+}

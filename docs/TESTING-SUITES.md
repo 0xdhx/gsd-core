@@ -33,7 +33,8 @@ The suite-suffix convention was chosen over a directory layout (`tests/security/
 
 ## Regression tests
 
-**Do not create new top-level `tests/bug-NNNN-*.test.cjs` files.** Add the
+**Do not create new top-level `tests/bug-NNNN-*.test.cjs`,
+`tests/fix-NNNN-*.test.cjs`, or `tests/issue-NNNN-*.test.cjs` files.** Add the
 regression case to the owning module's main test file instead (e.g. a
 `describe('regressions')` block in `tests/<module>.test.cjs`).
 
@@ -42,18 +43,59 @@ count — is the unit of CI overhead, and it is worst on Windows lanes where
 every spawn is Defender-scanned. The 2026-06 CI audit found 244 one-off
 `bug-*` files (~38% of the suite). That population is grandfathered in
 `scripts/lint-regression-test-names.allowlist.json` and enforced by an
-identity ratchet (`npm run lint:regression-names`, part of `npm run lint:ci`):
+identity ratchet (`npm run lint:regression-names`, part of `npm run lint:ci`),
+which also bans `fix-*` and `issue-*` NNNN-prefixed files the same way:
 
-- A **new** `bug-*` file fails CI — fold it into the owning module's file.
+- A **new** `bug-*`, `fix-*`, or `issue-*` NNNN-prefixed file fails CI — fold
+  it into the owning module's file.
 - **Deleting/consolidating** a grandfathered file requires pruning its
   allowlist entry, so the baseline only ever shrinks.
 - **Inherited drift** (the failure names files your PR didn't add — e.g. the
-  base branch merged `bug-*` files without feeding the allowlist, or you
-  rebased and carried a pre-rebase allowlist): run
+  base branch merged `bug-*`/`fix-*`/`issue-*` files without feeding the
+  allowlist, or you rebased and carried a pre-rebase allowlist): run
   `node scripts/lint-regression-test-names.cjs --update` and commit the
   regenerated allowlist. Snapshot artifacts like this allowlist (and
   `docs/INVENTORY.md`) must be regenerated **after** rebasing, never carried
   through a rebase.
+
+### A folded suite may appear only once per host
+
+When a standalone file is folded into its owning module's test file, the moved
+suite is wrapped in a self-contained block carrying a marker:
+
+```javascript
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/bug-376-claude-js-hook-gsd-rewriter.test.cjs — …
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-376-claude-js-hook-gsd-rewriter (…)", () => { … });
+}
+```
+
+Because the block is self-contained, a **second verbatim copy in the same host
+parses, registers, and passes — twice.** Nothing in a green suite reports it.
+[#3271](https://github.com/open-gsd/gsd-core/issues/3271) found 25 such copies
+(~5,800 lines) across three install suites, all from a single stale-base
+re-application during the consolidation epic. The cost is not only wasted CI on
+every lane: it is a `DEFECT.GENERATIVE-FIX` trap, because a contributor fixing
+one of those regressions edits the copy they found and leaves the other
+asserting the old behavior, with the suite still green.
+
+`local/no-duplicate-fold-marker` (`eslint-rules/no-duplicate-fold-marker.cjs`,
+error under `tests/**/*.cjs`) reports the second and every later occurrence of a
+`folded:<marker>` title in one file, naming the line the first occurrence sits
+on. **When it fires, delete the copy it points at** — the two blocks are the
+same suite, so the fix is removal, never an `eslint-disable`.
+
+It keys on the whitespace-delimited token after `folded:`, which matters in both
+directions. A narrower key that stops at `.` would collide
+`feat-443-effort-fast-mode.integration` with `feat-443-effort-fast-mode` — two
+genuinely distinct suites that coexist in `tests/model-resolver.test.cjs`. Keying
+on the *whole* title instead would let a re-fold under a different batch label
+slip through, which is exactly the shape #3271 took. Titles without a `folded:`
+prefix, non-literal titles, and the same marker appearing in two *different* host
+files are all left alone.
 
 The ratchet deliberately covers only `bug-*`. Files named `feat-NNNN-*` /
 `enh-NNNN-*` are *feature* test files — one (or one per suite) per feature is
@@ -95,10 +137,19 @@ The differential attribution check reports the file and the byte delta. To resol
 1. **Justify the growth in your PR** (a sentence in the description is enough) —
    the acknowledgment entry (below) is the review record that the larger size
    was a deliberate, seen decision, not silent drift.
-2. **Add an acknowledgment entry** in `tests/emitted-drift-ack.json` naming the
-   file and the reason, per `CONTEXT.md`'s `### Emitted Artifact Provenance`
-   entry. This is deliberately a committed file, not a flag — the entry appears
-   in your PR diff, so touching it *is* the visible signal.
+2. **Add an acknowledgment fragment** under `tests/emitted-drift-acks/` naming
+   the file and the reason, per `CONTRIBUTING.md`'s "Editing shipped content"
+   section and `CONTEXT.md`'s `### Emitted Artifact Provenance` entry. Name the
+   fragment for your issue or PR (something nobody else is using) — the failure
+   output prints a minimal valid document you can paste. This is deliberately a
+   per-PR fragment, not one shared file: fragments can never conflict across
+   PRs, and a fragment appearing in your diff *is* the visible signal. If the
+   failure instead names a path a merged PR already acknowledged (a **spent**
+   entry sitting in an existing fragment), reword that fragment's `reason` in
+   place to explain the new ripple — do not add a duplicate entry for the same
+   path; two ack sources naming the same path is a hard, loudly-reported error.
+   The legacy single `tests/emitted-drift-ack.json` is still read and unioned
+   in for branches that carry it, but new acknowledgments never go there.
 3. **Or shrink it instead of acknowledging.** Prefer extraction when the growth
    is incidental: for a workflow, move per-mode bodies to
    `workflows/<name>/modes/`, templates to `workflows/<name>/templates/`, and
@@ -118,7 +169,8 @@ help — that is the signal to extract, per step 3.
 |---|---|
 | `scripts/workflow-size.cjs` | Single source of truth — LF-normalized byte counter (`lfByteCount`) + generic `measureMdFiles(dir, predicate)` (backs both workflows and agents) + workflow enumeration (`listWorkflowStems`, `measureWorkflows`). Imported by both guards and by `tests/helpers/emitted-runtime.cjs`'s `currentSizes()` so they can never measure differently. |
 | `tests/emitted-attribution.test.cjs` + `tests/helpers/emitted-diff.cjs` | The differential attribution check and its size ratchet (ADR-2719). The sole mechanism for both emitted-content propagation AND per-file size growth as of #2724. |
-| `tests/emitted-drift-ack.json` | Committed acknowledgment file for unattributable emitted-content ripples and for size growth. Absent = no acks; its presence is the alarm. |
+| `tests/emitted-drift-acks/` | Per-PR acknowledgment fragments (primary, #2914) for unattributable emitted-content ripples and for size growth. A fragment appearing in your diff *is* the alarm; absence is the healthy steady state. |
+| `tests/emitted-drift-ack.json` | Legacy single acknowledgment file, superseded by the per-PR fragments above. Still read and unioned in for branches that carry it; must never gain new entries and must never persist on `next` (enforced by `guard-no-ack-on-next` via `scripts/lint-emitted-drift-ack.cjs --guard-next`). |
 | `npm run regen:derived` | Runs every remaining generator in dependency order (build → registry → ADR index → capability matrix → inventory manifest → manifest versions → `tests/fixtures/install-tree/*.json`). |
 | `tests/workflow-size-budget.test.cjs` | The workflow tier hard-cap guards, plus the `discuss-phase` progressive-disclosure checks. |
 | `tests/agent-size-budget.test.cjs` | The agent tier hard-cap guards (the agent analog). |
@@ -143,7 +195,8 @@ self-test. Separately, `scripts/qa-smell-ratchet.cjs` drives that same harness
 end to end against the real `gsd-tools` binary and turns its findings into a
 CI gate — run it with `npm run lint:qa-smells`.
 
-The harness's oracles (`tests/qa/oracles.cjs`) distinguish two severities:
+The gate has three independent inputs. The harness's oracles
+(`tests/qa/oracles.cjs`) supply the first two:
 
 - A **violation** is the engine breaking a documented contract. It always
   fails the build — baseline or no baseline, acknowledged or not.
@@ -153,6 +206,34 @@ The harness's oracles (`tests/qa/oracles.cjs`) distinguish two severities:
   `tests/qa/smell-baseline.json` (one that stopped firing — the baseline is
   shrink-only, so a fixed or changed scenario must be pruned, not left
   behind).
+
+The third comes from the scenarios themselves, not from an oracle:
+
+- A **scenario expectation failure** is a step's declared `expect` not
+  holding — the scenario asserted `percent: 100` and the engine returned
+  something else. Like a violation, it is **never acknowledgeable**: it
+  carries no fingerprint, so there is no `key` to put in a baseline entry or
+  an ack fragment. Fix the engine, or correct the expectation.
+
+Expectation failures were invisible to the gate until
+[#3597](https://github.com/open-gsd/gsd-core/issues/3597): `buildReport`
+counted them in `totals.violations` while `collectFindings` read only oracle
+violations, so a failing scenario printed `0 violations` and exited 0. The
+`multi-workstream` scenario failed on every CI run for three weeks without
+reddening a build. The invariant that keeps the two honest — asserted in
+`tests/loop-walk.qa.test.cjs` — is:
+
+```
+collectFindings().violations.length
+  + collectFindings().expectationFailures.length
+  === report.totals.violations
+```
+
+Note also that `scripts/qa-smell-ratchet.cjs` only invokes its own `main()`
+under `require.main === module`. That guard is what lets the QA suite
+`require()` the script to test `collectFindings` without kicking off a real
+20-scenario walk as an import side effect — the reason the gate's own logic
+had no test before #3597.
 
 Every smell must terminate in exactly one of TWO states — there is no third
 "accepted with a good explanation" state:
@@ -219,38 +300,81 @@ disagree, trust (and fix) the rule table.
 
 Unknown suites exit non-zero with the list of valid suites. Empty suites (e.g. `--suite security` before any security-tagged file exists) exit `0` with a `no tests in suite "..."` notice on stderr so CI lanes don't go red while a suite is being populated.
 
+## The live-config hermeticity guard
+
+Every `run-tests.cjs` invocation snapshots GSD's own install footprint in each
+live runtime config directory before the suite and re-checks it afterwards. It
+exists because the failure it catches is silent by construction: a test that
+resolves a config directory from the ambient environment instead of a sandbox
+writes into *your real* `~/.claude` (or `$GSD_HOME/.gsd`, or a Kimi
+`config.toml`), and nothing reports it. CI cannot catch this class at all —
+CI never has `CLAUDE_CONFIG_DIR` and friends set.
+
+The guard watches only what GSD unambiguously owns — its top-level install
+footprint plus `gsd-`-prefixed children of directories shared with the host
+agent — never whole config roots, because a host agent legitimately writing
+`history.jsonl` mid-run would make the guard cry wolf, and a guard that cries
+wolf gets switched off.
+
+Two environment variables control it:
+
+| Variable | Effect |
+|---|---|
+| `GSD_STRICT_LIVE_CONFIG_GUARD=1` | A detected write **fails the run**. Set on the Linux/macOS lanes of every CI job that runs the suite. |
+| `GSD_SKIP_LIVE_CONFIG_GUARD=1` | Skips the check entirely. |
+
+Unset, the guard **reports and does not fail** — deliberately, not timidly. On
+its first CI run it surfaced pre-existing leaks on the Windows lane, where
+`os.homedir()` reads `USERPROFILE` and ~190 test sites sandbox `HOME` alone.
+Those are real and worth fixing, but they are a different defect class, and a
+brand-new gate that instantly reds an unrelated lane gets reverted rather than
+obeyed. Windows lanes therefore stay report-only until that sweep lands; this
+repo has the pattern already, in the `local/no-source-grep` ESLint rule that
+shipped at `warn` and was promoted to `error` after its cleanup (ADR 452).
+
+`GSD_SKIP_LIVE_CONFIG_GUARD` is a bypass on a safety check, so it is documented
+here rather than left to be discovered in the source: an undocumented bypass is
+one people eventually set without knowing what they turned off. If you need it
+routinely, that is a bug report, not a workflow.
+
+Reported paths are labelled `CREATED`, `MODIFIED`, `DELETED`, or `UNVERIFIED`.
+`UNVERIFIED` means a scan bound was hit and the path could not be attested
+either way — it is never the same as clean.
+
 ## CI matrix
 
 The `Tests` workflow runs every PR through a scoped gate generated by
 `scripts/ci-test-scope.cjs`.
 
-| Lane | Node 22 | Node 24 |
-|---|---|---|
-| `ubuntu-latest` | scoped tests | unit + integration + security |
-| `windows-latest` | — | scoped Windows/path/shell tests |
-| `macos-latest` | full parity when required | full parity when required |
+All lanes run on **Node 24** — the `engines.node` floor (`>=24.0.0`) and the
+only supported runtime.
 
-- **Node 22** is the `engines.node` floor (`>=22.0.0`) — must stay green.
-- **Node 24** is the default development lane.
+| Lane | Scope |
+|---|---|
+| `ubuntu-latest` (scoped) | scoped tests — fast PR signal |
+| `ubuntu-latest` (full, sharded) | unit + integration + security |
+| `windows-latest` | scoped Windows/path/shell tests |
+| `macos-latest` | full parity when required |
+
 - **Scoped tests** are selected from the changed paths, plus a small CLI/package
   smoke set. They are for confidence on the affected surface, not for counting
   tests.
 
 The default PR gate runs the broad `unit` (under the c8 coverage gate),
 `integration`, and `security` suites once on Ubuntu / Node 24, scoped tests on
-Ubuntu / Node 22, and scoped tests on Windows / Node 24. "Scoped" means the
-diff-selected list from the rule table — not the full suite and not a fixed
-smoke set (the fixed smoke list is only the empty-selection fallback). The
-Windows lane's list is the Windows-sensitive subset of the selection, plus
-**every changed test file, unconditionally** (the #494 invariant, narrowed): a
-modified test is exercised on the divergent OS before merge at per-file cost,
-without paying for the three full parity lanes.
+a second Ubuntu / Node 24 lane, and scoped tests on Windows / Node 24.
+"Scoped" means the diff-selected list from the rule table — not the full suite
+and not a fixed smoke set (the fixed smoke list is only the empty-selection
+fallback). The Windows lane's list is the Windows-sensitive subset of the
+selection, plus **every changed test file, unconditionally** (the #494
+invariant, narrowed): a modified test is exercised on the divergent OS before
+merge at per-file cost, without paying for the three full parity lanes.
 
 PRs touching workflow, package, test-runner, install, release, or
 Windows-sensitive surfaces also run the full parity matrix on macOS and the
 older Windows runtime, plus `install` and `slow` on the primary Ubuntu lane.
 Everything (including the full parity matrix) runs on every push to `next`,
-which covers the residual macOS / Windows-Node-22 cross-product for scoped PRs.
+which covers the residual macOS / Windows cross-product for scoped PRs.
 
 Coverage runs inside the Ubuntu / Node 24 full lane (not a separate job — that
 duplicated the entire unit run) and stays single-lane because multiplying
@@ -308,8 +432,8 @@ event stream from a `gsd-test` run:
 
 ```bash
 node scripts/gen-test-timings.cjs \
-  ~/.local/state/gsd-test/runs/<run-id>/test-events-linux-node22.jsonl \
-  ~/.local/state/gsd-test/runs/<run-id>/test-events-linux-node24.jsonl
+  ~/.local/state/gsd-test/runs/<run-id>/test-events-linux-node24.jsonl \
+  ~/.local/state/gsd-test/runs/<run-id>/test-events-macos-node24.jsonl
 ```
 
 Pass every lane you have. A file's recorded time is the **max** across the

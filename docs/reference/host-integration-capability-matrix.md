@@ -48,6 +48,23 @@ consumed verbatim by `gen:capability-registry` and validated by `capability-vali
 | `state` | Filesystem/state I/O capability. |
 | `artifact` | Artifact delivery (skills, commands) surface capability. |
 
+### Trigger precedence (#2871 Phase 2 — adjacent to, not part of, `hostIntegration`)
+
+`runtime.triggerPrecedence` (an ordered list of trigger-bearing kind names, highest priority
+first) is declared as a sibling of `hostIntegration` in `capability.json`'s `runtime` body, not
+inside it — it is not researched per-CLI documentation the way the axes above are, so it carries
+no per-host `Source`/`Evidence` row. Only `commands` and `skills` are members of the vocabulary;
+`agents`/`kimi-agents` are excluded because they are not trigger-bearing (a `/gsd-<name>` a user
+types) — an agent is invoked through named/`subagent_type` dispatch, the separate `dispatch`
+interface point above, never through the `command` interface point. Every shipped runtime
+descriptor declares the same value, `["skills", "commands"]` (skills wins a same-scope collision),
+matching `capability-validator.cjs`'s `DEFAULT_TRIGGER_PRECEDENCE` — the axis is
+required-with-default (absence resolves to that default) so a third-party descriptor authored
+before this phase keeps validating unchanged. `runtime-artifact-layout.cts`'s
+`resolveTriggerSurface` reads it to decide the winner among same-trigger candidates once scope
+rank (Install Scope Module) has already been applied. See CONTEXT.md's Runtime Artifact Layout
+Module entry and `.gsd/phase/feat-2871-trigger-resolution/40-design.md`.
+
 ---
 
 ## claude
@@ -81,6 +98,8 @@ Sources consulted:
 - https://code.claude.com/docs/en/sandboxing
 - Context7 /websites/code_claude
 - Context7 /llmstxt/code_claude_llms_txt
+
+**Cross-scope trigger shadowing and spec-root reachability (#2873, epic #2866 Phase 4, resolving #2218).** GSD's claude `artifactLayout` installs `global=[skills]` and `local=[commands, agents]` (see "Trigger precedence" above). Claude Code's own documented precedence — personal overrides project, and a same-named skill overrides a same-named command — means both rules point the same direction when a user installs both scopes: the global skill always wins the `/gsd-<name>` trigger, and the project-local `.claude/gsd-core/` spec tree the local command correctly points at becomes unreachable through that trigger, silently. GSD Core now (a) detects this at install time and from `/gsd-health` (diagnostic `W028`) and prints which scope wins — an advisory only, exit code unchanged; and (b) for claude at **global** scope only, resolves the winning skill's own workflow-spec `@`-include at runtime rather than pre-expanding it: the skill body carries an explicit imperative instruction that resolves `.claude/gsd-core/workflows/<name>.md` relative to the working directory first, falling back to `~/.claude/gsd-core/workflows/<name>.md` when no local tree exists. This is instruction-following, not the guaranteed inclusion a real `@`-include provides — it costs the agent one file read — and is deliberately confined to this one reference, in this one runtime, at this one scope: the skill's `references/`/`templates/` includes and the local scope's own emission are unchanged. See [Interpret install-shadow warnings](../how-to/interpret-install-shadow-warnings.md) and [Install on your runtime — Claude Code](../how-to/install-on-your-runtime.md#claude-code).
 
 ---
 

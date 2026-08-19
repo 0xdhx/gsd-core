@@ -7,10 +7,25 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('node:child_process');
-const { runGsdTools, cleanup, absPlanningPath, TOOLS_PATH } = require('./helpers.cjs');
+const { runGsdTools, cleanup, absPlanningPath, TOOLS_PATH, parseFrontmatter } = require('./helpers.cjs');
 const { createFixture, seedPhase } = require('./fixtures/index.cjs');
 const { createTempProject, createTempDir } = require('./helpers.cjs');
 const { executionContextRefs } = require('../scripts/command-contract-helpers.cjs');
+
+/**
+ * #3188: write the canonical flat planning docs so an init-query "present" test
+ * actually has the file it asserts. The emitter now returns null for
+ * state_path / roadmap_path / requirements_path when the file is absent; tests
+ * that exercise the present-case must therefore create the file. Phase
+ * resolution is directory-based (findPhaseInternal) and unaffected by these.
+ */
+function writePlanningDocs(tmpDir, { state = true, roadmap = true, requirements = true } = {}) {
+  const planning = path.join(tmpDir, '.planning');
+  fs.mkdirSync(planning, { recursive: true });
+  if (state) fs.writeFileSync(path.join(planning, 'STATE.md'), '# State\n');
+  if (roadmap) fs.writeFileSync(path.join(planning, 'ROADMAP.md'), '# Roadmap\n');
+  if (requirements) fs.writeFileSync(path.join(planning, 'REQUIREMENTS.md'), '# Requirements\n');
+}
 
 describe('init commands', () => {
   let tmpDir;
@@ -32,6 +47,9 @@ describe('init commands', () => {
     seedPhase(tmpDir, '03-api', {
       '03-01-PLAN.md': '# Plan',
     });
+    // #3188: these are present-case assertions — the docs must exist on disk
+    // or the emitter now (correctly) returns null for the *_path fields.
+    writePlanningDocs(tmpDir);
 
     const result = runGsdTools('init execute-phase 03', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -86,6 +104,8 @@ describe('init commands', () => {
       '03-VERIFICATION.md': '# Verification',
       '03-UAT.md': '# UAT',
     });
+    // #3188: present-case assertions — create the planning docs the emitter keys on.
+    writePlanningDocs(tmpDir);
 
     const result = runGsdTools('init plan-phase 03', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -98,6 +118,139 @@ describe('init commands', () => {
     assert.strictEqual(output.research_path, absPlanningPath(tmpDir, 'phases', '03-api', '03-RESEARCH.md'));
     assert.strictEqual(output.verification_path, absPlanningPath(tmpDir, 'phases', '03-api', '03-VERIFICATION.md'));
     assert.strictEqual(output.uat_path, absPlanningPath(tmpDir, 'phases', '03-api', '03-UAT.md'));
+  });
+
+  test('#3511-class: init manager has_context/has_research ignore another phase\'s misplaced artifact', () => {
+    writePlanningDocs(tmpDir);
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## Progress',
+        '',
+        '- [ ] **Phase 1: Setup**',
+        '- [ ] **Phase 2: API**',
+        '',
+        '### Phase 1: Setup',
+        '',
+        '**Goal:** Build the foundation.',
+        '',
+        '### Phase 2: API',
+        '',
+        '**Goal:** Build the API.',
+        '',
+      ].join('\n'),
+    );
+
+    seedPhase(tmpDir, '01-setup', {});
+    // Phase 02's directory holds ONLY a stray artifact whose filename token
+    // ("01-") belongs to phase 01, not to this directory's own phase (02).
+    seedPhase(tmpDir, '02-api', {
+      '01-RESEARCH.md': '# Research for phase 01',
+      '01-CONTEXT.md': '# Context for phase 01',
+    });
+
+    const result = runGsdTools('init manager', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const p2 = output.phases.find((p) => p.number === '2');
+    assert.strictEqual(p2.has_research, false,
+      'phase 2 must not report has_research from a file that belongs to phase 1');
+    assert.strictEqual(p2.has_context, false,
+      'phase 2 must not report has_context from a file that belongs to phase 1');
+  });
+
+  test('#3511-class: init verify-work ui_phase_active ignores another phase\'s misplaced UI-SPEC file', () => {
+    writePlanningDocs(tmpDir);
+    // ui_phase_active is `hasActiveUiStep || hasUiSpecFile` (detectUiPhaseActive,
+    // src/init.cts) — the `ui` capability's `workflow.ui_phase` config key
+    // defaults to `true` (capabilities/ui/capability.json), which alone would
+    // make `hasActiveUiStep` (and therefore the whole OR) true regardless of
+    // which file the phase directory holds. Disabling it here isolates the
+    // signal this test actually exercises: the misplaced-file half of the OR.
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ workflow: { ui_phase: false } }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '### Phase 1: Setup',
+        '',
+        '**Goal:** Build the foundation.',
+        '',
+        '### Phase 2: API',
+        '',
+        '**Goal:** Build the API.',
+        '',
+      ].join('\n'),
+    );
+
+    seedPhase(tmpDir, '01-setup', {});
+    // Phase 02's directory holds ONLY a stray artifact whose filename token
+    // ("01-") belongs to phase 01, not to this directory's own phase (02).
+    seedPhase(tmpDir, '02-api', {
+      '01-UI-SPEC.md': '# UI Spec for phase 01',
+    });
+
+    const result = runGsdTools('init verify-work 2', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.ui_phase_active, false,
+      'phase 2 must not report ui_phase_active from a UI-SPEC file that belongs to phase 1');
+  });
+
+  // #3473 F2 (companion to #3357): init plan-phase's verification_path
+  // projector now resolves via the shared resolveVerificationFile resolver
+  // instead of a hand-rolled `.find()` over unsorted readdir() order. The
+  // canonical report must win over an ad-hoc -CORRECTION- worksheet
+  // deterministically, regardless of directory-listing order.
+  test('#3473 F2: init plan-phase resolves the canonical report over a -CORRECTION- worksheet', () => {
+    seedPhase(tmpDir, '03-api', {
+      '03-CORRECTION-VERIFICATION.md': '# Ad-hoc correction worksheet',
+      '03-VERIFICATION.md': '# Verification',
+    });
+    writePlanningDocs(tmpDir);
+
+    const result = runGsdTools('init plan-phase 03', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.verification_path,
+      absPlanningPath(tmpDir, 'phases', '03-api', '03-VERIFICATION.md'),
+      'the canonical 03-VERIFICATION.md must win over the CORRECTION worksheet',
+    );
+  });
+
+  // #3518: init plan-phase's uat_path projector must resolve via the shared
+  // resolveUatFile resolver (phase-pinned, deterministic) instead of a
+  // hand-rolled `.find()` over unsorted readdir() order. A stray cross-phase
+  // UAT artifact must never become THIS phase's uat_path, on any filesystem.
+  // The stray is listed first in the fixture (creation-order filesystems) AND
+  // sorts before the phase's own file (lexicographic-order filesystems), so
+  // the pre-fix readdir pick loses on both ordering families.
+  test('#3518: init plan-phase uat_path is phase-pinned — a stray cross-phase -UAT.md must not win', () => {
+    seedPhase(tmpDir, '03-api', {
+      '02-UAT.md': '# Stray cross-phase UAT artifact (belongs to phase 02)',
+      '03-UAT.md': '# UAT',
+    });
+    writePlanningDocs(tmpDir);
+
+    const result = runGsdTools('init plan-phase 03', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.uat_path,
+      absPlanningPath(tmpDir, 'phases', '03-api', '03-UAT.md'),
+      'the phase\'s own 03-UAT.md must win over the stray cross-phase 02-UAT.md',
+    );
   });
 
   // #2056: normalizePhaseName() strips ANY [A-Z][A-Z0-9_]*- prefix as a project
@@ -326,6 +479,8 @@ describe('init commands', () => {
       '03-VERIFICATION.md': '# Verification',
       '03-UAT.md': '# UAT',
     });
+    // #3188: present-case assertions — create the planning docs the emitter keys on.
+    writePlanningDocs(tmpDir);
 
     const result = runGsdTools('init phase-op 03', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -338,6 +493,50 @@ describe('init commands', () => {
     assert.strictEqual(output.research_path, absPlanningPath(tmpDir, 'phases', '03-api', '03-RESEARCH.md'));
     assert.strictEqual(output.verification_path, absPlanningPath(tmpDir, 'phases', '03-api', '03-VERIFICATION.md'));
     assert.strictEqual(output.uat_path, absPlanningPath(tmpDir, 'phases', '03-api', '03-UAT.md'));
+  });
+
+  // #3473 F2 (companion to #3357): init phase-op's verification_path projector
+  // — the second of the two now-fixed init.cts sites — same regression as
+  // the plan-phase test above.
+  test('#3473 F2: init phase-op resolves the canonical report over a -CORRECTION- worksheet', () => {
+    seedPhase(tmpDir, '03-api', {
+      '03-CORRECTION-VERIFICATION.md': '# Ad-hoc correction worksheet',
+      '03-VERIFICATION.md': '# Verification',
+    });
+    writePlanningDocs(tmpDir);
+
+    const result = runGsdTools('init phase-op 03', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.verification_path,
+      absPlanningPath(tmpDir, 'phases', '03-api', '03-VERIFICATION.md'),
+      'the canonical 03-VERIFICATION.md must win over the CORRECTION worksheet',
+    );
+  });
+
+  // #3518: init phase-op's uat_path projector — the second of the two
+  // single-pick UAT sites in src/init.cts — same phase-pinned contract as
+  // the plan-phase test above. Stray created first AND sorting first, so the
+  // pre-fix readdir-order pick deterministically chose it on both ordering
+  // families.
+  test('#3518: init phase-op uat_path is phase-pinned — a stray cross-phase -UAT.md must not win', () => {
+    seedPhase(tmpDir, '03-api', {
+      '02-UAT.md': '# Stray cross-phase UAT artifact (belongs to phase 02)',
+      '03-UAT.md': '# UAT',
+    });
+    writePlanningDocs(tmpDir);
+
+    const result = runGsdTools('init phase-op 03', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.uat_path,
+      absPlanningPath(tmpDir, 'phases', '03-api', '03-UAT.md'),
+      'the phase\'s own 03-UAT.md must win over the stray cross-phase 02-UAT.md',
+    );
   });
 
   test('init plan-phase detects has_reviews and reviews_path when REVIEWS.md exists', () => {
@@ -719,6 +918,65 @@ describe('init commands', () => {
     assert.strictEqual(output.phase_found, true);
     assert.strictEqual(output.phase_name, 'Details Block Regression');
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #3188: init execute-phase / plan-phase / phase-op must return null for
+// state_path / roadmap_path / requirements_path when the planning doc is
+// absent — matching the contract the conditional sibling fields (patterns_path,
+// context_path, …) already honour, and that ultraplan-phase.md:104 gates on.
+// The WRITING emitters (new-project / new-milestone / ingest-docs) are
+// intentionally NOT changed and keep returning a non-null write-target path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#3188 — init query path fields are null when the planning file is absent', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    // #2376 macOS fix: realpath so absPlanningPath matches process.cwd()-anchored output.
+    tmpDir = fs.realpathSync(createFixture());
+    seedPhase(tmpDir, '03-api', { '03-01-PLAN.md': '# Plan' });
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  // All three READING (projection) sites share the identical field group; the
+  // absent/present boundary must hold uniformly across them.
+  const COMMANDS = [
+    ['init execute-phase', 'init execute-phase 03'],
+    ['init plan-phase', 'init plan-phase 03'],
+    ['init phase-op', 'init phase-op 03'],
+  ];
+
+  for (const [label, argv] of COMMANDS) {
+    test(`${label}: state_path / roadmap_path / requirements_path are null when the docs are absent`, () => {
+      // No STATE.md / ROADMAP.md / REQUIREMENTS.md written.
+      const result = runGsdTools(argv, tmpDir);
+      assert.ok(result.success, `Command failed: ${result.error}`);
+
+      const output = JSON.parse(result.output);
+      assert.strictEqual(output.state_path, null,
+        'state_path must be null when STATE.md is absent');
+      assert.strictEqual(output.roadmap_path, null,
+        'roadmap_path must be null when ROADMAP.md is absent');
+      assert.strictEqual(output.requirements_path, null,
+        'requirements_path must be null when REQUIREMENTS.md is absent');
+    });
+
+    test(`${label}: state_path / roadmap_path / requirements_path are absolute when the docs exist`, () => {
+      writePlanningDocs(tmpDir);
+
+      const result = runGsdTools(argv, tmpDir);
+      assert.ok(result.success, `Command failed: ${result.error}`);
+
+      const output = JSON.parse(result.output);
+      assert.strictEqual(output.state_path, absPlanningPath(tmpDir, 'STATE.md'));
+      assert.strictEqual(output.roadmap_path, absPlanningPath(tmpDir, 'ROADMAP.md'));
+      assert.strictEqual(output.requirements_path, absPlanningPath(tmpDir, 'REQUIREMENTS.md'));
+    });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1544,6 +1802,27 @@ describe('cmdInitProgress', () => {
     assert.strictEqual(output.next_phase, null);
   });
 
+  test('#3511-class: has_research ignores a misplaced RESEARCH.md that belongs to another phase', () => {
+    // Phase 01 has no artifacts of its own.
+    const phase1 = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phase1, { recursive: true });
+
+    // Phase 02's directory holds ONLY a stray artifact whose filename token
+    // ("01-") belongs to phase 01, not to this directory's own phase (02).
+    const phase2 = path.join(tmpDir, '.planning', 'phases', '02-api');
+    fs.mkdirSync(phase2, { recursive: true });
+    fs.writeFileSync(path.join(phase2, '01-RESEARCH.md'), '# Research for phase 01');
+
+    const result = runGsdTools('init progress', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    const p2 = output.phases.find(p => p.number === '02');
+    assert.strictEqual(p2.has_research, false,
+      'phase 02 must not report has_research from a file that belongs to phase 01');
+    assert.strictEqual(p2.status, 'pending');
+  });
+
   test('implementation-complete phase without passed verification remains current work', () => {
     const phase1 = path.join(tmpDir, '.planning', 'phases', '01-setup');
     fs.mkdirSync(phase1, { recursive: true });
@@ -1710,6 +1989,80 @@ describe('cmdInitQuick', () => {
     const output = JSON.parse(result.output);
     assert.ok(output.branch_name, 'branch_name should be set');
     assert.ok(output.branch_name.endsWith('-quick'), `Expected fallback slug in branch name, got "${output.branch_name}"`);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// cmdInitQuick quick_id exact-value tests (#3314 — ADR-456 subprocess clock pin)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('cmdInitQuick quick_id — exact value under GSD_NOW_MS+TZ pin', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.realpathSync(createFixture());
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  // Computes the expected quick_id independently from the SAME algorithm
+  // documented in src/init.cts's cmdInitQuick — NOT copy-pasted from its
+  // runtime output — so this test can actually catch a broken implementation.
+  function expectedQuickId(ms) {
+    const d = new Date(ms);
+    const yy = String(d.getUTCFullYear()).slice(-2);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const dateStr = yy + mm + dd;
+    const secondsSinceMidnight = d.getUTCHours() * 3600 + d.getUTCMinutes() * 60 + d.getUTCSeconds();
+    const timeBlocks = Math.floor(secondsSinceMidnight / 2);
+    const timeEncoded = timeBlocks.toString(36).padStart(3, '0');
+    return dateStr + '-' + timeEncoded;
+  }
+
+  test('quick_id: exact value for pinned instant', () => {
+    const PINNED_MS = 1_700_000_000_000; // 2023-11-14T22:13:20.000Z
+    const result = runGsdTools('init quick "pinned task"', tmpDir, {
+      GSD_TEST_MODE: '1', GSD_NOW_MS: String(PINNED_MS), TZ: 'UTC',
+    });
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.quick_id, expectedQuickId(PINNED_MS));
+  });
+
+  test('boundary: two calls in the same 2s block share quick_id (documented collision, not a bug)', () => {
+    const BLOCK_START_MS = 1_700_000_000_000; // aligned so +0 and +1000 fall in the same 2s block
+    const r1 = runGsdTools('init quick "task a"', tmpDir, {
+      GSD_TEST_MODE: '1', GSD_NOW_MS: String(BLOCK_START_MS), TZ: 'UTC',
+    });
+    const r2 = runGsdTools('init quick "task b"', tmpDir, {
+      GSD_TEST_MODE: '1', GSD_NOW_MS: String(BLOCK_START_MS + 1000), TZ: 'UTC',
+    });
+    assert.ok(r1.success && r2.success);
+    const o1 = JSON.parse(r1.output);
+    const o2 = JSON.parse(r2.output);
+    assert.strictEqual(o1.quick_id, expectedQuickId(BLOCK_START_MS));
+    assert.strictEqual(o2.quick_id, expectedQuickId(BLOCK_START_MS + 1000));
+    assert.strictEqual(o1.quick_id, o2.quick_id, 'both instants are in the same 2-second block and must share a quick_id');
+  });
+
+  test('boundary: two calls straddling a 2s block edge get different quick_id', () => {
+    const BEFORE_EDGE_MS = 1_700_000_000_000; // even second → block boundary at +2000ms
+    const AFTER_EDGE_MS = BEFORE_EDGE_MS + 2000;
+    const r1 = runGsdTools('init quick "task a"', tmpDir, {
+      GSD_TEST_MODE: '1', GSD_NOW_MS: String(BEFORE_EDGE_MS), TZ: 'UTC',
+    });
+    const r2 = runGsdTools('init quick "task b"', tmpDir, {
+      GSD_TEST_MODE: '1', GSD_NOW_MS: String(AFTER_EDGE_MS), TZ: 'UTC',
+    });
+    assert.ok(r1.success && r2.success);
+    const o1 = JSON.parse(r1.output);
+    const o2 = JSON.parse(r2.output);
+    assert.strictEqual(o1.quick_id, expectedQuickId(BEFORE_EDGE_MS));
+    assert.strictEqual(o2.quick_id, expectedQuickId(AFTER_EDGE_MS));
+    assert.notStrictEqual(o1.quick_id, o2.quick_id, 'instants 2000ms apart cross a 2-second block edge and must differ');
   });
 });
 
@@ -2248,6 +2601,9 @@ describe('init handlers honor GSD_WORKSTREAM (ADR-0006 planningPaths consumption
       path.join(wsDir, 'ROADMAP.md'),
       '# Roadmap\n\n### Phase 1: Setup\n**Goal:** Bootstrap\n**Requirements**: R-01\n**Plans:** 1 plans\n'
     );
+    // #3188: REQUIREMENTS.md present so the workstream-scoped requirements_path
+    // present-case assertion holds (STATE/ROADMAP already written above).
+    fs.writeFileSync(path.join(wsDir, 'REQUIREMENTS.md'), '# Requirements\n');
     fs.writeFileSync(
       path.join(wsDir, 'config.json'),
       JSON.stringify({})
@@ -2297,6 +2653,8 @@ describe('init handlers honor GSD_WORKSTREAM (ADR-0006 planningPaths consumption
       // Flat fixture: the workstream fixture exists but we do NOT pass GSD_WORKSTREAM.
       // Handler should resolve flat .planning/ → state/roadmap/config are flat,
       // and the workstream phase is NOT found (flat phases/ is empty).
+      // #3188: create the flat docs so the flat *_path present-case assertions hold.
+      writePlanningDocs(tmpDir);
       const result = runGsdTools('init execute-phase 1', tmpDir, { GSD_WORKSTREAM: '', GSD_PROJECT: '' });
       assert.ok(result.success, `Command failed: ${result.error}`);
 
@@ -2390,6 +2748,8 @@ describe('init handlers honor GSD_WORKSTREAM (ADR-0006 planningPaths consumption
     });
 
     test('plan-phase WITHOUT GSD_WORKSTREAM resolves flat paths (boundary control)', () => {
+      // #3188: create the flat docs so the flat *_path present-case assertions hold.
+      writePlanningDocs(tmpDir);
       const result = runGsdTools('init plan-phase 1', tmpDir, { GSD_WORKSTREAM: '', GSD_PROJECT: '' });
       assert.ok(result.success, `Command failed: ${result.error}`);
 
@@ -2436,6 +2796,8 @@ describe('init handlers honor GSD_WORKSTREAM (ADR-0006 planningPaths consumption
     });
 
     test('phase-op WITHOUT GSD_WORKSTREAM does not find workstream-only phase (negative discrimination)', () => {
+      // #3188: create the flat docs so the flat *_path present-case assertions hold.
+      writePlanningDocs(tmpDir);
       const result = runGsdTools('init phase-op 1', tmpDir, { GSD_WORKSTREAM: '', GSD_PROJECT: '' });
       assert.ok(result.success, `Command failed: ${result.error}`);
 
@@ -2682,6 +3044,7 @@ describe('#2376 — init.* path fields resolve when process cwd differs from --c
   test('gsd-core/workflows/verify-work.md plan_gap_closure step references {state_path}/{roadmap_path}, not bare .planning literals', () => {
     const wfPath = path.join(__dirname, '..', 'gsd-core', 'workflows', 'verify-work.md');
     const content = fs.readFileSync(wfPath, 'utf8');
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     const stepMatch = content.match(/<step name="plan_gap_closure">[\s\S]*?<\/step>/);
     assert.ok(stepMatch, 'plan_gap_closure step should exist in verify-work.md');
     const step = stepMatch[0];
@@ -2703,6 +3066,7 @@ describe('#2376 — init.* path fields resolve when process cwd differs from --c
   test('gsd-core/workflows/execute-phase.md verify_phase_goal step references {requirements_path}, not a bare .planning literal', () => {
     const wfPath = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execute-phase.md');
     const content = fs.readFileSync(wfPath, 'utf8');
+    // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own workflow .md content, fixed-size author-controlled content
     const stepMatch = content.match(/<step name="verify_phase_goal">[\s\S]*?<\/step>/);
     assert.ok(stepMatch, 'verify_phase_goal step should exist in execute-phase.md');
     const step = stepMatch[0];
@@ -2712,7 +3076,7 @@ describe('#2376 — init.* path fields resolve when process cwd differs from --c
 
   // allow-test-rule: source-text-is-the-product (see #2376)
   //
-  // Checks verbatim presence of the exact edited <files_to_read>/output blocks
+  // Checks verbatim presence of the exact edited <required_reading>/output blocks
   // rather than scanning the whole file for absence of the old literals: several
   // of those literals (e.g. .planning/PROJECT.md, .planning/config.json) remain
   // legitimately elsewhere in this file in orchestrator-local bash/doc-table
@@ -2723,17 +3087,17 @@ describe('#2376 — init.* path fields resolve when process cwd differs from --c
     const content = fs.readFileSync(wfPath, 'utf8');
 
     assert.ok(content.includes(
-      '<files_to_read>\n- {research_dir}/STACK.md\n- {research_dir}/FEATURES.md\n- {research_dir}/ARCHITECTURE.md\n- {research_dir}/PITFALLS.md\n</files_to_read>'
+      '<required_reading>\n- {research_dir}/STACK.md\n- {research_dir}/FEATURES.md\n- {research_dir}/ARCHITECTURE.md\n- {research_dir}/PITFALLS.md\n</required_reading>'
     ), 'research-synthesizer spawn must read from {research_dir}, not bare .planning/research/*.md literals');
     assert.ok(content.includes('Write to: {research_dir}/SUMMARY.md'),
       'research-synthesizer spawn must write to {research_dir}/SUMMARY.md, not a bare literal');
 
     assert.ok(content.includes(
-      '<files_to_read>\n- {project_path} (Project context)\n- {requirements_path} (v1 Requirements)\n- {research_dir}/SUMMARY.md (Research findings - if exists)\n- {config_path} (Granularity and mode settings)\n</files_to_read>'
+      '<required_reading>\n- {project_path} (Project context)\n- {requirements_path} (v1 Requirements)\n- {research_dir}/SUMMARY.md (Research findings - if exists)\n- {config_path} (Granularity and mode settings)\n</required_reading>'
     ), 'roadmapper spawn must read from {project_path}/{requirements_path}/{research_dir}/{config_path}, not bare .planning literals');
 
     assert.ok(content.includes(
-      '<files_to_read>\n  - {roadmap_path} (Current roadmap to revise)\n  </files_to_read>'
+      '<required_reading>\n  - {roadmap_path} (Current roadmap to revise)\n  </required_reading>'
     ), 'roadmapper revision spawn must read {roadmap_path}, not a bare .planning/ROADMAP.md literal');
   });
 
@@ -2743,13 +3107,13 @@ describe('#2376 — init.* path fields resolve when process cwd differs from --c
     const content = fs.readFileSync(wfPath, 'utf8');
 
     assert.ok(content.includes(
-      '<files_to_read>\n- {research_dir}/STACK.md\n- {research_dir}/FEATURES.md\n- {research_dir}/ARCHITECTURE.md\n- {research_dir}/PITFALLS.md\n</files_to_read>'
+      '<required_reading>\n- {research_dir}/STACK.md\n- {research_dir}/FEATURES.md\n- {research_dir}/ARCHITECTURE.md\n- {research_dir}/PITFALLS.md\n</required_reading>'
     ), 'research-synthesizer spawn must read from {research_dir}, not bare .planning/research/*.md literals');
     assert.ok(content.includes('Write to: {research_dir}/SUMMARY.md'),
       'research-synthesizer spawn must write to {research_dir}/SUMMARY.md, not a bare literal');
 
     assert.ok(content.includes(
-      '<files_to_read>\n- {project_path}\n- {requirements_path}\n- {research_dir}/SUMMARY.md (if exists)\n- {config_path}\n- {milestones_path}\n</files_to_read>'
+      '<required_reading>\n- {project_path}\n- {requirements_path}\n- {research_dir}/SUMMARY.md (if exists)\n- {config_path}\n- {milestones_path}\n</required_reading>'
     ), 'roadmapper spawn must read from {project_path}/{requirements_path}/{research_dir}/{config_path}/{milestones_path}, not bare .planning literals');
   });
 
@@ -3206,6 +3570,25 @@ describe('init section manifest', () => {
       assert.deepStrictEqual(body.section_manifest.read, [
         'gsd-core/workflows/execute-phase/steps/partial-wave.md',
       ]);
+    });
+
+    test('#3511-class: regression-gate (state:has-prior-phases) ignores a misplaced VERIFICATION.md that belongs to another phase', (t) => {
+      const dir = createTempProject('gsd-3511-hasprior-');
+      t.after(() => cleanup(dir));
+      // Phase 01 is the one being executed.
+      seedPhase(dir, '01-widgets', {});
+      // Phase 02's directory holds ONLY a stray artifact whose filename
+      // token ("05-") belongs to phase 05, not to this directory's own
+      // phase (02) — it must not make phase 02 look like it has its own
+      // verification report.
+      seedPhase(dir, '02-other', { '05-VERIFICATION.md': '# Verification for phase 05' });
+
+      const body = parseOkJson(runExecutePhase(['1'], dir), 'stray-verification');
+
+      assert.ok(body.section_manifest, 'section_manifest must be present');
+      assert.ok(!body.section_manifest.included.includes('regression-gate'),
+        'regression-gate must not be included when no OTHER phase has its own verification');
+      assert.ok(body.section_manifest.excluded.includes('regression-gate'));
     });
   });
 
@@ -3990,5 +4373,182 @@ describe('init section manifest', () => {
         );
       }
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #3171 (Claim 3): the phase-start flow must not land a directory slug in
+// STATE.md's `current_phase_name`. When a phase directory already exists on
+// disk, `init execute-phase`'s disk-lookup path derived `phase_name` from the
+// directory-name remainder — itself an already-slugified value (`phase.add`
+// writes `${num}-${slug}` dirs) — so `phase_name` and `phase_slug` came out
+// byte-identical, and the execute-phase workflow forwarded that slug into
+// `state begin-phase --name`. The milestone-name half of #3171 was subsumed
+// by #3216 / PR #3226; these tests cover the remaining current_phase_name half.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#3171: init execute-phase emits the display name, not the directory slug', () => {
+  const DISPLAY_NAME = 'Loop-Termination and Baseline Correctness';
+  const PHASE_SLUG_DIR = '35-loop-termination-and-baseline-correctness';
+  const ROADMAP_3171 = [
+    '# Roadmap',
+    '',
+    `### Phase 35: ${DISPLAY_NAME}`,
+    '**Goal:** Fix loop termination',
+    '**Plans:** 1 plans',
+    '',
+  ].join('\n');
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.realpathSync(createFixture());
+    seedPhase(tmpDir, PHASE_SLUG_DIR, { '35-01-PLAN.md': '# Plan' });
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), ROADMAP_3171);
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('phase_name is the ROADMAP display name when the phase directory exists', () => {
+    const result = runGsdTools('init execute-phase 35 --raw', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_found, true, 'phase must be found on disk');
+    assert.ok(
+      typeof output.phase_dir === 'string' && output.phase_dir.includes(PHASE_SLUG_DIR),
+      `phase_dir must point at the on-disk directory; got ${JSON.stringify(output.phase_dir)}`,
+    );
+    assert.strictEqual(
+      output.phase_name,
+      DISPLAY_NAME,
+      `phase_name must be the ROADMAP display name, not the directory slug; got ${JSON.stringify(output.phase_name)}`,
+    );
+    assert.strictEqual(output.phase_slug, 'loop-termination-and-baseline-correctness');
+    assert.notStrictEqual(output.phase_name, output.phase_slug,
+      'phase_name must differ from phase_slug — a byte-identical pair is the #3171 defect signature');
+  });
+
+  test('the phase-start flow does not land a slug in current_phase_name', () => {
+    // 1. init execute-phase → the value the execute-phase workflow forwards to begin-phase.
+    const initResult = runGsdTools('init execute-phase 35 --raw', tmpDir);
+    assert.ok(initResult.success, `init execute-phase failed: ${initResult.error}`);
+    const initOutput = JSON.parse(initResult.output);
+    assert.strictEqual(initOutput.phase_name, DISPLAY_NAME);
+
+    // 2. Seed a STATE.md the transition module can rewrite (frontmatter + body).
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'current_phase: 34',
+        'current_phase_name: Prior Phase',
+        'status: planning',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Current Position',
+        '',
+        'Phase: 34 — Prior Phase',
+        'Plan: Not started',
+        'Status: Ready to execute',
+        '',
+      ].join('\n'),
+    );
+
+    // 3. The orchestrator wiring: feed init's phase_name into begin-phase --name.
+    const beginResult = runGsdTools(
+      ['state', 'begin-phase', '--phase', '35', '--name', initOutput.phase_name, '--plans', '1'],
+      tmpDir,
+    );
+    assert.ok(beginResult.success, `state begin-phase failed: ${beginResult.error}`);
+
+    // 4. current_phase_name in STATE.md must be the display name, never the slug.
+    const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    const fm = parseFrontmatter(stateContent);
+    assert.strictEqual(
+      fm.current_phase_name,
+      DISPLAY_NAME,
+      `current_phase_name must hold the display name, not a directory slug; got ${JSON.stringify(fm.current_phase_name)}`,
+    );
+    assert.ok(
+      !/^[a-z0-9]+(-[a-z0-9]+)+$/.test(String(fm.current_phase_name)),
+      `current_phase_name must not be slug-shaped; got ${JSON.stringify(fm.current_phase_name)}`,
+    );
+  });
+});
+
+// ─── #3581: init.progress frontier prefers roadmap order over stray artifacts ──
+describe('#3581: init.progress next_phase prefers the roadmap frontier', () => {
+  function writeProgressFixture(t, { strayNine, completeAll }) {
+    fs.writeFileSync(path.join(tmpDirOf(t), '.planning', 'ROADMAP.md'),
+      ['# Roadmap', '', '## Milestone v1.1.0', '', '### Phase 8: Payments', '**Goal:** g', '', '### Phase 9: Compatibility', '**Goal:** g', ''].join('\n'));
+    fs.writeFileSync(path.join(tmpDirOf(t), '.planning', 'STATE.md'), [
+      '---', 'gsd_state_version: 1.0', 'milestone: v1.1.0', 'milestone_name: Active',
+      'status: executing', 'current_phase: 8', 'progress:', '  total_phases: 9',
+      '  completed_phases: 7', '  percent: 78', '---', '', '# Project State', '',
+      '## Current Position', '', 'Phase: 8', 'Status: Executing',
+    ].join('\n'));
+    if (strayNine) {
+      const nine = path.join(tmpDirOf(t), '.planning', 'phases', '09-live-compatibility-diagnostics');
+      fs.mkdirSync(nine, { recursive: true });
+      fs.writeFileSync(path.join(nine, 'UAT.md'), '# UAT evidence\n');
+    }
+    if (completeAll) {
+      // both phases complete on disk (plans, summaries, PASSING verification —
+      // the #3168 disk-strict bar) + roadmap checkboxes
+      for (const dir of ['08-payments', '09-compatibility']) {
+        const d = path.join(tmpDirOf(t), '.planning', 'phases', dir);
+        fs.mkdirSync(d, { recursive: true });
+        fs.writeFileSync(path.join(d, 'PLAN.md'), '# p\n');
+        fs.writeFileSync(path.join(d, 'SUMMARY.md'), '# s\n');
+        fs.writeFileSync(path.join(d, `${dir.split('-')[0]}-VERIFICATION.md`), '---\nstatus: passed\n---\n\n# V\n');
+      }
+    }
+  }
+  // local alias so the helper reads the same as the suite's own fixtures
+  function tmpDirOf(t) { return t.tmpDir3581 ?? (t.tmpDir3581 = createTempProject('gsd-3581-')); }
+
+  test('#3581: init.progress prefers the roadmap frontier over a stray out-of-order artifact', (t) => {
+    writeProgressFixture(t, { strayNine: true });
+    t.after(() => cleanup(tmpDirOf(t)));
+    const result = runGsdTools(['init', 'progress', '--raw'], tmpDirOf(t));
+    assert.ok(result.success, `init progress failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.ok(out.next_phase, `next_phase present; got keys ${Object.keys(out)}`);
+    assert.equal(String(out.next_phase.number).replace(/^0+/, ''), '8',
+      `the roadmap's Phase 8 (pending, unscaffolded) must be the frontier — not the stray 09 artifact dir; got ${out.next_phase.number}`);
+    const eight = (out.phases || []).find((p) => String(p.number).replace(/^0+/, '') === '8');
+    assert.ok(eight, 'Phase 8 present in the phases array (roadmap-derived)');
+    assert.equal(eight.directory, null, 'Phase 8 has no directory (corroborating the stray-only-disk shape)');
+  });
+
+  test('#3581 (control): a pending roadmap-only phase outranks a later pending directory', (t) => {
+    writeProgressFixture(t, { strayNine: false });
+    // pure ordering property, no stray artifacts: roadmap-only pending 8 vs a
+    // pending 9 DIRECTORY (empty). The pinned mixed-statuses contract (an
+    // in-progress phase is currentPhase's lane, not nextPhase's) is untouched.
+    const nine = path.join(tmpDirOf(t), '.planning', 'phases', '09-compatibility');
+    fs.mkdirSync(nine, { recursive: true });
+    t.after(() => cleanup(tmpDirOf(t)));
+    const result = runGsdTools(['init', 'progress', '--raw'], tmpDirOf(t));
+    assert.ok(result.success, `init progress failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.equal(String(out.next_phase.number).replace(/^0+/, ''), '8',
+      'the unscaffolded roadmap Phase 8 is the frontier even against a legitimately-pending 9 directory');
+  });
+
+  test('#3581 (boundary): completed milestone yields no frontier', (t) => {
+    writeProgressFixture(t, { strayNine: false, completeAll: true });
+    fs.writeFileSync(path.join(tmpDirOf(t), '.planning', 'ROADMAP.md'),
+      ['# Roadmap', '', '## Milestone v1.1.0', '', '- [x] **Phase 8: Payments**', '- [x] **Phase 9: Compatibility**', ''].join('\n'));
+    t.after(() => cleanup(tmpDirOf(t)));
+    const result = runGsdTools(['init', 'progress', '--raw'], tmpDirOf(t));
+    assert.ok(result.success, `init progress failed: ${result.error}`);
+    const out = JSON.parse(result.output);
+    assert.equal(out.next_phase, null, 'all-complete milestone: no frontier (completion flow owns the answer)');
   });
 });

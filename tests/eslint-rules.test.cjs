@@ -9,11 +9,13 @@
  *   - local/no-elapsed-assertion
  *   - local/no-raw-rmsync-in-tests
  *   - local/no-adhoc-markdown-parsing
+ *   - local/require-subprocess-timeout
  */
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const { RuleTester } = require('eslint');
+const { RuleTester, ESLint } = require('eslint');
+const path = require('node:path');
 const fc = require('fast-check');
 
 const noSourceGrep = require('../eslint-rules/no-source-grep.cjs');
@@ -22,6 +24,8 @@ const noElapsedAssertion = require('../eslint-rules/no-elapsed-assertion.cjs');
 const noRawRmsyncInTests = require('../eslint-rules/no-raw-rmsync-in-tests.cjs');
 const noTautologicalAssert = require('../eslint-rules/no-tautological-assert.cjs');
 const noAdhocMarkdownParsing = require('../eslint-rules/no-adhoc-markdown-parsing.cjs');
+const noDuplicateFoldMarker = require('../eslint-rules/no-duplicate-fold-marker.cjs');
+const requireSubprocessTimeout = require('../eslint-rules/require-subprocess-timeout.cjs');
 
 const ruleTester = new RuleTester({
   languageOptions: {
@@ -99,17 +103,16 @@ describe('no-source-grep rule', () => {
     });
   });
 
-  test('valid: file with allow-test-rule annotation is exempt', () => {
+  test('valid: allow-test-rule annotation adjacent to the read exempts that site (#3508: site-scoped, not file-wide)', () => {
     ruleTester.run('no-source-grep', noSourceGrep, {
       valid: [
         {
-          // The allow annotation exempts the whole file
+          // The marker sits directly above the read+search it suppresses.
           code: `
-            // allow-test-rule: pending migration
             const fs = require('fs');
             const path = require('path');
-            const src = fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'io.cjs'), 'utf-8');
-            src.includes('someFunction');
+            // allow-test-rule: pending migration
+            const src = fs.readFileSync(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'io.cjs'), 'utf-8'); src.includes('someFunction');
           `,
           filename: 'tests/foo.test.cjs',
         },
@@ -130,6 +133,920 @@ describe('no-source-grep rule', () => {
         },
       ],
       invalid: [],
+    });
+  });
+});
+
+// ─── no-source-grep widening (#3502 / Phase 3 of #3464) ─────────────────────
+//
+// One RuleTester case per row of .gsd/phase/chore-3464-widen-source-grep/
+// 50-test-matrix.md. Row numbers in test names refer to that matrix.
+
+describe('no-source-grep rule — widening (#3502)', () => {
+  test('row 1: baseline literal .cjs read + .includes() (happy regression)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            src.includes('x');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 2: .cts source read + .match() (gap B)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const ROOT = '/repo';
+            const src = fs.readFileSync(path.join(ROOT, 'src', 'verification.cts'), 'utf-8');
+            src.match(/x/);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 3: .mts source read + .match() (gap B)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const ROOT = '/repo';
+            const src = fs.readFileSync(path.join(ROOT, 'src', 'x.mts'), 'utf-8');
+            src.match(/x/);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 4: .mjs source read + .match() (gap B)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const ROOT = '/repo';
+            const src = fs.readFileSync(path.join(ROOT, 'src', 'x.mjs'), 'utf-8');
+            src.match(/x/);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 5: .matchAll() on a tracked read (gap A)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            src.matchAll(/x/g);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 6: regex.test(tracked) (gap A, argument-side detection)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const re = /x/;
+            re.test(src);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 7: /lit/.test(tracked) (gap A, argument-side detection)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            /x/.test(src);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 8: .split() / .replace() probes (gap A)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            src.split('\\n');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            src.replace(/x/, '');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 9: two-hop derived variable (gap C)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            function strip(x) { return x; }
+            const a = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const b = strip(a);
+            b.match(/x/);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 10: three-hop derived variable — at the depth bound (gap C, boundary)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const a = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const b = a;
+            const c = b;
+            c.includes('x');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 11: hop chain beyond the configured depth is a documented limit (gap C, boundary)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const a = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const b = a;
+            const c = b;
+            const d = c;
+            d.includes('x');
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 12: shadowed same-name param — false-positive guard (gap D)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const fn = (src) => src.replace(/x/, 'y');
+            fn('unrelated');
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 13: same name, sibling block scopes — false-positive guard (gap D)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            {
+              const c = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            }
+            {
+              const c = 'x';
+              c.includes('y');
+            }
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 14: .md literal read + .includes() (negative space, unchanged)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const content = fs.readFileSync(path.join(__dirname, '..', 'workflows', 'a.md'), 'utf-8');
+            content.includes('x');
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 15: .json literal read + .match() (negative space, unchanged)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const content = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.json'), 'utf-8');
+            content.match(/x/);
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 16: dynamic path variable → .includes() — deliberately not flagged (rejected widening)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            function readIt(p) {
+              const content = fs.readFileSync(p, 'utf-8');
+              content.includes('x');
+            }
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 17: tracked read, no text search (negative space, unchanged)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const data = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'));
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 18: require() of a .cjs (negative space, unchanged)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const mod = require('../lib/a.cjs');
+            mod.someMethod();
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 19: a marker adjacent to the read+search suppresses it (#3508: site-scoped, not file-wide)', () => {
+    // The raw marker text is assembled via string concatenation so this
+    // FILE's own bytes never contain a contiguous "allow" + "-test-rule:"
+    // token (scripts/lint-allow-test-rule-refs.cjs does a raw whole-file
+    // substring scan). At RuleTester-run time the concatenation resolves to
+    // a real single-line comment, which the rule under test honors normally.
+    // The marker sits directly above the read+search (site-scoped, #3508),
+    // not merely somewhere earlier in the file (the pre-#3508 file-wide form
+    // this row originally exercised).
+    const marker = '// ' + 'allow' + '-test-rule: split marker for row 19, see #3502';
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      marker,
+      "const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); src.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('row 20: marker text inside a string literal (not a comment) does not suppress', () => {
+    // Same split-marker technique as row 19, applied to a STRING literal
+    // (not a comment) — this row exists to prove the rule's suppression
+    // check only honors an actual comment, per the #3465 discriminator.
+    const stringMarkerLine = "const note = '" + 'allow' + "-test-rule: this is just data, not a directive';";
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      stringMarkerLine,
+      "const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');",
+      'src.includes(note);',
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+});
+
+// ─── no-source-grep site-scoped suppression (#3508 / Phase 4 of #3464) ──────
+//
+// One RuleTester case per row of
+// .gsd/phase/chore-3464-site-scoped-suppression/50-test-matrix.md, rows 1-12.
+// Row 4 is the one that actually proves the defect is closed: file-wide
+// amnesty is gone, so a marker adjacent to one violation must NOT reach an
+// unrelated violation later in the same file. Rows 3 and 6 are the
+// compatibility guards (prose between marker and read; marker + zero
+// violations) that must keep working or this would break the 277
+// marker-bearing files that rely on file-level markers being a documented
+// no-op when there's nothing to suppress.
+//
+// Marker text is always assembled via string concatenation (`AT` below) so
+// THIS file's raw bytes never contain a contiguous "allow" + "-test-rule:"
+// token — same fixture-host discipline as the row 19/20 cases above
+// (scripts/lint-allow-test-rule-refs.cjs does a raw whole-file substring
+// scan and must not newly count this file).
+//
+// NOTE: row 9's fixture length is tied to MAX_MARKER_LOOKAHEAD_LINES (8) in
+// eslint-rules/no-source-grep.cjs — if that constant changes, this fixture's
+// filler-line count must change with it.
+// Row 12 ("marker with no #NNN") is explicitly a script-level check, not a
+// RuleTester case (test-matrix.md marks it "(script, not RuleTester)") —
+// it's covered by `node scripts/lint-allow-test-rule-refs.cjs` instead.
+
+describe('no-source-grep rule — site-scoped suppression (#3508)', () => {
+  const AT = 'allow' + '-test-rule:';
+
+  test('row 1: marker directly above the read+search is suppressed (site-scoped)', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('row 2: marker trailing on the same line as the search is suppressed', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x'); // ${AT} reason (#1)`,
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('row 3: marker with prose lines between it and the read is still suppressed (repo real-style guard)', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      '// continuation prose line one explaining the reason',
+      '// continuation prose line two continuing the explanation',
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('row 4: marker adjacent to V1 does NOT reach an unrelated V2 later in the file (the defect this phase closes)', () => {
+    const filler = Array.from({ length: 40 }, (_, i) => `// unrelated filler line ${i + 1}, pushing V2 well past the lookahead bound`);
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason for V1 (#1)`,
+      "const s1 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s1.includes('x');",
+      ...filler,
+      "const s2 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'b.cjs'), 'utf-8'); s2.includes('y');",
+    ];
+    const code = lines.join('\n');
+    const v2Line = lines.length; // s2's line is the last line of the fixture
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          // Exactly ONE error, reported at V2 -- V1 stays suppressed, and the
+          // marker's reach does NOT extend to the unrelated V2 40 lines later.
+          errors: [{ messageId: 'noSourceGrep', line: v2Line }],
+        },
+      ],
+    });
+  });
+
+  test('row 5: marker far above a violation with no marker text of its own is not suppressed', () => {
+    const filler = Array.from({ length: 100 }, (_, i) => `// unrelated filler line ${i + 1}`);
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      ...filler,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x');",
+    ];
+    const code = lines.join('\n');
+    const violationLine = lines.length;
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep', line: violationLine }],
+        },
+      ],
+    });
+  });
+
+  test('row 6: file with a marker and zero violations stays green (the 277 inert-marker files compatibility guard)', () => {
+    const code = [
+      `// ${AT} reason (#1)`,
+      "const fs = require('fs');",
+      "const path = require('path');",
+      "const content = fs.readFileSync(path.join(__dirname, '..', 'docs', 'readme.md'), 'utf-8');",
+      "content.includes('hello');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('row 7: no marker, one violation is flagged (baseline unchanged)', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 8: two violations, two adjacent markers -- per-site marking works', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason for V1 (#1)`,
+      "const s1 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s1.includes('x');",
+      `// ${AT} reason for V2 (#1)`,
+      "const s2 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'b.cjs'), 'utf-8'); s2.includes('y');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('row 9: marker beyond the lookahead bound does not suppress (the bound is where it claims)', () => {
+    // MAX_MARKER_LOOKAHEAD_LINES is 8 in eslint-rules/no-source-grep.cjs.
+    // 9 filler comment lines between the marker and the read pushes the gap
+    // to 10 lines (> 8), just past the bound.
+    const filler = Array.from({ length: 9 }, (_, i) => `// filler comment line ${i + 1}`);
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      ...filler,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x');",
+    ];
+    const code = lines.join('\n');
+    const violationLine = lines.length;
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep', line: violationLine }],
+        },
+      ],
+    });
+  });
+
+  test('row 10: marker text inside a fixture string (not a real comment) is not a directive', () => {
+    // The marker-looking text lives inside a STRING LITERAL in the linted
+    // fixture, never as a `//` comment -- ESLint's comment AST (what the
+    // rule inspects) never sees string-literal contents, so this must not
+    // suppress the real, unmarked violation below it (the #3465 lesson).
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `const note = 'not a directive: ${AT} fake reason';`,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes(note);",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('row 11: marker citing #NNN on the same line still suppresses (citation contract unaffected)', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason for this read (#3508)`,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8'); s.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  // ─── read-site suppression (adversarial-review fix, ITEM 1) ────────────
+  //
+  // A violation is fundamentally about a read+search PAIR. Before this fix,
+  // a marker adjacent to the readFileSync() call (the intuitive annotation
+  // spot) failed to suppress once the search happened on a later line,
+  // because the readFileSync assignment line itself is "real code" and
+  // broke comment-purity on the marker->search lookahead path. The rule now
+  // also checks a marker's site-scoping against the ORIGINATING read call's
+  // own line, independent of the marker->search path.
+
+  test('valid: marker directly above the read, search on the very next (non-comment) line', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      "const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf8');",
+      "src.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('valid: marker directly above the read, search several comment-pure lines later (read-line real code no longer breaks the marker->search path)', () => {
+    const code = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      "const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf8');",
+      '// comment-pure line one',
+      '// comment-pure line two',
+      '// comment-pure line three',
+      "src.includes('x');",
+    ].join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('invalid: marker above the read suppresses that pair, but an unrelated tracked variable searched further down is still flagged', () => {
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason for V1 (#1)`,
+      "const s1 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf8');",
+      "s1.includes('x');",
+      "const s2 = fs.readFileSync(path.join(__dirname, '..', 'lib', 'b.cjs'), 'utf8');",
+      "s2.includes('y');",
+    ];
+    const code = lines.join('\n');
+    const v2Line = lines.length; // s2.includes(...) is the last line
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep', line: v2Line }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: marker far from both the read and the search is still flagged', () => {
+    const filler = Array.from({ length: 20 }, (_, i) => `// unrelated filler line ${i + 1}`);
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      ...filler,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf8');",
+      "s.includes('x');",
+    ];
+    const code = lines.join('\n');
+    const violationLine = lines.length; // s.includes(...) is the last line
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep', line: violationLine }],
+        },
+      ],
+    });
+  });
+
+  test('boundary: marker exactly MAX_MARKER_LOOKAHEAD_LINES (8) above the read is suppressed via the read-site path', () => {
+    // 7 comment-pure filler lines between the marker and the read puts the
+    // read exactly 8 lines below the marker -- the inclusive boundary.
+    const filler = Array.from({ length: 7 }, (_, i) => `// filler comment line ${i + 1}`);
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      ...filler,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf8');",
+      "s.includes('x');",
+    ];
+    const code = lines.join('\n');
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [{ code, filename: 'tests/foo.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('boundary: marker one line beyond MAX_MARKER_LOOKAHEAD_LINES (9) above the read is not suppressed', () => {
+    // 8 comment-pure filler lines between the marker and the read puts the
+    // read 9 lines below the marker -- one past the inclusive boundary.
+    const filler = Array.from({ length: 8 }, (_, i) => `// filler comment line ${i + 1}`);
+    const lines = [
+      "const fs = require('fs');",
+      "const path = require('path');",
+      `// ${AT} reason (#1)`,
+      ...filler,
+      "const s = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf8');",
+      "s.includes('x');",
+    ];
+    const code = lines.join('\n');
+    const violationLine = lines.length; // s.includes(...) is the last line
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep', line: violationLine }],
+        },
+      ],
+    });
+  });
+});
+
+// ─── no-source-grep hop-propagation value-shape (adversarial-review fix) ────
+//
+// minTrackedHop() used to walk EVERY Identifier under a derivation's RHS
+// and treat any bare reference to a tracked variable as propagating,
+// regardless of whether the derived VALUE could still carry text (e.g.
+// `.length`). These rows cover the value-shape gate that replaced that
+// blind walk: propagate only through derivations that plausibly still
+// carry the source file's text; do not propagate through scalar-producing
+// shapes (member access, numeric/boolean methods, comparisons, Number()
+// et al).
+
+describe('no-source-grep rule — hop-propagation value-shape (adversarial-review fix)', () => {
+  test('valid: .length derivation does not propagate (reported false-positive repro)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const len = raw.length;
+            if (/^\\d+$/.test(len)) {}
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('invalid: numeric-returning method derivation does not cascade to a second error', () => {
+    // raw.indexOf('x') is itself already flagged directly (indexOf is one
+    // of the TEXT_METHODS this rule flags on a tracked receiver, unrelated
+    // to hop propagation). The important assertion here is that there is
+    // exactly ONE error, not two: the numeric result of .indexOf() must
+    // NOT stay tracked, so String(n).includes('1') is not a second finding.
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const n = raw.indexOf('x');
+            String(n).includes('1');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: boolean-returning method derivation does not cascade to a second error', () => {
+    // Same shape as above with a boolean-returning method: raw.includes('x')
+    // is itself already flagged directly. The boolean result must NOT stay
+    // tracked, so String(ok).includes('true') is not a second finding.
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const ok = raw.includes('x');
+            String(ok).includes('true');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('valid: comparison of a tracked derivation does not propagate', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const same = raw.length === 0;
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('invalid: string-returning method derivation still propagates and is caught', () => {
+    // raw.replace(...) is flagged directly (replace is a TEXT_METHOD, same
+    // as the indexOf/includes rows above) AND the string-returning result
+    // (b) correctly stays tracked, so b.includes('y') is a second, distinct
+    // finding. Two errors total, both real.
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const b = raw.replace(/x/, '');
+            b.includes('y');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }, { messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: template-literal derivation still propagates and is caught', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            const b = \`\${raw}\`;
+            b.match(/y/);
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: direct .includes() on the tracked source read is unchanged (no regression)', () => {
+    ruleTester.run('no-source-grep', noSourceGrep, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const fs = require('fs');
+            const path = require('path');
+            const raw = fs.readFileSync(path.join(__dirname, '..', 'lib', 'a.cjs'), 'utf-8');
+            raw.includes('x');
+          `,
+          filename: 'tests/foo.test.cjs',
+          errors: [{ messageId: 'noSourceGrep' }],
+        },
+      ],
     });
   });
 });
@@ -1587,5 +2504,518 @@ describe('no-adhoc-markdown-parsing rule', () => {
       }),
       { numRuns: 200, seed: 2880 },
     );
+  });
+});
+
+// ─── no-duplicate-fold-marker ────────────────────────────────────────
+
+describe('no-duplicate-fold-marker rule', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+
+  /** Build a source string whose line numbers are the array indices + 1. */
+  const src = (...lines) => lines.join('\n');
+
+  const FOLD_A_B1 = '__foldDescribe("folded:a (consolidation epic #1969 B1 #1970)", () => {});';
+  const FOLD_A_B5 = '__foldDescribe("folded:a (consolidation epic #1969 B5 #1975)", () => {});';
+  const FOLD_B_B1 = '__foldDescribe("folded:b (consolidation epic #1969 B1 #1970)", () => {});';
+
+  test('rule module exports a create function', () => {
+    assert.strictEqual(typeof noDuplicateFoldMarker.create, 'function');
+  });
+
+  // ── Row 1: the #3271 regression, asserted against the real tree ────────────
+  //
+  // The unit cases below prove the rule can fire. THIS proves the tree it
+  // guards is actually clean — it is the assertion that was red before the 25
+  // duplicated regions were deleted (18 in install.test.cjs, 5 in
+  // install-minimal-hooks.test.cjs, 2 in install-write-confinement.test.cjs).
+  //
+  // Driven through the real ESLint API over the production glob rather than a
+  // hand-rolled scan of file text: a readFileSync + .match() scan of a .cjs
+  // path is exactly the shape `local/no-source-grep` bans in tests/**.
+  test('regression #3271: the real tests/ tree has no duplicate fold markers', async () => {
+    const eslint = new ESLint({
+      cwd: REPO_ROOT,
+      overrideConfigFile: true,
+      overrideConfig: {
+        files: ['tests/**/*.cjs'],
+        plugins: { local: { rules: { 'no-duplicate-fold-marker': noDuplicateFoldMarker } } },
+        languageOptions: { ecmaVersion: 2022, sourceType: 'commonjs' },
+        rules: { 'local/no-duplicate-fold-marker': 'error' },
+      },
+    });
+
+    const results = await eslint.lintFiles(['tests/**/*.cjs']);
+
+    // Filter to THIS rule: an ad-hoc config also surfaces "rule not found" for
+    // inline eslint-disable directives naming rules it does not register.
+    const violations = results.flatMap((r) =>
+      r.messages
+        .filter((m) => m.ruleId === 'local/no-duplicate-fold-marker')
+        .map((m) => `${path.relative(REPO_ROOT, r.filePath)}:${m.line} ${m.message}`),
+    );
+
+    // Non-vacuous: if the glob silently matched nothing, the empty result below
+    // would be meaningless.
+    assert.ok(results.length > 100, `expected the tests/ glob to match many files, got ${results.length}`);
+    assert.deepStrictEqual(violations, [], `duplicate folded suites found:\n${violations.join('\n')}`);
+  });
+
+  test('the rule is registered at error for tests/**/*.cjs in the real config', async () => {
+    const eslint = new ESLint({ cwd: REPO_ROOT });
+    const config = await eslint.calculateConfigForFile(
+      path.join(REPO_ROOT, 'tests', 'install.test.cjs'),
+    );
+    assert.deepStrictEqual(config.rules['local/no-duplicate-fold-marker'], [2]);
+  });
+
+  // ── Occurrence-count boundary: 1 (clean) / 2 (one report) / 3 (two) ────────
+
+  test('valid: a single folded marker in a file', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [{ code: src(FOLD_A_B1), filename: 'tests/host.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('invalid: the same folded marker twice in one file', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [],
+      invalid: [
+        {
+          code: src(FOLD_A_B1, FOLD_A_B1),
+          filename: 'tests/host.test.cjs',
+          errors: [
+            { messageId: 'duplicateFoldMarker', data: { marker: 'a', firstLine: '1' }, line: 2 },
+          ],
+        },
+      ],
+    });
+  });
+
+  test('invalid: three occurrences report the 2nd and 3rd', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [],
+      invalid: [
+        {
+          code: src(FOLD_A_B1, FOLD_A_B1, FOLD_A_B1),
+          filename: 'tests/host.test.cjs',
+          errors: [
+            { messageId: 'duplicateFoldMarker', data: { marker: 'a', firstLine: '1' }, line: 2 },
+            { messageId: 'duplicateFoldMarker', data: { marker: 'a', firstLine: '1' }, line: 3 },
+          ],
+        },
+      ],
+    });
+  });
+
+  test('valid: two distinct folded markers', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [{ code: src(FOLD_A_B1, FOLD_B_B1), filename: 'tests/host.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  // ── Negative space (10-diagnosis.md) ──────────────────────────────────────
+
+  // #3271's own reproduction regex (`folded:[a-z0-9-]*`) stops at `.` and
+  // collides these two genuinely distinct suites, which coexist in
+  // tests/model-resolver.test.cjs. A guard written to that key would red the
+  // build on `next` forever.
+  test('valid: dot-suffixed marker is distinct from its prefix (model-resolver #3271 false positive)', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            '__foldDescribe("folded:feat-443-effort-fast-mode.integration (consolidation epic #1969 B8 #1977)", () => {});',
+            '__foldDescribe("folded:feat-443-effort-fast-mode (consolidation epic #1969 B8 #1977)", () => {});',
+          ),
+          filename: 'tests/model-resolver.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  // tests/review-default-reviewers-workflow.test.cjs reuses the fold alias for
+  // an ordinary describe block. Those carry no uniqueness obligation.
+  test('valid: __foldDescribe titles without a folded: prefix are ignored', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            "__foldDescribe('#1936: OpenCode reviewer empty-output hardening', () => {});",
+            "__foldDescribe('#1936: OpenCode reviewer empty-output hardening', () => {});",
+          ),
+          filename: 'tests/host.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: a file with no fold markers', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [{ code: src('describe("ordinary", () => {});'), filename: 'tests/host.test.cjs' }],
+      invalid: [],
+    });
+  });
+
+  test('valid: plain describe with a folded: title is not the fold convention', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            'describe("folded:a (consolidation epic #1969 B1 #1970)", () => {});',
+            'describe("folded:a (consolidation epic #1969 B1 #1970)", () => {});',
+          ),
+          filename: 'tests/host.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  // Documented non-goal, pinned so the behavior is deliberate rather than
+  // accidental: the rule keys on the callee identifier being literally
+  // __foldDescribe. Every one of the 365 fold sites calls it directly.
+  test('valid: a call through a further alias of the fold alias is not tracked', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            'const d = __foldDescribe;',
+            'd("folded:a (consolidation epic #1969 B1 #1970)", () => {});',
+            'd("folded:a (consolidation epic #1969 B1 #1970)", () => {});',
+          ),
+          filename: 'tests/host.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: a member-expression call named __foldDescribe is not the fold alias', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            'helpers.__foldDescribe("folded:a (consolidation epic #1969 B1 #1970)", () => {});',
+            'helpers.__foldDescribe("folded:a (consolidation epic #1969 B1 #1970)", () => {});',
+          ),
+          filename: 'tests/host.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  // The same marker in two different HOST files is not intra-file duplication.
+  // RuleTester lints each entry as its own file, so this also proves the
+  // per-file state is rebuilt rather than shared across files.
+  test('valid: the same marker in two different files is not an intra-file duplicate', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        { code: src(FOLD_A_B1), filename: 'tests/host-one.test.cjs' },
+        { code: src(FOLD_A_B1), filename: 'tests/host-two.test.cjs' },
+      ],
+      invalid: [],
+    });
+  });
+
+  // ── Ordering / identity ───────────────────────────────────────────────────
+
+  test('invalid: interleaved duplicates each report against their own first occurrence', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [],
+      invalid: [
+        {
+          code: src(FOLD_A_B1, FOLD_B_B1, FOLD_A_B1, FOLD_B_B1),
+          filename: 'tests/host.test.cjs',
+          errors: [
+            { messageId: 'duplicateFoldMarker', data: { marker: 'a', firstLine: '1' }, line: 3 },
+            { messageId: 'duplicateFoldMarker', data: { marker: 'b', firstLine: '2' }, line: 4 },
+          ],
+        },
+      ],
+    });
+  });
+
+  // The batch label is provenance, not identity — a re-fold under a different
+  // batch must not evade the guard. This is the exact shape of #3271: #1975
+  // re-applied #1970's blocks.
+  test('invalid: a duplicate marker is reported even when the batch label differs', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [],
+      invalid: [
+        {
+          code: src(FOLD_A_B1, FOLD_A_B5),
+          filename: 'tests/host.test.cjs',
+          errors: [
+            { messageId: 'duplicateFoldMarker', data: { marker: 'a', firstLine: '1' }, line: 2 },
+          ],
+        },
+      ],
+    });
+  });
+
+  // ── Title shapes that cannot be resolved statically ───────────────────────
+
+  test('invalid: substitution-free template-literal fold titles are resolved', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [],
+      invalid: [
+        {
+          code: src(
+            '__foldDescribe(`folded:a (consolidation epic #1969 B1 #1970)`, () => {});',
+            '__foldDescribe(`folded:a (consolidation epic #1969 B1 #1970)`, () => {});',
+          ),
+          filename: 'tests/host.test.cjs',
+          errors: [
+            { messageId: 'duplicateFoldMarker', data: { marker: 'a', firstLine: '1' }, line: 2 },
+          ],
+        },
+      ],
+    });
+  });
+
+  test('valid: non-literal fold titles are skipped without throwing', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            'const name = "folded:a";',
+            'const x = "a";',
+            '__foldDescribe(name, () => {});',
+            '__foldDescribe(name, () => {});',
+            '__foldDescribe(`folded:${x} (epic)`, () => {});',
+            '__foldDescribe(`folded:${x} (epic)`, () => {});',
+            '__foldDescribe(42, () => {});',
+            '__foldDescribe(42, () => {});',
+          ),
+          filename: 'tests/host.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: __foldDescribe with no arguments does not throw', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        { code: src('__foldDescribe();', '__foldDescribe();'), filename: 'tests/host.test.cjs' },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: an empty marker after the folded: prefix is not tracked', () => {
+    ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+      valid: [
+        {
+          code: src(
+            '__foldDescribe("folded: (consolidation epic #1969 B1 #1970)", () => {});',
+            '__foldDescribe("folded: (consolidation epic #1969 B1 #1970)", () => {});',
+          ),
+          filename: 'tests/host.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  // Property: marker identity is the whole whitespace-delimited token.
+  //
+  // This is the generative form of the #3271 correctness question. An
+  // implementation that keyed on the issue's `[a-z0-9-]*` slice would truncate
+  // at `.` and pass arm 1 while failing arm 2 on any pair like
+  // (`a.integration`, `a`) — which is exactly the tests/model-resolver.test.cjs
+  // false positive. The alphabet deliberately includes `.` and `_` so those
+  // pairs are generated, not hoped for.
+  //
+  // `fc` is already imported at the top of this file and used by the
+  // no-adhoc-markdown-parsing suite; this follows the same
+  // fc.property-driving-ruleTester shape.
+  test('property: a marker is identified by its whole token, so distinct markers never collide', () => {
+    const markerArb = fc
+      .array(fc.constantFrom('a', 'z', 'q', '0', '9', '-', '.', '_'), { minLength: 1, maxLength: 12 })
+      .map((chars) => chars.join(''));
+
+    const fold = (marker) =>
+      `__foldDescribe("folded:${marker} (consolidation epic #1969 B1 #1970)", () => {});`;
+
+    // Arm 1: the SAME marker twice is always reported exactly once, against
+    // the first occurrence.
+    fc.assert(
+      fc.property(markerArb, (marker) => {
+        ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+          valid: [],
+          invalid: [
+            {
+              code: src(fold(marker), fold(marker)),
+              filename: 'tests/host.test.cjs',
+              errors: [
+                { messageId: 'duplicateFoldMarker', data: { marker, firstLine: '1' }, line: 2 },
+              ],
+            },
+          ],
+        });
+      }),
+      { numRuns: 150, seed: 3271 },
+    );
+
+    // Arm 2: two DISTINCT markers never collide, however they differ.
+    fc.assert(
+      fc.property(markerArb, markerArb, (a, b) => {
+        fc.pre(a !== b);
+        ruleTester.run('no-duplicate-fold-marker', noDuplicateFoldMarker, {
+          valid: [{ code: src(fold(a), fold(b)), filename: 'tests/host.test.cjs' }],
+          invalid: [],
+        });
+      }),
+      { numRuns: 150, seed: 3271 },
+    );
+  });
+});
+
+// ─── require-subprocess-timeout ────────────────────────────────────
+
+describe('require-subprocess-timeout rule', () => {
+  test('rule module exports a create function', () => {
+    assert.strictEqual(typeof requireSubprocessTimeout.create, 'function');
+  });
+
+  // ── INVALID cases (must error) ────────────────────────────────────────────
+
+  test('invalid: execFileSync("git", args, { cwd }) — object-literal options with no timeout key', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const { execFileSync } = require('node:child_process');
+            const args = ['status'];
+            const cwd = '/repo';
+            execFileSync('git', args, { cwd });
+          `,
+          filename: 'src/some-module.cts',
+          errors: [{ messageId: 'requireSubprocessTimeout' }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: execSync("npm ci", { encoding: "utf8" }) — object-literal options with no timeout key', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const { execSync } = require('node:child_process');
+            execSync('npm ci', { encoding: 'utf8' });
+          `,
+          filename: 'src/some-module.cts',
+          errors: [{ messageId: 'requireSubprocessTimeout' }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: spawnSync with a dotted childProcess.spawnSync callee and no timeout', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const childProcess = require('node:child_process');
+            childProcess.spawnSync('git', ['log'], { cwd: '/repo', encoding: 'utf-8' });
+          `,
+          filename: 'src/some-module.cts',
+          errors: [{ messageId: 'requireSubprocessTimeout' }],
+        },
+      ],
+    });
+  });
+
+  test('invalid: execFileSync with NO options argument at all — categorically no timeout', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [],
+      invalid: [
+        {
+          code: `
+            const { execFileSync } = require('node:child_process');
+            execFileSync('git', ['status']);
+          `,
+          filename: 'src/some-module.cts',
+          errors: [{ messageId: 'requireSubprocessTimeout' }],
+        },
+      ],
+    });
+  });
+
+  // ── VALID cases (must NOT error) ──────────────────────────────────────────
+
+  test('valid: execFileSync("git", args, { cwd, timeout: 30000 }) — timeout key present', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [
+        {
+          code: `
+            const { execFileSync } = require('node:child_process');
+            const args = ['status'];
+            const cwd = '/repo';
+            execFileSync('git', args, { cwd, timeout: 30000 });
+          `,
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: options as a pre-built identifier — execFileSync("git", args, opts) is not traced', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [
+        {
+          code: `
+            const { execFileSync } = require('node:child_process');
+            const args = ['status'];
+            const opts = { cwd: '/repo', timeout: 30000 };
+            execFileSync('git', args, opts);
+          `,
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: same unbounded call under a tests/** filename — rule is inert outside src/*.cts', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [
+        {
+          code: `
+            const { execFileSync } = require('node:child_process');
+            execFileSync('git', ['status'], { cwd: '/repo' });
+          `,
+          filename: 'tests/foo.test.cjs',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: allow-unbounded-subprocess suppression comment on the call line', () => {
+    ruleTester.run('require-subprocess-timeout', requireSubprocessTimeout, {
+      valid: [
+        {
+          code: `
+            const { execFileSync } = require('node:child_process');
+            execFileSync('git', ['status'], { cwd: '/repo' }); // allow-unbounded-subprocess: bounded by caller's own watchdog
+          `,
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
   });
 });

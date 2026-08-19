@@ -23,6 +23,14 @@ const { throwIfFailed } = require('./helpers/git-fixture.cjs');
 const { cleanup } = require('./helpers.cjs');
 const fc = require('fast-check');
 const { CLAUDE_AGENT_ALIASES } = require('../gsd-core/bin/lib/model-resolver.cjs');
+const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
+// #3241 — the intended new home for CLAUDE_AGENT_ALIASES + isAnthropicFlavoredModel
+// (see .gsd/phase/feat-3241-codex-omit-model-by-default/40-design.md "The seam
+// decision"). Neither export exists on model-catalog.cjs yet; requiring the
+// module does not throw (it just has no such keys today), but calling
+// isAnthropicFlavoredModel does — see the new describe block below.
+const modelCatalog = require('../gsd-core/bin/lib/model-catalog.cjs');
+const modelResolver = require('../gsd-core/bin/lib/model-resolver.cjs');
 
 // #2153 follow-up: ensure hooks/dist/ exists before any install integration
 // test runs. The Codex install path copies hook files from hooks/dist/, which
@@ -51,6 +59,7 @@ const {
   convertClaudeAgentToCodexAgent,
   convertClaudeCommandToCodexSkill,
   generateCodexAgentToml,
+  _resetCodexWarningDedupeForTests,
   cleanupCodexSkillMetadataSidecars,
   generateCodexConfigBlock,
   stripGsdFromCodexConfig,
@@ -60,10 +69,10 @@ const {
   GSD_CODEX_MARKER,
   CODEX_AGENT_SANDBOX,
   parseTomlToObject,
-  resolveNodeRunner,
   validateCodexConfigSchema,
 } = require('../bin/install.js');
 
+const { resolveNodeRunner } = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 const { resolveInstallPlan } = require('../gsd-core/bin/lib/runtime-config-adapter-registry.cjs');
 
 function runCodexInstall(codexHome, cwd = path.join(__dirname, '..')) {
@@ -511,13 +520,17 @@ tools: Read, Grep, Glob
     );
   });
 
-  test('emits reasoning effort when runtime resolver pins Codex model (#838)', () => {
+  test('omits model and reasoning effort when only the runtime resolver would have pinned one (#838, #3241)', () => {
+    // #3241 flips this test: the runtime-resolver auto-embed block (D1) was
+    // removed, so a resolver alone (no explicit model_overrides) no longer
+    // pins a model at install time, and #838's model/effort coupling means
+    // neither line survives.
     const runtimeResolver = { resolve: () => ({ model: 'gpt-5.5' }) };
     const result = generateCodexAgentToml('gsd-executor', sampleAgent, null, runtimeResolver);
-    assert.ok(result.includes('model = "gpt-5.5"'), 'runtime resolver must pin model');
+    assert.ok(!result.includes('model = "gpt-5.5"'), 'runtime resolver alone must not pin model (#3241)');
     assert.ok(
-      result.includes('model_reasoning_effort ='),
-      'reasoning effort is safe to emit when runtime resolver pins model'
+      !result.includes('model_reasoning_effort ='),
+      'reasoning effort must not survive an omitted resolver model (#838 coupling)'
     );
   });
 
@@ -562,10 +575,13 @@ tools: Read, Grep, Glob
     assert.ok(!result.includes('model ='), 'unmappable Anthropic override falls through to Codex default (no model pinned)');
   });
 
-  test('a dropped claude-* override falls through to the runtime resolver (#2310)', () => {
+  test('a dropped claude-* override no longer falls through to the runtime resolver (#2310, #3241)', () => {
+    // #3241 (D1) removed the runtime-resolver fallback embed entirely, so a
+    // dropped alias/claude-* override now has nothing left to fall through to
+    // — it is simply omitted, same as the claude id never leaking.
     const runtimeResolver = { runtime: 'codex', resolve: () => ({ model: 'gpt-5.6-terra' }) };
     const result = generateCodexAgentToml('gsd-executor', sampleAgent, { 'gsd-executor': 'claude-opus-4-8' }, runtimeResolver);
-    assert.ok(result.includes('model = "gpt-5.6-terra"'), 'falls through to the runtime-resolved Codex model');
+    assert.ok(!result.includes('model = "gpt-5.6-terra"'), 'resolver fallback no longer fires (#3241 D1)');
     assert.ok(!result.includes('claude-'), 'claude id must not leak even with a resolver present');
   });
 
@@ -626,6 +642,212 @@ tools: Read, Grep, Glob
       if (!m) return true; // no model pinned is always safe
       return !/claude/i.test(m) && !/^model = "(opus|sonnet|haiku|fable)"$/.test(m);
     }), { numRuns: 400 });
+  });
+
+  // ─── #3241: omit the Codex per-agent model by default (resolver-only path) ────
+  // Phase 1 removes the runtime-resolver auto-embed. These tests drive the
+  // shipping default shape — runtime set + model_profile:"balanced" (mocked
+  // here as a resolver object, matching the existing #2517/#838 tests above,
+  // e.g. L514-522) — with NO model_overrides, and assert the model line (and
+  // its coupled model_reasoning_effort, #838) are omitted.
+
+  test('omits model and model_reasoning_effort when only the runtime resolver would have supplied one (#3241)', () => {
+    // RED (pre-fix): today this resolver-only path still embeds the tier
+    // model (see L514-522's "runtime resolver pins Codex model" test, which
+    // asserts the opposite of this on purpose and is left untouched per the
+    // Phase 1 rollout plan). Both assertions below fail against the current
+    // tree: `model = "gpt-5.6-sol"` and `model_reasoning_effort = "high"`
+    // are both present in `result` today.
+    const runtimeResolver = { runtime: 'codex', resolve: () => ({ model: 'gpt-5.6-sol' }) };
+    const result = generateCodexAgentToml('gsd-executor', sampleAgent, null, runtimeResolver);
+    assert.ok(!/^model = /m.test(result),
+      'a resolver-only tier model must not be embedded by default (#3241)');
+    assert.ok(!result.includes('model_reasoning_effort ='),
+      'reasoning effort must not survive an omitted resolver model (#838 coupling)');
+  });
+
+  test('resolver is null (inherit profile or no runtime configured) emits no model and no warning (#3241)', (t) => {
+    // Regression guard — PASSES today already: readGsdRuntimeProfileResolver
+    // already returns null for both "no runtime" and model_profile:"inherit"
+    // (bin/install.js:1632, :1635), and generateCodexAgentToml already omits
+    // the model when runtimeResolver is null. Nothing in Phase 1 touches this
+    // branch; this test exists to prove it keeps holding after the fix lands.
+    const origWrite = process.stderr.write;
+    const stderrChunks = [];
+    process.stderr.write = (chunk) => { stderrChunks.push(String(chunk)); return true; };
+    t.after(() => { process.stderr.write = origWrite; });
+    const result = generateCodexAgentToml('gsd-executor', sampleAgent, null, null);
+    assert.ok(!/^model = /m.test(result), 'no model when the resolver is null');
+    assert.strictEqual(stderrChunks.join(''), '', 'inherit/no-runtime users must never be warned — nothing was lost');
+  });
+
+  test('resolver present but resolve() yields nothing emits no model and no warning (#3241)', (t) => {
+    // Regression guard — PASSES today already: entry?.model is undefined when
+    // resolve() returns null, so pinnedModel stays null and no warning branch
+    // is reachable in current code. Nothing was lost, so nothing should warn,
+    // before or after the fix (negative-space row in 40-design.md).
+    const origWrite = process.stderr.write;
+    const stderrChunks = [];
+    process.stderr.write = (chunk) => { stderrChunks.push(String(chunk)); return true; };
+    t.after(() => { process.stderr.write = origWrite; });
+    const runtimeResolver = { runtime: 'codex', resolve: () => null };
+    const result = generateCodexAgentToml('gsd-executor', sampleAgent, null, runtimeResolver);
+    assert.ok(!/^model = /m.test(result), 'no model when resolve() yields nothing');
+    assert.strictEqual(stderrChunks.join(''), '', 'a resolver that would not have pinned anything must never warn');
+  });
+
+  test('empty-string and whitespace-only model_overrides are not pins and not warnings (#3241)', (t) => {
+    // '' — regression guard, PASSES today: '' is falsy, so the pin branch is
+    // never entered at all (no pin, no warning either old or new).
+    //
+    // '   ' (whitespace-only) — RED (pre-fix, live defect, fixed in this
+    // phase per maintainer direction): a whitespace-only override is a
+    // truthy JS string, is not Anthropic-flavored per `_isAnthropicFlavoredModel`,
+    // and is CURRENTLY pinned verbatim (`model = "   "`) with no guard —
+    // the same class of bug the #2310 guard exists to stop (a non-model
+    // value reaching the .toml and 400-ing the Codex agent). Must be
+    // silently dropped, matching how '' already behaves — NOT routed through
+    // `_warnCodexModelOverrideDropped` (that warning's "is not a valid Codex
+    // model (Anthropic alias/id)" text would misdescribe a blank field), so
+    // no warning of any kind is expected for it either.
+    const origWrite = process.stderr.write;
+    const stderrChunks = [];
+    process.stderr.write = (chunk) => { stderrChunks.push(String(chunk)); return true; };
+    t.after(() => { process.stderr.write = origWrite; });
+    const emptyResult = generateCodexAgentToml('gsd-executor', sampleAgent, { 'gsd-executor': '' });
+    const whitespaceResult = generateCodexAgentToml('gsd-executor', sampleAgent, { 'gsd-executor': '   ' });
+    assert.ok(!/^model = /m.test(emptyResult), 'empty-string override must not be pinned');
+    assert.ok(!/^model = /m.test(whitespaceResult), 'whitespace-only override must not be pinned (#3241 fix)');
+    assert.strictEqual(stderrChunks.join(''), '', 'empty-string/whitespace overrides must never warn');
+  });
+
+  test('non-string model_overrides values are ignored without throwing (#3241)', () => {
+    // Regression guard — PASSES today already: none of these ever reach the
+    // string-pin branch (`typeof rawModelOverride === 'string'` gates it), so
+    // no value here is ever emitted as `model =`, and none of them throw.
+    // Some truthy non-string values (42, {}, true, []) DO hit the existing
+    // `_warnCodexModelOverrideDropped` warn branch today — that is pre-2310
+    // behavior this phase does not touch, so no assertion is made on warning
+    // presence/absence here, only "no pin" and "no crash" per the matrix.
+    const hostileValues = [42, {}, null, true, [], 0, NaN];
+    for (const value of hostileValues) {
+      assert.doesNotThrow(() => {
+        const result = generateCodexAgentToml('gsd-executor', sampleAgent, { 'gsd-executor': value });
+        assert.ok(!/^model = /m.test(result), `non-string override ${JSON.stringify(value)} must not be pinned`);
+      }, `non-string override ${JSON.stringify(value)} must not throw`);
+    }
+  });
+
+  // 50-test-matrix.md row 15 (oversized warning value truncated at 64 chars)
+  // is deliberately NOT covered here. Maintainer-confirmed pinned wording
+  // (see the describe block below) interpolates no user-controlled value —
+  // no agent name, no model string — so there is nothing in the message that
+  // could ever exhibit truncation. A test asserting truncation against a
+  // message with no interpolated value would be vacuous by construction.
+
+  test('light-tier service_tier/model_verbosity survive independent of whether a model is pinned (#3241, #774 decoupling guard)', () => {
+    // Regression guard — PASSES today already: the light-tier emission block
+    // (bin/install.js ~L4198-4203) reads AGENT_DEFAULT_TIERS unconditionally
+    // and never inspects pinnedModel/hasPinnedModel. This test exists to
+    // catch a FUTURE implementation that wrongly couples these fields to
+    // hasPinnedModel while implementing #3241 — if that coupling is ever
+    // introduced, this is the test that turns red. It is not expected to be
+    // red before the #3241 fix lands, and per 50-test-matrix.md's own
+    // "Red-before-green" note this is the row most likely to be accidentally
+    // vacuous — flagged explicitly here rather than mis-classified.
+    const runtimeResolver = { runtime: 'codex', resolve: () => ({ model: 'gpt-5.6-sol' }) };
+    const lightAgent = `---
+name: gsd-plan-checker
+description: Checks plans quickly
+tools: Read, Grep
+---
+
+<role>You check plans.</role>`;
+    const lightResult = generateCodexAgentToml('gsd-plan-checker', lightAgent, null, runtimeResolver);
+    assert.ok(lightResult.includes('service_tier = "flex"'), 'service_tier must not be coupled to whether a model is pinned');
+    assert.ok(lightResult.includes('model_verbosity = "low"'), 'model_verbosity must not be coupled to whether a model is pinned');
+
+    // Other direction: a non-light agent with no model at all must still gain
+    // neither field (duplicates the existing #774 coverage at L647-652
+    // intentionally — 50-test-matrix.md row 18 folds this into row 17 as the
+    // same independence guard, viewed from the opposite direction).
+    const standardResult = generateCodexAgentToml('gsd-executor', sampleAgent, null, null);
+    assert.ok(!standardResult.includes('service_tier'), 'standard-tier agent must not gain service_tier just because no model is pinned');
+    assert.ok(!standardResult.includes('model_verbosity'), 'standard-tier agent must not gain model_verbosity just because no model is pinned');
+  });
+
+  // ─── #3241 review: gate the deprecation notice on "would have been EMBEDDED",
+  // not "would have been returned" ────────────────────────────────────────────
+  // The resolver-would-have-supplied-a-model check above (L652-665) doesn't
+  // inspect stderr, so it couldn't catch this: the notice must not fire when
+  // the would-be resolver model would ALSO have been rejected by the #2310
+  // Anthropic-flavored gate (L4192) pre-Phase-1 — that user never had the pin
+  // in the first place, so telling them to set model_overrides is false. The
+  // notice's one-time dedupe is a module-level boolean shared across every
+  // test in this file (an earlier test in this describe block, e.g.
+  // L652-665, may have already latched it), so each test here resets it via
+  // the documented test seam (_resetCodexWarningDedupeForTests) instead of
+  // busting require.cache — a cache bust would create a second module
+  // instance and break every other test in this file that assumes a single
+  // shared instance.
+
+  function captureStderr(t) {
+    const origWrite = process.stderr.write;
+    const chunks = [];
+    process.stderr.write = (chunk) => { chunks.push(String(chunk)); return true; };
+    t.after(() => { process.stderr.write = origWrite; });
+    return () => chunks.join('').split(/\r?\n/).filter((l) => l.length > 0);
+  }
+
+  test('no deprecation notice when the resolver would only have produced an Anthropic-flavored model (#3241 review — defect fix)', (t) => {
+    _resetCodexWarningDedupeForTests();
+    const getLines = captureStderr(t);
+    // Mixed-runtime config (runtime: opencode) resolving against a Codex
+    // install target — the #2310 gate (bin/install.js:4192) rejects this
+    // model BEFORE Phase 1 too, so this user never had the pin. Bare alias
+    // form covered too, since both routes hit the same gate.
+    for (const model of ['anthropic/claude-opus-4-8', 'sonnet']) {
+      const runtimeResolver = { runtime: 'opencode', resolve: () => ({ model }) };
+      const result = generateCodexAgentToml('gsd-executor', sampleAgent, null, runtimeResolver);
+      assert.ok(!/^model = /m.test(result), `no model pinned for would-be resolver model "${model}"`);
+    }
+    const noticeLines = getLines().filter((l) => l.startsWith('gsd: notice — '));
+    assert.strictEqual(noticeLines.length, 0,
+      'no notice: the resolver model would never have survived the #2310 gate pre-Phase-1 either, so nothing was lost');
+  });
+
+  test('deprecation notice still fires when the resolver would have produced a legal Codex model (#3241 review)', (t) => {
+    _resetCodexWarningDedupeForTests();
+    const getLines = captureStderr(t);
+    const runtimeResolver = { runtime: 'codex', resolve: () => ({ model: 'gpt-5.6-sol' }) };
+    const result = generateCodexAgentToml('gsd-executor', sampleAgent, null, runtimeResolver);
+    assert.ok(!/^model = /m.test(result), 'no model pinned by default (#3241 D1)');
+    const noticeLines = getLines().filter((l) => l.startsWith('gsd: notice — '));
+    assert.strictEqual(noticeLines.length, 1,
+      'exactly one notice: a legal gpt-5.6-sol model would have been embedded pre-Phase-1, and now is not — the fix must not over-correct into silence');
+  });
+
+  test('both the override-dropped warning and the resolver-omitted notice fire for an Anthropic override plus a legal resolver model (#3241 review — intentional, do NOT collapse to one message)', (t) => {
+    // NOT a defect. Two distinct true facts, two distinct prefixes:
+    // - model_overrides:"sonnet" is Anthropic-flavored → dropped pre-Phase-1
+    //   too (#2310 gate on the override path) → `gsd: warning — ` fires.
+    // - With the override dropped, execution falls through to the runtime
+    //   resolver, which WOULD have supplied "gpt-5.6-sol" (a legal Codex
+    //   model) and that pin WOULD have been embedded pre-Phase-1 → this user
+    //   genuinely lost a pin → `gsd: notice — ` fires too.
+    // A future reader must not "fix" this down to one message.
+    _resetCodexWarningDedupeForTests();
+    const getLines = captureStderr(t);
+    const runtimeResolver = { runtime: 'codex', resolve: () => ({ model: 'gpt-5.6-sol' }) };
+    const result = generateCodexAgentToml(
+      'gsd-executor', sampleAgent, { 'gsd-executor': 'sonnet' }, runtimeResolver,
+    );
+    assert.ok(!/^model = /m.test(result), 'no model pinned (Anthropic override dropped, resolver model not auto-embedded)');
+    const lines = getLines();
+    const warningLines = lines.filter((l) => l.startsWith('gsd: warning — '));
+    const noticeLines = lines.filter((l) => l.startsWith('gsd: notice — '));
+    assert.strictEqual(warningLines.length, 1, 'exactly one warning: the Anthropic override was dropped');
+    assert.strictEqual(noticeLines.length, 1, 'exactly one notice: the legal resolver model would have been embedded and now is not');
   });
 
   // ─── #774: service_tier / model_verbosity for light-tier agents ───────────────
@@ -694,6 +916,75 @@ description: Maps the codebase
     const parsed = parseTomlToObject(toml);
     assert.strictEqual(parsed.service_tier, 'flex', 'service_tier must parse to "flex"');
     assert.strictEqual(parsed.model_verbosity, 'low', 'model_verbosity must parse to "low"');
+  });
+});
+
+// ─── #3241: shared isAnthropicFlavoredModel / CLAUDE_AGENT_ALIASES surface ─────
+// Phase 2/3 need one predicate. 40-design.md's "seam decision" moves
+// CLAUDE_AGENT_ALIASES into model-catalog.cjs and defines isAnthropicFlavoredModel
+// beside it, re-exporting from model-resolver.cjs for back-compat. Neither exists
+// on model-catalog.cjs yet (verified: modelCatalog.isAnthropicFlavoredModel is
+// `undefined` today), so every test below is RED against the current tree.
+
+describe('#3241 isAnthropicFlavoredModel + CLAUDE_AGENT_ALIASES (model-catalog owns it)', () => {
+  const parityAgent = `---
+name: gsd-executor
+description: Executes plans
+tools: Read, Write
+---
+
+<role>You are an executor.</role>`;
+
+  test('predicate flags every Claude tier alias and case/namespace variant (#3241)', () => {
+    // RED (pre-fix): modelCatalog.isAnthropicFlavoredModel is undefined today,
+    // so `modelCatalog.isAnthropicFlavoredModel('opus')` throws
+    // "isAnthropicFlavoredModel is not a function" — this test fails on the
+    // very first call, before any assertion runs.
+    for (const alias of ['opus', 'sonnet', 'haiku', 'fable']) {
+      assert.strictEqual(modelCatalog.isAnthropicFlavoredModel(alias), true, `alias "${alias}" must be flagged`);
+    }
+    for (const id of ['claude-opus-4-5', 'anthropic/claude-x', 'us.anthropic.claude-x', 'CLAUDE-X']) {
+      assert.strictEqual(modelCatalog.isAnthropicFlavoredModel(id), true, `id "${id}" must be flagged (case/namespace variant)`);
+    }
+  });
+
+  test('predicate is false for real Codex ids and non-strings, without throwing (#3241)', () => {
+    // RED (pre-fix): same "not a function" throw as above — fails before any
+    // assertion is reached.
+    for (const value of ['gpt-5.6-sol', 'gpt-4', '', null, undefined, {}, 0]) {
+      assert.doesNotThrow(() => modelCatalog.isAnthropicFlavoredModel(value), `must not throw for ${JSON.stringify(value)}`);
+      assert.strictEqual(modelCatalog.isAnthropicFlavoredModel(value), false, `must be false for ${JSON.stringify(value)}`);
+    }
+  });
+
+  test('the alias set has exactly one owner across both modules (#3241)', () => {
+    // RED (pre-fix): modelCatalog.CLAUDE_AGENT_ALIASES is undefined today
+    // (model-catalog.cjs exports no such key), so deepStrictEqual against
+    // modelResolver's real Set fails. Divergence guard per
+    // 50-test-matrix.md rows 22-23: without this, Phase 2/3 can silently
+    // fork the rule.
+    assert.deepStrictEqual(
+      modelCatalog.CLAUDE_AGENT_ALIASES,
+      modelResolver.CLAUDE_AGENT_ALIASES,
+      'model-catalog and model-resolver must share the exact same CLAUDE_AGENT_ALIASES contents'
+    );
+  });
+
+  test('installer Codex .toml emission agrees with the shared predicate (#3241)', () => {
+    // RED (pre-fix): modelCatalog.isAnthropicFlavoredModel is undefined, so
+    // the first loop iteration throws "not a function" before any
+    // generateCodexAgentToml call happens.
+    const probeValues = [...CLAUDE_AGENT_ALIASES, 'claude-sonnet-5', 'gpt-5.6-sol'];
+    for (const value of probeValues) {
+      const expectedFlavored = modelCatalog.isAnthropicFlavoredModel(value);
+      const result = generateCodexAgentToml('gsd-executor', parityAgent, { 'gsd-executor': value });
+      const modelLine = result.split(/\r?\n/).find((line) => /^model = /.test(line));
+      if (expectedFlavored) {
+        assert.strictEqual(modelLine, undefined, `"${value}" is Anthropic-flavored per the shared predicate — installer must omit it`);
+      } else {
+        assert.strictEqual(modelLine, `model = ${JSON.stringify(value)}`, `"${value}" is NOT Anthropic-flavored per the shared predicate — installer must emit it verbatim`);
+      }
+    }
   });
 });
 
@@ -1431,7 +1722,7 @@ describe('mergeCodexConfig', () => {
     assert.ok(!content.includes('Updated description'), 'no per-agent description in config.toml');
     assert.ok(!content.includes('[agents.gsd-planner]'), 'no agent role table (canonical source is the standalone TOML)');
     // Verify no duplicate markers
-    const markerCount = (content.match(new RegExp(GSD_CODEX_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    const markerCount = (content.match(new RegExp(escapeRegex(GSD_CODEX_MARKER), 'g')) || []).length;
     assert.strictEqual(markerCount, 1, 'exactly one marker');
   });
 
@@ -1485,7 +1776,7 @@ describe('mergeCodexConfig', () => {
     // GSD section (stripLeakedGsdCodexSections) and the fresh block never
     // re-adds one (#2406) — zero role tables should remain anywhere.
     const gsdStructCount = (content.match(/^\[agents\.gsd-executor\]\s*$/gm) || []).length;
-    const markerCount = (content.match(new RegExp(GSD_CODEX_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    const markerCount = (content.match(new RegExp(escapeRegex(GSD_CODEX_MARKER), 'g')) || []).length;
 
     assert.ok(content.includes('[model]'), 'preserves user content');
     assert.ok(content.includes('[agents.custom-agent]'), 'preserves non-GSD agent section');
@@ -1518,7 +1809,7 @@ describe('mergeCodexConfig', () => {
     assert.ok(content.includes('other_feature = true'), 'preserves user feature keys');
     assert.ok(!content.includes('[agents.gsd-executor]'), 'no agent role table (canonical source is the standalone TOML)');
     // Verify no duplicate markers
-    const markerCount = (content.match(new RegExp(GSD_CODEX_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length;
+    const markerCount = (content.match(new RegExp(escapeRegex(GSD_CODEX_MARKER), 'g')) || []).length;
     assert.strictEqual(markerCount, 1, 'exactly one marker');
   });
 
@@ -1760,6 +2051,217 @@ describe('mergeCodexConfig', () => {
   });
 });
 
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/issue-2940-codex-config-merge-trailing.test.cjs — consolidation epic #1969 (H3 W4 #3336)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-2940-codex-config-merge-trailing (consolidation epic #1969 H3 W4 #3336)", () => {
+'use strict';
+process.env.GSD_TEST_MODE = '1';
+
+/**
+ * Regression test for #2940 — `gsd-update` overwrites `~/.codex/config.toml`,
+ * removing any user/Codex-CLI settings added after the GSD-managed marker block.
+ *
+ * Root cause: `mergeCodexConfig`'s Case 2 (marker present) preserved content
+ * BEFORE the marker but unconditionally discarded everything from the marker to
+ * EOF, replacing it with a freshly generated GSD block. Since a fresh install
+ * writes the GSD block as the file's entire content, any settings the user or
+ * Codex CLI later adds (`[model]`, `[mcp_servers.*]`, `[profiles.*]`) land AFTER
+ * the block, and every subsequent update wiped them.
+ *
+ * The fix preserves genuine trailing TOML by routing the post-marker region
+ * through the existing `stripLeakedGsdCodexSections` (which removes GSD's own
+ * managed/leaked sections while keeping user tables), then re-appending it after
+ * the regenerated GSD block — without regressing #2406's de-dup.
+ *
+ * Matrix: .gsd/bug/fix/2940-codex-config-merge-preserves-trailing-content/50-test-matrix.md
+ *
+ * NOTE: this describe block covers trailing-content-after-the-marker preservation
+ * ([model]/[mcp_servers.*]/[profiles.*] appended AFTER the GSD block) — a case the
+ * pre-existing 'mergeCodexConfig' suite above does not exercise (that suite's cases
+ * write user content BEFORE the marker/block, not after). Verified non-duplicate
+ * against both the pre-existing target and the other three folded sources.
+ */
+
+const { describe, test, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { cleanup } = require('./helpers.cjs');
+
+const {
+  generateCodexConfigBlock,
+  mergeCodexConfig,
+  GSD_CODEX_MARKER,
+} = require('../bin/install.js');
+
+describe('mergeCodexConfig trailing-content preservation (#2940)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2940-merge-'));
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  /** A GSD block with one agent (the shape installCodexConfig passes). */
+  const block = () =>
+    generateCodexConfigBlock([{ name: 'gsd-executor', description: 'Executes plans' }]);
+
+  test('trailingUserModelSectionPreserved', () => {
+    // Row 1 (failing-first regression): a config with the GSD block FIRST, then a user
+    // [model] section after it (the real-world layout — fresh install fills the file,
+    // user settings land after). Re-merge must preserve [model] byte-for-byte.
+    const configPath = path.join(tmpDir, 'config.toml');
+    const trailing = '[model]\nname = "gpt-5.4"\n';
+    // First write: GSD block + user content after it (no content before the marker).
+    fs.writeFileSync(configPath, block() + '\n' + trailing);
+
+    mergeCodexConfig(configPath, block());
+
+    const content = fs.readFileSync(configPath, 'utf8');
+    assert.ok(content.includes('[model]'), 'user [model] section preserved after re-merge');
+    assert.ok(content.includes('name = "gpt-5.4"'), 'user model value preserved verbatim');
+    assert.ok(content.includes(GSD_CODEX_MARKER), 'GSD marker still present');
+    const markerCount = (content.match(new RegExp(escapeRegex(GSD_CODEX_MARKER), 'g')) || []).length;
+    assert.strictEqual(markerCount, 1, 'exactly one marker (no duplication)');
+    assert.ok(content.includes('max_depth ='), 'GSD-managed [agents] block regenerated');
+  });
+
+  test('multipleTrailingTablesPreserved', () => {
+    // Row 2: multiple trailing user tables ([mcp_servers.*], [profiles.*]).
+    const configPath = path.join(tmpDir, 'config.toml');
+    const trailing = [
+      '[mcp_servers.figma]',
+      'command = "npx"',
+      'args = ["-y", "figma-mcp"]',
+      '',
+      '[profiles.dev]',
+      'model = "o3"',
+      'sandbox_mode = "workspace-write"',
+    ].join('\n');
+    fs.writeFileSync(configPath, block() + '\n' + trailing + '\n');
+
+    mergeCodexConfig(configPath, block());
+
+    const content = fs.readFileSync(configPath, 'utf8');
+    assert.ok(content.includes('[mcp_servers.figma]'), 'mcp_servers table preserved');
+    assert.ok(content.includes('[profiles.dev]'), 'profiles table preserved');
+    assert.ok(content.includes('sandbox_mode = "workspace-write"'), 'profile value preserved');
+    assert.ok(content.includes(GSD_CODEX_MARKER), 'GSD block regenerated');
+  });
+
+  test('reMergeIsIdempotent', () => {
+    // Row 3 (acceptance #2): merging the result of a merge again yields identical content.
+    const configPath = path.join(tmpDir, 'config.toml');
+    fs.writeFileSync(configPath, block() + '\n[model]\nname = "o3"\n');
+
+    mergeCodexConfig(configPath, block());
+    const afterFirst = fs.readFileSync(configPath, 'utf8');
+
+    mergeCodexConfig(configPath, block());
+    const afterSecond = fs.readFileSync(configPath, 'utf8');
+
+    assert.strictEqual(afterSecond, afterFirst, 'second merge is idempotent (no further change)');
+  });
+
+  test('leakedGsdSectionAfterMarkerStillStripped', () => {
+    // Row 4 (#2406 non-regression): a leaked GSD-managed [agents.gsd-*] section AFTER the
+    // marker is still REMOVED (not regrown), while genuine user content after it is preserved.
+    const configPath = path.join(tmpDir, 'config.toml');
+    const leakedAndUser = [
+      '[agents.gsd-executor]',
+      'description = "stale leaked"',
+      'config_file = "agents/gsd-executor.toml"',
+      '',
+      '[model]',
+      'name = "o3"',
+    ].join('\n');
+    fs.writeFileSync(configPath, block() + '\n' + leakedAndUser + '\n');
+
+    mergeCodexConfig(configPath, block());
+
+    const content = fs.readFileSync(configPath, 'utf8');
+    const gsdStructCount = (content.match(/^\[agents\.gsd-executor\]\s*$/gm) || []).length;
+    assert.strictEqual(gsdStructCount, 0, 'leaked [agents.gsd-executor] after marker is stripped (not regrown)');
+    assert.ok(content.includes('[model]'), 'genuine user [model] after the leaked section still preserved');
+  });
+
+  test('bareAgentsAfterMarkerHandled', () => {
+    // Row 5: a user AgentsToml scalar (max_threads) the user folded INTO the managed [agents]
+    // block (the valid, realistic shape — two [agents] tables would be invalid TOML), PLUS a
+    // separate trailing [model] section. The fix must preserve the user scalar via the existing
+    // spliceCodexAgentsScalars path AND preserve the trailing [model] via the new trailing-region
+    // logic, while regenerating exactly one managed [agents] table.
+    const configPath = path.join(tmpDir, 'config.toml');
+    // Simulate: fresh install wrote the GSD block; the user then added max_threads into the
+    // [agents] table and added a [model] section after it.
+    const existing = [
+      GSD_CODEX_MARKER,
+      '',
+      '[agents]',
+      'max_depth = 1',
+      'max_threads = 4',
+      '',
+      '[model]',
+      'name = "o3"',
+    ].join('\n');
+    fs.writeFileSync(configPath, existing + '\n');
+
+    mergeCodexConfig(configPath, block());
+
+    const content = fs.readFileSync(configPath, 'utf8');
+    // The user's max_threads scalar is preserved (spliced into the regenerated managed [agents]);
+    // there is exactly one [agents] table (the managed one).
+    assert.ok(content.includes('max_threads = 4'), 'user AgentsToml scalar (max_threads) preserved in managed block');
+    const agentsHeaders = (content.match(/^\[agents\]\s*$/gm) || []).length;
+    assert.strictEqual(agentsHeaders, 1, 'exactly one [agents] table (the managed one)');
+    assert.ok(content.includes('max_depth = 1'), 'GSD-managed max_depth still present');
+    assert.ok(content.includes('[model]'), 'trailing [model] still preserved');
+  });
+
+  test('beforeAndAfterMarkerBothPreserved', () => {
+    // Row 6: content both BEFORE and AFTER the marker is preserved; GSD block regenerated once.
+    const configPath = path.join(tmpDir, 'config.toml');
+    const before = '[profiles.work]\nmodel = "gpt-5.4"\n';
+    const after = '[mcp_servers.github]\ncommand = "gh-mcp"\n';
+    fs.writeFileSync(configPath, before + '\n' + block() + '\n' + after + '\n');
+
+    mergeCodexConfig(configPath, block());
+
+    const content = fs.readFileSync(configPath, 'utf8');
+    assert.ok(content.includes('[profiles.work]'), 'content before marker preserved');
+    assert.ok(content.includes('[mcp_servers.github]'), 'content after marker preserved');
+    const markerCount = (content.match(new RegExp(escapeRegex(GSD_CODEX_MARKER), 'g')) || []).length;
+    assert.strictEqual(markerCount, 1, 'exactly one marker');
+  });
+
+  test('noTrailingContentUnchanged', () => {
+    // Row 7 (zero-trailing boundary): a config with ONLY the GSD block (fresh-install case)
+    // re-merges to just the regenerated block — no spurious blank-line artifacts introduced
+    // by the trailing-preservation logic.
+    const configPath = path.join(tmpDir, 'config.toml');
+    fs.writeFileSync(configPath, block() + '\n');
+
+    mergeCodexConfig(configPath, block());
+
+    const content = fs.readFileSync(configPath, 'utf8');
+    // No spurious trailing blank lines beyond the single trailing newline. Use a CRLF-safe
+    // pattern (\r?\n) so the assertion holds under Windows git-autocrlf line endings.
+    assert.ok(!/(?:\r?\n){3,}$/.test(content), 'no spurious run of blank lines at end of file');
+    assert.strictEqual(content.trim(), block().trim(), 'content is exactly the regenerated block (whitespace-trimmed)');
+  });
+});
+  });
+}
+
+
 // ─── Integration: installCodexConfig ────────────────────────────────────────────
 
 describe('installCodexConfig (integration)', () => {
@@ -1860,6 +2362,191 @@ describe('installCodexConfig (integration)', () => {
     }
   });
 });
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/issue-2834-codex-install-model-ordering.test.cjs — consolidation epic #1969 (H3 W4 #3336)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-2834-codex-install-model-ordering (consolidation epic #1969 H3 W4 #3336)", () => {
+// allow-test-rule: structural-implementation-guard (#2834)
+'use strict';
+
+// Regression guard for #2834: on a clean Codex install, agent TOMLs contained no
+// model-routing fields because defaults.json (resolve_model_ids + runtime) was written
+// AFTER installCodexConfig generated the TOMLs. The fix extracts writeNonClaudeDefaults
+// and calls it BEFORE installCodexConfig. This test asserts the ordering invariant in
+// the install source so a future edit can't silently re-introduce the gap.
+//
+// Verified non-duplicate: no existing coverage in this file asserts on
+// writeNonClaudeDefaults / the install-flow call ordering (source-text guard), and
+// none of the other three folded sources touch this.
+
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+
+const INSTALL_JS = path.join(__dirname, '..', 'bin', 'install.js');
+
+test('writeNonClaudeDefaults is called before installCodexConfig in the Codex install flow (#2834)', () => {
+  const src = fs.readFileSync(INSTALL_JS, 'utf8');
+
+  // Find the call to writeNonClaudeDefaults that precedes installCodexConfig.
+  const writeIdx = src.indexOf('writeNonClaudeDefaults(runtime);');
+  assert.ok(writeIdx !== -1, 'writeNonClaudeDefaults(runtime) must be called in the install flow');
+
+  // Find the FIRST installCodexConfig call AFTER the writeNonClaudeDefaults call.
+  const codexGenIdx = src.indexOf('installCodexConfig(targetDir', writeIdx);
+  assert.ok(codexGenIdx !== -1 && codexGenIdx > writeIdx,
+    'installCodexConfig must be called AFTER writeNonClaudeDefaults so defaults.json ' +
+    '(resolve_model_ids + runtime) exists before agent TOML generation reads it (#2834)');
+
+  // The #2834 comment must be present at the call site.
+  const callSite = src.slice(writeIdx - 300, writeIdx + 100);
+  assert.ok(/#2834/.test(callSite), 'the writeNonClaudeDefaults call must carry the #2834 rationale comment');
+});
+
+test('writeNonClaudeDefaults function exists and is a no-op for Claude (#2834)', () => {
+  const src = fs.readFileSync(INSTALL_JS, 'utf8');
+  const fnIdx = src.indexOf('function writeNonClaudeDefaults(');
+  assert.ok(fnIdx !== -1, 'writeNonClaudeDefaults must be defined as a function');
+  const fnBody = src.slice(fnIdx, fnIdx + 1200);
+  assert.ok(/nativeModelAliases/.test(fnBody), 'writeNonClaudeDefaults must early-return for Claude (nativeModelAliases check)');
+  assert.ok(/resolve_model_ids/.test(fnBody), 'writeNonClaudeDefaults must write resolve_model_ids');
+  assert.ok(/defaults\.runtime/.test(fnBody), 'writeNonClaudeDefaults must write runtime');
+});
+  });
+}
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/issue-2639-codex-toml-neutralization.test.cjs — consolidation epic #1969 (H3 W4 #3336)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-2639-codex-toml-neutralization (consolidation epic #1969 H3 W4 #3336)", () => {
+// allow-test-rule: source-text-is-the-product
+// Workflow .md / agent .md / command .md / reference .md files — their text
+// IS what the runtime loads. Testing text content tests the deployed contract.
+// Per CONTRIBUTING.md exception matrix.
+
+/**
+ * Regression: issue #2639 — Codex install generated agent TOMLs with stale
+ * Claude-specific references (CLAUDE.md, .claude/skills/, .claudeignore).
+ *
+ * RCA: `installCodexConfig()` applied a narrow path-only regex pass before
+ * calling `generateCodexAgentToml()`, bypassing the full
+ * `convertClaudeToCodexMarkdown()` + `neutralizeAgentReferences(..., 'AGENTS.md')`
+ * pipeline used on the .md emit path. Fix routes the TOML path through the
+ * same pipeline and extends the pipeline to cover bare `.claude/skills/`,
+ * `.claude/commands/`, `.claude/agents/`, and `.claudeignore`.
+ *
+ * Verified non-duplicate: the pre-existing 'generateCodexAgentToml' suite covers
+ * model_overrides/sandbox_mode/reasoning-effort, not CLAUDE.md/.claudeignore/skills-path
+ * neutralization in the emitted TOML; the '#570 — Codex leak scanner sub-bugs' suite
+ * covers ~/.claude path leaks via convertClaudeToCodexMarkdown but not the
+ * installCodexConfig()-level TOML-emit pipeline this regression targets.
+ */
+
+process.env.GSD_TEST_MODE = '1';
+
+const { test, describe, beforeEach, afterEach } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const { installCodexConfig } = require('../bin/install.js');
+const { cleanup } = require('./helpers.cjs');
+
+function makeTempDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2639-'));
+}
+
+function writeAgentFixture(agentsSrc, name, body) {
+  const content = `---
+name: ${name}
+description: Test agent for #2639
+---
+
+${body}
+`;
+  fs.writeFileSync(path.join(agentsSrc, `${name}.md`), content);
+}
+
+describe('#2639 — Codex TOML emit routes through full neutralization pipeline', () => {
+  let tmpDir;
+  let agentsSrc;
+  let targetDir;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    agentsSrc = path.join(tmpDir, 'agents');
+    targetDir = path.join(tmpDir, 'codex');
+    fs.mkdirSync(agentsSrc, { recursive: true });
+    fs.mkdirSync(targetDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('strips CLAUDE.md, .claude/skills/, .claude/commands/, .claude/agents/, and .claudeignore from emitted TOML', () => {
+    writeAgentFixture(agentsSrc, 'gsd-code-reviewer', [
+      '**Project instructions:** Read `./CLAUDE.md` if it exists.',
+      '',
+      '**CLAUDE.md enforcement:** If `./CLAUDE.md` exists, treat it as hard constraints.',
+      '',
+      '**Project skills:** Check `.claude/skills/` or `.agents/skills/` directory.',
+      '',
+      'Also check `.claude/commands/` and `.claude/agents/` for definitions.',
+      '',
+      'DO respect .gitignore and .claudeignore. Do not review ignored files.',
+      '',
+      'Claude will refuse the task if policy violated.',
+    ].join('\n'));
+
+    installCodexConfig(targetDir, agentsSrc);
+
+    const tomlPath = path.join(targetDir, 'agents', 'gsd-code-reviewer.toml');
+    assert.ok(fs.existsSync(tomlPath), 'per-agent TOML written');
+    const toml = fs.readFileSync(tomlPath, 'utf8');
+
+    assert.ok(!toml.includes('CLAUDE.md'), 'no CLAUDE.md references remain in TOML');
+    assert.ok(!toml.includes('.claude/skills/'), 'no .claude/skills/ references remain');
+    assert.ok(!toml.includes('.claude/commands/'), 'no .claude/commands/ references remain');
+    assert.ok(!toml.includes('.claude/agents/'), 'no .claude/agents/ references remain');
+    assert.ok(!toml.includes('.claudeignore'), 'no .claudeignore references remain');
+
+    assert.ok(toml.includes('AGENTS.md'), 'AGENTS.md substituted for CLAUDE.md');
+    assert.ok(
+      toml.includes('.codex/skills/') || toml.includes('.agents/skills/'),
+      'skills path neutralized'
+    );
+
+    // Standalone "Claude" agent-name references replaced
+    assert.ok(!/\bClaude\b(?! Code| Opus| Sonnet| Haiku| native| based)/.test(toml),
+      'standalone Claude agent-name references replaced');
+  });
+
+  test('preserves Claude product/model names (Claude Code, Claude Opus) in TOML', () => {
+    writeAgentFixture(agentsSrc, 'gsd-executor', [
+      'This agent runs under Claude Code with the Claude Opus 4 model.',
+      'Do not confuse with Claude Sonnet or Claude Haiku.',
+    ].join('\n'));
+
+    installCodexConfig(targetDir, agentsSrc);
+    const toml = fs.readFileSync(path.join(targetDir, 'agents', 'gsd-executor.toml'), 'utf8');
+
+    assert.ok(toml.includes('Claude Code'), 'Claude Code product name preserved');
+    assert.ok(toml.includes('Claude Opus'), 'Claude Opus model name preserved');
+  });
+});
+  });
+}
+
 
 // ─── Codex config.toml [features] safety (#1202) ─────────────────────────────
 
@@ -2629,6 +3316,363 @@ describe('Codex install hook configuration (e2e)', () => {
     assertNoDraftRootKeys(content);
   });
 });
+
+
+// ────────────────────────────────────────────────────────────────────────
+// Folded from tests/issue-2695-codex-hook-set.test.cjs — consolidation epic #1969 (H3 W4 #3336)
+// ────────────────────────────────────────────────────────────────────────
+{
+  const { describe: __foldDescribe } = require('node:test');
+  __foldDescribe("folded:bug-2695-codex-hook-set (consolidation epic #1969 H3 W4 #3336)", () => {
+// Regression tests for #2695 — Codex native updates omit the update-hook worker
+// and the managed-hooks registry.
+//
+// The Codex install branch in bin/install.js used to allowlist only two of the
+// four hook files the shipped build emits (gsd-check-update.js +
+// gsd-context-monitor.js), and gated the entire branch on !isMinimalMode so the
+// `core` profile installed none of them. The parent SessionStart hook spawn()s
+// the worker, which require()s the registry — so Codex was wired to a dependency
+// chain the same installer never delivered.
+//
+// These tests drive the real installer (bin/install.js) behaviorally into an
+// isolated temp config dir and assert the complete four-file set is delivered
+// for both profiles, the registry is byte-for-byte, the version stamps resolve
+// to the installed package version, and unrelated user files are preserved.
+//
+// Verified non-duplicate: the pre-existing 'Codex install hook configuration
+// (e2e)' suite above only asserts gsd-check-update.js delivery/wiring — it never
+// asserts on gsd-check-update-worker.js, managed-hooks-registry.cjs, or
+// gsd-context-monitor.js delivery, the core/full profile matrix, upgrade-refresh,
+// byte-for-byte registry copy, idempotency of the four-file set, user-file
+// preservation, or the core-profile negative-space (no agent files) — all
+// genuinely distinct assertions this fold adds.
+
+'use strict';
+
+const { test, describe, before } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { runNode } = require('./helpers/process-seam.cjs');
+const { throwIfFailed } = require('./helpers/git-fixture.cjs');
+
+const { cleanup } = require('./helpers.cjs');
+const {
+  INSTALL_SCRIPT,
+  BUILD_SCRIPT,
+  HOOKS_DIST,
+  installerEnv,
+} = require('./helpers/install-shared.cjs');
+
+const PKG_VERSION = require('../package.json').version;
+
+// #3145: class-norm timeouts, not per-suite values — see helpers/timeouts.cjs.
+const {
+  BUILD_TIMEOUT_MS: BUILD_HOOKS_TIMEOUT_MS,
+  INSTALL_TIMEOUT_MS,
+} = require('./helpers/timeouts.cjs');
+
+// The four-file hook set the Codex surface must deliver together (#2695).
+const CODEX_HOOK_FILES = [
+  'gsd-check-update.js',
+  'gsd-check-update-worker.js',
+  'managed-hooks-registry.cjs',
+  'gsd-context-monitor.js',
+];
+
+// Build hooks/dist before any install runs (the installer copies from there).
+before(() => {
+  const r = runNode([BUILD_SCRIPT], { timeoutMs: BUILD_HOOKS_TIMEOUT_MS });
+  throwIfFailed(r, `node ${BUILD_SCRIPT}`);
+});
+
+function hooksDirOf(configDir) {
+  return path.join(configDir, 'hooks');
+}
+
+/** Run the Codex installer into an isolated temp config dir. */
+function runCodexInstall({ profile, preseed }) {
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), `gsd-2695-${profile}-`));
+  if (preseed) {
+    const hooksDest = hooksDirOf(configDir);
+    fs.mkdirSync(hooksDest, { recursive: true });
+    for (const [name, body] of Object.entries(preseed)) {
+      fs.writeFileSync(path.join(hooksDest, name), body);
+    }
+  }
+  // Sandbox HOME/USERPROFILE to configDir: Codex's skills-kind `home: ".agents"`
+  // override resolves via os.homedir(); sandboxing keeps the spawn self-contained
+  // (mirrors tests/install-minimal-hooks.test.cjs Codex downgrade test).
+  const result = runNode(
+    [INSTALL_SCRIPT, '--codex', '--global', '--config-dir', configDir, `--profile=${profile}`],
+    { env: installerEnv({ HOME: configDir, USERPROFILE: configDir }), timeoutMs: INSTALL_TIMEOUT_MS },
+  );
+  return { configDir, result };
+}
+
+// Older-version stamp used to pre-seed an "upgrade" scenario.
+const OLDER_VERSION = '1.7.0';
+
+describe('#2695: fresh Codex installs deliver the complete four-file hook set', () => {
+  for (const profile of ['core', 'full']) {
+    test(`fresh --profile=${profile} installs all four hook files`, (t) => {
+      const { configDir, result } = runCodexInstall({ profile });
+      t.after(() => cleanup(configDir));
+
+      const hooksDir = hooksDirOf(configDir);
+      for (const file of CODEX_HOOK_FILES) {
+        assert.ok(
+          fs.existsSync(path.join(hooksDir, file)),
+          `expected ${file} under <config>/hooks for --profile=${profile}\n` +
+            `installer stdout: ${result.stdout}\ninstaller stderr: ${result.stderr}`,
+        );
+      }
+    });
+  }
+});
+
+describe('#2695: Codex upgrades refresh all four hook files to the current version', () => {
+  // Pre-seed all four files stamped at OLDER_VERSION so an upgrade must overwrite them.
+  function olderSeed() {
+    const seed = {};
+    for (const name of CODEX_HOOK_FILES) {
+      // Registry carries no version token; seed it with a stale sentinel body.
+      if (name.endsWith('.cjs')) {
+        seed[name] = `// stale registry ${OLDER_VERSION}\nmodule.exports = {};\n`;
+      } else {
+        seed[name] = `// gsd-hook-version: ${OLDER_VERSION}\n// stale\n`;
+      }
+    }
+    return seed;
+  }
+
+  for (const profile of ['core', 'full']) {
+    test(`--profile=${profile} upgrade refreshes all four hook files`, (t) => {
+      const { configDir, result } = runCodexInstall({ profile, preseed: olderSeed() });
+      t.after(() => cleanup(configDir));
+
+      const hooksDir = hooksDirOf(configDir);
+      // All four must now carry the current version stamp where one exists, and
+      // the registry must no longer be the stale sentinel.
+      for (const name of CODEX_HOOK_FILES) {
+        const dest = path.join(hooksDir, name);
+        assert.ok(
+          fs.existsSync(dest),
+          `expected refreshed ${name} for --profile=${profile}\n` +
+            `installer stdout: ${result.stdout}\ninstaller stderr: ${result.stderr}`,
+        );
+      }
+      // The registry must be REFRESHED on upgrade, not merely present: assert it no
+      // longer carries the stale sentinel and now matches the shipped dist byte-for-byte
+      // (the raw-copy fallback must overwrite an existing dest, not skip it).
+      const registryDest = path.join(hooksDir, 'managed-hooks-registry.cjs');
+      const registryBytes = fs.readFileSync(registryDest, 'utf8');
+      assert.ok(
+        !registryBytes.includes(`stale registry ${OLDER_VERSION}`),
+        `registry must be refreshed on upgrade for --profile=${profile} (still carries the stale sentinel)`,
+      );
+      assert.deepStrictEqual(
+        fs.readFileSync(registryDest),
+        fs.readFileSync(path.join(HOOKS_DIST, 'managed-hooks-registry.cjs')),
+        `refreshed registry must match hooks/dist byte-for-byte for --profile=${profile}`,
+      );
+      // Version stamps resolved (acceptance #2/#3).
+      const workerStamp = readHookVersionLine(path.join(hooksDir, 'gsd-check-update-worker.js'));
+      assert.strictEqual(
+        workerStamp, PKG_VERSION,
+        `worker gsd-hook-version stamp must be the installed package version (${PKG_VERSION}), ` +
+          `got "${workerStamp}" for --profile=${profile}`,
+      );
+      const parentStamp = readHookVersionLine(path.join(hooksDir, 'gsd-check-update.js'));
+      assert.strictEqual(
+        parentStamp, PKG_VERSION,
+        `parent gsd-check-update stamp must be the installed package version (${PKG_VERSION}), ` +
+          `got "${parentStamp}" for --profile=${profile}`,
+      );
+    });
+  }
+});
+
+describe('#2695: managed-hooks-registry.cjs is copied byte-for-byte', () => {
+  for (const profile of ['core', 'full']) {
+    test(`--profile=${profile} registry matches hooks/dist byte-for-byte`, (t) => {
+      const { configDir, result } = runCodexInstall({ profile });
+      t.after(() => cleanup(configDir));
+
+      const dest = path.join(hooksDirOf(configDir), 'managed-hooks-registry.cjs');
+      assert.ok(fs.existsSync(dest), `registry missing for --profile=${profile}\nstdout: ${result.stdout}`);
+      const distBytes = fs.readFileSync(path.join(HOOKS_DIST, 'managed-hooks-registry.cjs'));
+      const destBytes = fs.readFileSync(dest);
+      assert.deepStrictEqual(
+        destBytes, distBytes,
+        `managed-hooks-registry.cjs must be copied byte-for-byte (no version/path transform) for --profile=${profile}`,
+      );
+    });
+  }
+});
+
+describe('#2695: worker hook-version stamp is a literal install-time value', () => {
+  test('the stamp is the literal package version, never a placeholder or a runtime lookup', (t) => {
+    const { configDir } = runCodexInstall({ profile: 'full' });
+    t.after(() => cleanup(configDir));
+
+    const workerPath = path.join(hooksDirOf(configDir), 'gsd-check-update-worker.js');
+    const content = fs.readFileSync(workerPath, 'utf8');
+    // The placeholder must have been replaced — a leftover {{GSD_VERSION}} is the bug shape.
+    assert.ok(
+      !content.includes('{{GSD_VERSION}}'),
+      'worker still carries an unresolved {{GSD_VERSION}} placeholder — stamping did not run',
+    );
+    // And the resolved value must be the literal version, present on the version-comment line.
+    const stamp = readHookVersionLine(workerPath);
+    assert.strictEqual(stamp, PKG_VERSION, `worker stamp must equal package.json version, got "${stamp}"`);
+  });
+});
+
+describe('#2695: unrelated user-owned hook files are preserved', () => {
+  for (const profile of ['core', 'full']) {
+    test(`--profile=${profile} leaves a pre-existing user hook untouched`, (t) => {
+      const userOwned = 'my-custom-hook.js';
+      const userBody = '// user-owned hook — do not touch\nconsole.log("mine");\n';
+      const { configDir, result } = runCodexInstall({ profile, preseed: { [userOwned]: userBody } });
+      t.after(() => cleanup(configDir));
+
+      const dest = path.join(hooksDirOf(configDir), userOwned);
+      assert.ok(fs.existsSync(dest), `user-owned ${userOwned} must be preserved for --profile=${profile}\nstdout: ${result.stdout}`);
+      assert.strictEqual(
+        fs.readFileSync(dest, 'utf8'), userBody,
+        `user-owned ${userOwned} bytes must be unchanged for --profile=${profile}`,
+      );
+    });
+  }
+});
+
+describe('#2695: re-running the installer is idempotent for the four-file set', () => {
+  test('a second full install leaves all four files present and correctly stamped', (t) => {
+    const first = runCodexInstall({ profile: 'full' });
+    t.after(() => cleanup(first.configDir));
+    // Second run into the SAME config dir.
+    const result2 = runNode(
+      [INSTALL_SCRIPT, '--codex', '--global', '--config-dir', first.configDir, '--profile=full'],
+      { env: installerEnv({ HOME: first.configDir, USERPROFILE: first.configDir }), timeoutMs: INSTALL_TIMEOUT_MS },
+    );
+    assert.ok(result2.stdout || result2.stderr);
+
+    const hooksDir = hooksDirOf(first.configDir);
+    for (const name of CODEX_HOOK_FILES) {
+      assert.ok(fs.existsSync(path.join(hooksDir, name)), `${name} must survive a second install`);
+    }
+    assert.strictEqual(
+      readHookVersionLine(path.join(hooksDir, 'gsd-check-update-worker.js')),
+      PKG_VERSION,
+      'worker stamp must remain correct after a second install',
+    );
+  });
+});
+
+describe('#2695: the core profile enables the hook feature and wires SessionStart (intended)', () => {
+  // For the update-check/context-monitor hooks to actually fire, Codex needs both
+  // the feature flag in config.toml AND the hooks.json routing — copying inert
+  // files alone would leave `core` with scripts Codex never invokes. Entering the
+  // codex-toml branch for `core` (the #2695 gate change) synthesizes `[features]
+  // hooks = true` via ensureCodexHooksFeature, writes config.toml, and registers
+  // the hooks. This is the intended behavior of the fix, not a side effect — these
+  // assertions pin it so a future re-gating cannot silently regress it.
+  test('--profile=core writes config.toml enabling the hooks feature', (t) => {
+    const { configDir } = runCodexInstall({ profile: 'core' });
+    t.after(() => cleanup(configDir));
+
+    const configPath = path.join(configDir, 'config.toml');
+    assert.ok(fs.existsSync(configPath), 'core must write config.toml so the hooks feature is enabled');
+    const config = fs.readFileSync(configPath, 'utf8');
+    assert.ok(/^\s*hooks\s*=\s*true\s*$/m.test(config), 'config.toml must enable hooks = true for core');
+  });
+
+  test('--profile=core wires the SessionStart update-check hook in hooks.json', (t) => {
+    const { configDir } = runCodexInstall({ profile: 'core' });
+    t.after(() => cleanup(configDir));
+
+    const hooksJsonPath = path.join(configDir, 'hooks.json');
+    assert.ok(fs.existsSync(hooksJsonPath), 'core must write hooks.json');
+    const hooksJson = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf8'));
+    const sessionStartCmds = collectHookCommands(hooksJson, 'SessionStart');
+    // The command points at the gsd-check-update hook script. Its extension is
+    // platform-specific — Windows routes through a .cmd shim, POSIX through .js —
+    // so assert on the basename prefix, not a hardcoded extension (Windows parity).
+    const routedToUpdateHook = sessionStartCmds.some((c) => {
+      const token = c.replace(/"/g, '').replace(/\\/g, '/');
+      const segs = token.split('/');
+      const last = segs[segs.length - 1];
+      return last.startsWith('gsd-check-update.');
+    });
+    assert.ok(
+      routedToUpdateHook,
+      `core must route SessionStart to the gsd-check-update hook in hooks.json; got: ${JSON.stringify(sessionStartCmds)}`,
+    );
+  });
+});
+
+describe('#2695: the core profile still installs no agent files (negative space)', () => {
+  test('--profile=core delivers hooks but no gsd-* agent files', (t) => {
+    const { configDir } = runCodexInstall({ profile: 'core' });
+    t.after(() => cleanup(configDir));
+
+    // Hooks delivered (the fix)…
+    for (const name of CODEX_HOOK_FILES) {
+      assert.ok(fs.existsSync(path.join(hooksDirOf(configDir), name)), `${name} delivered for core`);
+    }
+    // …but the full agent surface is still absent (core stays minimal). Codex agents
+    // are .toml ([agents.gsd-*] in config.toml + agents/gsd-*.toml), so check both
+    // extensions — a .md-only filter would miss a Codex agent-surface regression.
+    const agentsDir = path.join(configDir, 'agents');
+    if (fs.existsSync(agentsDir)) {
+      const gsdAgents = fs.readdirSync(agentsDir).filter(
+        (f) => f.startsWith('gsd-') && (f.endsWith('.md') || f.endsWith('.toml')),
+      );
+      assert.deepStrictEqual(gsdAgents, [], 'core must not install the full agent surface');
+    }
+    // And config.toml must carry no agent role sections.
+    const configPath = path.join(configDir, 'config.toml');
+    if (fs.existsSync(configPath)) {
+      const config = fs.readFileSync(configPath, 'utf8');
+      assert.ok(
+        !/^\[agents\.gsd-/m.test(config),
+        'core config.toml must not declare [agents.gsd-*] roles (full agent surface stays a full-profile concern)',
+      );
+    }
+  });
+});
+
+/**
+ * Read the `// gsd-hook-version: <value>` comment value from a hook file.
+ * Returns the trimmed literal. Used so tests assert on the structured stamp,
+ * not on raw `.includes()` prose (CONTRIBUTING raw-text-matching rule).
+ */
+function readHookVersionLine(hookPath) {
+  const content = fs.readFileSync(hookPath, 'utf8');
+  const m = content.match(/^\/\/ gsd-hook-version:\s*(.+?)\s*$/m);
+  return m ? m[1] : null;
+}
+
+/**
+ * Collect every hook command string registered under a given Codex hooks.json
+ * event key. Used so the SessionStart-wiring test asserts on the structured
+ * hook entries (commands), not on raw text matching against the whole file.
+ */
+function collectHookCommands(hooksJson, eventName) {
+  const entries = (hooksJson && hooksJson.hooks && Array.isArray(hooksJson.hooks[eventName]))
+    ? hooksJson.hooks[eventName]
+    : [];
+  return entries.flatMap((entry) =>
+    (entry && Array.isArray(entry.hooks) ? entry.hooks : [])
+      .map((h) => (h && typeof h.command === 'string' ? h.command : null))
+      .filter(Boolean),
+  );
+}
+  });
+}
+
 
 describe('Codex uninstall symmetry for hook-enabled configs', () => {
   let tmpDir;
@@ -3669,7 +4713,7 @@ describe('#2760 fix 4 — Write-failure rollback (atomic write + snapshot restor
     const preInstallBytes = fs.readFileSync(path.join(codexHome, 'config.toml'));
 
     const configPath = path.join(codexHome, 'config.toml');
-    const tempPattern = new RegExp('^' + configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.tmp-');
+    const tempPattern = new RegExp('^' + escapeRegex(configPath) + '\\.tmp-');
 
     // Stub: allow writes to atomic temp files (which renameSync overwrites
     // the target, never truncating it directly) but throw on any direct
@@ -3735,7 +4779,7 @@ describe('#2760 fix 4 — Write-failure rollback (atomic write + snapshot restor
 
     const preInstallBytes = fs.readFileSync(path.join(codexHome, 'config.toml'));
     const configPath = path.join(codexHome, 'config.toml');
-    const tempPattern = new RegExp('^' + configPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.tmp-');
+    const tempPattern = new RegExp('^' + escapeRegex(configPath) + '\\.tmp-');
 
     // Stub: fault writes targeting the atomic temp file (the pre-rename branch
     // of atomicWriteFileSync). Other writes (agent .toml files in CODEX_HOME)
@@ -4348,9 +5392,9 @@ const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
 
-const INSTALL = require(path.join(__dirname, '..', 'bin', 'install.js'));
+const HOOKS_SURFACE = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'runtime-hooks-surface.cjs'));
 const projection = require(path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'shell-command-projection.cjs'));
-const { buildCodexHookBlock, rewriteLegacyCodexHookBlock, resolveNodeRunner } = INSTALL;
+const { buildCodexHookBlock, rewriteLegacyCodexHookBlock, resolveNodeRunner } = HOOKS_SURFACE;
 const { projectCodexHookTomlCommand } = projection;
 
 /**
@@ -5915,15 +6959,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const INSTALL = require('../bin/install.js');
+const HOOKS_SURFACE = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 const PROJECTION = require('../gsd-core/bin/lib/shell-command-projection.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
+
+const {
+  uninstall,
+} = INSTALL;
 
 const {
   buildCodexHookWindowsShimIR,
   ensureCodexHooksJsonSessionStart,
   resolveNodeRunner,
-  uninstall,
-} = INSTALL;
+} = HOOKS_SURFACE;
 
 const { projectManagedHookCommand } = PROJECTION;
 
@@ -5947,12 +6995,12 @@ function hookHandlersForEvent(hooksJson, eventName) {
 describe('#3426 — export surface: buildCodexHookWindowsShimIR must be exported', () => {
   test('buildCodexHookWindowsShimIR is a function', () => {
     assert.equal(typeof buildCodexHookWindowsShimIR, 'function',
-      'buildCodexHookWindowsShimIR must be exported from bin/install.js');
+      'buildCodexHookWindowsShimIR must be exported from runtime-hooks-surface.cjs');
   });
 
   test('ensureCodexHooksJsonSessionStart is a function', () => {
     assert.equal(typeof ensureCodexHooksJsonSessionStart, 'function',
-      'ensureCodexHooksJsonSessionStart must be exported from bin/install.js');
+      'ensureCodexHooksJsonSessionStart must be exported from runtime-hooks-surface.cjs');
   });
 });
 
@@ -8338,13 +9386,12 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const INSTALL = require('../bin/install.js');
 const {
   ensureCodexHooksJsonSessionStart,
   ensureCodexHooksJsonEvent,
   removeCodexHooksJsonEvent,
   reconcileCodexHooksJsonEvent,
-} = INSTALL;
+} = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 const { createTempDir, cleanup } = require('./helpers.cjs');
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -8386,17 +9433,17 @@ function stubHookFile(targetDir, hookName) {
 describe('enh-772: export surface — new functions are exported', () => {
   test('ensureCodexHooksJsonEvent is a function', () => {
     assert.strictEqual(typeof ensureCodexHooksJsonEvent, 'function',
-      'ensureCodexHooksJsonEvent must be exported from bin/install.js');
+      'ensureCodexHooksJsonEvent must be exported from runtime-hooks-surface.cjs');
   });
 
   test('removeCodexHooksJsonEvent is a function', () => {
     assert.strictEqual(typeof removeCodexHooksJsonEvent, 'function',
-      'removeCodexHooksJsonEvent must be exported from bin/install.js');
+      'removeCodexHooksJsonEvent must be exported from runtime-hooks-surface.cjs');
   });
 
   test('reconcileCodexHooksJsonEvent is a function', () => {
     assert.strictEqual(typeof reconcileCodexHooksJsonEvent, 'function',
-      'reconcileCodexHooksJsonEvent must be exported from bin/install.js');
+      'reconcileCodexHooksJsonEvent must be exported from runtime-hooks-surface.cjs');
   });
 });
 
