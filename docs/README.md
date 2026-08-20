@@ -32,6 +32,7 @@ Language versions: [English](README.md) · [Português (pt-BR)](pt-BR/README.md)
 - [Read the statusline freshness marker](how-to/read-the-statusline-freshness-marker.md) — turn on `state ~N commits back`, and tell "STATE.md is fresh" apart from "freshness could not be established"
 - [Consume the planning snapshot](how-to/consume-the-planning-snapshot.md) — read `planning inspect` from a dashboard or harness, and tell "nothing to report" apart from "could not look"
 - [Keep planning docs out of a shared repo](how-to/keep-planning-docs-private.md) — make `.planning/` local-only, including untracking files git already tracks (the step `.gitignore` alone cannot do)
+- [Publish PRs without planning artifacts](how-to/publish-prs-without-planning-artifacts.md) — keep `.planning/` committed locally, so worktrees and `/gsd-undo` keep working, while `planning.pr_strict` keeps every planning path out of the branch you push
 - [Plan a phase](how-to/plan-a-phase.md) — run research, decompose work, and verify plan quality
 - [Verify a dependency-compatibility claim](how-to/verify-a-dependency-compatibility-claim.md) — act on a compatibility claim the researcher left `[ASSUMED]`, and tell "nothing declared" apart from "a constraint is declared" and "the lookup failed"
 - [Execute a phase](how-to/execute-a-phase.md) — run plans in parallel waves with fresh-context subagents
