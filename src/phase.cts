@@ -3004,48 +3004,85 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
             // Both are correctly-parsed lines. So the capture is re-tokenized the
             // way the selector tokenizes it, and only three narrow shapes warn:
             //   R1  a token that is ITSELF a range - `RANGE-01...05`,
-            //       `RANGE-01..RANGE-05`, `API-2-01` (which the filter drops whole);
+            //       `RANGE-01..RANGE-05`. The bare-hyphen spelling is held to the
+            //       strictest shape (`REQ-01-REQ-05`, full ID on both sides):
+            //       `LETTERS-\d+-\d+` is also a date-like annotation (`FY-2026-08`)
+            //       and a sub-numbered ID (`API-2-01`), and warning on those is the
+            //       expensive class. The loose numeric endpoint stays allowed for
+            //       the non-hyphen operators, which have no such collision;
             //   R2  a token that is PURELY a range operator with a selected REQ-ID
             //       immediately on BOTH sides - `RANGE-01 ... RANGE-05`. Requiring
             //       both neighbours to be IDs is what keeps `- 3 points` and
-            //       `- locked per ADR-7.` silent;
+            //       `- locked per ADR-7.` silent; and the endpoints must imply an
+            //       INTERIOR (same prefix, numeric gap > 1) - `REQ-02 - REQ-03`
+            //       selects both endpoints and can drop nothing, so an annotation
+            //       hyphen between two adjacent selected IDs stays silent;
             //   R3  nothing was selected at all and some token still carries
-            //       ID-shaped text - the wholly-inert line. Gated on zero selection,
-            //       so it cannot add noise to a line that worked.
+            //       ID-shaped text - the wholly-inert line. Gated on zero selection
+            //       AND on the line not LEADING with a `TBD`/`None` placeholder, so
+            //       `None (per ADR-7)` - a declared-empty line citing its rationale
+            //       - cannot add noise. (A placeholder-led line selects zero by
+            //       definition; treating its citations as unparsed residue is the
+            //       #2334 over-warning again.)
             // `TBD`, a literal `None`, the shipped `<!-- ... -->` template comment
             // and parenthetical citations match none of the three.
             const REQ_RANGE_OP = '(?:\\.{2,}|\\u2026|\\u2014|\\u2013|-|to|thru|through)';
+            const REQ_RANGE_OP_NOHYPHEN = '(?:\\.{2,}|\\u2026|\\u2014|\\u2013|to|thru|through)';
             const REQ_RANGE_TOKEN_RE = new RegExp(
-              `^([A-Z][A-Z0-9]*)-(?:\\d+)\\s*${REQ_RANGE_OP}\\s*(?:\\1-)?\\d+$`,
+              `^([A-Z][A-Z0-9]*)-(?:\\d+)\\s*(?:${REQ_RANGE_OP_NOHYPHEN}\\s*(?:\\1-)?|-\\s*\\1-)\\d+$`,
               'i',
             );
             const REQ_PURE_RANGE_OP_RE = new RegExp(`^${REQ_RANGE_OP}$`, 'i');
             const REQ_ID_SUBSTRING_RE = /[A-Z][A-Z0-9]*-\d+/i;
-            // Same split as the selector. Surrounding brackets/parens and trailing
-            // sentence punctuation are shaved off ONLY for tokens that carry
-            // alphanumerics, so a token that is nothing but a range operator (`..`)
-            // survives intact instead of being shaved to nothing.
+            // Same split as the selector. Tokens carrying alphanumerics are shaved
+            // of surrounding brackets/quotes/backticks and trailing sentence
+            // punctuation; a token with NO alphanumerics is shaved of brackets
+            // ONLY, so `(..)` surfaces its operator while a bare `..` is not
+            // shaved to nothing by the punctuation classes.
             const reqLineTokens = reqMatch[1]
               .replace(/<!--[\s\S]*?-->/g, ' ')
               .split(/[,\s]+/)
               .map((t) => {
                 const trimmed = t.trim();
-                if (!/[A-Za-z0-9]/.test(trimmed)) return trimmed;
-                return trimmed.replace(/^[[({]+/, '').replace(/[\])}.;:]+$/, '');
+                if (!/[A-Za-z0-9]/.test(trimmed)) {
+                  return trimmed.replace(/^[[({]+/, '').replace(/[\])}]+$/, '');
+                }
+                return trimmed.replace(/^[[({"'`]+/, '').replace(/[\])}.;:"'`]+$/, '');
               })
               .filter(Boolean);
-            const rangeTokens = reqLineTokens.filter((t) => REQ_RANGE_TOKEN_RE.test(t));
+            const rangeTokens = reqLineTokens.filter(
+              (t) => t.length <= 256 && REQ_RANGE_TOKEN_RE.test(t),
+            );
+            // Endpoint pair implies a dropped interior only when the prefixes agree
+            // and the numbers are more than 1 apart; a cross-prefix pair is opaque,
+            // so it stays warn-worthy.
+            const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
+            const impliesInterior = (a: string, b: string): boolean => {
+              const ma = REQ_ID_PARTS_RE.exec(a);
+              const mb = REQ_ID_PARTS_RE.exec(b);
+              if (!ma || !mb) return true;
+              if (ma[1].toUpperCase() !== mb[1].toUpperCase()) return true;
+              return Math.abs(parseInt(mb[2], 10) - parseInt(ma[2], 10)) > 1;
+            };
             const hasSpacedRange = reqLineTokens.some(
               (t, i) =>
                 REQ_PURE_RANGE_OP_RE.test(t) &&
                 i > 0 &&
                 i < reqLineTokens.length - 1 &&
                 REQ_ID_SHAPE_RE.test(reqLineTokens[i - 1] ?? '') &&
-                REQ_ID_SHAPE_RE.test(reqLineTokens[i + 1] ?? ''),
+                REQ_ID_SHAPE_RE.test(reqLineTokens[i + 1] ?? '') &&
+                impliesInterior(reqLineTokens[i - 1], reqLineTokens[i + 1]),
             );
+            const reqLeadToken = (reqLineTokens[0] ?? '').toUpperCase();
+            const reqLineIsPlaceholderLed = reqLeadToken === 'TBD' || reqLeadToken === 'NONE';
+            // The 256-char cap here and above bounds the unanchored substring
+            // test, which backtracks quadratically on a single pathological
+            // token; no real REQ-ID or range token approaches it.
             const inertIdShaped =
-              citedReqIds.length === 0
-                ? reqLineTokens.filter((t) => REQ_ID_SUBSTRING_RE.test(t))
+              citedReqIds.length === 0 && !reqLineIsPlaceholderLed
+                ? reqLineTokens.filter(
+                    (t) => t.length <= 256 && t.includes('-') && REQ_ID_SUBSTRING_RE.test(t),
+                  )
                 : [];
             if (rangeTokens.length > 0 || hasSpacedRange || inertIdShaped.length > 0) {
               // Deliberately says "selected", NOT "marked complete": a range whose
@@ -3057,11 +3094,17 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
                   ? `the only REQ-ID(s) selected from it were: ${citedReqIds.join(', ')}`
                   : 'it selected NO REQ-IDs at all, so nothing was marked';
               const unparsedDesc = [...new Set([...rangeTokens, ...inertIdShaped])];
+              // Only diagnose "range" when a range rule actually fired - an R3
+              // warning on non-range ID text must not claim one was written.
+              const rangeAdvice =
+                rangeTokens.length > 0 || hasSpacedRange
+                  ? ' Range forms are not expanded; rewrite the line naming every requirement explicitly '
+                  : ' Rewrite the line naming every requirement explicitly ';
               warnings.push(
                 `ROADMAP Phase ${phaseNum} **Requirements** line is not a comma-separated REQ-ID list ` +
                   `(\`${reqMatch[1].trim()}\`) - ${selectedDesc}.` +
                   (unparsedDesc.length > 0 ? ` Unparsed text: ${unparsedDesc.join(', ')}.` : '') +
-                  ` Range forms are not expanded; rewrite the line naming every requirement explicitly ` +
+                  rangeAdvice +
                   `(e.g. \`REQ-01, REQ-02, REQ-03\`).`,
               );
             }

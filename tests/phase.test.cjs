@@ -11819,6 +11819,7 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['ellipsis', 'RANGE-01 … RANGE-05'],
     ['hyphen', 'RANGE-01 - RANGE-05'],
     ['worded', 'RANGE-01 through RANGE-05'],
+    ['parenthesized operator', 'RANGE-01 (..) RANGE-05'],
   ]) {
     test(
       `#3697-1 (${label} spaced range): a range that survives the split as its two endpoints must warn — ` +
@@ -11952,6 +11953,16 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['date annotation', 'RANGE-01, RANGE-02 - 2026-08-21 target'],
     ['em-dash citation with trailing period', 'RANGE-01, RANGE-02 — locked per ADR-7.'],
     ['nested parenthetical citations', 'RANGE-01, RANGE-02 (see (ADR-7), then ADR-8)'],
+    // A hyphen between two ADJACENT selected IDs can drop nothing (there is no
+    // interior), so it reads as an annotation separator, not a range.
+    ['adjacent-ID annotation hyphen', 'RANGE-01, RANGE-02 - RANGE-03 deferred'],
+    // `LETTERS-\d+-\d+` is also a date: the bare-hyphen tight-range arm demands
+    // a full ID on both sides precisely so this stays silent.
+    ['date-like parenthetical annotation', 'RANGE-01 (target FY-2026-08)'],
+    // A declared-empty line citing its rationale — zero selection with ID-shaped
+    // text, but placeholder-led. The #2334 class R3 must not recreate.
+    ['None with citation', 'None (per ADR-7)'],
+    ['TBD with citation', 'TBD (see ADR-7)'],
   ]) {
     test(
       `#3697-4 (negative space, ${label}): must stay silent — the historical over-warning must not return`,
@@ -11981,28 +11992,32 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   // sees only `RANGE-01`, and v1's scan saw nothing at all). Partial
   // selection: exactly RANGE-01 is ticked; the range token is reported as
   // unparsed; nothing is expanded.
+  for (const [label5, line5] of [
+    ['parenthesized', 'RANGE-01 (plus RANGE-02..RANGE-05)'],
+    ['backticked', 'RANGE-01, `RANGE-02..RANGE-05`'],
+  ]) {
   test(
-    '#3697-5 (parenthesized tight range): a range inside parentheses must warn and stay unexpanded',
+    `#3697-5 (${label5} tight range): a wrapped range must still warn and stay unexpanded`,
     () => {
-      const tmpDir = build3697RangeFixture('RANGE-01 (plus RANGE-02..RANGE-05)');
+      const tmpDir = build3697RangeFixture(line5);
       try {
         const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
         const parsed = JSON.parse(output);
         const warnings = parsed.warnings || [];
         assert.ok(
           warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
-          `#3697-5 FAILED: the parenthesized range selects only RANGE-01, so it must warn. ` +
+          `#3697-5 FAILED (${label5}): the wrapped range selects only RANGE-01, so it must warn. ` +
           `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
         );
         assert.ok(
           warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-02\.\.RANGE-05/.test(w)),
-          `#3697-5 FAILED: the warning must name the unparsed range token ` +
+          `#3697-5 FAILED (${label5}): the warning must name the unparsed range token ` +
           `(RANGE-02..RANGE-05), got: ${JSON.stringify(warnings)}`,
         );
         const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
         assert.deepStrictEqual(
           tickedReqIds(reqContent), ['RANGE-01'],
-          `#3697-5 FAILED: exactly RANGE-01 must be ticked (no expansion, no extra writes).\n` +
+          `#3697-5 FAILED (${label5}): exactly RANGE-01 must be ticked (no expansion, no extra writes).\n` +
           `REQUIREMENTS.md:\n${reqContent}`,
         );
       } finally {
@@ -12010,6 +12025,7 @@ describe('issue #3697: phase complete must warn when the Requirements line under
       }
     },
   );
+  }
 });
 
 
