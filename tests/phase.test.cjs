@@ -11824,38 +11824,35 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     test(
       `#3697-1 (${label} spaced range): a range that survives the split as its two endpoints must warn — ` +
       'and the endpoint-only marking behavior itself is UNCHANGED',
-      () => {
+      (t) => {
         const tmpDir = build3697RangeFixture(line);
-        try {
-          const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-          const parsed = JSON.parse(output);
-          const warnings = parsed.warnings || [];
-          assert.ok(
-            warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
-            `#3697-1 FAILED (${label}): a spaced range marks ONLY its endpoints, so it must warn. ` +
-            `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
-          );
-          assert.strictEqual(
-            parsed.has_warnings, true,
-            `#3697-1 FAILED (${label}): has_warnings must be true, got: ${JSON.stringify(parsed)}`,
-          );
-          // The warning must name what WAS selected, so the author can see the gap.
-          assert.ok(
-            warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-01/.test(w) && /RANGE-05/.test(w)),
-            `#3697-1 FAILED (${label}): the warning must name the IDs actually selected ` +
-            `(RANGE-01, RANGE-05), got: ${JSON.stringify(warnings)}`,
-          );
-          // Behavior guard: this is a warning, NOT range support. Exactly the two
-          // endpoints stay ticked; the interior IDs are still not expanded.
-          const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
-          assert.deepStrictEqual(
-            tickedReqIds(reqContent).sort(), ['RANGE-01', 'RANGE-05'],
-            `#3697-1 FAILED (${label}): the selected set must be UNCHANGED (endpoints only — ranges are ` +
-            `deliberately not expanded).\nREQUIREMENTS.md:\n${reqContent}`,
-          );
-        } finally {
-          cleanup(tmpDir);
-        }
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-1 FAILED (${label}): a spaced range marks ONLY its endpoints, so it must warn. ` +
+          `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+        assert.strictEqual(
+          parsed.has_warnings, true,
+          `#3697-1 FAILED (${label}): has_warnings must be true, got: ${JSON.stringify(parsed)}`,
+        );
+        // The warning must name what WAS selected, so the author can see the gap.
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-01/.test(w) && /RANGE-05/.test(w)),
+          `#3697-1 FAILED (${label}): the warning must name the IDs actually selected ` +
+          `(RANGE-01, RANGE-05), got: ${JSON.stringify(warnings)}`,
+        );
+        // Behavior guard: this is a warning, NOT range support. Exactly the two
+        // endpoints stay ticked; the interior IDs are still not expanded.
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent).sort(), ['RANGE-01', 'RANGE-05'],
+          `#3697-1 FAILED (${label}): the selected set must be UNCHANGED (endpoints only — ranges are ` +
+          `deliberately not expanded).\nREQUIREMENTS.md:\n${reqContent}`,
+        );
       },
     );
   }
@@ -11867,35 +11864,32 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     test(
       `#3697-2 (${label} tight range): a line that selects ZERO IDs while being non-empty and not TBD ` +
       'must warn, and must write nothing to the ledger',
-      () => {
+      (t) => {
         const tmpDir = build3697RangeFixture(line);
-        try {
-          const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-          const parsed = JSON.parse(output);
-          const warnings = parsed.warnings || [];
-          assert.ok(
-            warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
-            `#3697-2 FAILED (${label}): a zero-selection line is completely inert and must warn. ` +
-            `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
-          );
-          assert.ok(
-            warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-01/.test(w)),
-            `#3697-2 FAILED (${label}): the warning must name the unparsed ID-shaped text, ` +
-            `got: ${JSON.stringify(warnings)}`,
-          );
-          assert.strictEqual(
-            parsed.requirements_updated, false,
-            `#3697-2 FAILED (${label}): nothing was selected, so requirements_updated must be false, ` +
-            `got: ${JSON.stringify(parsed)}`,
-          );
-          const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
-          assert.deepStrictEqual(
-            tickedReqIds(reqContent), [],
-            `#3697-2 FAILED (${label}): no checkbox may be ticked.\nREQUIREMENTS.md:\n${reqContent}`,
-          );
-        } finally {
-          cleanup(tmpDir);
-        }
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-2 FAILED (${label}): a zero-selection line is completely inert and must warn. ` +
+          `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-01/.test(w)),
+          `#3697-2 FAILED (${label}): the warning must name the unparsed ID-shaped text, ` +
+          `got: ${JSON.stringify(warnings)}`,
+        );
+        assert.strictEqual(
+          parsed.requirements_updated, false,
+          `#3697-2 FAILED (${label}): nothing was selected, so requirements_updated must be false, ` +
+          `got: ${JSON.stringify(parsed)}`,
+        );
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent), [],
+          `#3697-2 FAILED (${label}): no checkbox may be ticked.\nREQUIREMENTS.md:\n${reqContent}`,
+        );
       },
     );
   }
@@ -11906,31 +11900,28 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   ]) {
     test(
       `#3697-3 (control, ${label}): the canonical form must mark every ID and must not warn`,
-      () => {
+      (t) => {
         const tmpDir = build3697RangeFixture(line);
-        try {
-          const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-          const parsed = JSON.parse(output);
-          const warnings = parsed.warnings || [];
-          // Whole-channel assertion: the fixture registers every cited ID, so
-          // there is NO legitimate warning here. Filtering by the current
-          // phrase would let a re-worded over-warning slip through (review
-          // claim 8) — assert actual silence, not absence of one wording.
-          assert.deepStrictEqual(
-            warnings, [],
-            `#3697-3 FAILED (${label}): the canonical comma list must never warn, ` +
-            `got: ${JSON.stringify(warnings)}`,
-          );
-          const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
-          assert.deepStrictEqual(
-            tickedReqIds(reqContent).sort(),
-            ['RANGE-01', 'RANGE-02', 'RANGE-03', 'RANGE-04', 'RANGE-05'],
-            `#3697-3 FAILED (${label}): all five requirements must be ticked.\n` +
-            `REQUIREMENTS.md:\n${reqContent}`,
-          );
-        } finally {
-          cleanup(tmpDir);
-        }
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        // Whole-channel assertion: the fixture registers every cited ID, so
+        // there is NO legitimate warning here. Filtering by the current
+        // phrase would let a re-worded over-warning slip through (review
+        // claim 8) — assert actual silence, not absence of one wording.
+        assert.deepStrictEqual(
+          warnings, [],
+          `#3697-3 FAILED (${label}): the canonical comma list must never warn, ` +
+          `got: ${JSON.stringify(warnings)}`,
+        );
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent).sort(),
+          ['RANGE-01', 'RANGE-02', 'RANGE-03', 'RANGE-04', 'RANGE-05'],
+          `#3697-3 FAILED (${label}): all five requirements must be ticked.\n` +
+          `REQUIREMENTS.md:\n${reqContent}`,
+        );
       },
     );
   }
@@ -11973,23 +11964,20 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   ]) {
     test(
       `#3697-4 (negative space, ${label}): must stay silent — the historical over-warning must not return`,
-      () => {
+      (t) => {
         const tmpDir = build3697RangeFixture(line);
-        try {
-          const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-          const parsed = JSON.parse(output);
-          const warnings = parsed.warnings || [];
-          // Whole-channel assertion, same rationale as #3697-3: every ID these
-          // fixtures cite is registered, so nothing here may warn at all. A
-          // phrase-filtered check pins wording, not silence (review claim 8).
-          assert.deepStrictEqual(
-            warnings, [],
-            `#3697-4 FAILED (${label}): ${JSON.stringify(line)} must not produce ANY warning, ` +
-            `got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
-          );
-        } finally {
-          cleanup(tmpDir);
-        }
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        // Whole-channel assertion, same rationale as #3697-3: every ID these
+        // fixtures cite is registered, so nothing here may warn at all. A
+        // phrase-filtered check pins wording, not silence (review claim 8).
+        assert.deepStrictEqual(
+          warnings, [],
+          `#3697-4 FAILED (${label}): ${JSON.stringify(line)} must not produce ANY warning, ` +
+          `got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
       },
     );
   }
@@ -12007,31 +11995,28 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   ]) {
   test(
     `#3697-5 (${label5} tight range): a wrapped range must still warn and stay unexpanded`,
-    () => {
+    (t) => {
       const tmpDir = build3697RangeFixture(line5);
-      try {
-        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-        const parsed = JSON.parse(output);
-        const warnings = parsed.warnings || [];
-        assert.ok(
-          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
-          `#3697-5 FAILED (${label5}): the wrapped range selects only RANGE-01, so it must warn. ` +
-          `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
-        );
-        assert.ok(
-          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-02\.\.RANGE-05/.test(w)),
-          `#3697-5 FAILED (${label5}): the warning must name the unparsed range token ` +
-          `(RANGE-02..RANGE-05), got: ${JSON.stringify(warnings)}`,
-        );
-        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
-        assert.deepStrictEqual(
-          tickedReqIds(reqContent), ['RANGE-01'],
-          `#3697-5 FAILED (${label5}): exactly RANGE-01 must be ticked (no expansion, no extra writes).\n` +
-          `REQUIREMENTS.md:\n${reqContent}`,
-        );
-      } finally {
-        cleanup(tmpDir);
-      }
+      t.after(() => cleanup(tmpDir));
+      const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+      const parsed = JSON.parse(output);
+      const warnings = parsed.warnings || [];
+      assert.ok(
+        warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+        `#3697-5 FAILED (${label5}): the wrapped range selects only RANGE-01, so it must warn. ` +
+        `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+      );
+      assert.ok(
+        warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-02\.\.RANGE-05/.test(w)),
+        `#3697-5 FAILED (${label5}): the warning must name the unparsed range token ` +
+        `(RANGE-02..RANGE-05), got: ${JSON.stringify(warnings)}`,
+      );
+      const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+      assert.deepStrictEqual(
+        tickedReqIds(reqContent), ['RANGE-01'],
+        `#3697-5 FAILED (${label5}): exactly RANGE-01 must be ticked (no expansion, no extra writes).\n` +
+        `REQUIREMENTS.md:\n${reqContent}`,
+      );
     },
   );
   }
@@ -12043,20 +12028,17 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   // warning legitimately fires; only the misparse channel must stay silent.
   test(
     '#3697-4b (word-operator-prefixed ID): a canonical list must not read as a glued range',
-    () => {
+    (t) => {
       const tmpDir = build3697RangeFixture('RANGE-01, TORANGE-05');
-      try {
-        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-        const parsed = JSON.parse(output);
-        const warnings = parsed.warnings || [];
-        assert.deepStrictEqual(
-          warnings.filter((w) => REQ_LINE_MISPARSE_RE.test(w)), [],
-          `#3697-4b FAILED: "RANGE-01, TORANGE-05" is a comma list of two valid IDs and must not ` +
-          `produce a misparse warning, got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
-        );
-      } finally {
-        cleanup(tmpDir);
-      }
+      t.after(() => cleanup(tmpDir));
+      const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+      const parsed = JSON.parse(output);
+      const warnings = parsed.warnings || [];
+      assert.deepStrictEqual(
+        warnings.filter((w) => REQ_LINE_MISPARSE_RE.test(w)), [],
+        `#3697-4b FAILED: "RANGE-01, TORANGE-05" is a comma list of two valid IDs and must not ` +
+        `produce a misparse warning, got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+      );
     },
   );
 
@@ -12077,26 +12059,23 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     test(
       `#3697-6 (${label6} half-spaced range): a range glued to one endpoint must warn — ` +
       'selection is unchanged',
-      () => {
+      (t) => {
         const tmpDir = build3697RangeFixture(line6);
-        try {
-          const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
-          const parsed = JSON.parse(output);
-          const warnings = parsed.warnings || [];
-          assert.ok(
-            warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
-            `#3697-6 FAILED (${label6}): a half-spaced range under-selects, so it must warn. ` +
-            `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
-          );
-          const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
-          assert.deepStrictEqual(
-            tickedReqIds(reqContent), expectTicked,
-            `#3697-6 FAILED (${label6}): exactly ${JSON.stringify(expectTicked)} must be ticked ` +
-            `(no expansion).\nREQUIREMENTS.md:\n${reqContent}`,
-          );
-        } finally {
-          cleanup(tmpDir);
-        }
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-6 FAILED (${label6}): a half-spaced range under-selects, so it must warn. ` +
+          `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent), expectTicked,
+          `#3697-6 FAILED (${label6}): exactly ${JSON.stringify(expectTicked)} must be ticked ` +
+          `(no expansion).\nREQUIREMENTS.md:\n${reqContent}`,
+        );
       },
     );
   }
