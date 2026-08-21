@@ -11818,6 +11818,7 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   for (const [label, line] of [
     ['ellipsis', 'RANGE-01 … RANGE-05'],
     ['hyphen', 'RANGE-01 - RANGE-05'],
+    ['worded', 'RANGE-01 through RANGE-05'],
   ]) {
     test(
       `#3697-1 (${label} spaced range): a range that survives the split as its two endpoints must warn — ` +
@@ -11910,8 +11911,12 @@ describe('issue #3697: phase complete must warn when the Requirements line under
           const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
           const parsed = JSON.parse(output);
           const warnings = parsed.warnings || [];
+          // Whole-channel assertion: the fixture registers every cited ID, so
+          // there is NO legitimate warning here. Filtering by the current
+          // phrase would let a re-worded over-warning slip through (review
+          // claim 8) — assert actual silence, not absence of one wording.
           assert.deepStrictEqual(
-            warnings.filter((w) => REQ_LINE_MISPARSE_RE.test(w)), [],
+            warnings, [],
             `#3697-3 FAILED (${label}): the canonical comma list must never warn, ` +
             `got: ${JSON.stringify(warnings)}`,
           );
@@ -11938,6 +11943,15 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['literal None', 'None'],
     ['shipped template comment', '[RANGE-01, RANGE-02]  <!-- brackets optional, remove if unused -->'],
     ['parenthetical citation', 'RANGE-01, RANGE-02 (locked per ADR-7)'],
+    // The next four are the false-positive classes a free-text detector
+    // produced (the #2334/#2339 regression shape): a hyphen after the list is
+    // an ANNOTATION separator, not a range operator, whenever what follows is
+    // not itself a REQ-ID — and an ID-shaped citation on a correctly-parsed
+    // line is a citation, not unparsed residue.
+    ['numeric estimate annotation', 'RANGE-01, RANGE-02 - 3 points'],
+    ['date annotation', 'RANGE-01, RANGE-02 - 2026-08-21 target'],
+    ['em-dash citation with trailing period', 'RANGE-01, RANGE-02 — locked per ADR-7.'],
+    ['nested parenthetical citations', 'RANGE-01, RANGE-02 (see (ADR-7), then ADR-8)'],
   ]) {
     test(
       `#3697-4 (negative space, ${label}): must stay silent — the historical over-warning must not return`,
@@ -11947,9 +11961,12 @@ describe('issue #3697: phase complete must warn when the Requirements line under
           const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
           const parsed = JSON.parse(output);
           const warnings = parsed.warnings || [];
+          // Whole-channel assertion, same rationale as #3697-3: every ID these
+          // fixtures cite is registered, so nothing here may warn at all. A
+          // phrase-filtered check pins wording, not silence (review claim 8).
           assert.deepStrictEqual(
-            warnings.filter((w) => REQ_LINE_MISPARSE_RE.test(w)), [],
-            `#3697-4 FAILED (${label}): ${JSON.stringify(line)} must not produce a misparse warning, ` +
+            warnings, [],
+            `#3697-4 FAILED (${label}): ${JSON.stringify(line)} must not produce ANY warning, ` +
             `got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
           );
         } finally {
@@ -11958,6 +11975,41 @@ describe('issue #3697: phase complete must warn when the Requirements line under
       },
     );
   }
+
+  // A range hidden INSIDE balanced parentheses is stripped by the token shave
+  // and must still warn (review claim 2's first reproduction: the selector
+  // sees only `RANGE-01`, and v1's scan saw nothing at all). Partial
+  // selection: exactly RANGE-01 is ticked; the range token is reported as
+  // unparsed; nothing is expanded.
+  test(
+    '#3697-5 (parenthesized tight range): a range inside parentheses must warn and stay unexpanded',
+    () => {
+      const tmpDir = build3697RangeFixture('RANGE-01 (plus RANGE-02..RANGE-05)');
+      try {
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-5 FAILED: the parenthesized range selects only RANGE-01, so it must warn. ` +
+          `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-02\.\.RANGE-05/.test(w)),
+          `#3697-5 FAILED: the warning must name the unparsed range token ` +
+          `(RANGE-02..RANGE-05), got: ${JSON.stringify(warnings)}`,
+        );
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent), ['RANGE-01'],
+          `#3697-5 FAILED: exactly RANGE-01 must be ticked (no expansion, no extra writes).\n` +
+          `REQUIREMENTS.md:\n${reqContent}`,
+        );
+      } finally {
+        cleanup(tmpDir);
+      }
+    },
+  );
 });
 
 
