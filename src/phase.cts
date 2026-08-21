@@ -3047,6 +3047,11 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
                 if (!/[A-Za-z0-9]/.test(trimmed)) {
                   return trimmed.replace(/^[[({]+/, '').replace(/[\])}]+$/, '');
                 }
+                // A trailing run of 2+ dots is a glued range operator
+                // (`REQ-01.. REQ-05`), not sentence punctuation - keep it.
+                if (/\.{2,}$/.test(trimmed)) {
+                  return trimmed.replace(/^[[({"'`*_~“”‘’]+/, '');
+                }
                 return trimmed
                   .replace(/^[[({"'`*_~“”‘’]+/, '')
                   .replace(/[\])}.;:"'`*_~“”‘’]+$/, '');
@@ -3085,13 +3090,15 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
             // only: a word operator glued to an ID is not a range spelling, it is
             // an ID - `TOREQ-05` is a valid prefix-agnostic REQ-ID, and `to` +
             // `REQ-05` would warn on the canonical list `REQ-01, TOREQ-05`.
+            // The TRAILING arm keeps the word operators: a valid ID must end in
+            // digits, so `REQ-01through` can never be an ID - only a glued typo.
             const REQ_RANGE_OP_SYMBOL = '(?:\\.{2,}|\\u2026|\\u2014|\\u2013|-)';
             const REQ_GLUED_RANGE_LEAD_RE = new RegExp(
               `^${REQ_RANGE_OP_SYMBOL}([A-Z][A-Z0-9]*-\\d+)$`,
               'i',
             );
             const REQ_GLUED_RANGE_TRAIL_RE = new RegExp(
-              `^([A-Z][A-Z0-9]*-\\d+)${REQ_RANGE_OP_SYMBOL}$`,
+              `^([A-Z][A-Z0-9]*-\\d+)${REQ_RANGE_OP}$`,
               'i',
             );
             const hasGluedRangeFragment = reqLineTokens.some((t, i) => {
@@ -3146,7 +3153,7 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
                   ? ' Range forms are not expanded; rewrite the line naming every requirement explicitly '
                   : ' Rewrite the line naming every requirement explicitly ';
               warnings.push(
-                `ROADMAP Phase ${phaseNum} **Requirements** line is not a comma-separated REQ-ID list ` +
+                `ROADMAP Phase ${phaseNum} **Requirements** line could not be parsed as a comma-separated REQ-ID list ` +
                   `(\`${reqMatch[1].trim()}\`) - ${selectedDesc}.` +
                   (unparsedDesc.length > 0 ? ` Unparsed text: ${unparsedDesc.join(', ')}.` : '') +
                   rangeAdvice +

@@ -11787,7 +11787,7 @@ describe('issue #2334: ghost-REQ-ID classification must probe write surfaces, no
 // and on parenthetical annotations must not return.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const REQ_LINE_MISPARSE_RE = /not a comma-separated REQ-ID list/i;
+const REQ_LINE_MISPARSE_RE = /could not be parsed as a comma-separated REQ-ID list/i;
 
 function build3697RangeFixture(roadmapRequirementsLine) {
   return build2334GhostSurfaceFixture({
@@ -12067,6 +12067,12 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   for (const [label6, line6, expectTicked] of [
     ['leading-glue', 'RANGE-01 -RANGE-05', ['RANGE-01']],
     ['trailing-glue', 'RANGE-01- RANGE-05', ['RANGE-05']],
+    // A word operator can glue only TRAILING (an ID must end in digits, so
+    // `RANGE-01through` cannot be an ID — but `TORANGE-05` can, which is why
+    // the leading arm is symbol-only).
+    ['worded-glue', 'RANGE-01through RANGE-05', ['RANGE-05']],
+    // The trailing shave must not eat a glued `..` as sentence punctuation.
+    ['double-dot-glue', 'RANGE-01.. RANGE-05', ['RANGE-05']],
   ]) {
     test(
       `#3697-6 (${label6} half-spaced range): a range glued to one endpoint must warn — ` +
