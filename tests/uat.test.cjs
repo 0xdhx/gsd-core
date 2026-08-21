@@ -16,6 +16,8 @@ const {
   CHECKPOINT_LANGUAGE_ALIASES,
   resolveCheckpointFrame,
   parseDeferredItems,
+  parseDeferredItemsWithStatus,
+  acknowledgeDeferredItem,
 } = require('../gsd-core/bin/lib/uat.cjs');
 
 describe('audit-uat command', () => {
@@ -2223,6 +2225,166 @@ describe('#3457 parseDeferredItems: heading-delimited entries', () => {
 
     assert.strictEqual(got.length, 1, JSON.stringify(got.map(i => i.name)));
     assert.strictEqual(got[0].result, 'unresolved');
+  });
+});
+
+describe('#3702 parseDeferredItems: list-marker grammar', () => {
+  // `deferred-items.md` has no template and no mandated shape, but the parser
+  // recognised only the hyphen marker — so `*`, `+` and ordered lists (all
+  // lists in CommonMark and GFM) contributed ZERO entries on both the headless
+  // and the heading-delimited path. A mixed file dropped its non-hyphen entries
+  // while keeping their hyphenated siblings, under-reporting without ever
+  // looking empty.
+  const SECTION = '## Deferred Items\n\n';
+  const names = (md) => parseDeferredItems(SECTION + md).map((i) => i.name);
+  const count = (md) => names(md).length;
+
+  // The marker set the ruling widened to. `1)` is deliberately absent — the
+  // paren-terminated ordered form is out of scope for this fix, and the
+  // `1) still yields zero` case below pins that as intended, not as an oversight.
+  const MARKERS = ['-', '*', '+', '1.'];
+
+  test('AC1 headless: every marker yields the same count as the hyphen form', () => {
+    const shape = (m) => `${m} alpha\n${m} beta\n`;
+    const hyphen = count(shape('-'));
+
+    assert.strictEqual(hyphen, 2, 'baseline: the hyphen form must yield 2');
+    for (const m of MARKERS) {
+      assert.strictEqual(count(shape(m)), hyphen, `marker ${JSON.stringify(m)}: ${JSON.stringify(names(shape(m)))}`);
+    }
+  });
+
+  test('AC1 headless: the entry NAME drops the marker, whichever marker it is', () => {
+    // rawGapEntryText renders the name acknowledgeDeferredItem later matches on,
+    // so a marker left in the rendered name would make the entry unreachable.
+    for (const m of MARKERS) {
+      assert.deepStrictEqual(names(`${m} alpha\n`), ['alpha'], `marker ${JSON.stringify(m)}`);
+    }
+  });
+
+  test('AC2 heading-delimited: a body carrying any marker is KEPT (was dropped)', () => {
+    const shape = (m) => `### Entry\n\n${m} **What:** x.\n`;
+
+    for (const m of MARKERS) {
+      assert.strictEqual(count(shape(m)), 1, `marker ${JSON.stringify(m)}: ${JSON.stringify(names(shape(m)))}`);
+    }
+  });
+
+  test('AC2 heading-delimited: a mixed file no longer drops its non-hyphen entry', () => {
+    // The row that bites hardest in the wild: the file never looks empty, it
+    // just silently under-reports.
+    const got = names('### Hyphen entry\n\n- x.\n\n### Asterisk entry\n\n* y.\n');
+
+    assert.strictEqual(got.length, 2, JSON.stringify(got));
+    assert.match(got[0], /^Hyphen entry/);
+    assert.match(got[1], /^Asterisk entry/);
+  });
+
+  test('AC3: a resolved-status field under any marker resolves its entry', () => {
+    // The lockstep property: widening what OPENS an entry without widening the
+    // marker STRIP feeding field extraction would surface the entry and then
+    // never resolve it — permanently unresolved, which is worse than dropped.
+    //
+    // Asserted through parseDeferredItemsWithStatus, NOT through an empty
+    // parseDeferredItems: "no outstanding item" is also what a DROPPED entry
+    // looks like, so the weaker form passes against the unfixed parser for
+    // precisely the reason under test. The entry must exist AND read resolved.
+    for (const m of MARKERS) {
+      for (const [shape, md] of [
+        ['heading', `${SECTION}### Entry\n\n${m} **What:** x.\n${m} **Status:** resolved\n`],
+        ['headless', `${SECTION}${m} alpha\n  status: resolved\n`],
+      ]) {
+        const where = `${shape} shape, marker ${JSON.stringify(m)}`;
+        const withStatus = parseDeferredItemsWithStatus(md);
+
+        assert.strictEqual(withStatus.length, 1, `${where}: entry must be parsed at all — ${JSON.stringify(withStatus)}`);
+        assert.strictEqual(withStatus[0].status, 'resolved', `${where}: ${JSON.stringify(withStatus)}`);
+        assert.deepStrictEqual(parseDeferredItems(md), [], `${where}: resolved entries are not outstanding`);
+      }
+    }
+  });
+
+  test('AC3: the acknowledge writer reaches an entry written under any marker', () => {
+    for (const m of MARKERS) {
+      const content = `${SECTION}${m} alpha\n`;
+      const got = acknowledgeDeferredItem(content, 'alpha');
+
+      assert.strictEqual(got.status, 'ok', `marker ${JSON.stringify(m)}`);
+      assert.match(got.content, /status: acknowledged/, `marker ${JSON.stringify(m)}`);
+      assert.strictEqual(
+        parseDeferredItemsWithStatus(got.content)[0].status,
+        'acknowledged',
+        `marker ${JSON.stringify(m)}: the written marker must parse back`,
+      );
+    }
+  });
+
+  test('AC3: an already-acknowledged entry under any marker is not double-written', () => {
+    for (const m of MARKERS) {
+      const original = `${SECTION}${m} alpha\n`;
+      const once = acknowledgeDeferredItem(original, 'alpha').content;
+      const twice = acknowledgeDeferredItem(once, 'alpha').content;
+
+      // Anti-vacuity: an unreachable entry is also idempotent, so pin that the
+      // first call actually wrote before pinning that the second did not.
+      assert.notStrictEqual(once, original, `marker ${JSON.stringify(m)}: first acknowledge must write`);
+      assert.strictEqual(twice, once, `marker ${JSON.stringify(m)}`);
+    }
+  });
+
+  test('AC4: prose-only and bare headings still contribute nothing', () => {
+    // The "prose is not an item" contract is untouched: an asterisk bullet is
+    // not prose, so widening the marker set cannot start counting prose.
+    assert.deepStrictEqual(names('### Musings\n\njust prose here.\n'), []);
+    assert.deepStrictEqual(names('### A bare heading with no body\n'), []);
+    assert.deepStrictEqual(names('### Notes\n\nwe considered * and + as options.\n'), []);
+  });
+
+  test('AC4: a bolded field key is not mistaken for an asterisk bullet', () => {
+    // `**Status:**` opens with `*` but supplies no whitespace after it, so the
+    // widened marker declines and the bolded-key path still owns the line.
+    const got = parseDeferredItemsWithStatus(`${SECTION}### Entry\n\n- **What:** x.\n**Status:** resolved\n`);
+
+    assert.strictEqual(got.length, 1, JSON.stringify(got));
+    assert.strictEqual(got[0].status, 'resolved', JSON.stringify(got));
+  });
+
+  test('AC5: a table under a leaf heading still yields exactly its rows', () => {
+    // The anti-double-count property (#2766): table lines are skipped before
+    // the body-marker flag can be set, and a `|` row is not a list marker, so
+    // the heading still contributes no phantom entry.
+    const oneRow = names('### Discovered\n\n| Test | Seeds |\n|---|---|\n| test_a | 0, 1 |\n');
+    assert.deepStrictEqual(oneRow, ['test_a — 0, 1'], JSON.stringify(oneRow));
+
+    const twoRows = names('### Discovered\n\n| Test | Seeds |\n|---|---|\n| test_a | 0 |\n| test_b | 1 |\n');
+    assert.strictEqual(twoRows.length, 2, JSON.stringify(twoRows));
+  });
+
+  test('the paren-terminated ordered marker `1)` remains out of scope', () => {
+    // Pinned so a later reader sees this as the ruling's scope, not a miss.
+    assert.deepStrictEqual(names('1) alpha\n2) beta\n'), []);
+  });
+
+  test('CRLF files: widened markers split and resolve identically', () => {
+    for (const m of MARKERS) {
+      const crlf = `## Deferred Items\r\n\r\n### Entry\r\n\r\n${m} **What:** x.\r\n${m} **Status:** resolved\r\n`;
+      const withStatus = parseDeferredItemsWithStatus(crlf);
+
+      // Same anti-vacuity as AC3: an empty outstanding list would also be
+      // satisfied by the entry never being parsed.
+      assert.strictEqual(withStatus.length, 1, `marker ${JSON.stringify(m)}: ${JSON.stringify(withStatus)}`);
+      assert.strictEqual(withStatus[0].status, 'resolved', `marker ${JSON.stringify(m)}`);
+      assert.deepStrictEqual(parseDeferredItems(crlf), [], `marker ${JSON.stringify(m)}`);
+    }
+  });
+
+  test('nested sub-lists under any marker stay folded into their parent entry', () => {
+    // splitGapsEntries' indent rule (#2286) is marker-agnostic: only a marker at
+    // or shallower than the first one seen opens a new entry.
+    for (const m of MARKERS) {
+      const got = names(`${m} alpha\n    ${m} nested one\n    ${m} nested two\n${m} beta\n`);
+      assert.strictEqual(got.length, 2, `marker ${JSON.stringify(m)}: ${JSON.stringify(got)}`);
+    }
   });
 });
 

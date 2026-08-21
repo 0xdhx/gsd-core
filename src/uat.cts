@@ -894,13 +894,13 @@ function parseDeferredItemsWithStatus(content: string): Array<{ name: string; st
       lines: entryLines,
       fields: extractGapEntryFields(entryLines.map(stripLeadingBulletMarker)),
     }))
-    : splitGapsEntries(sectionBody).map((entryLines) => ({
+    : splitGapsEntries(sectionBody, DEFERRED_BULLET_MARKERS).map((entryLines) => ({
       lines: entryLines,
-      fields: extractGapEntryFields(entryLines),
+      fields: extractGapEntryFields(entryLines, DEFERRED_BULLET_MARKERS),
     }));
 
   for (const { lines: entryLines, fields } of entries) {
-    const text = rawGapEntryText(entryLines);
+    const text = rawGapEntryText(entryLines, DEFERRED_BULLET_MARKERS);
     if (!text) continue;
 
     items.push({ name: text, status: fields.status || '' });
@@ -1012,9 +1012,9 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     return { content, status: 'unsupported_heading_shape' };
   }
 
-  const entries = splitGapsEntriesWithSpans(sectionBody);
+  const entries = splitGapsEntriesWithSpans(sectionBody, DEFERRED_BULLET_MARKERS);
   const matches = entries
-    .map((entry) => ({ entry, text: rawGapEntryText(entry.lines) }))
+    .map((entry) => ({ entry, text: rawGapEntryText(entry.lines, DEFERRED_BULLET_MARKERS) }))
     .filter((e) => e.text === targetText);
 
   if (matches.length === 0) return { content, status: 'not_found' };
@@ -1022,7 +1022,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
 
   const { entry } = matches[0];
   const { lines: entryLines, start, end } = entry;
-  const fields = extractGapEntryFields(entryLines);
+  const fields = extractGapEntryFields(entryLines, DEFERRED_BULLET_MARKERS);
   if (fields.status && fields.status.toLowerCase() === 'resolved') {
     return { content, status: 'already_resolved' };
   }
@@ -1039,12 +1039,16 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   // comparison that selected this entry — this catches real drift between
   // the two rather than a regex trivially guaranteed to agree with itself.
   const strippedForVerify = matchedLines.map((l) => l.replace(/\r$/, ''));
-  if (rawGapEntryText(strippedForVerify) !== targetText) {
+  if (rawGapEntryText(strippedForVerify, DEFERRED_BULLET_MARKERS) !== targetText) {
     return { content, status: 'match_verification_failed' };
   }
 
   const matchIndexInContent = sectionOffset + start;
-  const statusFieldRe = /^\s*(?:-\s+)?(\*+status:\*+|status:)/i;
+  // #3702: the optional entry-opening marker matches the widened deferred set.
+  // A bolded `**Status:**` still parses — the `*` alternative requires trailing
+  // whitespace, which `**` does not supply, so the optional group declines and
+  // the bolded-key alternative matches as before.
+  const statusFieldRe = /^\s*(?:(?:[-*+]|\d+\.)\s+)?(\*+status:\*+|status:)/i;
   const statusLineIdx = matchedLines.findIndex((rawLine) => statusFieldRe.test(rawLine.replace(/\r$/, '')));
 
   // No CRLF-preservation branch here (WARNING 1, #3458 follow-up review):
@@ -1065,7 +1069,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   // whole-file normalization rather than duplicating it.
   let newMatchedLines: string[];
   if (statusLineIdx === -1) {
-    const bulletIndentMatch = matchedLines[0].match(/^(\s*)-\s+/);
+    const bulletIndentMatch = matchedLines[0].match(DEFERRED_BULLET_MARKERS.strip);
     const continuationIndent = ' '.repeat((bulletIndentMatch ? bulletIndentMatch[1].length : 0) + 2);
     newMatchedLines = [
       matchedLines[0],
@@ -1075,7 +1079,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   } else {
     const original = matchedLines[statusLineIdx];
     const replaced = original.replace(
-      /^(\s*(?:-\s+)?)(\*+status:\*+|status:)(\s*).*$/i,
+      /^(\s*(?:(?:[-*+]|\d+\.)\s+)?)(\*+status:\*+|status:)(\s*).*$/i,
       (_m, indent: string, key: string, ws: string) => `${indent}${key}${ws}acknowledged`,
     );
     newMatchedLines = matchedLines.slice();
@@ -1087,14 +1091,73 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
 }
 
 /**
- * Strip one leading `- ` bullet marker (#3457). Heading-delimited deferred
- * entries carry their fields as sibling bullets; `extractGapEntryFields` only
- * de-bullets line 0 (Gaps-protective — there, a later `- ` line is a nested
- * sub-list), so the deferred heading path de-bullets every line itself before
- * field extraction. Non-bullet lines pass through untouched.
+ * The two regex shapes a bullet-aware walk needs over one marker set: `open`
+ * detects an entry-opening marker, `strip` additionally captures the line's
+ * remaining content. Carrying both in ONE object is what keeps a detection
+ * site and its matching strip site from drifting to different marker sets —
+ * the asymmetry #3702 warns about (widen what OPENS an entry without widening
+ * what is STRIPPED before field extraction, and a status field written under
+ * the new marker never resolves its entry).
+ */
+interface BulletMarkers {
+  /** `^(indent)<marker>\s` — group 1 is the indent. */
+  open: RegExp;
+  /** `^(indent)<marker>\s+(rest)$` — group 1 indent, group 2 rest-of-line. */
+  strip: RegExp;
+}
+
+/**
+ * Hyphen-only markers — the `## Gaps` form, unchanged by #3702. Gaps entries
+ * come from a template that mandates the hyphen YAML-lite shape, so widening
+ * that section's grammar is not what the deferred-items ruling required; the
+ * shared splitting seam is parameterised rather than widened wholesale so the
+ * Gaps path stays byte-for-byte on its existing behaviour.
+ */
+const HYPHEN_BULLET_MARKERS: BulletMarkers = {
+  open: /^(\s*)-\s/,
+  strip: /^(\s*)-\s+(.*)$/,
+};
+
+/**
+ * Deferred-items markers (#3702): the standard Markdown list markers, not the
+ * hyphen alone. `deferred-items.md` has NO template and no mandated shape —
+ * executors write it by hand (the same premise that justified the #2766 table
+ * union) — so an author reaching for `*`, `+` or `1.` wrote a list by every
+ * Markdown definition while this parser contributed ZERO entries for it. The
+ * hyphen restriction was a regex literal inherited from the Gaps seam, never a
+ * stated decision: measured in the wild, non-empty records parsed to a clean
+ * zero, and a MIXED file dropped its non-hyphen entries while keeping their
+ * hyphenated siblings — under-reporting without ever looking empty.
+ *
+ * Deliberately NOT widened to prose: "prose is not an item" is this parser's
+ * pre-existing, test-asserted contract (the `# Notes` case) and is untouched
+ * here. An asterisk bullet is not prose, and a `|` row is not a list marker —
+ * table lines are still skipped before the body-bullet flag can be set, so
+ * `parseDeferredTableItems` keeps sole ownership of table bodies and the
+ * #2766 anti-double-count property holds unchanged.
+ *
+ * The paren-terminated ordered form (`1)`) is out of scope for this fix: the
+ * #3702 ruling scopes the widening to `*`, `+` and the dot-terminated ordered
+ * marker.
+ */
+const DEFERRED_BULLET_MARKERS: BulletMarkers = {
+  open: /^(\s*)(?:[-*+]|\d+\.)\s/,
+  strip: /^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/,
+};
+
+/**
+ * Strip one leading bullet marker (#3457; marker set widened by #3702).
+ * Heading-delimited deferred entries carry their fields as sibling bullets;
+ * `extractGapEntryFields` only de-bullets line 0 (Gaps-protective — there, a
+ * later `- ` line is a nested sub-list), so the deferred heading path
+ * de-bullets every line itself before field extraction. Non-bullet lines pass
+ * through untouched.
+ *
+ * Deferred-only by construction — every caller is on the deferred path — so it
+ * takes the widened set directly rather than a parameter.
  */
 function stripLeadingBulletMarker(line: string): string {
-  return line.replace(/^(\s*)-\s+/, '');
+  return line.replace(DEFERRED_BULLET_MARKERS.strip, '$2');
 }
 
 /**
@@ -1116,8 +1179,9 @@ function stripLeadingBulletMarker(line: string): string {
  * level; deepest level) each mis-count one of these shapes.
  *
  * A leaf entry is [heading text, ...body lines up to the next heading] and is
- * kept only when its body (minus table lines) contains at least one `- `
- * bullet:
+ * kept only when its body (minus table lines) contains at least one list item
+ * — any of `-`, `*`, `+` or a dot-terminated ordered marker (#3702; the
+ * hyphen-only form silently dropped `*`/`+`/ordered bodies):
  * - a prose-only or bare heading contributes nothing — "prose is not an item"
  *   is this parser's pre-existing contract (see the `# Notes` case);
  * - a table-only body is left entirely to `parseDeferredTableItems`, which
@@ -1149,14 +1213,14 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
   let currentHasBullet = false;
 
   const flushCurrent = (): void => {
-    // Keep the leaf entry only when its body carries a bullet; the heading
+    // Keep the leaf entry only when its body carries a list item; the heading
     // text line itself (element 0) never counts as one.
     if (current !== null && currentHasBullet) entries.push(current);
     current = null;
     currentHasBullet = false;
   };
   const flushPending = (): void => {
-    entries.push(...splitGapsEntries(pending.join('\n')));
+    entries.push(...splitGapsEntries(pending.join('\n'), DEFERRED_BULLET_MARKERS));
     pending = [];
   };
 
@@ -1180,7 +1244,7 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     if (/^\s*\|/.test(lines[i].replace(/\r$/, ''))) continue;
     if (current !== null) {
       current.push(lines[i]);
-      if (/^\s*-\s/.test(lines[i].replace(/\r$/, ''))) currentHasBullet = true;
+      if (DEFERRED_BULLET_MARKERS.open.test(lines[i].replace(/\r$/, ''))) currentHasBullet = true;
     } else {
       pending.push(lines[i]);
     }
@@ -1254,8 +1318,18 @@ interface GapsEntrySpan {
  * boundary — a second, independently-written grouping pass is exactly how a
  * span-carrying sibling could disagree with the plain-lines version it is
  * supposed to be span-annotating.
+ *
+ * `markers` selects the marker set an entry may OPEN with (#3702). It defaults
+ * to the hyphen-only Gaps form, so every pre-existing caller is unaffected;
+ * the deferred-items callers pass `DEFERRED_BULLET_MARKERS`. Parameterising
+ * the shared seam — rather than widening it in place — is what keeps the
+ * template-mandated Gaps grammar out of the deferred-items ruling's blast
+ * radius while still leaving exactly ONE grouping pass in the module.
  */
-function splitGapsEntriesCore(sectionBody: string): GapsEntrySpan[] {
+function splitGapsEntriesCore(
+  sectionBody: string,
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+): GapsEntrySpan[] {
   const rawLines = sectionBody.split('\n');
   const lineStarts: number[] = [];
   const lineEnds: number[] = [];
@@ -1281,7 +1355,7 @@ function splitGapsEntriesCore(sectionBody: string): GapsEntrySpan[] {
 
   rawLines.forEach((rawLine, idx) => {
     const line = rawLine.replace(/\r$/, '');
-    const bulletMatch = line.match(/^(\s*)-\s/);
+    const bulletMatch = line.match(markers.open);
     if (bulletMatch) {
       const indent = bulletMatch[1].length;
       if (baseIndent === null) baseIndent = indent;
@@ -1306,7 +1380,8 @@ function splitGapsEntriesCore(sectionBody: string): GapsEntrySpan[] {
 
 /**
  * Split a `## Gaps` section body into per-entry line groups on TOP-LEVEL
- * `- ` bullet openers.
+ * bullet openers — `- ` for Gaps, or whichever set `markers` names (#3702:
+ * the deferred-items callers pass the widened CommonMark set).
  *
  * The indentation of the FIRST bullet line encountered establishes the
  * "top-level" indent for the whole section; any subsequent `- `-opening line
@@ -1321,8 +1396,11 @@ function splitGapsEntriesCore(sectionBody: string): GapsEntrySpan[] {
  * the template emits) are discarded. An empty/whitespace-only section body
  * (heading present, no bullets) returns `[]`.
  */
-function splitGapsEntries(sectionBody: string): string[][] {
-  return splitGapsEntriesCore(sectionBody).map((entry) => entry.lines);
+function splitGapsEntries(
+  sectionBody: string,
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+): string[][] {
+  return splitGapsEntriesCore(sectionBody, markers).map((entry) => entry.lines);
 }
 
 /**
@@ -1341,8 +1419,11 @@ function splitGapsEntries(sectionBody: string): string[][] {
  * one. Carrying the span out of THIS same pass — the one that already knows
  * exactly where the entry lives — removes the re-derivation step entirely.
  */
-function splitGapsEntriesWithSpans(sectionBody: string): GapsEntrySpan[] {
-  return splitGapsEntriesCore(sectionBody);
+function splitGapsEntriesWithSpans(
+  sectionBody: string,
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+): GapsEntrySpan[] {
+  return splitGapsEntriesCore(sectionBody, markers);
 }
 
 /**
@@ -1371,7 +1452,10 @@ function splitGapsEntriesWithSpans(sectionBody: string): GapsEntrySpan[] {
  * keep their literal case, and mid-line emphasis is untouched, preserving the
  * start-anchored decoy invariant above.
  */
-function extractGapEntryFields(entryLines: string[]): Record<string, string> {
+function extractGapEntryFields(
+  entryLines: string[],
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+): Record<string, string> {
   const fields: Record<string, string> = {};
   const fieldLineRe = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
   const boldedKeyRe = /^\*+([A-Za-z_][A-Za-z0-9_-]*):\*+/;
@@ -1382,7 +1466,7 @@ function extractGapEntryFields(entryLines: string[]): Record<string, string> {
     // a later line belongs to a nested sub-list and is handled by
     // `splitGapsEntries` already folding it in — it is not itself a field
     // line unless it independently matches `key: value` after stripping.
-    const bulletStripped = line.match(/^(\s*)-\s+(.*)$/);
+    const bulletStripped = line.match(markers.strip);
     const content = (idx === 0 && bulletStripped ? bulletStripped[2] : line.trim())
       .replace(boldedKeyRe, (_m, key: string) => `${key.toLowerCase()}:`);
 
@@ -1399,10 +1483,22 @@ function extractGapEntryFields(entryLines: string[]): Record<string, string> {
   return fields;
 }
 
-/** Fallback display text for a Gaps entry with no parseable `truth:` field. */
-function rawGapEntryText(entryLines: string[]): string {
+/**
+ * Fallback display text for a Gaps entry with no parseable `truth:` field.
+ *
+ * `markers` selects which opening marker is stripped off line 0 (#3702) —
+ * hyphen-only by default, the widened set for deferred-items callers, so a
+ * `*`-opened entry renders the same name its hyphen twin would. That name is
+ * the key `acknowledgeDeferredItem` matches on, so the two MUST use the same
+ * set: rendering `* alpha` where the parse surfaced `alpha` would make the
+ * entry un-acknowledgeable.
+ */
+function rawGapEntryText(
+  entryLines: string[],
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+): string {
   return entryLines
-    .map((l, i) => (i === 0 ? l.replace(/^(\s*)-\s+/, '') : l.trim()))
+    .map((l, i) => (i === 0 ? l.replace(markers.strip, '$2') : l.trim()))
     .join(' ')
     .trim();
 }
