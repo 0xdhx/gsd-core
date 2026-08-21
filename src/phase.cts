@@ -3047,22 +3047,26 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
                 if (!/[A-Za-z0-9]/.test(trimmed)) {
                   return trimmed.replace(/^[[({]+/, '').replace(/[\])}]+$/, '');
                 }
-                return trimmed.replace(/^[[({"'`]+/, '').replace(/[\])}.;:"'`]+$/, '');
+                return trimmed
+                  .replace(/^[[({"'`*_~“”‘’]+/, '')
+                  .replace(/[\])}.;:"'`*_~“”‘’]+$/, '');
               })
               .filter(Boolean);
-            const rangeTokens = reqLineTokens.filter(
-              (t) => t.length <= 256 && REQ_RANGE_TOKEN_RE.test(t),
-            );
-            // Endpoint pair implies a dropped interior only when the prefixes agree
-            // and the numbers are more than 1 apart; a cross-prefix pair is opaque,
-            // so it stays warn-worthy.
+            const rangeTokens = reqLineTokens.filter((t) => REQ_RANGE_TOKEN_RE.test(t));
+            // Endpoint pair implies a dropped interior only when the prefixes
+            // AGREE and the numbers are more than 1 apart. A cross-prefix pair is
+            // NOT range-worthy: real ranges are same-prefix by nature, while a
+            // separator between two different-prefix tokens is how annotations
+            // read (`REQ-02 - (ADR-7)`), and warning there is the #2334 class.
+            // BigInt keeps the gap exact for numbers past 2^53.
             const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
             const impliesInterior = (a: string, b: string): boolean => {
               const ma = REQ_ID_PARTS_RE.exec(a);
               const mb = REQ_ID_PARTS_RE.exec(b);
-              if (!ma || !mb) return true;
-              if (ma[1].toUpperCase() !== mb[1].toUpperCase()) return true;
-              return Math.abs(parseInt(mb[2], 10) - parseInt(ma[2], 10)) > 1;
+              if (!ma || !mb) return false;
+              if (ma[1].toUpperCase() !== mb[1].toUpperCase()) return false;
+              const gap = BigInt(mb[2]) - BigInt(ma[2]);
+              return gap > 1n || gap < -1n;
             };
             const hasSpacedRange = reqLineTokens.some(
               (t, i) =>
@@ -3073,18 +3077,55 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
                 REQ_ID_SHAPE_RE.test(reqLineTokens[i + 1] ?? '') &&
                 impliesInterior(reqLineTokens[i - 1], reqLineTokens[i + 1]),
             );
+            // Half-spaced ranges split at the tokenizer, so R1's own `\s*` never
+            // sees them: `REQ-01 -REQ-05` tokenizes as `REQ-01`, `-REQ-05`. A
+            // token that is an operator GLUED to a full ID warns exactly when a
+            // plain spaced operator would have - ID-shaped neighbour on the open
+            // side, and the endpoint pair implying an interior.
+            const REQ_GLUED_RANGE_LEAD_RE = new RegExp(
+              `^${REQ_RANGE_OP}([A-Z][A-Z0-9]*-\\d+)$`,
+              'i',
+            );
+            const REQ_GLUED_RANGE_TRAIL_RE = new RegExp(
+              `^([A-Z][A-Z0-9]*-\\d+)${REQ_RANGE_OP}$`,
+              'i',
+            );
+            const hasGluedRangeFragment = reqLineTokens.some((t, i) => {
+              const lead = REQ_GLUED_RANGE_LEAD_RE.exec(t);
+              if (
+                lead &&
+                i > 0 &&
+                REQ_ID_SHAPE_RE.test(reqLineTokens[i - 1] ?? '') &&
+                impliesInterior(reqLineTokens[i - 1], lead[1])
+              ) {
+                return true;
+              }
+              const trail = REQ_GLUED_RANGE_TRAIL_RE.exec(t);
+              return Boolean(
+                trail &&
+                  i < reqLineTokens.length - 1 &&
+                  REQ_ID_SHAPE_RE.test(reqLineTokens[i + 1] ?? '') &&
+                  impliesInterior(trail[1], reqLineTokens[i + 1]),
+              );
+            });
             const reqLeadToken = (reqLineTokens[0] ?? '').toUpperCase();
             const reqLineIsPlaceholderLed = reqLeadToken === 'TBD' || reqLeadToken === 'NONE';
-            // The 256-char cap here and above bounds the unanchored substring
-            // test, which backtracks quadratically on a single pathological
-            // token; no real REQ-ID or range token approaches it.
+            // The 2048-char cap bounds the one UNANCHORED regex, which backtracks
+            // quadratically on a single pathological token (sub-ms at this bound);
+            // no real REQ-ID-carrying token approaches it. The anchored range
+            // regexes above scan linearly and need no cap.
             const inertIdShaped =
               citedReqIds.length === 0 && !reqLineIsPlaceholderLed
                 ? reqLineTokens.filter(
-                    (t) => t.length <= 256 && t.includes('-') && REQ_ID_SUBSTRING_RE.test(t),
+                    (t) => t.length <= 2048 && t.includes('-') && REQ_ID_SUBSTRING_RE.test(t),
                   )
                 : [];
-            if (rangeTokens.length > 0 || hasSpacedRange || inertIdShaped.length > 0) {
+            if (
+              rangeTokens.length > 0 ||
+              hasSpacedRange ||
+              hasGluedRangeFragment ||
+              inertIdShaped.length > 0
+            ) {
               // Deliberately says "selected", NOT "marked complete": a range whose
               // endpoints are themselves unregistered selects them and marks
               // nothing, and a warning that overclaims the write is a warning the
@@ -3097,7 +3138,7 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
               // Only diagnose "range" when a range rule actually fired - an R3
               // warning on non-range ID text must not claim one was written.
               const rangeAdvice =
-                rangeTokens.length > 0 || hasSpacedRange
+                rangeTokens.length > 0 || hasSpacedRange || hasGluedRangeFragment
                   ? ' Range forms are not expanded; rewrite the line naming every requirement explicitly '
                   : ' Rewrite the line naming every requirement explicitly ';
               warnings.push(

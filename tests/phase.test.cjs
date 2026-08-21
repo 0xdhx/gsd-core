@@ -11956,6 +11956,13 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     // A hyphen between two ADJACENT selected IDs can drop nothing (there is no
     // interior), so it reads as an annotation separator, not a range.
     ['adjacent-ID annotation hyphen', 'RANGE-01, RANGE-02 - RANGE-03 deferred'],
+    // Cross-prefix pairs around a separator are annotations, not ranges — real
+    // ranges are same-prefix by nature.
+    ['hyphen citation annotation', 'RANGE-01, RANGE-02 - (ADR-7)'],
+    ['ellipsis-of-omission with citation', 'RANGE-01, RANGE-02 (...) (ADR-7)'],
+    // Markdown emphasis around a placeholder must not defeat the placeholder
+    // gate.
+    ['bold placeholder with citation', '**None** (per ADR-7)'],
     // `LETTERS-\d+-\d+` is also a date: the bare-hyphen tight-range arm demands
     // a full ID on both sides precisely so this stays silent.
     ['date-like parenthetical annotation', 'RANGE-01 (target FY-2026-08)'],
@@ -11995,6 +12002,7 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   for (const [label5, line5] of [
     ['parenthesized', 'RANGE-01 (plus RANGE-02..RANGE-05)'],
     ['backticked', 'RANGE-01, `RANGE-02..RANGE-05`'],
+    ['bold-wrapped', 'RANGE-01, **RANGE-02..RANGE-05**'],
   ]) {
   test(
     `#3697-5 (${label5} tight range): a wrapped range must still warn and stay unexpanded`,
@@ -12025,6 +12033,41 @@ describe('issue #3697: phase complete must warn when the Requirements line under
       }
     },
   );
+  }
+
+  // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
+  // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
+  // only the well-formed side. The glued-fragment rule must warn, and the
+  // selection stays exactly what the tokenizer produced.
+  for (const [label6, line6, expectTicked] of [
+    ['leading-glue', 'RANGE-01 -RANGE-05', ['RANGE-01']],
+    ['trailing-glue', 'RANGE-01- RANGE-05', ['RANGE-05']],
+  ]) {
+    test(
+      `#3697-6 (${label6} half-spaced range): a range glued to one endpoint must warn — ` +
+      'selection is unchanged',
+      () => {
+        const tmpDir = build3697RangeFixture(line6);
+        try {
+          const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+          const parsed = JSON.parse(output);
+          const warnings = parsed.warnings || [];
+          assert.ok(
+            warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+            `#3697-6 FAILED (${label6}): a half-spaced range under-selects, so it must warn. ` +
+            `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+          );
+          const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+          assert.deepStrictEqual(
+            tickedReqIds(reqContent), expectTicked,
+            `#3697-6 FAILED (${label6}): exactly ${JSON.stringify(expectTicked)} must be ticked ` +
+            `(no expansion).\nREQUIREMENTS.md:\n${reqContent}`,
+          );
+        } finally {
+          cleanup(tmpDir);
+        }
+      },
+    );
   }
 });
 
