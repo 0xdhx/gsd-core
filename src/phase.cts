@@ -2979,6 +2979,64 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
               .filter(Boolean)
               .filter((r) => REQ_ID_SHAPE_RE.test(r));
 
+            // #3697: the shape filter above fixed OVER-selection (#2334 HIGH 3);
+            // it left UNDER-selection silent. The `**Requirements**:` line is only
+            // ever parsed as a comma list, so an off-template range form selects
+            // the wrong set with no signal at any layer:
+            //   `RANGE-01 ... RANGE-05` -> the two ENDPOINTS only (the interior
+            //     IDs are never considered), yet `requirements_updated: true`;
+            //   `RANGE-01...05`         -> ZERO IDs; the whole line is inert.
+            // The one existing cross-check (`ghostReqIds`, below) is itself
+            // `citedReqIds.filter(...)`, so an ID the tokenizer DROPPED is
+            // invisible to it by construction — as it is to
+            // `traceabilityWriteMisses` and to `requirements_updated`.
+            //
+            // This warns; it does not parse. Range syntax stays deliberately
+            // UNSUPPORTED (off-template — `templates/roadmap.md` ships the comma
+            // list) and `citedReqIds` is left exactly as selected, so no existing
+            // ledger write changes.
+            //
+            // The trigger is ID-SHAPED EVIDENCE, never bare residue: #2334/#2339
+            // removed precisely that over-warning, and `**Requirements:** None`,
+            // the shipped `<!-- brackets optional ... -->` comment, and annotated
+            // lines like `REQ-01 (locked per ADR-7)` must all stay silent. So
+            // parenthetical citations and HTML comments are stripped BEFORE the
+            // scan, and only two things warn: an ID-shaped substring the
+            // tokenizer did not select, or a range operator joining two IDs.
+            const reqLineScanText = reqMatch[1]
+              .replace(/<!--[\s\S]*?-->/g, ' ')
+              .replace(/\([^)]*\)/g, ' ')
+              .replace(/[[\]]/g, ' ');
+            // Deliberately UNANCHORED — the anchored `REQ_ID_SHAPE_RE` above is
+            // what a glued token (`RANGE-01...05`) fails; the substring scan is
+            // what sees the ID inside it.
+            const REQ_ID_SUBSTRING_RE = /[A-Z][A-Z0-9]*-\d+/gi;
+            // `A-01 ... A-05` / `A-01..05` / `A-01 - A-04` / `A-01 to A-05`: an ID,
+            // a range operator, and a NUMERIC endpoint. Requiring the endpoint to
+            // be numeric is what keeps prose (`REQ-01 - see the ADR`) from matching.
+            const REQ_ID_RANGE_RE =
+              /[A-Z][A-Z0-9]*-\d+\s*(?:\.{2,}|\u2026|\u2014|\u2013|-|\bto\b)\s*(?:[A-Z][A-Z0-9]*-)?\d+/i;
+            const selectedReqIdsLower = new Set(citedReqIds.map((r) => r.toLowerCase()));
+            const unselectedIdShaped = (reqLineScanText.match(REQ_ID_SUBSTRING_RE) ?? []).filter(
+              (t) => !selectedReqIdsLower.has(t.toLowerCase()),
+            );
+            if (unselectedIdShaped.length > 0 || REQ_ID_RANGE_RE.test(reqLineScanText)) {
+              const selectedDesc =
+                citedReqIds.length > 0
+                  ? `only these were selected and marked complete: ${citedReqIds.join(', ')}`
+                  : 'NO requirement IDs were selected, so the line marked nothing at all';
+              const droppedDesc =
+                unselectedIdShaped.length > 0
+                  ? ` Unparsed ID-shaped text: ${[...new Set(unselectedIdShaped)].join(', ')}.`
+                  : '';
+              warnings.push(
+                `ROADMAP Phase ${phaseNum} **Requirements** line is not a comma-separated REQ-ID list ` +
+                  `(\`${reqMatch[1].trim()}\`) — ${selectedDesc}.${droppedDesc} ` +
+                  `Range forms are not supported; rewrite the line naming every requirement explicitly ` +
+                  `(e.g. \`REQ-01, REQ-02, REQ-03\`).`,
+              );
+            }
+
             for (const reqId of citedReqIds) {
               const reqEscaped = escapeRegex(reqId);
               // Surface 1 — the checkbox: - [ ] **REQ-ID** → - [x] **REQ-ID**.
