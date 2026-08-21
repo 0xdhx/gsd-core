@@ -3081,13 +3081,17 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
             // sees them: `REQ-01 -REQ-05` tokenizes as `REQ-01`, `-REQ-05`. A
             // token that is an operator GLUED to a full ID warns exactly when a
             // plain spaced operator would have - ID-shaped neighbour on the open
-            // side, and the endpoint pair implying an interior.
+            // side, and the endpoint pair implying an interior. SYMBOL operators
+            // only: a word operator glued to an ID is not a range spelling, it is
+            // an ID - `TOREQ-05` is a valid prefix-agnostic REQ-ID, and `to` +
+            // `REQ-05` would warn on the canonical list `REQ-01, TOREQ-05`.
+            const REQ_RANGE_OP_SYMBOL = '(?:\\.{2,}|\\u2026|\\u2014|\\u2013|-)';
             const REQ_GLUED_RANGE_LEAD_RE = new RegExp(
-              `^${REQ_RANGE_OP}([A-Z][A-Z0-9]*-\\d+)$`,
+              `^${REQ_RANGE_OP_SYMBOL}([A-Z][A-Z0-9]*-\\d+)$`,
               'i',
             );
             const REQ_GLUED_RANGE_TRAIL_RE = new RegExp(
-              `^([A-Z][A-Z0-9]*-\\d+)${REQ_RANGE_OP}$`,
+              `^([A-Z][A-Z0-9]*-\\d+)${REQ_RANGE_OP_SYMBOL}$`,
               'i',
             );
             const hasGluedRangeFragment = reqLineTokens.some((t, i) => {

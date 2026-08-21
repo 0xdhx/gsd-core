@@ -12003,6 +12003,7 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['parenthesized', 'RANGE-01 (plus RANGE-02..RANGE-05)'],
     ['backticked', 'RANGE-01, `RANGE-02..RANGE-05`'],
     ['bold-wrapped', 'RANGE-01, **RANGE-02..RANGE-05**'],
+    ['underscore-wrapped', 'RANGE-01, _RANGE-02..RANGE-05_'],
   ]) {
   test(
     `#3697-5 (${label5} tight range): a wrapped range must still warn and stay unexpanded`,
@@ -12034,6 +12035,30 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     },
   );
   }
+
+  // A valid prefix-agnostic ID that HAPPENS to start with a word operator
+  // (`TORANGE-05` reads as `to` + `RANGE-05`) is an ID, not a glued range —
+  // the glued-fragment rule is symbol-operator-only for exactly this reason.
+  // The ID is unregistered in this fixture, so the pre-existing ghost-ID
+  // warning legitimately fires; only the misparse channel must stay silent.
+  test(
+    '#3697-4b (word-operator-prefixed ID): a canonical list must not read as a glued range',
+    () => {
+      const tmpDir = build3697RangeFixture('RANGE-01, TORANGE-05');
+      try {
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.deepStrictEqual(
+          warnings.filter((w) => REQ_LINE_MISPARSE_RE.test(w)), [],
+          `#3697-4b FAILED: "RANGE-01, TORANGE-05" is a comma list of two valid IDs and must not ` +
+          `produce a misparse warning, got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+      } finally {
+        cleanup(tmpDir);
+      }
+    },
+  );
 
   // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
   // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
