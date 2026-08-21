@@ -2988,51 +2988,80 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
             //   `RANGE-01...05`         -> ZERO IDs; the whole line is inert.
             // The one existing cross-check (`ghostReqIds`, below) is itself
             // `citedReqIds.filter(...)`, so an ID the tokenizer DROPPED is
-            // invisible to it by construction — as it is to
+            // invisible to it by construction - as it is to
             // `traceabilityWriteMisses` and to `requirements_updated`.
             //
             // This warns; it does not parse. Range syntax stays deliberately
-            // UNSUPPORTED (off-template — `templates/roadmap.md` ships the comma
+            // UNSUPPORTED (off-template - `templates/roadmap.md` ships the comma
             // list) and `citedReqIds` is left exactly as selected, so no existing
             // ledger write changes.
             //
-            // The trigger is ID-SHAPED EVIDENCE, never bare residue: #2334/#2339
-            // removed precisely that over-warning, and `**Requirements:** None`,
-            // the shipped `<!-- brackets optional ... -->` comment, and annotated
-            // lines like `REQ-01 (locked per ADR-7)` must all stay silent. So
-            // parenthetical citations and HTML comments are stripped BEFORE the
-            // scan, and only two things warn: an ID-shaped substring the
-            // tokenizer did not select, or a range operator joining two IDs.
-            const reqLineScanText = reqMatch[1]
-              .replace(/<!--[\s\S]*?-->/g, ' ')
-              .replace(/\([^)]*\)/g, ' ')
-              .replace(/[[\]]/g, ' ');
-            // Deliberately UNANCHORED — the anchored `REQ_ID_SHAPE_RE` above is
-            // what a glued token (`RANGE-01...05`) fails; the substring scan is
-            // what sees the ID inside it.
-            const REQ_ID_SUBSTRING_RE = /[A-Z][A-Z0-9]*-\d+/gi;
-            // `A-01 ... A-05` / `A-01..05` / `A-01 - A-04` / `A-01 to A-05`: an ID,
-            // a range operator, and a NUMERIC endpoint. Requiring the endpoint to
-            // be numeric is what keeps prose (`REQ-01 - see the ADR`) from matching.
-            const REQ_ID_RANGE_RE =
-              /[A-Z][A-Z0-9]*-\d+\s*(?:\.{2,}|\u2026|\u2014|\u2013|-|\bto\b)\s*(?:[A-Z][A-Z0-9]*-)?\d+/i;
-            const selectedReqIdsLower = new Set(citedReqIds.map((r) => r.toLowerCase()));
-            const unselectedIdShaped = (reqLineScanText.match(REQ_ID_SUBSTRING_RE) ?? []).filter(
-              (t) => !selectedReqIdsLower.has(t.toLowerCase()),
+            // DETECTION IS TOKEN-BASED, NOT A FREE-TEXT SCAN. Scanning the raw
+            // capture for stray ID-shaped substrings re-introduces precisely the
+            // over-warning #2334/#2339 removed: `REQ-01, REQ-02 - 3 points` reads
+            // as a range, and the trailing period in `... locked per ADR-7.` keeps
+            // that citation out of the anchored filter so it reads as "unparsed".
+            // Both are correctly-parsed lines. So the capture is re-tokenized the
+            // way the selector tokenizes it, and only three narrow shapes warn:
+            //   R1  a token that is ITSELF a range - `RANGE-01...05`,
+            //       `RANGE-01..RANGE-05`, `API-2-01` (which the filter drops whole);
+            //   R2  a token that is PURELY a range operator with a selected REQ-ID
+            //       immediately on BOTH sides - `RANGE-01 ... RANGE-05`. Requiring
+            //       both neighbours to be IDs is what keeps `- 3 points` and
+            //       `- locked per ADR-7.` silent;
+            //   R3  nothing was selected at all and some token still carries
+            //       ID-shaped text - the wholly-inert line. Gated on zero selection,
+            //       so it cannot add noise to a line that worked.
+            // `TBD`, a literal `None`, the shipped `<!-- ... -->` template comment
+            // and parenthetical citations match none of the three.
+            const REQ_RANGE_OP = '(?:\\.{2,}|\\u2026|\\u2014|\\u2013|-|to|thru|through)';
+            const REQ_RANGE_TOKEN_RE = new RegExp(
+              `^([A-Z][A-Z0-9]*)-(?:\\d+)\\s*${REQ_RANGE_OP}\\s*(?:\\1-)?\\d+$`,
+              'i',
             );
-            if (unselectedIdShaped.length > 0 || REQ_ID_RANGE_RE.test(reqLineScanText)) {
+            const REQ_PURE_RANGE_OP_RE = new RegExp(`^${REQ_RANGE_OP}$`, 'i');
+            const REQ_ID_SUBSTRING_RE = /[A-Z][A-Z0-9]*-\d+/i;
+            // Same split as the selector. Surrounding brackets/parens and trailing
+            // sentence punctuation are shaved off ONLY for tokens that carry
+            // alphanumerics, so a token that is nothing but a range operator (`..`)
+            // survives intact instead of being shaved to nothing.
+            const reqLineTokens = reqMatch[1]
+              .replace(/<!--[\s\S]*?-->/g, ' ')
+              .split(/[,\s]+/)
+              .map((t) => {
+                const trimmed = t.trim();
+                if (!/[A-Za-z0-9]/.test(trimmed)) return trimmed;
+                return trimmed.replace(/^[[({]+/, '').replace(/[\])}.;:]+$/, '');
+              })
+              .filter(Boolean);
+            const rangeTokens = reqLineTokens.filter((t) => REQ_RANGE_TOKEN_RE.test(t));
+            const hasSpacedRange = reqLineTokens.some(
+              (t, i) =>
+                REQ_PURE_RANGE_OP_RE.test(t) &&
+                i > 0 &&
+                i < reqLineTokens.length - 1 &&
+                REQ_ID_SHAPE_RE.test(reqLineTokens[i - 1] ?? '') &&
+                REQ_ID_SHAPE_RE.test(reqLineTokens[i + 1] ?? ''),
+            );
+            const inertIdShaped =
+              citedReqIds.length === 0
+                ? reqLineTokens.filter((t) => REQ_ID_SUBSTRING_RE.test(t))
+                : [];
+            if (rangeTokens.length > 0 || hasSpacedRange || inertIdShaped.length > 0) {
+              // Deliberately says "selected", NOT "marked complete": a range whose
+              // endpoints are themselves unregistered selects them and marks
+              // nothing, and a warning that overclaims the write is a warning the
+              // reader learns to distrust.
               const selectedDesc =
                 citedReqIds.length > 0
-                  ? `only these were selected and marked complete: ${citedReqIds.join(', ')}`
-                  : 'NO requirement IDs were selected, so the line marked nothing at all';
-              const droppedDesc =
-                unselectedIdShaped.length > 0
-                  ? ` Unparsed ID-shaped text: ${[...new Set(unselectedIdShaped)].join(', ')}.`
-                  : '';
+                  ? `the only REQ-ID(s) selected from it were: ${citedReqIds.join(', ')}`
+                  : 'it selected NO REQ-IDs at all, so nothing was marked';
+              const unparsedDesc = [...new Set([...rangeTokens, ...inertIdShaped])];
               warnings.push(
                 `ROADMAP Phase ${phaseNum} **Requirements** line is not a comma-separated REQ-ID list ` +
-                  `(\`${reqMatch[1].trim()}\`) — ${selectedDesc}.${droppedDesc} ` +
-                  `Range forms are not supported; rewrite the line naming every requirement explicitly ` +
+                  `(\`${reqMatch[1].trim()}\`) - ${selectedDesc}.` +
+                  (unparsedDesc.length > 0 ? ` Unparsed text: ${unparsedDesc.join(', ')}.` : '') +
+                  ` Range forms are not expanded; rewrite the line naming every requirement explicitly ` +
                   `(e.g. \`REQ-01, REQ-02, REQ-03\`).`,
               );
             }
