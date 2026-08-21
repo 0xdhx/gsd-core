@@ -892,7 +892,7 @@ function parseDeferredItemsWithStatus(content: string): Array<{ name: string; st
   const entries = headingEntries !== null
     ? headingEntries.map((entryLines) => ({
       lines: entryLines,
-      fields: extractGapEntryFields(entryLines.map(stripLeadingBulletMarker)),
+      fields: extractGapEntryFields(entryLines.map(stripLeadingBulletMarker), DEFERRED_BULLET_MARKERS),
     }))
     : splitGapsEntries(sectionBody, DEFERRED_BULLET_MARKERS).map((entryLines) => ({
       lines: entryLines,
