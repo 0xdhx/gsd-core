@@ -1044,8 +1044,19 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   }
 
   const matchIndexInContent = sectionOffset + start;
-  const statusFieldRe = /^\s*(?:-\s+)?(\*+status:\*+|status:)/i;
-  const statusLineIdx = matchedLines.findIndex((rawLine) => statusFieldRe.test(rawLine.replace(/\r$/, '')));
+  // Mirror exactly what `extractGapEntryFields` reads back: it strips a bullet
+  // marker on line 0 only, so on a later line a nested `  - status: open` is a
+  // nested sub-list, never a field line. Such a line must fall through to the
+  // insert branch below (which writes a marker-free line the parser does read)
+  // rather than be rewritten in place with a marker the parser ignores (#3740).
+  const statusFieldRe = /^\s*(\*+status:\*+|status:)/i;
+  const statusLineIdx = matchedLines.findIndex((rawLine, idx) => {
+    const line = rawLine.replace(/\r$/, '');
+    // Line 0 carries the entry-opening bullet the reader strips before field
+    // extraction; strip it here too so the two sides agree on that line.
+    const content = idx === 0 ? line.replace(/^(\s*)-\s+/, '$1') : line;
+    return statusFieldRe.test(content);
+  });
 
   // No CRLF-preservation branch here (WARNING 1, #3458 follow-up review):
   // every write goes through `platformWriteSync` → `normalizeContent`, which
@@ -1075,6 +1086,9 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   } else {
     const original = matchedLines[statusLineIdx];
     const replaced = original.replace(
+      // The optional bullet group is reachable only for line 0 (the search
+      // above matches later lines marker-free); preserving it there keeps the
+      // line an entry-opening bullet, which the reader de-bullets on read.
       /^(\s*(?:-\s+)?)(\*+status:\*+|status:)(\s*).*$/i,
       (_m, indent: string, key: string, ws: string) => `${indent}${key}${ws}acknowledged`,
     );

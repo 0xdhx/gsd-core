@@ -2325,3 +2325,87 @@ describe('#2766 parseGapsItems: GFM table shape', () => {
     assert.strictEqual(items[0].reason, 'because');
   });
 });
+
+// ─── #3740: acknowledge round-trip for nested-marker status lines ─────────────
+
+describe('#3740 acknowledgeDeferredItem: ack must be visible to the parser', () => {
+  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
+    require('../gsd-core/bin/lib/uat.cjs');
+
+  // parse → acknowledge → parse: the assertion shape that catches a writer
+  // whose rewrite the reader never sees (#3740 — `ok` yet still outstanding).
+  const roundTrip = (body) => {
+    const content = '## Deferred Items\n\n' + body + '\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1, JSON.stringify(before));
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    return { ack, after: parseDeferredItemsWithStatus(ack.content) };
+  };
+
+  test('nested-marker status (`  - status: open`) round-trips to acknowledged', () => {
+    const { ack, after } = roundTrip('- alpha\n  - status: open');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after.length, 1, JSON.stringify(after));
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+  });
+
+  test('nested bold-marker status (`  - **status:** open`) round-trips to acknowledged', () => {
+    const { ack, after } = roundTrip('- alpha\n  - **status:** open');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+  });
+
+  test('control: plain indented status still rewrites in place', () => {
+    const { ack, after } = roundTrip('- alpha\n  status: open');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+    assert.ok(!/- status:/.test(ack.content), ack.content);
+  });
+
+  test('control: bold marker-free status still rewrites in place', () => {
+    const { ack, after } = roundTrip('- alpha\n  **status:** open');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+  });
+
+  test('control: no status field takes the insert branch', () => {
+    const { ack, after } = roundTrip('- alpha');
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /\n {2}status: acknowledged\n/);
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+  });
+
+  test('inserted line wins over the stale nested bullet (first-wins reader)', () => {
+    const { ack, after } = roundTrip('- alpha\n  - status: open');
+    // The nested bullet is deliberately left in place; the inserted marker-free
+    // line precedes it and the reader is first-wins.
+    assert.match(ack.content, /- alpha\n {2}status: acknowledged\n {2}- status: open/);
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+  });
+
+  test('heading-delimited shape is still refused (unchanged)', () => {
+    const content = '## Deferred Items\n\n### 1. alpha\n\n- status: open\n';
+    const ack = acknowledgeDeferredItem(content, 'anything');
+    assert.strictEqual(ack.status, 'unsupported_heading_shape');
+    assert.strictEqual(ack.content, content);
+  });
+});
+
+// #3740 edge: line 0 itself as the status line — the reader de-bullets line 0,
+// so the writer must keep treating it as the status field (in-place rewrite).
+describe('#3740 acknowledgeDeferredItem: line-0 status line keeps in-place rewrite', () => {
+  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
+    require('../gsd-core/bin/lib/uat.cjs');
+
+  test('entry whose bullet line IS the status field still acknowledges', () => {
+    const content = '## Deferred Items\n\n- status: open\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1, JSON.stringify(before));
+    assert.strictEqual(before[0].status, 'open');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /- status: acknowledged/);
+    const after = parseDeferredItemsWithStatus(ack.content);
+    assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
+  });
+});
