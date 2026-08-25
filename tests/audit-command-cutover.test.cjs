@@ -2087,6 +2087,38 @@ describe('bug #950: quick-task SUMMARY must carry status: complete', () => {
       assert.equal(fs.readFileSync(filePath, 'utf-8'), before, 'file must be byte-identical — nothing written on refusal');
     });
 
+    test('#3702 round 2 (m3): a heading-delimited file written with `*`, `+` or `1.` now SURFACES its entries, and the writer still refuses them — the milestone-close halt is user-visible', () => {
+      // Before #3702 such a file parsed to zero entries and `complete-milestone`
+      // closed over it silently. It now yields entries whose heading shape the
+      // writer refuses, which the milestone loop turns into
+      // `record_ack_failure` → exit 1. This pins BOTH halves of that change
+      // through the same two CLI calls the loop makes: the listing that puts
+      // the entry in front of the writer, and the refusal that halts.
+      const fixtures = [['*', '02-star'], ['+', '03-plus'], ['1.', '04-ordered']];
+      const files = new Map();
+      for (const [marker, slug] of fixtures) {
+        const phaseDir = planningPath('phases', slug);
+        fs.mkdirSync(phaseDir, { recursive: true });
+        const filePath = path.join(phaseDir, 'deferred-items.md');
+        const before = ['## Deferred Items', '', `### Out of scope under ${slug}`, '', `${marker} **What:** detail.`, ''].join('\n');
+        fs.writeFileSync(filePath, before);
+        files.set(slug, { filePath, before });
+      }
+
+      const listed = audit(tmpDir).items.deferred_items.filter((i) => /^Out of scope under /.test(i.text));
+      assert.equal(listed.length, fixtures.length, `every marker's heading entry must be listed: ${JSON.stringify(listed)}`);
+
+      for (const item of listed) {
+        const slug = /under (\S+)/.exec(item.text)[1];
+        const { filePath, before } = files.get(slug);
+        // `--text` is the audit's own reported text, exactly as the loop passes it.
+        const result = ack(tmpDir, ['--category', 'deferred_items', '--phase', slug.slice(0, 2), '--file', 'deferred-items.md', '--text', item.text, '--milestone', 'v1.0']);
+        assert.equal(result.success, false, `${slug}: heading-delimited shape must be refused`);
+        assert.match(result.error, /heading-delimited/i, slug);
+        assert.equal(fs.readFileSync(filePath, 'utf-8'), before, `${slug}: nothing written on refusal`);
+      }
+    });
+
     // ── F1 (#3458 follow-up review, HIGH): the writer must splice by the
     // SELECTED entry's own carried span, never re-find it by searching —
     // otherwise a byte-identical substring living inside an EARLIER entry
