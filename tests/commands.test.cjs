@@ -5386,6 +5386,26 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     gitOrThrow(['add', '--', shared], { cwd: tmpDir });
   }
 
+  // The probe compares the WORKING TREE to HEAD, so an unborn HEAD makes it
+  // fatal (rc 128). That must fall through to the commit rather than be read as
+  // "nothing to commit" — there is plenty to commit in a repo with no commits.
+  test('an unborn HEAD falls through to the commit rather than reporting nothing_to_commit', () => {
+    const fresh = createTempDir();
+    fs.mkdirSync(path.join(fresh, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(fresh, '.planning', 'config.json'), '{}\n');
+    fs.writeFileSync(path.join(fresh, '.planning', 'doc.md'), 'first content\n');
+    gitOrThrow(['init', '-q', '.'], { cwd: fresh });
+    gitOrThrow(['config', 'user.email', 't@t'], { cwd: fresh });
+    gitOrThrow(['config', 'user.name', 't'], { cwd: fresh });
+
+    const result = runGsdTools('commit "m" --files .planning/doc.md', fresh);
+    const payload = (result.output && result.output.trim()) ? result.output : result.error;
+    const output = JSON.parse(payload);
+    assert.strictEqual(output.committed, true,
+      'the very first commit in a repo must not be swallowed by the empty-diff guard');
+    cleanup(fresh);
+  });
+
   // git refuses a partial commit during a cherry-pick exactly as it does during
   // a merge, so the guard must stay out of the way there too — this arm pins
   // that the pre-fix outcome is preserved rather than turned into a silent

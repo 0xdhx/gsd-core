@@ -1820,8 +1820,13 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // this fix during a revert, reintroducing the very misreport it removes.
   // `canScope` below keeps its narrower merge-only test on purpose — widening it
   // would change pre-existing cherry-pick behaviour, which is outside this fix.
-  const isCherryPickInProgress = execGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], { cwd }).exitCode === 0;
-  const partialCommitRefused = isMergeInProgress || isCherryPickInProgress;
+  // Only the scoped, non-amend call can return through the guard below, so both
+  // added probes are gated on that — an unscoped commit or an --amend would
+  // otherwise pay for git invocations whose answer it can never use.
+  const guardApplies = explicitFiles && !amend;
+  const partialCommitRefused = isMergeInProgress
+    || (guardApplies
+      && execGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], { cwd }).exitCode === 0);
   // `stagedPaths` records paths whose `git add` exited 0 — that is "did
   // staging succeed", not "is there anything to commit". Staging an
   // already-committed, unmodified file succeeds while contributing no diff, so
@@ -1831,21 +1836,32 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // string match on git's output below — which a rejecting pre-commit hook
   // pre-empts, because git runs the hook before it decides there is nothing to
   // commit. The caller was then handed `commit_failed` carrying a gate message
-  // about a commit that had nothing to gate. Ask git whether the staged paths
-  // actually differ instead. Two conjuncts are load-bearing:
+  // about a commit that had nothing to gate. Ask git whether the named paths
+  // actually differ instead. Three things about that probe are load-bearing:
+  //  - it compares the WORKING TREE to HEAD (`diff HEAD`), not the index
+  //    (`diff --cached`). `git commit -- <paths>` is a partial commit: it takes
+  //    the working-tree content of those paths and ignores what is staged. A
+  //    probe against the index therefore answers a different question than the
+  //    commit asks, and a working-tree write landing between the `git add`
+  //    above and this line — another process in a shared checkout — would make
+  //    the index say "empty" while the commit would still have recorded the new
+  //    content. Driven: `diff --cached` rc 0 and `diff HEAD` rc 1 on the same
+  //    path, with `git commit -- <path>` then committing it.
   //  - the `length === 0` short-circuit keeps the all-missing-paths case exact.
-  //    Spreading an empty array yields a pathspec-less `diff --cached`, which
-  //    tests the WHOLE index — unrelated staged work elsewhere would then
-  //    suppress the guard and regress the skip-missing contract (#2014).
+  //    Spreading an empty array yields a pathspec-less `diff`, which tests the
+  //    WHOLE tree — unrelated work elsewhere would then suppress the guard and
+  //    regress the skip-missing contract (#2014).
   //  - `!partialCommitRefused`: see above — deciding "nothing to commit" from a
   //    pathspec git will not honour would abandon an in-progress merge, so those
   //    states keep their pre-existing behaviour untouched.
-  // Any other non-zero exit from the probe (a genuine git error) leaves the
-  // guard shut and falls through to the commit — failing toward today's path.
-  const stagedDiffIsEmpty = stagedPaths.length === 0
-    || (!partialCommitRefused
-      && execGit(['diff', '--cached', '--quiet', '--', ...stagedPaths], { cwd }).exitCode === 0);
-  if (explicitFiles && stagedDiffIsEmpty && !amend) {
+  // Any other non-zero exit from the probe (a genuine git error, or an unborn
+  // HEAD) leaves the guard shut and falls through to the commit — failing toward
+  // today's path rather than manufacturing a no-op.
+  const nothingToCommit = guardApplies
+    && (stagedPaths.length === 0
+      || (!partialCommitRefused
+        && execGit(['diff', '--quiet', 'HEAD', '--', ...stagedPaths], { cwd }).exitCode === 0));
+  if (nothingToCommit) {
     const result = { committed: false, hash: null, reason: 'nothing_to_commit' };
     output(result, raw, 'nothing');
     return;
