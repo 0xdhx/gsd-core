@@ -2595,10 +2595,13 @@ describe('#3740 acknowledgeDeferredItem: property — parse→ack→parse over m
           // carries the new value. Addressability of the NEW name is what the
           // idempotence check below proves.
 
-          // Line-ending discipline: nothing the writer emits may introduce a
-          // bare `\n` into a CRLF document.
+          // Line-ending discipline, both directions: nothing the writer emits
+          // may introduce a bare `\n` into a CRLF document, or a `\r` into an
+          // LF one.
           if (eol === '\r\n') {
             assert.ok(!/(^|[^\r])\n/.test(ack.content), `mixed endings: ${JSON.stringify(ack.content)}`);
+          } else {
+            assert.ok(!/\r/.test(ack.content), `LF document acquired a CR: ${JSON.stringify(ack.content)}`);
           }
 
           // In place for what the reader reads; one inserted line otherwise.
