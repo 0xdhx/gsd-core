@@ -89,7 +89,7 @@ Glob every phase directory's SCOPE BOUNDARY log (executor writes out-of-scope di
 ls .planning/phases/*/deferred-items.md 2>/dev/null || true
 ```
 
-For each `deferred-items.md` found, read its entries (bullet list, one entry per top-level list item — `-`, `*`, `+` or a dot-terminated ordered marker such as `1.` — with continuation lines indented beneath it). An entry is RESOLVED only if it carries an explicit `status: resolved` field (case-insensitive) on one of its lines; every other entry — including one with no `status:` field at all — is UNRESOLVED and must be surfaced (fail-safe: never silently drop a possibly-open item).
+For each `deferred-items.md` found, read its entries (bullet list, one entry per top-level list item — `-`, `*`, `+` or a dot-terminated ordered marker, where an ordered list counts only when it starts at `1.` — with continuation lines indented beneath it; fenced code blocks and `* * *`-style separators are not entries). An entry is RESOLVED only if it carries an explicit `status: resolved` field (case-insensitive) on one of its lines; every other entry — including one with no `status:` field at all — is UNRESOLVED and must be surfaced (fail-safe: never silently drop a possibly-open item).
 
 Emit:
 - ✓ `No unresolved deferred items` — if no `deferred-items.md` files exist, or every entry in every file is `status: resolved`
