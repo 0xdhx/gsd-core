@@ -1084,11 +1084,17 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     const continuationIndent = ' '.repeat((bulletIndentMatch ? bulletIndentMatch[1].length : 0) + 2);
     // The new line goes right after line 0, so line 0 stops being the span's
     // last line. Under CRLF the span's last line is the one line WITHOUT a
-    // `\r` (the file's own `\r\n` follows the span), so: line 0 takes the
-    // document's convention now that it is not last, and the inserted line
-    // inherits whatever line 0 had — it is last exactly when line 0 was.
+    // `\r` (the file's own `\r\n` follows the span). So the ending is read
+    // from the entry's OWN boundary, never sniffed from the whole document (a
+    // mixed-ending file would otherwise have its LF opener rewritten to CRLF):
+    // line 0's own terminator when line 0 is not the span's last line, else
+    // the separator that follows the span. Line 0 takes that ending now that
+    // it is not last; the inserted line inherits whatever line 0 had — it is
+    // last exactly when line 0 was.
     const line0HadCr = matchedLines[0].endsWith('\r');
-    const crlf = line0HadCr || /\r\n/.test(content);
+    const crlf = matchedLines.length > 1
+      ? line0HadCr
+      : content.startsWith('\r\n', matchIndexInContent + (end - start));
     newMatchedLines = [
       crlf ? `${matchedLines[0].replace(/\r$/, '')}\r` : matchedLines[0],
       `${continuationIndent}status: acknowledged${line0HadCr ? '\r' : ''}`,

@@ -2508,6 +2508,21 @@ describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\
     assertUniformCrlf(ack.content);
   });
 
+  test('mixed-ending document: the insert branch reads the ENTRY\'s ending, not the file\'s', () => {
+    // A CRLF heading over an LF entry. The opener's own `\n` must survive;
+    // a document-wide `\r\n` sniff would rewrite it to `\r\n` and hand the
+    // inserted line a bare `\n` — more irregular than the input.
+    const content = '## Deferred Items\r\n\r\n- alpha\n  reason: x\n';
+    const ack = acknowledgeDeferredItem(content, parseDeferredItemsWithStatus(content)[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha\n  status: acknowledged\n  reason: x\n');
+    // And the single-line twin: a CRLF entry with no continuation lines,
+    // where the only evidence of the entry's ending is the separator after it.
+    const single = '## Deferred Items\n\n- alpha\r\n';
+    const ack2 = acknowledgeDeferredItem(single, parseDeferredItemsWithStatus(single)[0].name);
+    assert.strictEqual(ack2.content, '## Deferred Items\n\n- alpha\r\n  status: acknowledged\r\n');
+  });
+
   test('acknowledging twice is idempotent under CRLF', () => {
     const { ack } = crlfRoundTrip(['- alpha', '  status: open', '  reason: x']);
     const again = acknowledgeDeferredItem(ack.content, parseDeferredItemsWithStatus(ack.content)[0].name);
@@ -2517,9 +2532,11 @@ describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\
 });
 
 // #3740 round 2 (PR #3773 review, Major 1): the parse → acknowledge → parse
-// contract as a property over the whole boundary the review named — status
-// marker × line ending × status-line position — rather than the hand-picked
-// corners above. Every marker the reader reads must be rewritten in place;
+// contract as a property over the boundary the review named — status marker ×
+// line ending × status-line position — rather than the hand-picked corners
+// above. Not a full Cartesian product: `line0` (the bullet line IS the status
+// field) is only meaningful for the markers the reader reads on line 0, so
+// for the others it collapses onto `first`; `none` has no position at all. Every marker the reader reads must be rewritten in place;
 // every marker it does not read must take the insert branch; either way the
 // re-parsed status is `acknowledged`, the entry keeps its name, the line
 // endings stay uniform, and a second acknowledgement is a no-op.
