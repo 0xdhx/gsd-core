@@ -5296,9 +5296,9 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
 
   // AC3, sharp edge: the `stagedPaths.length === 0` short-circuit is
   // load-bearing, not defensive noise. Without it an all-missing call spreads
-  // an empty array into the pathspec, and a pathspec-less `git diff --cached`
-  // tests the WHOLE index — so unrelated staged work would suppress the guard
-  // and turn this arm into a commit of somebody else's staged changes.
+  // an empty array into the pathspec, and a pathspec-less `git diff HEAD`
+  // tests the WHOLE tree — so unrelated work would suppress the guard and turn
+  // this arm into a commit of somebody else's changes.
   test('AC3: all named paths missing does not consult unrelated staged work', () => {
     const rel = commitFixtureFile();
     fs.unlinkSync(path.join(tmpDir, rel));
@@ -5385,6 +5385,25 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     fs.writeFileSync(path.join(tmpDir, shared), 'resolved\n');
     gitOrThrow(['add', '--', shared], { cwd: tmpDir });
   }
+
+  // Documented boundary, not an oversight. `git update-index --assume-unchanged`
+  // tells git to ignore working-tree changes to a path: `git add` then stages
+  // nothing, and BOTH diff forms (`--cached` and `HEAD`) report no difference —
+  // so no diff-based guard can see the change. `git commit -- <path>` is the
+  // odd one out, reading the working tree directly and recording it. Reporting
+  // `nothing_to_commit` is the answer consistent with this function's own
+  // staging step, which honoured the flag one loop earlier. Pinned so the
+  // behaviour is a decision on the record rather than an accident.
+  test('a modified assume-unchanged path reports nothing_to_commit', () => {
+    const rel = commitFixtureFile();
+    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, rel), 'hello\nmodified under assume-unchanged\n');
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit',
+      'git add honoured the flag, so the guard must report the same thing it did');
+  });
 
   // The probe compares the WORKING TREE to HEAD, so an unborn HEAD makes it
   // fatal (rc 128). That must fall through to the commit rather than be read as
