@@ -1222,6 +1222,33 @@ function fencedLineSet(lines: string[]): Set<number> {
   return fenced;
 }
 
+/**
+ * Ordered-run memory keyed by INDENT (#3702 round 2, round review): each list
+ * level carries its own "the previous opener here was ordered" flag, so a
+ * nested `1. / 2.` run resolves its fields while a nested `3.` under a nested
+ * `-` is prose, and a top-level run never leaks into a nested list. A new
+ * opener at indent `d` resets every deeper level (a new item starts new
+ * sub-lists); a paragraph after a blank at indent `d` ends the runs at `d`
+ * and deeper; a thematic break or a heading clears everything.
+ */
+class OrderedRuns {
+  private readonly byIndent = new Map<number, boolean>();
+  at(indent: number): boolean { return this.byIndent.get(indent) ?? false; }
+  opened(indent: number, ordered: boolean): void {
+    for (const d of [...this.byIndent.keys()]) if (d > indent) this.byIndent.delete(d);
+    this.byIndent.set(indent, ordered);
+  }
+  endedAt(indent: number): void {
+    for (const d of [...this.byIndent.keys()]) if (d >= indent) this.byIndent.delete(d);
+  }
+  clear(): void { this.byIndent.clear(); }
+}
+
+/** Leading-whitespace width of a line. */
+function indentOf(line: string): number {
+  return (line.match(/^[ \t]*/) as RegExpMatchArray)[0].length;
+}
+
 /** A line classified as a list-item opener by `matchListOpener`. */
 interface ListOpener {
   /** Width of the indent before the marker. */
@@ -1356,7 +1383,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
   // a non-indented non-list line is a PARAGRAPH, which ends the list
   // (CommonMark §5.3); a non-indented line with no blank before it is lazy
   // continuation and keeps it open.
-  let inOrderedRun = false;
+  const runs = new OrderedRuns();
   let blankSeen = false;
 
   const flushCurrent = (): void => {
@@ -1385,7 +1412,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
       // ANY heading; flushing here keeps entries in document order even when
       // a container's direct bullets precede its first child entry.
       flushPending();
-      inOrderedRun = false;
+      runs.clear();
       blankSeen = false;
       if (!heading.isContainer) {
         // Leaf heading: open an entry with the heading text as line 0.
@@ -1416,7 +1443,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     }
     // A thematic break is a separator: not evidence, not body (M1).
     if (THEMATIC_BREAK_RE.test(line)) {
-      inOrderedRun = false;
+      runs.clear();
       blankSeen = false;
       continue;
     }
@@ -1424,13 +1451,13 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     if (/^\s*\|/.test(line)) continue;
     if (current !== null) {
       current.lines.push(line);
-      const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, inOrderedRun);
+      const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, runs.at(indentOf(line)));
       current.opener.push(opener !== null);
       if (opener !== null) {
         currentHasBullet = true;
-        inOrderedRun = opener.ordered;
-      } else if (blankSeen && !/^[ \t]/.test(line) && line.trim() !== '') {
-        inOrderedRun = false; // a paragraph after a blank line ends the list
+        runs.opened(opener.indent, opener.ordered);
+      } else if (blankSeen && line.trim() !== '') {
+        runs.endedAt(indentOf(line)); // a paragraph after a blank line ends the lists at its level and deeper
       }
       if (line.trim() === '') blankSeen = true;
       else blankSeen = false;
@@ -1537,10 +1564,10 @@ function splitGapsEntriesCore(
   let currentStartLine = -1;
   let currentEndLine = -1;
   let baseIndent: number | null = null;
-  // Whether the previous TOP-LEVEL opener was ordered — the ordered-run
-  // memory `matchListOpener` consults (#3702 round 2, B2). Nested openers are
-  // continuation lines here and neither read nor move it.
-  let inOrderedRun = false;
+  // Ordered-run memory per indent (#3702 round 2, B2 + round review) — the
+  // top level decides entry boundaries; nested levels decide only which
+  // continuation lines count as accepted openers for field stripping.
+  const runs = new OrderedRuns();
   // Per-line opener flags for `current`, recorded HERE — the one place the
   // run state is known — so the heading path's strip-only-openers rule reads
   // the splitter's own verdict instead of re-deriving it (round review: a
@@ -1576,21 +1603,21 @@ function splitGapsEntriesCore(
       // it joins the closed entry — the next opener starts fresh.
       flush();
       current = null;
-      inOrderedRun = false;
+      runs.clear();
       blankSeen = false;
       return;
     }
-    const opener = matchListOpener(line, markers, inOrderedRun);
+    const opener = matchListOpener(line, markers, runs.at(indentOf(line)));
     if (opener !== null) {
       const { indent } = opener;
       if (baseIndent === null) baseIndent = indent;
+      runs.opened(indent, opener.ordered);
       if (indent <= baseIndent) {
         flush();
         current = [line];
         currentOpeners = [true];
         currentStartLine = idx;
         currentEndLine = idx;
-        inOrderedRun = opener.ordered;
         blankSeen = false; // an opener is not blank — the memory must not survive it
         return;
       }
@@ -1603,10 +1630,8 @@ function splitGapsEntriesCore(
       // is over (CommonMark §5.3) and a later `5. x` is prose. Without the
       // blank it is lazy continuation and the run stays open.
       const blank = line.trim() === '';
-      if (!blank && blankSeen && baseIndent !== null && (line.match(/^\s*/) as RegExpMatchArray)[0].length <= baseIndent) {
-        inOrderedRun = false;
-      }
-      blankSeen = blank;
+      if (!blank && blankSeen && opener === null) runs.endedAt(indentOf(line));
+      blankSeen = opener === null && blank;
     }
     // else: pre-first-bullet content (e.g. the template's HTML comment) — discarded.
   });

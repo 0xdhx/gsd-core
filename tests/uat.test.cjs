@@ -2736,6 +2736,21 @@ describe('#3702 round 2: round-review refinements (ordered run, rejected ordinal
     assert.strictEqual(names(md).length, 2);
   });
 
+  test('an ordered run is per INDENT: a nested `1. / 2.` run resolves (round-1 parity), a nested ordinal under a nested bullet is prose', () => {
+    // Round-review continuation 2: nested openers read the top-level run and
+    // never wrote their own.
+    for (const eol of ['\n', '\r\n']) {
+      const nestedRun = '- alpha\n  1. what: detail\n  2. status: resolved\n\n### Entry\n\n- **What:** x\n'.replace(/\n/g, eol);
+      assert.deepStrictEqual(statuses(nestedRun), ['resolved', ''], JSON.stringify(eol));
+      const leak = '1. alpha\n  - nested prose\n  3. status: resolved\n\n### Entry\n\n- **What:** x\n'.replace(/\n/g, eol);
+      assert.deepStrictEqual(statuses(leak), ['', ''], JSON.stringify(eol));
+    }
+    // A new top-level item resets the nested levels: `2.` under beta does not continue alpha's nested run.
+    assert.deepStrictEqual(statuses('- alpha\n  1. a\n- beta\n  2. status: resolved\n'), ['', '']);
+    // Under a heading the same per-indent rule applies.
+    assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n  1. step\n  2. **Status:** resolved\n'), ['resolved']);
+  });
+
   test('a REJECTED ordinal line under a heading is not marker-stripped, so it cannot manufacture a field', () => {
     // `3. status: resolved` is prose by the start-at-1 rule; before this fix the
     // heading path stripped its marker anyway and read a resolved field off it.
