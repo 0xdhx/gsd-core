@@ -1117,7 +1117,8 @@ interface BulletMarkers {
   strip: RegExp;
   /**
    * Honour Markdown block structure — thematic breaks close the list, fenced
-   * code neither opens an entry nor carries a field (#3702 round 2, M1/M2).
+   * code neither opens an entry nor carries a field (#3702 round 2, M1/M2),
+   * and indents are measured in CommonMark columns rather than raw characters.
    * `false` for the Gaps grammar, which #3702's ruling keeps byte-for-byte on
    * its `next` behaviour; `true` for the deferred-items grammar. Carried on the
    * marker set rather than as a second parameter so a caller cannot widen one
@@ -1249,6 +1250,19 @@ class OrderedRuns {
  * advances to the next multiple of 4), so `\t` and ` ` are different levels
  * and `\t` equals four spaces — character counting aliased them.
  */
+/**
+ * Indent WIDTH under a grammar (#3702 round 2, review round 6). The deferred
+ * grammar measures CommonMark columns; the Gaps grammar keeps `next`'s raw
+ * character count, because its `blockStructure: false` opt-out promises
+ * byte-for-byte parity and a column measure silently breaks it — a
+ * tab-indented Gaps item followed by a two-space one split into two entries
+ * where `next` folded them into one, and the reverse pair folded where `next`
+ * split. The opt-out now covers indent semantics, not only fences and breaks.
+ */
+function indentWidth(indent: string, markers: BulletMarkers): number {
+  return markers.blockStructure ? indentOf(indent) : indent.length;
+}
+
 function indentOf(line: string): number {
   let col = 0;
   for (const ch of line) {
@@ -1303,7 +1317,7 @@ function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boo
   const token = m[2];
   const ordered = /^\d/.test(token);
   if (ordered && !inOrderedRun && parseInt(token, 10) !== 1) return null;
-  return { indent: indentOf(m[1]), ordered };
+  return { indent: indentWidth(m[1], markers), ordered };
 }
 
 /**
@@ -1607,8 +1621,9 @@ function splitGapsEntriesCore(
     }
   };
 
-  // Block structure (M1/M2) is a property of the GRAMMAR, not of this seam:
-  // the Gaps set opts out and stays byte-for-byte on its `next` behaviour.
+  // Block structure (M1/M2 + column indents) is a property of the GRAMMAR,
+  // not of this seam: the Gaps set opts out and stays byte-for-byte on its
+  // `next` behaviour — see `indentWidth` for the indent half of that opt-out.
   const fenced = markers.blockStructure ? fencedLineSet(rawLines) : new Set<number>();
   const fenceOpens = markers.blockStructure ? fenceOpenerLines(rawLines) : new Set<number>();
   let blankSeen = false;
@@ -1616,7 +1631,7 @@ function splitGapsEntriesCore(
   // base is the one top level (a dedenting list keeps its entry boundaries);
   // deeper indents are their own nested levels.
   const levelOf = (line: string): number => {
-    const ind = indentOf(line);
+    const ind = indentWidth(line.match(/^[ \t]*/)![0], markers);
     return baseIndent !== null && ind <= baseIndent ? baseIndent : ind;
   };
   rawLines.forEach((rawLine, idx) => {

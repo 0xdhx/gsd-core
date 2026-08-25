@@ -2705,6 +2705,34 @@ describe('#3702 round 2: thematic breaks and fenced code are not list items (M1,
   });
 });
 
+describe('#3702 round 2: indent measure is grammar-scoped (review round 6)', () => {
+  // The deferred grammar measures CommonMark columns (a tab is a jump to the
+  // next multiple of 4); the Gaps grammar keeps `next`'s raw character count.
+  // Sharing one measure silently changed Gaps entry boundaries in BOTH
+  // directions on tab-indented input, breaking the `blockStructure: false`
+  // opt-out's byte-for-byte promise.
+  const gapsNames = (body) => parseUatItems(['# UAT', '', '## Gaps', '', body, ''].join('\n')).map((i) => i.name);
+  const deferredNames = (body) => parseDeferredItems('## Deferred Items\n\n' + body + '\n').map((i) => i.name);
+
+  test('Gaps: a tab-indented item followed by a two-space one stays ONE entry, as on `next`', () => {
+    assert.deepEqual(gapsNames('\t- first item\n  - second item'), ['first item - second item']);
+  });
+
+  test('Gaps: a two-space item followed by a tab-indented one stays TWO entries, as on `next`', () => {
+    assert.deepEqual(gapsNames('  - first item\n\t- second item'), ['first item', 'second item']);
+  });
+
+  test('Gaps: four spaces then two spaces splits, and a tab pair splits — unchanged either way', () => {
+    assert.deepEqual(gapsNames('    - first item\n  - second item'), ['first item', 'second item']);
+    assert.deepEqual(gapsNames('\t- first item\n\t- second item'), ['first item', 'second item']);
+  });
+
+  test('deferred: the SAME tab/space pairs measure in columns — the opposite verdict, by design', () => {
+    assert.deepEqual(deferredNames('\t- first\n  - second'), ['first', 'second']);
+    assert.deepEqual(deferredNames('  - first\n\t- second'), ['first - second']);
+  });
+});
+
 describe('#3702 round 2: round-review refinements (ordered run, rejected ordinals, breaks, fenced fields, Gaps scope)', () => {
   const SECTION = '## Deferred Items\n\n';
   const names = (md) => parseDeferredItems(SECTION + md).map((i) => i.name);
