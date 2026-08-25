@@ -534,7 +534,7 @@ describe('milestone complete command', () => {
       const statePath = path.join(tmpDir, '.planning', 'STATE.md');
       const stateBefore = fs.readFileSync(statePath, 'utf-8');
 
-      const result = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test'], tmpDir, PINNED_CLOCK_ENV);
+      const result = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--confirm'], tmpDir, PINNED_CLOCK_ENV);
       assert.ok(result.success, `Command failed: ${result.error}`);
 
       const output = JSON.parse(result.output);
@@ -549,7 +549,7 @@ describe('milestone complete command', () => {
       writeState(tmpDir);
       const statePath = path.join(tmpDir, '.planning', 'STATE.md');
 
-      const run1 = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--force'], tmpDir, PINNED_CLOCK_ENV);
+      const run1 = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--force', '--confirm'], tmpDir, PINNED_CLOCK_ENV);
       assert.ok(run1.success, `first milestone complete failed: ${run1.error}`);
       const stateAfter1 = fs.readFileSync(statePath, 'utf-8');
 
@@ -558,7 +558,7 @@ describe('milestone complete command', () => {
       // genuine no-op for STATE.md content, even though MILESTONES.md still
       // gains a new (duplicate-looking) entry each call — the two flags are
       // independent and must not be conflated.
-      const run2 = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--force'], tmpDir, PINNED_CLOCK_ENV);
+      const run2 = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--force', '--confirm'], tmpDir, PINNED_CLOCK_ENV);
       assert.ok(run2.success, `second milestone complete failed: ${run2.error}`);
       const stateAfter2 = fs.readFileSync(statePath, 'utf-8');
 
