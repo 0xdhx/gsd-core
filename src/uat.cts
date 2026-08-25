@@ -1056,40 +1056,48 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     (rawLine, idx) => parseGapEntryFieldLine(rawLine, idx)?.key === 'status',
   );
 
-  // No CRLF-preservation branch here (WARNING 1, #3458 follow-up review):
-  // every write goes through `platformWriteSync` → `normalizeContent`, which
-  // for a `.md` path unconditionally runs `_normalizeMd` — whole-file
-  // `\r\n` → `\n`, plus blank-line normalization around headings/lists — on
-  // EVERY write, not just this one. That is this codebase's single,
-  // deliberate OS-facing I/O seam (`shell-command-projection.cts`), applied
-  // uniformly to every `.md` writer; carving out one exception here would
-  // fight it rather than follow it, for a guarantee (byte-identical CRLF on
-  // disk) the seam already makes impossible. A marker write on a CRLF
-  // `deferred-items.md` normalizes the WHOLE file to LF, same as any other
-  // `.md` write in this codebase — expected, not a regression to guard
-  // against. Where a source line still carries a trailing `\r` (read from an
-  // on-disk CRLF document before normalization), `String.prototype.replace`
-  // consumes it as part of `.*$` and the replacement text does not
-  // reproduce it, so it is dropped here too — consistent with the eventual
-  // whole-file normalization rather than duplicating it.
+  // The lines here are RAW: `audit acknowledge` hands this function the
+  // `readFileSync` content of an on-disk `deferred-items.md`, and CRLF
+  // normalization (`_normalizeMd`, via `platformWriteSync` → `normalizeContent`)
+  // runs only on WRITE. So every line of a CRLF document, except the entry's
+  // last when the span stops short of the file's final `\r\n`, still carries
+  // its `\r` here. That matters because in JS `.` never matches `\r` and `$`
+  // without the `m` flag matches only end-of-input: an `.*$`-anchored rewrite
+  // applied to `  status: open\r` does not match at all, `replace` hands the
+  // line back untouched, and the function reported `ok` having changed
+  // nothing (#3773 review, Blocker 1 — the whole-file normalization then
+  // silently made the SECOND run succeed, which is what kept it hidden). So
+  // the rewrite runs on the `\r`-stripped line and the `\r` is put back; the
+  // insert branch gives its new line the same ending as the entry's opening
+  // line. Per-line ending preservation is the honest in-memory contract — the
+  // normalizer on the write path still decides what reaches disk, and this
+  // function deliberately does not duplicate that whole-file decision.
   let newMatchedLines: string[];
   if (statusLineIdx === -1) {
     const bulletIndentMatch = matchedLines[0].match(/^(\s*)-\s+/);
     const continuationIndent = ' '.repeat((bulletIndentMatch ? bulletIndentMatch[1].length : 0) + 2);
+    // The new line goes right after line 0, so line 0 stops being the span's
+    // last line. Under CRLF the span's last line is the one line WITHOUT a
+    // `\r` (the file's own `\r\n` follows the span), so: line 0 takes the
+    // document's convention now that it is not last, and the inserted line
+    // inherits whatever line 0 had — it is last exactly when line 0 was.
+    const line0HadCr = matchedLines[0].endsWith('\r');
+    const crlf = line0HadCr || /\r\n/.test(content);
     newMatchedLines = [
-      matchedLines[0],
-      `${continuationIndent}status: acknowledged`,
+      crlf ? `${matchedLines[0].replace(/\r$/, '')}\r` : matchedLines[0],
+      `${continuationIndent}status: acknowledged${line0HadCr ? '\r' : ''}`,
       ...matchedLines.slice(1),
     ];
   } else {
     const original = matchedLines[statusLineIdx];
-    const replaced = original.replace(
+    const cr = original.endsWith('\r') ? '\r' : '';
+    const replaced = original.slice(0, original.length - cr.length).replace(
       // The optional bullet group is reachable only for line 0 (the search
       // above matches later lines marker-free); preserving it there keeps the
       // line an entry-opening bullet, which the reader de-bullets on read.
       /^(\s*(?:-\s+)?)(\*+status:\*+|status:)(\s*).*$/i,
       (_m, indent: string, key: string, ws: string) => `${indent}${key}${ws}acknowledged`,
-    );
+    ) + cr;
     newMatchedLines = matchedLines.slice();
     newMatchedLines[statusLineIdx] = replaced;
   }

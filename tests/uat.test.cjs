@@ -2440,3 +2440,86 @@ describe('#3740 acknowledgeDeferredItem: writer selects only lines the reader re
     assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
   });
 });
+
+// #3740 round 2 (PR #3773 review, Blockers 1 + 3): `audit acknowledge` passes
+// raw `readFileSync` content in, and CRLF normalization runs only on write, so
+// a `\r`-terminated status line reaches the rewrite. `.` never matches `\r`
+// and `$` (no `m` flag) is end-of-input only, so an `.*$`-anchored rewrite
+// silently no-ops on every status line except the entry's last — the one
+// position where the span excludes the trailing `\r`. Boundary under test:
+// status-line position within the entry × line ending.
+describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\'s last line', () => {
+  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
+    require('../gsd-core/bin/lib/uat.cjs');
+
+  const crlfRoundTrip = (entryLines) => {
+    const content = ['## Deferred Items', '', ...entryLines, ''].join('\r\n');
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1, JSON.stringify(before));
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    return { content, ack, after: parseDeferredItemsWithStatus(ack.content) };
+  };
+
+  // Every `\n` in the result must be preceded by `\r` — no mixed endings
+  // introduced by the rewrite or the insert (review Minor 2).
+  const assertUniformCrlf = (text) => {
+    assert.ok(!/[^\r]\n/.test(text) && !/^\n/.test(text), `mixed line endings: ${JSON.stringify(text)}`);
+  };
+
+  test('status line in the MIDDLE of the entry is rewritten (the review\'s exact reproducer)', () => {
+    const { content, ack, after } = crlfRoundTrip(['- alpha', '  status: open', '  reason: x']);
+    assert.strictEqual(ack.status, 'ok');
+    assert.notStrictEqual(ack.content, content, 'ok must mean something changed');
+    assert.strictEqual(after[0].status, 'acknowledged');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha\r\n  status: acknowledged\r\n  reason: x\r\n');
+    assertUniformCrlf(ack.content);
+  });
+
+  test('status line FIRST after the bullet, with fields after it', () => {
+    const { ack, after } = crlfRoundTrip(['- alpha', '  **status:** open', '  reason: x', '  owner: y']);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status, 'acknowledged');
+    assert.match(ack.content, /\r\n {2}\*\*status:\*\* acknowledged\r\n {2}reason: x\r\n/);
+    assertUniformCrlf(ack.content);
+  });
+
+  test('status on the bullet line itself (line 0) under CRLF', () => {
+    const { ack, after } = crlfRoundTrip(['- status: open', '  reason: x']);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status, 'acknowledged');
+    assert.match(ack.content, /\r\n- status: acknowledged\r\n {2}reason: x\r\n/);
+    assertUniformCrlf(ack.content);
+  });
+
+  test('control: status line LAST in the entry (the only position the old rewrite handled)', () => {
+    const { ack, after } = crlfRoundTrip(['- alpha', '  status: open']);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status, 'acknowledged');
+    assertUniformCrlf(ack.content);
+  });
+
+  test('insert branch under CRLF: the inserted line takes the entry\'s line ending', () => {
+    const { ack, after } = crlfRoundTrip(['- alpha', '  - status: open', '  reason: x']);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status, 'acknowledged');
+    assert.match(ack.content, /- alpha\r\n {2}status: acknowledged\r\n {2}- status: open\r\n/);
+    assertUniformCrlf(ack.content);
+  });
+
+  test('insert branch under CRLF on a single-line entry (line 0 is the span\'s last line)', () => {
+    // The span excludes the file's final `\r\n`, so line 0 arrives WITHOUT a
+    // `\r`; the insert must not join it to the new line with a bare `\n`.
+    const { ack, after } = crlfRoundTrip(['- alpha']);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(after[0].status, 'acknowledged');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha\r\n  status: acknowledged\r\n');
+    assertUniformCrlf(ack.content);
+  });
+
+  test('acknowledging twice is idempotent under CRLF', () => {
+    const { ack } = crlfRoundTrip(['- alpha', '  status: open', '  reason: x']);
+    const again = acknowledgeDeferredItem(ack.content, parseDeferredItemsWithStatus(ack.content)[0].name);
+    assert.strictEqual(again.status, 'ok');
+    assert.strictEqual(again.content, ack.content);
+  });
+});
