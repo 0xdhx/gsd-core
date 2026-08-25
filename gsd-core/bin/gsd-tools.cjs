@@ -68,11 +68,12 @@
  *                                      gaps_found-only, never call on the pass path
  *
  * Milestone Operations:
- *   milestone complete <version>       Archive milestone, create MILESTONES.md
+ *   milestone complete <version> (--confirm | --dry-run)
+ *                                      Archive milestone, create MILESTONES.md — one of the two is required
  *     --confirm                      REQUIRED to mutate (#3726): the archive is irreversible (ROADMAP/
  *                                    REQUIREMENTS archived, phase dirs MOVED, STATE.md rewritten), so
  *                                    without this flag the command refuses and mutates nothing
- *     [--dry-run]                    Preview what would move, mutates nothing (no --confirm needed; #2118)
+ *     --dry-run                      Preview what would move, mutates nothing (no --confirm needed; #2118)
  *     [--name <name>]
  *     [--no-archive-phases]          Skip moving phase dirs to milestones/vX.Y-phases/ (archived by default)
  *     [--archive-quick]              Move .planning/quick/* dirs to milestones/vX.Y-quick/ + reset the

@@ -882,7 +882,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 
 ```bash
 # Archive milestone
-node gsd-tools.cjs milestone complete <version> --confirm [--name <name>] [--no-archive-phases] [--force] [--dry-run] [--archive-quick]
+node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run) [--name <name>] [--no-archive-phases] [--force] [--archive-quick]
 
 # Archive .planning/quick/* into milestones/<version>-quick/ WITHOUT the milestone complete close-out (#2142)
 node gsd-tools.cjs milestone archive-quick <version> [--dry-run]
