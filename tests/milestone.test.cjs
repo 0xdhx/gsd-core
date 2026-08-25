@@ -2546,6 +2546,28 @@ describe('#3726: milestone complete refuses to mutate without --confirm', () => 
     assert.deepStrictEqual(snapshotPlanning(), before, '--force refusal must leave .planning/ untouched');
   });
 
+  // #3726 boundary triple, third arm (review Minor 1): present-but-falsy.
+  // The gate is an exact-token match (`args.includes('--confirm')`), so
+  // `--confirm=false` / `--confirm=0` are not the token and refuse,
+  // fail-closed. Pinned so a future `=`-aware or prefix-matching arg parser
+  // cannot silently turn `--confirm=false` into a confirmed run of an
+  // irreversible command with no test going red.
+  test('--confirm=false / --confirm=0 do not satisfy the confirmation gate (canonical + query forms)', () => {
+    seedMutableMilestone();
+    const before = snapshotPlanning();
+    for (const argv of [
+      ['milestone', 'complete', 'v1.0', '--confirm=false'],
+      ['milestone', 'complete', 'v1.0', '--confirm=0'],
+      ['query', 'milestone.complete', 'v1.0', '--confirm=false'],
+      ['query', 'milestone.complete', 'v1.0', '--confirm=0'],
+    ]) {
+      const result = runGsdTools(argv, tmpDir);
+      assert.strictEqual(result.success, false, `${argv.join(' ')} must refuse — the exact token is absent`);
+      assert.match(result.error || '', /--confirm/, 'refusal must name the flag that proceeds');
+      assert.deepStrictEqual(snapshotPlanning(), before, `${argv.join(' ')} must leave .planning/ untouched`);
+    }
+  });
+
   // #3726 AC 3: the preview needs no confirmation and still mutates nothing.
   test('--dry-run previews without --confirm and mutates nothing', () => {
     seedMutableMilestone();
