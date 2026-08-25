@@ -2409,3 +2409,34 @@ describe('#3740 acknowledgeDeferredItem: line-0 status line keeps in-place rewri
     assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
   });
 });
+
+// #3740 round 2 (PR #3773 review, Blocker 2): the writer must only ever select
+// a status line the reader reads back. A bare `Status:` is stored by the
+// reader under `Status` (bare keys keep their case — see the
+// `extractGapEntryFields` doc comment), so rewriting it in place reports `ok`
+// while `fields.status` stays empty and the item remains outstanding.
+describe('#3740 acknowledgeDeferredItem: writer selects only lines the reader reads as `status`', () => {
+  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
+    require('../gsd-core/bin/lib/uat.cjs');
+
+  test('bare capitalised `Status:` is not rewritten in place — the insert branch makes it readable', () => {
+    const content = '## Deferred Items\n\n- alpha\n  Status: open\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1);
+    assert.strictEqual(before[0].status, '', 'premise: the reader does not read a bare `Status:`');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /- alpha\n {2}status: acknowledged\n {2}Status: open\n/);
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
+  test('control: bold `**Status:**` IS read (lower-cased) and so is rewritten in place', () => {
+    const content = '## Deferred Items\n\n- alpha\n  **Status:** open\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before[0].status, 'open');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n  **Status:** acknowledged\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+});

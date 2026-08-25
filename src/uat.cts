@@ -1044,19 +1044,17 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   }
 
   const matchIndexInContent = sectionOffset + start;
-  // Mirror exactly what `extractGapEntryFields` reads back: it strips a bullet
-  // marker on line 0 only, so on a later line a nested `  - status: open` is a
-  // nested sub-list, never a field line. Such a line must fall through to the
-  // insert branch below (which writes a marker-free line the parser does read)
-  // rather than be rewritten in place with a marker the parser ignores (#3740).
-  const statusFieldRe = /^\s*(\*+status:\*+|status:)/i;
-  const statusLineIdx = matchedLines.findIndex((rawLine, idx) => {
-    const line = rawLine.replace(/\r$/, '');
-    // Line 0 carries the entry-opening bullet the reader strips before field
-    // extraction; strip it here too so the two sides agree on that line.
-    const content = idx === 0 ? line.replace(/^(\s*)-\s+/, '$1') : line;
-    return statusFieldRe.test(content);
-  });
+  // Locate the status line with the READER'S OWN classifier, not a writer-side
+  // regex (#3740): the only line worth rewriting in place is one the reader
+  // will read back as `fields.status`. A nested `  - status: open` on a later
+  // line is a sub-list to the reader, and a bare `Status:` is stored under
+  // `Status`, not `status` — neither is selected here, so both fall through to
+  // the insert branch below, which writes a line the reader does read. The
+  // reader is first-wins over duplicate keys and this is a first-match search
+  // over the same classifier, so the two sides agree on WHICH line, too.
+  const statusLineIdx = matchedLines.findIndex(
+    (rawLine, idx) => parseGapEntryFieldLine(rawLine, idx)?.key === 'status',
+  );
 
   // No CRLF-preservation branch here (WARNING 1, #3458 follow-up review):
   // every write goes through `platformWriteSync` → `normalizeContent`, which
@@ -1387,30 +1385,50 @@ function splitGapsEntriesWithSpans(sectionBody: string): GapsEntrySpan[] {
  */
 function extractGapEntryFields(entryLines: string[]): Record<string, string> {
   const fields: Record<string, string> = {};
-  const fieldLineRe = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
-  const boldedKeyRe = /^\*+([A-Za-z_][A-Za-z0-9_-]*):\*+/;
 
   entryLines.forEach((rawLine, idx) => {
-    const line = rawLine.replace(/\r$/, '');
-    // Strip ONLY the entry-opening bullet marker (idx 0); a bullet marker on
-    // a later line belongs to a nested sub-list and is handled by
-    // `splitGapsEntries` already folding it in — it is not itself a field
-    // line unless it independently matches `key: value` after stripping.
-    const bulletStripped = line.match(/^(\s*)-\s+(.*)$/);
-    const content = (idx === 0 && bulletStripped ? bulletStripped[2] : line.trim())
-      .replace(boldedKeyRe, (_m, key: string) => `${key.toLowerCase()}:`);
-
-    const m = fieldLineRe.exec(content);
-    if (!m) return;
-    const key = m[1];
-    let value = m[2].trim();
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-      value = value.slice(1, -1);
-    }
-    if (!(key in fields)) fields[key] = value;
+    const field = parseGapEntryFieldLine(rawLine, idx);
+    if (!field) return;
+    if (!(field.key in fields)) fields[field.key] = field.value;
   });
 
   return fields;
+}
+
+const gapFieldLineRe = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
+const gapBoldedKeyRe = /^\*+([A-Za-z_][A-Za-z0-9_-]*):\*+/;
+
+/**
+ * The ONE place an entry line is classified as a `key: value` field line —
+ * `extractGapEntryFields` reads through it, and `acknowledgeDeferredItem`
+ * locates the line it will rewrite through it. Sharing the classifier is what
+ * makes the writer unable to select a line the reader will not read back
+ * (#3740): the writer used to carry its own status-line regex, and the two
+ * drifted twice in one review round — a nested `  - status:` sub-list line
+ * the reader deliberately skips, and a case-insensitive `Status:` the
+ * reader's bare-key match (case-sensitive, by the doc comment above) does not
+ * store under `status`. Each drift produced `ok` with nothing the reader could
+ * see. A single classifier has no second copy to drift from.
+ *
+ * Returns `null` for a non-field line. `idx` is the line's position within its
+ * entry: ONLY line 0 has its entry-opening bullet marker stripped; a marker on
+ * a later line belongs to a nested sub-list (`splitGapsEntries` already folded
+ * it in) and is not a field line unless it independently matches after a
+ * plain trim.
+ */
+function parseGapEntryFieldLine(rawLine: string, idx: number): { key: string; value: string } | null {
+  const line = rawLine.replace(/\r$/, '');
+  const bulletStripped = line.match(/^(\s*)-\s+(.*)$/);
+  const content = (idx === 0 && bulletStripped ? bulletStripped[2] : line.trim())
+    .replace(gapBoldedKeyRe, (_m, key: string) => `${key.toLowerCase()}:`);
+
+  const m = gapFieldLineRe.exec(content);
+  if (!m) return null;
+  let value = m[2].trim();
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    value = value.slice(1, -1);
+  }
+  return { key: m[1], value };
 }
 
 /** Fallback display text for a Gaps entry with no parseable `truth:` field. */
