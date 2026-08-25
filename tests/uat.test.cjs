@@ -1721,9 +1721,9 @@ describe('#2287 progress.md forensic_audit: deferred-items.md contract', () => {
   });
 });
 
-// ─── parseDeferredItems property test (#2287) ──────────────────────────────
+// ─── parseDeferredItems property test (#2287, widened by #3702 round 2) ─────
 
-describe('#2287 parseDeferredItems: property (status: resolved fail-safe)', () => {
+describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × marker × shape × line ending', () => {
   // Single-line entry text: no newlines (would break bullet-entry splitting),
   // non-empty after trim, and never itself SHAPED like a `status:` field line
   // (that would be indistinguishable from a real field regardless of intent).
@@ -1738,43 +1738,72 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe)', () =
   const decoyText = plainText.map((s) => `${s} status: resolved trailing note`);
 
   const textArb = fc.oneof(plainText, decoyText);
-  const entryArb = fc.record({ text: textArb, resolved: fc.boolean() });
+  // `statusFirst` matters on the heading shape: round 1's only CRLF test put
+  // `**Status:**` LAST, the one line `collectSection`'s `.trimEnd()` had
+  // already de-CR'd, and the B1 regression hid behind it.
+  const entryArb = fc.record({ text: textArb, resolved: fc.boolean(), statusFirst: fc.boolean() });
+
+  // #3702 round 2 (B3): the marker set is an enumerated domain — exactly what a
+  // property is for. Ordered markers are numbered from 1 (the ordered-run
+  // rule, B2); the two shapes exercise both splitters; CRLF exercises the
+  // heading path's CR handling (B1).
+  const markerArb = fc.constantFrom('-', '*', '+', 'ordered');
+  const shapeArb = fc.constantFrom('headless', 'heading');
+  const eolArb = fc.constantFrom('\n', '\r\n');
+  const mk = (marker, i) => (marker === 'ordered' ? `${i + 1}.` : marker);
+
+  const render = (entries, marker, shape, eol) => {
+    const lines = ['## Deferred Items', ''];
+    entries.forEach((e, i) => {
+      if (shape === 'headless') {
+        lines.push(`${mk(marker, i)} ${e.text}`);
+        if (e.resolved) lines.push('  status: resolved');
+      } else {
+        lines.push(`### ${e.text}`, '');
+        const what = (n) => `${mk(marker, n)} **What:** ${e.text}`;
+        const status = (n) => `${mk(marker, n)} **Status:** resolved`;
+        if (!e.resolved) lines.push(what(0));
+        else if (e.statusFirst) lines.push(status(0), what(1));
+        else lines.push(what(0), status(1));
+        lines.push('');
+      }
+    });
+    return lines.join(eol);
+  };
+  const idOf = (name) => { const m = /E(\d+)_/.exec(name); return m ? Number(m[1]) : -1; };
 
   test('property: an entry is surfaced iff it is NOT marked status: resolved; surfaced count == non-resolved count', () => {
     fc.assert(
       fc.property(
-        fc.array(entryArb, { maxLength: 20 }),
-        (rawEntries) => {
+        fc.array(entryArb, { maxLength: 20 }), markerArb, shapeArb, eolArb,
+        (rawEntries, marker, shape, eol) => {
           // Index-prefix for uniqueness so surfaced items can be mapped back
           // to their source entry unambiguously even with colliding random text.
-          const entries = rawEntries.map((e, i) => ({ text: `E${i}_${e.text}`, resolved: e.resolved }));
-
-          const lines = ['## Deferred Items', ''];
-          for (const e of entries) {
-            lines.push(`- ${e.text}`);
-            if (e.resolved) lines.push('  status: resolved');
-          }
-          const content = lines.join('\n');
+          const entries = rawEntries.map((e, i) => ({ ...e, text: `E${i}_${e.text}` }));
+          const content = render(entries, marker, shape, eol);
+          const where = `${shape} ${JSON.stringify(marker)} ${JSON.stringify(eol)}`;
 
           const items = parseDeferredItems(content);
-          const surfacedNames = new Set(items.map((it) => it.name));
+          const surfacedIds = new Set(items.map((it) => idOf(it.name)));
 
           const expectedUnresolved = entries.filter((e) => !e.resolved);
           const expectedResolved = entries.filter((e) => e.resolved);
 
           // Total surfaced count equals the count of non-resolved entries.
-          assert.strictEqual(items.length, expectedUnresolved.length);
+          assert.strictEqual(items.length, expectedUnresolved.length, where);
 
           // Every non-resolved entry IS surfaced (including status:-shaped
           // decoy substrings embedded mid-line — those must not flip the
           // outcome).
-          for (const e of expectedUnresolved) {
-            assert.ok(surfacedNames.has(e.text), `expected unresolved entry to surface: ${e.text}`);
+          for (const [i, e] of entries.entries()) {
+            assert.strictEqual(surfacedIds.has(i), !e.resolved, `${where}: ${e.resolved ? 'resolved entry must never surface' : 'unresolved entry must surface'}: ${e.text}`);
           }
+          void expectedResolved;
 
-          // No status:-resolved entry is EVER surfaced.
-          for (const e of expectedResolved) {
-            assert.ok(!surfacedNames.has(e.text), `status: resolved entry must never surface: ${e.text}`);
+          // Headless: the surfaced NAME is the entry text with the marker gone,
+          // whichever marker it was (the name is what acknowledge matches on).
+          if (shape === 'headless') {
+            for (const it of items) assert.strictEqual(it.name, entries[idOf(it.name)].text, where);
           }
 
           // Every returned item carries the fixed deferred category/result shape.
@@ -1782,6 +1811,39 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe)', () =
             assert.strictEqual(item.result, 'unresolved');
             assert.strictEqual(item.category, 'deferred');
           }
+        }
+      )
+    );
+  });
+
+  test('property: acknowledge reaches and rewrites every unresolved headless entry, whichever marker or line ending', () => {
+    // The writer refuses the heading shape by design (`unsupported_heading_shape`),
+    // so this ranges over the headless shape only. It is the property that
+    // reaches M4 (CRLF rewrite reported ok and wrote nothing) and m2 (indent).
+    fc.assert(
+      fc.property(
+        fc.array(entryArb, { minLength: 1, maxLength: 12 }), markerArb, eolArb,
+        (rawEntries, marker, eol) => {
+          const entries = rawEntries.map((e, i) => ({ ...e, text: `E${i}_${e.text}` }));
+          let content = render(entries, marker, 'headless', eol);
+          const where = `${JSON.stringify(marker)} ${JSON.stringify(eol)}`;
+
+          for (const e of entries.filter((x) => !x.resolved)) {
+            const got = acknowledgeDeferredItem(content, e.text);
+            assert.strictEqual(got.status, 'ok', `${where}: ${e.text}`);
+            assert.notStrictEqual(got.content, content, `${where}: an ok must have written: ${e.text}`);
+            content = got.content;
+          }
+          const after = parseDeferredItemsWithStatus(content);
+          assert.strictEqual(after.length, entries.length, where);
+          for (const it of after) {
+            const e = entries[idOf(it.name)];
+            assert.strictEqual(it.status, e.resolved ? 'resolved' : 'acknowledged', `${where}: ${it.name}`);
+          }
+          // `acknowledged` is suppressed at the AUDIT layer, not the parser's:
+          // only `resolved` leaves the outstanding list here, so the count is
+          // unchanged by the writes above.
+          assert.strictEqual(parseDeferredItems(content).length, entries.filter((x) => !x.resolved).length, where);
         }
       )
     );
