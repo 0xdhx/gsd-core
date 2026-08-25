@@ -2436,6 +2436,52 @@ describe('#3740 acknowledgeDeferredItem: writer selects only lines the reader re
   });
 });
 
+// #3775: the same bare-key/case disagreement seen from its DATA-LOSS side. The
+// writer's old case-insensitive search matched a bare `Status:` line that the
+// reader stores under `Status`, so acknowledging an entry whose human-written
+// value was `resolved` rewrote that value to `acknowledged` and returned `ok`.
+// The `already_resolved` guard could not stop it: the guard reads
+// `fields.status`, which a bare non-lowercase key never populates, so the
+// pre-ack status was `''` and the entry never looked resolved. With the writer
+// sharing the reader's classifier the line is no longer selected at all, so the
+// human's value survives verbatim and the inserted marker-free line carries the
+// acknowledgement. Asserted apart from the `open` cases above because what the
+// bug destroyed was the VALUE, and only a resolved value can be destroyed.
+describe('#3775 acknowledgeDeferredItem: a bare non-lowercase `resolved` value survives acknowledgement', () => {
+  test('bare `Status: resolved` is left intact — its value is not overwritten', () => {
+    const content = '## Deferred Items\n\n- alpha\n  Status: resolved\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1);
+    assert.strictEqual(before[0].status, '', 'premise: the reader does not read a bare `Status:`');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    // Whole-content equality is the value-preservation assertion: the human's
+    // `Status: resolved` line appears verbatim, and the acknowledgement arrives
+    // on an inserted line the reader reads first-wins.
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n  status: acknowledged\n  Status: resolved\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
+  test('bare `STATUS: resolved` is left intact too — the upper-case arm of the same rule', () => {
+    const content = '## Deferred Items\n\n- alpha\n  STATUS: resolved\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before[0].status, '', 'premise: the reader does not read a bare `STATUS:`');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n  status: acknowledged\n  STATUS: resolved\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
+  test('control: a resolved value the reader DOES read is refused as `already_resolved`, file untouched', () => {
+    const content = '## Deferred Items\n\n- alpha\n  **Status:** resolved\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before[0].status, 'resolved');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'already_resolved');
+    assert.strictEqual(ack.content, content);
+  });
+});
+
 // #3740 round 2 (PR #3773 review, Blockers 1 + 3): `audit acknowledge` passes
 // raw `readFileSync` content in, and CRLF normalization runs only on write, so
 // a `\r`-terminated status line reaches the rewrite. `.` never matches `\r`
