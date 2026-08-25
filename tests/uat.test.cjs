@@ -16,6 +16,8 @@ const {
   CHECKPOINT_LANGUAGE_ALIASES,
   resolveCheckpointFrame,
   parseDeferredItems,
+  parseDeferredItemsWithStatus,
+  acknowledgeDeferredItem,
 } = require('../gsd-core/bin/lib/uat.cjs');
 
 describe('audit-uat command', () => {
@@ -2329,9 +2331,6 @@ describe('#2766 parseGapsItems: GFM table shape', () => {
 // ─── #3740: acknowledge round-trip for nested-marker status lines ─────────────
 
 describe('#3740 acknowledgeDeferredItem: ack must be visible to the parser', () => {
-  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
-    require('../gsd-core/bin/lib/uat.cjs');
-
   // parse → acknowledge → parse: the assertion shape that catches a writer
   // whose rewrite the reader never sees (#3740 — `ok` yet still outstanding).
   const roundTrip = (body) => {
@@ -2359,7 +2358,9 @@ describe('#3740 acknowledgeDeferredItem: ack must be visible to the parser', () 
     const { ack, after } = roundTrip('- alpha\n  status: open');
     assert.strictEqual(ack.status, 'ok');
     assert.strictEqual(after[0].status.toLowerCase(), 'acknowledged');
-    assert.ok(!/- status:/.test(ack.content), ack.content);
+    // In place: same line count, and the status line is the same line —
+    // rewritten, not inserted above a stale one.
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n  status: acknowledged\n');
   });
 
   test('control: bold marker-free status still rewrites in place', () => {
@@ -2394,9 +2395,6 @@ describe('#3740 acknowledgeDeferredItem: ack must be visible to the parser', () 
 // #3740 edge: line 0 itself as the status line — the reader de-bullets line 0,
 // so the writer must keep treating it as the status field (in-place rewrite).
 describe('#3740 acknowledgeDeferredItem: line-0 status line keeps in-place rewrite', () => {
-  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
-    require('../gsd-core/bin/lib/uat.cjs');
-
   test('entry whose bullet line IS the status field still acknowledges', () => {
     const content = '## Deferred Items\n\n- status: open\n';
     const before = parseDeferredItemsWithStatus(content);
@@ -2416,9 +2414,6 @@ describe('#3740 acknowledgeDeferredItem: line-0 status line keeps in-place rewri
 // `extractGapEntryFields` doc comment), so rewriting it in place reports `ok`
 // while `fields.status` stays empty and the item remains outstanding.
 describe('#3740 acknowledgeDeferredItem: writer selects only lines the reader reads as `status`', () => {
-  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
-    require('../gsd-core/bin/lib/uat.cjs');
-
   test('bare capitalised `Status:` is not rewritten in place — the insert branch makes it readable', () => {
     const content = '## Deferred Items\n\n- alpha\n  Status: open\n';
     const before = parseDeferredItemsWithStatus(content);
@@ -2449,9 +2444,6 @@ describe('#3740 acknowledgeDeferredItem: writer selects only lines the reader re
 // position where the span excludes the trailing `\r`. Boundary under test:
 // status-line position within the entry × line ending.
 describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\'s last line', () => {
-  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
-    require('../gsd-core/bin/lib/uat.cjs');
-
   const crlfRoundTrip = (entryLines) => {
     const content = ['## Deferred Items', '', ...entryLines, ''].join('\r\n');
     const before = parseDeferredItemsWithStatus(content);
@@ -2532,9 +2524,6 @@ describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\
 // re-parsed status is `acknowledged`, the entry keeps its name, the line
 // endings stay uniform, and a second acknowledgement is a no-op.
 describe('#3740 acknowledgeDeferredItem: property — parse→ack→parse over marker × eol × position', () => {
-  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
-    require('../gsd-core/bin/lib/uat.cjs');
-
   // `inPlace` mirrors `extractGapEntryFields`: a bare key keeps its case, a
   // bolded key is lower-cased, a bullet on a later line is a sub-list.
   const MARKERS = {
