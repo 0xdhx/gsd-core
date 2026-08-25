@@ -128,7 +128,7 @@ describe('milestone complete command', () => {
     // Capture pre-state
     const stateBefore = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
 
-    const result = runGsdTools('milestone complete v1.0 --name Test --dry-run --confirm', tmpDir);
+    const result = runGsdTools('milestone complete v1.0 --name Test --dry-run', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -179,7 +179,7 @@ describe('milestone complete command', () => {
     writeState(tmpDir);
     mkPhaseDir(tmpDir, '01-foundation');
 
-    const result = runGsdTools('milestone complete v1.0 --dry-run --no-archive-phases --confirm', tmpDir);
+    const result = runGsdTools('milestone complete v1.0 --dry-run --no-archive-phases', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -195,7 +195,7 @@ describe('milestone complete command', () => {
     // Capture pre-state
     const stateBefore = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
 
-    const result = runGsdTools('milestone complete v1.0 --dry-run --force --confirm', tmpDir);
+    const result = runGsdTools('milestone complete v1.0 --dry-run --force', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const output = JSON.parse(result.output);
@@ -222,7 +222,7 @@ describe('milestone complete command', () => {
     writeState(tmpDir);
     mkPhaseDir(tmpDir, '01-foundation', { oneLiner: 'Set up project infrastructure' });
 
-    const result = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--dry-run', '--raw', '--confirm'], tmpDir);
+    const result = runGsdTools(['milestone', 'complete', 'v1.0', '--name', 'Test', '--dry-run', '--raw'], tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     // Before the fix, output(dryRunResult, raw, 'dry-run') meant --raw discarded
@@ -2049,7 +2049,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
   test('without --force the guard fires even when STATE.md milestone: desyncs from the requested version', () => {
     makeFixture(tmpDir, 'v1.0', 'desync');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
       tmpDir,
     );
     assert.strictEqual(result.success, false, 'guard must fire on STATE desync, not fail open');
@@ -2062,7 +2062,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
   test('without --force the guard fires even when STATE.md has no milestone: field', () => {
     makeFixture(tmpDir, 'v1.0', 'absent');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
       tmpDir,
     );
     assert.strictEqual(result.success, false, 'guard must fire when milestone: field is absent');
@@ -2075,7 +2075,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
   test('without --force the guard fires even when STATE.md does not exist', () => {
     makeFixture(tmpDir, 'v1.0', 'no-file');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
       tmpDir,
     );
     assert.strictEqual(result.success, false, 'guard must fire when STATE.md is missing entirely');
@@ -2088,7 +2088,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
   test('with --force the guard is bypassed even when STATE.md milestone: desyncs', () => {
     makeFixture(tmpDir, 'v1.0', 'desync');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--force', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--force'],
       tmpDir,
     );
     assert.ok(
@@ -2102,7 +2102,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
   test('a STATE milestone mismatch emits a warning naming both versions', () => {
     makeFixture(tmpDir, 'v1.0', 'desync');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
       tmpDir,
     );
     // Guard fires (failure path) — the WARNING is written to stderr before
@@ -2127,7 +2127,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
     // not a mismatch — so no WARNING should accompany it.
     makeFixture(tmpDir, 'v1.0', 'absent');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Regression Test', '--dry-run'],
       tmpDir,
     );
     assert.strictEqual(result.success, false, 'guard must still fire on absent field');
@@ -2149,7 +2149,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
       `---\nmilestone: v1.0\n---\n# State\n\n**Status:** In progress\n`,
     );
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Fresh', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Fresh', '--dry-run'],
       tmpDir,
     );
     assert.ok(
@@ -2170,7 +2170,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
       `---\n---\n# State\n\n**Status:** In progress\n`,
     );
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Sentinel', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Sentinel', '--dry-run'],
       tmpDir,
     );
     assert.ok(
@@ -2207,7 +2207,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
   test('guard does not fire for a started phase whose directory is digit-leading (#2528)', () => {
     makeDigitLeadingFixture(tmpDir, '5', '05-80-20-cleanup');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Digit Leading', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Digit Leading', '--dry-run'],
       tmpDir,
     );
     assert.ok(
@@ -2222,7 +2222,7 @@ describe('bug #2946: unstarted-phase guard runs independent of STATE.md mileston
     // guard on a one-way-door operation.
     makeDigitLeadingFixture(tmpDir, '80', '05-80-20-cleanup');
     const result = runGsdTools(
-      ['milestone', 'complete', 'v1.0', '--name', 'Digit Leading', '--dry-run', '--confirm'],
+      ['milestone', 'complete', 'v1.0', '--name', 'Digit Leading', '--dry-run'],
       tmpDir,
     );
     assert.strictEqual(result.success, false, 'guard must fire — Phase 80 has no directory');
