@@ -393,8 +393,9 @@ elsewhere — phase scoping cannot be trusted, and the command now refuses
 rather than falling back to an over-inclusive filter that would archive every
 phase directory in the project. `unreadable` (no ROADMAP.md at all) and
 `unscoped` (no section for this version) are pre-existing, legitimately
-handled states and are not refused here. Pass `--force` to override, the same
-affordance the unstarted-phase guard uses.
+handled states and are not refused here. Pass `--force --confirm` to override, the same
+affordance the unstarted-phase guard uses (`--confirm` is required for any mutating run —
+#3726; `--force` alone does not imply it).
 
 ---
 
@@ -903,7 +904,7 @@ node gsd-tools.cjs requirements mark-complete <ids>
 | `--force` | Override the unstarted-phase guard (see below). |
 | `--dry-run` | Print the archive plan (roadmap, requirements, phases, and — when `--archive-quick` is also passed — quick-task dirs to move) without mutating anything. |
 
-**Unstarted-phase guard.** Before archiving, the command scans the ROADMAP scoped for `<version>` and refuses if any `### Phase N:` heading in that slice has no matching phase directory on disk (`disk_status: no_directory`). Phase 0 (pre-milestone) and Phase 999 (backlog) sentinels are excluded. The guard runs whenever `--force` is absent, independent of `STATE.md`'s `milestone:` field — if that field is present but does not match `<version>`, a WARNING naming both values is emitted to stderr and the scan still runs (#2946). Pass `--force` to override.
+**Unstarted-phase guard.** Before archiving, the command scans the ROADMAP scoped for `<version>` and refuses if any `### Phase N:` heading in that slice has no matching phase directory on disk (`disk_status: no_directory`). Phase 0 (pre-milestone) and Phase 999 (backlog) sentinels are excluded. The guard runs whenever `--force` is absent, independent of `STATE.md`'s `milestone:` field — if that field is present but does not match `<version>`, a WARNING naming both values is emitted to stderr and the scan still runs (#2946). Pass `--force --confirm` to override (`--confirm` is required for any mutating run — #3726; `--force` alone does not imply it).
 
 **Sentinel directories are never archived.** The phase-directory move performed when `--no-archive-phases` is absent is now filtered through the same canonical sentinel predicate as `phases list` and `phases clear`: `999.*` (backlog) and `0-*` (pre-milestone) directories are left in place rather than moved into `.planning/milestones/<version>-phases/`. Previously this path was scoped only by the milestone window, with no sentinel filter, so a sentinel directory sitting inside the window could be archived along with the milestone's real phases.
 
