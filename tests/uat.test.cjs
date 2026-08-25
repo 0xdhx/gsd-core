@@ -2482,6 +2482,46 @@ describe('#3775 acknowledgeDeferredItem: a bare non-lowercase `resolved` value s
   });
 });
 
+// #3775 row D: the bare non-lowercase key on the entry's BULLET line. Distinct
+// from the indented rows above and not reachable from the property: `bareCap`
+// is declared `inPlace: false`, so the property's `line0` position collapses
+// onto an indented continuation line and never renders `- Status:` at all. The
+// reader de-bullets line 0 before classifying, so the shape is genuinely a
+// bare key there too — stored under `Status`, never selected by the writer,
+// and handed to the insert branch. The lowercase control is the existing
+// `#3740 ... line-0 status line keeps in-place rewrite` block, which asserts
+// the opposite branch for `- status:`; it is not duplicated here.
+describe('#3775 acknowledgeDeferredItem: a bare non-lowercase key ON the bullet line', () => {
+  test('`- Status: open` is not rewritten in place — the insert branch follows it', () => {
+    const content = '## Deferred Items\n\n- Status: open\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1);
+    assert.strictEqual(before[0].status, '', 'premise: line 0 de-bulleted is still a bare `Status:`');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- Status: open\n  status: acknowledged\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
+  test('`- Status: resolved` keeps its value too — row D crossed with value preservation', () => {
+    const content = '## Deferred Items\n\n- Status: resolved\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before[0].status, '');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- Status: resolved\n  status: acknowledged\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
+  test('the inserted line lands before the entry\'s other fields, not at the end', () => {
+    const content = '## Deferred Items\n\n- Status: open\n  reason: x\n';
+    const ack = acknowledgeDeferredItem(content, parseDeferredItemsWithStatus(content)[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- Status: open\n  status: acknowledged\n  reason: x\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+});
+
 // #3740 round 2 (PR #3773 review, Blockers 1 + 3): `audit acknowledge` passes
 // raw `readFileSync` content in, and CRLF normalization runs only on write, so
 // a `\r`-terminated status line reaches the rewrite. `.` never matches `\r`
