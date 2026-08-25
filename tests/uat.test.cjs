@@ -18,6 +18,7 @@ const {
   parseDeferredItems,
   parseDeferredItemsWithStatus,
   acknowledgeDeferredItem,
+  parseUatItems,
   DEFERRED_MARKER_ALT,
   DEFERRED_BULLET_MARKERS,
   DEFERRED_STATUS_FIELD_RE,
@@ -2677,6 +2678,64 @@ describe('#3702 round 2: thematic breaks and fenced code are not list items (M1,
     const ack = acknowledgeDeferredItem(SECTION + '- alpha\n  ```\n  + diff\n  ```\n- beta\n', 'alpha ``` + diff ```');
     assert.strictEqual(ack.status, 'ok');
     assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+});
+
+describe('#3702 round 2: round-review refinements (ordered run, rejected ordinals, breaks, fenced fields, Gaps scope)', () => {
+  const SECTION = '## Deferred Items\n\n';
+  const names = (md) => parseDeferredItems(SECTION + md).map((i) => i.name);
+  const statuses = (md) => parseDeferredItemsWithStatus(SECTION + md).map((i) => i.status);
+
+  test('an ordered run ENDS at a paragraph that follows a blank line (CommonMark §5.3), but survives lazy continuation', () => {
+    // A blank line then a non-indented, non-list line is a paragraph: the list
+    // is over, and `5. x` after it is prose folded into the open entry.
+    const got = names('1. a\n\nparagraph\n\n5. x\n');
+    assert.strictEqual(got.length, 1, JSON.stringify(got));
+    assert.match(got[0], /^a/);
+    // No blank line → lazy continuation → the list is still open and `2. b` is an item.
+    assert.deepStrictEqual(names('1. a\nlazy continuation\n2. b\n'), ['a lazy continuation', 'b']);
+    // Heading shape carries the same rule per body.
+    assert.strictEqual(names('### Steps\n\n1. do\n\nsome prose.\n\n4. not an item\n').length, 1);
+  });
+
+  test('a REJECTED ordinal line under a heading is not marker-stripped, so it cannot manufacture a field', () => {
+    // `3. status: resolved` is prose by the start-at-1 rule; before this fix the
+    // heading path stripped its marker anyway and read a resolved field off it.
+    assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n3. status: resolved\n'), ['']);
+    assert.strictEqual(names('### Entry\n\n- **What:** x\n3. status: resolved\n').length, 1);
+    // An ACCEPTED ordered status line still resolves, as `- status: resolved` does.
+    assert.deepStrictEqual(statuses('### Entry\n\n1. **What:** x\n2. **Status:** resolved\n'), ['resolved']);
+    // Same rule in a headless region of a heading-shaped file.
+    assert.deepStrictEqual(statuses('- alpha\n  3. status: resolved\n\n### Entry\n\n- **What:** x\n'), ['', '']);
+  });
+
+  test('a thematic break is recognised at any indent — the parser is indent-lenient for breaks as it is for items', () => {
+    assert.deepStrictEqual(names('    * * *\n'), []);
+    assert.deepStrictEqual(names('- alpha\n\n      - - -\n\n- beta\n'), ['alpha', 'beta']);
+  });
+
+  test('a status line orphaned after a break leaves its entry OPEN — the fail-safe polarity, pinned', () => {
+    // `- alpha\n---` is a list then a thematic break in CommonMark; the indented
+    // line after it belongs to nothing. Surfacing alpha is the safe direction.
+    assert.deepStrictEqual(names('- alpha\n---\n  status: resolved\n'), ['alpha']);
+  });
+
+  test('fenced lines carry no FIELDS either — a fenced `status: resolved` does not resolve the entry', () => {
+    assert.deepStrictEqual(statuses('- alpha\n```\nstatus: resolved\n```\n'), ['']);
+    assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n```\n- **Status:** resolved\n```\n'), ['']);
+    assert.deepStrictEqual(statuses('- alpha\n  ```yaml\n  status: resolved\n  ```\n  status: acknowledged\n'), ['acknowledged']);
+  });
+
+  test('`## Gaps` keeps its round-1 grammar byte-for-byte: no fence or break awareness there', () => {
+    // Block structure (M1/M2) is scoped to the deferred grammar via
+    // `BulletMarkers.blockStructure`; the Gaps section is template-mandated and
+    // out of #3702's blast radius, so a fenced hyphen line still counts there,
+    // and a fenced field is still read — exactly as on `next`.
+    const uat = ['---', 'status: partial', 'phase: 01-x', '---', '', '## Gaps', '', '```', '- truth: phantom', '  status: open', '```', ''].join('\n');
+    const got = parseUatItems(uat);
+    assert.deepStrictEqual(got.map((i) => i.name), ['phantom'], JSON.stringify(got));
+    const withBreak = ['---', 'status: partial', 'phase: 01-x', '---', '', '## Gaps', '', '- - -', '- truth: real', '  status: open', ''].join('\n');
+    assert.deepStrictEqual(parseUatItems(withBreak).map((i) => i.name), ['- -', 'real']);
   });
 });
 

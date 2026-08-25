@@ -888,11 +888,13 @@ function parseDeferredItemsWithStatus(content: string): Array<{ name: string; st
   // before field extraction, not just line 0 (which `extractGapEntryFields`
   // does for the headless/Gaps shape, where a later `- ` line is a nested
   // sub-list, not a field).
-  const headingEntries = splitDeferredHeadingEntries(sectionBody);
+  const headingEntries = splitDeferredHeadingEntriesDetailed(sectionBody);
   const entries = headingEntries !== null
-    ? headingEntries.map((entryLines) => ({
-      lines: entryLines,
-      fields: extractGapEntryFields(entryLines.map(stripLeadingBulletMarker), DEFERRED_BULLET_MARKERS),
+    ? headingEntries.map((entry) => ({
+      lines: entry.lines,
+      // Strip ONLY the lines that opened a list item — a rejected ordinal
+      // ("3. status: resolved" as prose) keeps its `3. ` and yields no field.
+      fields: extractGapEntryFields(entry.lines.map((l, i) => (entry.opener[i] ? stripLeadingBulletMarker(l) : l)), DEFERRED_BULLET_MARKERS),
     }))
     : splitGapsEntries(sectionBody, DEFERRED_BULLET_MARKERS).map((entryLines) => ({
       lines: entryLines,
@@ -1113,6 +1115,15 @@ interface BulletMarkers {
   open: RegExp;
   /** `^(indent)<marker>\s+(rest)$` — group 1 indent, group 2 rest-of-line. */
   strip: RegExp;
+  /**
+   * Honour Markdown block structure — thematic breaks close the list, fenced
+   * code neither opens an entry nor carries a field (#3702 round 2, M1/M2).
+   * `false` for the Gaps grammar, which #3702's ruling keeps byte-for-byte on
+   * its `next` behaviour; `true` for the deferred-items grammar. Carried on the
+   * marker set rather than as a second parameter so a caller cannot widen one
+   * without the other.
+   */
+  blockStructure: boolean;
 }
 
 /**
@@ -1125,6 +1136,7 @@ interface BulletMarkers {
 const HYPHEN_BULLET_MARKERS: BulletMarkers = {
   open: /^(\s*)(-)\s/,
   strip: /^(\s*)-\s+(.*)$/,
+  blockStructure: false,
 };
 
 /**
@@ -1164,6 +1176,7 @@ const DEFERRED_MARKER_ALT = '(?:[-*+]|\\d{1,9}\\.)';
 const DEFERRED_BULLET_MARKERS: BulletMarkers = {
   open: new RegExp(`^(\\s*)(${DEFERRED_MARKER_ALT})[ \\t]`),
   strip: new RegExp(`^(\\s*)${DEFERRED_MARKER_ALT}[ \\t]+(.*?)\\r?$`),
+  blockStructure: true,
 };
 
 /**
@@ -1185,9 +1198,12 @@ const DEFERRED_STATUS_REWRITE_RE = new RegExp(`^(\\s*(?:${DEFERRED_MARKER_ALT}[ 
  * `- - -` was a phantom `"- -"` entry on base, and #3702's widening added the
  * other two (#3702 round 2, M1). `+ + +` is not a CommonMark break, but it is
  * the same authoring gesture and no less garbage as an entry name, so the
- * class here is "three-or-more of one marker character, nothing else".
+ * class here is "three-or-more of one marker character, nothing else". The
+ * indent is unbounded, not CommonMark's `{0,3}`: this parser reads a list at
+ * any indent (see `#3702 round 2` m1), so a separator drawn at any indent is
+ * a separator too — otherwise `    * * *` is a phantom entry named `* *`.
  */
-const THEMATIC_BREAK_RE = /^ {0,3}([-*+_])(?:[ \t]*\1){2,}[ \t]*$/;
+const THEMATIC_BREAK_RE = /^[ \t]*([-*+_])(?:[ \t]*\1){2,}[ \t]*$/;
 
 /**
  * Indices (into `lines`) of every line that sits inside a fenced code block,
@@ -1298,6 +1314,42 @@ function stripLeadingBulletMarker(line: string): string {
  * heading group (the mixed shape) stay one item each.
  */
 function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
+  const detailed = splitDeferredHeadingEntriesDetailed(sectionBody);
+  return detailed === null ? null : detailed.map((entry) => entry.lines);
+}
+
+/** A heading-path entry with, per line, whether that line was an ACCEPTED list opener. */
+interface DeferredHeadingEntry {
+  lines: string[];
+  /** `opener[i]` — line `i` opened a list item under `matchListOpener`'s rules. */
+  opener: boolean[];
+}
+
+/**
+ * Per-line opener flags for a headless-region entry (`splitGapsEntries`
+ * output): line 0 opened it by construction; later lines are classified with
+ * the run carried from line 0, so a nested `3. status: x` under a `-` entry
+ * is prose there exactly as it is under a leaf heading.
+ */
+function headlessEntryOpeners(entryLines: string[]): boolean[] {
+  const flags: boolean[] = [];
+  let inOrderedRun = false;
+  entryLines.forEach((line, i) => {
+    const opener = i === 0 ? matchListOpener(line, DEFERRED_BULLET_MARKERS, true) : matchListOpener(line, DEFERRED_BULLET_MARKERS, inOrderedRun);
+    flags.push(opener !== null);
+    if (opener !== null) inOrderedRun = opener.ordered;
+  });
+  return flags;
+}
+
+/**
+ * `splitDeferredHeadingEntries` with the per-line opener flags the deferred
+ * field-extraction path needs (#3702 round 2, round review): the heading path
+ * strips the marker off EVERY body line before field extraction (#3457), and a
+ * line whose ordinal `matchListOpener` REJECTED must not be stripped — or
+ * "3. status: resolved" as prose loses its `3. ` and reads as a resolved field.
+ */
+function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadingEntry[] | null {
   const headings = tokenizeHeadings(sectionBody);
   if (headings.length === 0) return null;
 
@@ -1311,14 +1363,18 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     headingByLine.set(headings[i].line, { text: headings[i].text, isContainer });
   }
 
-  const entries: string[][] = [];
-  let current: string[] | null = null; // accumulating a leaf heading's entry
+  const entries: DeferredHeadingEntry[] = [];
+  let current: DeferredHeadingEntry | null = null; // accumulating a leaf heading's entry
   let pending: string[] = []; // preamble / container-heading body lines
   let currentHasBullet = false;
   // Ordered-run memory for the leaf body being accumulated (#3702 round 2,
   // B2) — reset at every heading, so `### Notes` + "3. is the number…" is
-  // prose while `### Steps` + "1. do / 2. then" is a list.
+  // prose while `### Steps` + "1. do / 2. then" is a list. A blank line then
+  // a non-indented non-list line is a PARAGRAPH, which ends the list
+  // (CommonMark §5.3); a non-indented line with no blank before it is lazy
+  // continuation and keeps it open.
   let inOrderedRun = false;
+  let blankSeen = false;
 
   const flushCurrent = (): void => {
     // Keep the leaf entry only when its body carries a list item; the heading
@@ -1328,7 +1384,9 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     currentHasBullet = false;
   };
   const flushPending = (): void => {
-    entries.push(...splitGapsEntries(pending.join('\n'), DEFERRED_BULLET_MARKERS));
+    for (const lines of splitGapsEntries(pending.join('\n'), DEFERRED_BULLET_MARKERS)) {
+      entries.push({ lines, opener: headlessEntryOpeners(lines) });
+    }
     pending = [];
   };
 
@@ -1343,9 +1401,10 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
       // a container's direct bullets precede its first child entry.
       flushPending();
       inOrderedRun = false;
+      blankSeen = false;
       if (!heading.isContainer) {
         // Leaf heading: open an entry with the heading text as line 0.
-        current = [heading.text];
+        current = { lines: [heading.text], opener: [false] };
         currentHasBullet = false;
       }
       continue;
@@ -1360,25 +1419,36 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     // The headless path (`splitGapsEntriesCore`) already stores stripped lines.
     const line = lines[i].replace(/\r$/, '');
     if (fenced.has(i)) {
-      // Fence content is body text, never list-item evidence (M2).
-      if (current !== null) current.push(line);
-      else pending.push(line);
+      // Fence content is body text, never list-item evidence (M2) — and
+      // never an opener, so it is never marker-stripped for fields either.
+      if (current !== null) {
+        current.lines.push(line);
+        current.opener.push(false);
+      } else {
+        pending.push(line);
+      }
       continue;
     }
     // A thematic break is a separator: not evidence, not body (M1).
     if (THEMATIC_BREAK_RE.test(line)) {
       inOrderedRun = false;
+      blankSeen = false;
       continue;
     }
     // Table lines belong to parseDeferredTableItems, never to a heading entry.
     if (/^\s*\|/.test(line)) continue;
     if (current !== null) {
-      current.push(line);
+      current.lines.push(line);
       const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, inOrderedRun);
+      current.opener.push(opener !== null);
       if (opener !== null) {
         currentHasBullet = true;
         inOrderedRun = opener.ordered;
+      } else if (blankSeen && !/^[ \t]/.test(line) && line.trim() !== '') {
+        inOrderedRun = false; // a paragraph after a blank line ends the list
       }
+      if (line.trim() === '') blankSeen = true;
+      else blankSeen = false;
     } else {
       pending.push(line);
     }
@@ -1491,7 +1561,10 @@ function splitGapsEntriesCore(
     }
   };
 
-  const fenced = fencedLineSet(rawLines);
+  // Block structure (M1/M2) is a property of the GRAMMAR, not of this seam:
+  // the Gaps set opts out and stays byte-for-byte on its `next` behaviour.
+  const fenced = markers.blockStructure ? fencedLineSet(rawLines) : new Set<number>();
+  let blankSeen = false;
   rawLines.forEach((rawLine, idx) => {
     const line = rawLine.replace(/\r$/, '');
     if (fenced.has(idx)) {
@@ -1504,13 +1577,14 @@ function splitGapsEntriesCore(
       }
       return;
     }
-    if (THEMATIC_BREAK_RE.test(line)) {
+    if (markers.blockStructure && THEMATIC_BREAK_RE.test(line)) {
       // A thematic break closes the list (M1): the open entry ends here, the
       // break itself is neither an item nor a continuation, and nothing after
       // it joins the closed entry — the next opener starts fresh.
       flush();
       current = null;
       inOrderedRun = false;
+      blankSeen = false;
       return;
     }
     const opener = matchListOpener(line, markers, inOrderedRun);
@@ -1529,6 +1603,14 @@ function splitGapsEntriesCore(
     if (current !== null) {
       current.push(line);
       currentEndLine = idx;
+      // A blank line then a top-level non-list line is a PARAGRAPH: the list
+      // is over (CommonMark §5.3) and a later `5. x` is prose. Without the
+      // blank it is lazy continuation and the run stays open.
+      const blank = line.trim() === '';
+      if (!blank && blankSeen && baseIndent !== null && (line.match(/^\s*/) as RegExpMatchArray)[0].length <= baseIndent) {
+        inOrderedRun = false;
+      }
+      blankSeen = blank;
     }
     // else: pre-first-bullet content (e.g. the template's HTML comment) — discarded.
   });
@@ -1619,8 +1701,16 @@ function extractGapEntryFields(
   const fields: Record<string, string> = {};
   const fieldLineRe = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
   const boldedKeyRe = /^\*+([A-Za-z_][A-Za-z0-9_-]*):\*+/;
+  // A fenced line is content, not a field (#3702 round 2, round review): the
+  // splitters already keep fence lines from OPENING an entry, and a
+  // `status: resolved` quoted inside a code block must not resolve one either.
+  // An entry is a contiguous slice and a fence never spans two entries (the
+  // opener of the next entry would be fence content), so scanning the entry's
+  // own lines classifies exactly what the splitter classified.
+  const fenced = markers.blockStructure ? fencedLineSet(entryLines) : new Set<number>();
 
   entryLines.forEach((rawLine, idx) => {
+    if (fenced.has(idx)) return;
     const line = rawLine.replace(/\r$/, '');
     // Strip ONLY the entry-opening bullet marker (idx 0); a bullet marker on
     // a later line belongs to a nested sub-list and is handled by
