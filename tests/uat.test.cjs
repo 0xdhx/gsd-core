@@ -2425,6 +2425,20 @@ describe('#3740 acknowledgeDeferredItem: writer selects only lines the reader re
     assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
   });
 
+  // The upper-case arm of the same rule (#3775 row E). Distinct from the
+  // Title-case row above and unreachable from the property, which renders only
+  // `Status` via `bareCap` and never `STATUS`.
+  test('bare upper-case `STATUS:` is not rewritten in place either', () => {
+    const content = '## Deferred Items\n\n- alpha\n  STATUS: open\n';
+    const before = parseDeferredItemsWithStatus(content);
+    assert.strictEqual(before.length, 1);
+    assert.strictEqual(before[0].status, '', 'premise: the reader does not read a bare `STATUS:`');
+    const ack = acknowledgeDeferredItem(content, before[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n  status: acknowledged\n  STATUS: open\n');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
   test('control: bold `**Status:**` IS read (lower-cased) and so is rewritten in place', () => {
     const content = '## Deferred Items\n\n- alpha\n  **Status:** open\n';
     const before = parseDeferredItemsWithStatus(content);
