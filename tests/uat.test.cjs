@@ -2567,6 +2567,57 @@ describe('#3702 round 2: the ordered marker and the prose contract (B2, m1)', ()
   });
 });
 
+describe('#3702 round 2: thematic breaks and fenced code are not list items (M1, M2)', () => {
+  const SECTION = '## Deferred Items\n\n';
+  const names = (md) => parseDeferredItems(SECTION + md).map((i) => i.name);
+
+  test('M1: a thematic break opens no entry, whichever character it is drawn with', () => {
+    // `- - -` was a phantom `"- -"` entry on base already; round 1 added
+    // `* * *` and `+ + +` to the class — and `* * *` is the separator an
+    // author writing in the `*` style is most likely to use.
+    for (const hr of ['* * *', '+ + +', '- - -', '***', '---', '___', ' * * *', '*  *  *  ', '- - - - -']) {
+      assert.deepStrictEqual(names(`${hr}\n`), [], JSON.stringify(hr));
+      assert.deepStrictEqual(names(`### Entry\n\n${hr}\n`), [], `heading: ${JSON.stringify(hr)}`);
+    }
+  });
+
+  test('M1: a thematic break ENDS the open entry rather than joining it', () => {
+    // CommonMark: a thematic break closes the list. The separator is neither a
+    // phantom item nor a continuation line of the item above it.
+    assert.deepStrictEqual(names('- alpha\n\n* * *\n\n- beta\n'), ['alpha', 'beta']);
+    assert.deepStrictEqual(names('* alpha\n* * *\n* beta\n'), ['alpha', 'beta']);
+    // Under a heading, the break is dropped from the entry body.
+    assert.deepStrictEqual(names('### Entry\n\n- **What:** x.\n\n* * *\n'), ['Entry  - **What:** x.']);
+    // `- - - x` is NOT a break (trailing text); it is a `- ` item whose text is `- - x`.
+    assert.deepStrictEqual(names('- - - x\n'), ['- - x']);
+  });
+
+  test('M2: lines inside a fenced code block never open an entry', () => {
+    // #3702's wild records carry reproduction blocks — `+`-prefixed diff lines
+    // and `1.`-numbered repro steps are the NORMAL content of such a file.
+    assert.deepStrictEqual(names('### Entry\n\n```sh\n1. run this\n2. then this\n```\n'), []);
+    assert.deepStrictEqual(names('```diff\n+ added\n- removed\n```\n'), []);
+    assert.deepStrictEqual(names('~~~\n* not an item\n~~~\n'), []);
+    // An unterminated fence runs to the end of the section.
+    assert.deepStrictEqual(names('```\n- still fenced\n'), []);
+  });
+
+  test('M2: a fence inside an entry is continuation, and the entry still parses around it', () => {
+    const md = '- alpha\n  ```sh\n  1. step\n  + diff\n  ```\n  status: resolved\n- beta\n';
+    const withStatus = parseDeferredItemsWithStatus(SECTION + md);
+    assert.strictEqual(withStatus.length, 2, JSON.stringify(withStatus));
+    assert.strictEqual(withStatus[0].status, 'resolved');
+    assert.deepStrictEqual(names(md), ['beta']);
+    // Heading shape: the fenced lines are body text, not evidence — the `-`
+    // line outside the fence is what keeps the entry.
+    assert.strictEqual(names('### Entry\n\n- **What:** x.\n\n```\n1. repro\n```\n').length, 1);
+    // And the acknowledge writer's span survives a fenced continuation.
+    const ack = acknowledgeDeferredItem(SECTION + '- alpha\n  ```\n  + diff\n  ```\n- beta\n', 'alpha ``` + diff ```');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+});
+
 // ─── Bug 3: table-shaped ## Gaps section ──────────────────────────────────────
 
 describe('#2766 parseGapsItems: GFM table shape', () => {

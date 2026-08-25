@@ -16,7 +16,7 @@ import io = require('./io.cjs');
 const { output, error } = io;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import markdownSectionizer = require('./markdown-sectionizer.cjs');
-const { collectSection, tokenizeHeadings } = markdownSectionizer;
+const { collectSection, tokenizeHeadings, scanFencedBlocks } = markdownSectionizer;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import markdownTable = require('./markdown-table.cjs');
 const { splitTableRow, isDelimiterRow } = markdownTable;
@@ -1178,6 +1178,34 @@ const DEFERRED_BULLET_MARKERS: BulletMarkers = {
 const DEFERRED_STATUS_FIELD_RE = new RegExp(`^\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?(\\*+status:\\*+|status:)`, 'i');
 const DEFERRED_STATUS_REWRITE_RE = new RegExp(`^(\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?)(\\*+status:\\*+|status:)(\\s*).*$`, 'i');
 
+/**
+ * CommonMark §4.1 thematic break: up to 3 spaces of indent, then three or
+ * more of the SAME `-`, `*` or `_`, optionally space/tab-separated, and
+ * nothing else. `- - -`, `* * *` and `+ + +` all also match a list opener —
+ * `- - -` was a phantom `"- -"` entry on base, and #3702's widening added the
+ * other two (#3702 round 2, M1). `+ + +` is not a CommonMark break, but it is
+ * the same authoring gesture and no less garbage as an entry name, so the
+ * class here is "three-or-more of one marker character, nothing else".
+ */
+const THEMATIC_BREAK_RE = /^ {0,3}([-*+_])(?:[ \t]*\1){2,}[ \t]*$/;
+
+/**
+ * Indices (into `lines`) of every line that sits inside a fenced code block,
+ * delimiters included — by the sectionizer's own fence state machine, so a
+ * `~~~` fence, an indented fence and an unterminated fence (runs to the end)
+ * are classified exactly as `stripFencedCode` would (#3702 round 2, M2).
+ * #3702's wild records carry reproduction blocks; `+`-prefixed diff lines and
+ * `1.`-numbered steps are their normal content, not entries.
+ */
+function fencedLineSet(lines: string[]): Set<number> {
+  const fenced = new Set<number>();
+  for (const block of scanFencedBlocks(lines)) {
+    const last = block.closeLineIdx === -1 ? lines.length - 1 : block.closeLineIdx;
+    for (let i = block.openLineIdx; i <= last; i++) fenced.add(i);
+  }
+  return fenced;
+}
+
 /** A line classified as a list-item opener by `matchListOpener`. */
 interface ListOpener {
   /** Width of the indent before the marker. */
@@ -1304,6 +1332,7 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     pending = [];
   };
 
+  const fenced = fencedLineSet(lines);
   for (let i = 0; i < lines.length; i++) {
     const lineNo = i + 1;
     const heading = headingByLine.get(lineNo);
@@ -1330,6 +1359,17 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     // that is not the file's final line then resurfaces its entry as open.
     // The headless path (`splitGapsEntriesCore`) already stores stripped lines.
     const line = lines[i].replace(/\r$/, '');
+    if (fenced.has(i)) {
+      // Fence content is body text, never list-item evidence (M2).
+      if (current !== null) current.push(line);
+      else pending.push(line);
+      continue;
+    }
+    // A thematic break is a separator: not evidence, not body (M1).
+    if (THEMATIC_BREAK_RE.test(line)) {
+      inOrderedRun = false;
+      continue;
+    }
     // Table lines belong to parseDeferredTableItems, never to a heading entry.
     if (/^\s*\|/.test(line)) continue;
     if (current !== null) {
@@ -1451,8 +1491,28 @@ function splitGapsEntriesCore(
     }
   };
 
+  const fenced = fencedLineSet(rawLines);
   rawLines.forEach((rawLine, idx) => {
     const line = rawLine.replace(/\r$/, '');
+    if (fenced.has(idx)) {
+      // Fence content never opens an entry (M2). Inside an open entry it is
+      // continuation — pushed, so the span invariant `acknowledgeDeferredItem`
+      // re-verifies still holds; before the first entry it is discarded.
+      if (current !== null) {
+        current.push(line);
+        currentEndLine = idx;
+      }
+      return;
+    }
+    if (THEMATIC_BREAK_RE.test(line)) {
+      // A thematic break closes the list (M1): the open entry ends here, the
+      // break itself is neither an item nor a continuation, and nothing after
+      // it joins the closed entry — the next opener starts fresh.
+      flush();
+      current = null;
+      inOrderedRun = false;
+      return;
+    }
     const opener = matchListOpener(line, markers, inOrderedRun);
     if (opener !== null) {
       const { indent } = opener;
@@ -1493,7 +1553,8 @@ function splitGapsEntriesCore(
  *
  * Lines before the first bullet (e.g. the `<!-- YAML format ... -->` comment
  * the template emits) are discarded. An empty/whitespace-only section body
- * (heading present, no bullets) returns `[]`.
+ * (heading present, no bullets) returns `[]`. Fenced code never opens an
+ * entry and a thematic break closes the open one (#3702 round 2, M1/M2).
  */
 function splitGapsEntries(
   sectionBody: string,
