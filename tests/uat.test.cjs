@@ -2523,3 +2523,88 @@ describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\
     assert.strictEqual(again.content, ack.content);
   });
 });
+
+// #3740 round 2 (PR #3773 review, Major 1): the parse → acknowledge → parse
+// contract as a property over the whole boundary the review named — status
+// marker × line ending × status-line position — rather than the hand-picked
+// corners above. Every marker the reader reads must be rewritten in place;
+// every marker it does not read must take the insert branch; either way the
+// re-parsed status is `acknowledged`, the entry keeps its name, the line
+// endings stay uniform, and a second acknowledgement is a no-op.
+describe('#3740 acknowledgeDeferredItem: property — parse→ack→parse over marker × eol × position', () => {
+  const { parseDeferredItemsWithStatus, acknowledgeDeferredItem } =
+    require('../gsd-core/bin/lib/uat.cjs');
+
+  // `inPlace` mirrors `extractGapEntryFields`: a bare key keeps its case, a
+  // bolded key is lower-cased, a bullet on a later line is a sub-list.
+  const MARKERS = {
+    bare: { render: (v) => `status: ${v}`, inPlace: true },
+    bold: { render: (v) => `**status:** ${v}`, inPlace: true },
+    boldCap: { render: (v) => `**Status:** ${v}`, inPlace: true },
+    nested: { render: (v) => `- status: ${v}`, inPlace: false },
+    bareCap: { render: (v) => `Status: ${v}`, inPlace: false },
+    none: { render: null, inPlace: false },
+  };
+
+  test('after acknowledgement the reader reports `acknowledged` for every shape', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...Object.keys(MARKERS)),
+        fc.constantFrom('\n', '\r\n'),
+        fc.constantFrom('line0', 'first', 'middle', 'last'),
+        fc.constantFrom('open', 'pending', ''),
+        fc.array(fc.constantFrom('reason: x', 'owner: y', 'note: "quoted"'), { minLength: 0, maxLength: 2 }),
+        fc.array(fc.constantFrom('reason: x', 'owner: y', 'note: "quoted"'), { minLength: 0, maxLength: 2 }),
+        fc.constantFrom('alpha', 'beta item', 'item three'),
+        (markerName, eol, position, value, pre, post, name) => {
+          const marker = MARKERS[markerName];
+          let entry;
+          if (marker.render === null) {
+            entry = [`- ${name}`, ...pre.map((l) => `  ${l}`), ...post.map((l) => `  ${l}`)];
+          } else if (position === 'line0' && marker.inPlace) {
+            // The bullet line IS the status field (the reader de-bullets line 0).
+            entry = [`- ${marker.render(value)}`, ...pre.map((l) => `  ${l}`), ...post.map((l) => `  ${l}`)];
+          } else {
+            const status = `  ${marker.render(value)}`;
+            const body = position === 'first' || position === 'line0'
+              ? [status, ...pre, ...post]
+              : position === 'last'
+                ? [...pre, ...post, status]
+                : [...pre, status, ...post];
+            entry = [`- ${name}`, ...body.map((l) => (l.startsWith('  ') ? l : `  ${l}`))];
+          }
+          const content = ['## Deferred Items', '', ...entry, ''].join(eol);
+
+          const before = parseDeferredItemsWithStatus(content);
+          assert.strictEqual(before.length, 1, `precondition: one entry parsed from ${JSON.stringify(content)}`);
+          const ack = acknowledgeDeferredItem(content, before[0].name);
+          assert.strictEqual(ack.status, 'ok', JSON.stringify({ content, ack }));
+          assert.notStrictEqual(ack.content, content, `ok must change the file: ${JSON.stringify(content)}`);
+
+          const after = parseDeferredItemsWithStatus(ack.content);
+          assert.strictEqual(after.length, 1, JSON.stringify(after));
+          assert.strictEqual(after[0].status, 'acknowledged', JSON.stringify({ content, out: ack.content }));
+          // No name-identity assertion: an entry's name is its whole rendered
+          // text, status line included (`rawGapEntryText`), so it legitimately
+          // carries the new value. Addressability of the NEW name is what the
+          // idempotence check below proves.
+
+          // Line-ending discipline: nothing the writer emits may introduce a
+          // bare `\n` into a CRLF document.
+          if (eol === '\r\n') {
+            assert.ok(!/(^|[^\r])\n/.test(ack.content), `mixed endings: ${JSON.stringify(ack.content)}`);
+          }
+
+          // In place for what the reader reads; one inserted line otherwise.
+          const delta = ack.content.split(eol).length - content.split(eol).length;
+          assert.strictEqual(delta, marker.inPlace ? 0 : 1, JSON.stringify({ markerName, position, out: ack.content }));
+
+          // Idempotent: acknowledging an acknowledged entry is a no-op.
+          const again = acknowledgeDeferredItem(ack.content, after[0].name);
+          assert.strictEqual(again.status, 'ok');
+          assert.strictEqual(again.content, ack.content);
+        },
+      ),
+    );
+  });
+});
