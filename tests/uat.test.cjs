@@ -1742,7 +1742,12 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × mar
   // `statusFirst` matters on the heading shape: round 1's only CRLF test put
   // `**Status:**` LAST, the one line `collectSection`'s `.trimEnd()` had
   // already de-CR'd, and the B1 regression hid behind it.
-  const entryArb = fc.record({ text: textArb, resolved: fc.boolean(), statusFirst: fc.boolean() });
+  // `decoy` adds a prose line that BEGINS with a non-1 ordinal (`7. …`): under
+  // the start-at-1 rule (B2) it is never an item, never evidence and never a
+  // field — round 1 read it as an opener. Placed where it cannot end a run:
+  // before the first headless entry, and first in a heading body.
+  const entryArb = fc.record({ text: textArb, resolved: fc.boolean(), statusFirst: fc.boolean(), decoy: fc.boolean() });
+  const decoyOrdinal = fc.integer({ min: 2, max: 999999999 });
 
   // #3702 round 2 (B3): the marker set is an enumerated domain — exactly what a
   // property is for. Ordered markers are numbered from 1 (the ordered-run
@@ -1753,14 +1758,22 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × mar
   const eolArb = fc.constantFrom('\n', '\r\n');
   const mk = (marker, i) => (marker === 'ordered' ? `${i + 1}.` : marker);
 
-  const render = (entries, marker, shape, eol) => {
+  const render = (entries, marker, shape, eol, ordinal = 7) => {
     const lines = ['## Deferred Items', ''];
+    if (shape === 'headless' && entries.some((e) => e.decoy)) {
+      // Pre-first-entry prose: a rejected ordinal is discarded, an accepted
+      // one (round 1) opens a phantom entry and breaks the count.
+      lines.push(`${ordinal}. ${entries.find((e) => e.decoy).text} status: resolved`, '');
+    }
     entries.forEach((e, i) => {
       if (shape === 'headless') {
         lines.push(`${mk(marker, i)} ${e.text}`);
         if (e.resolved) lines.push('  status: resolved');
       } else {
         lines.push(`### ${e.text}`, '');
+        // A decoy ordinal line FIRST in the body: never stripped, so the
+        // `status: resolved` after it can never become a field.
+        if (e.decoy) lines.push(`${ordinal}. ${e.text} status: resolved`);
         const what = (n) => `${mk(marker, n)} **What:** ${e.text}`;
         const status = (n) => `${mk(marker, n)} **Status:** resolved`;
         if (!e.resolved) lines.push(what(0));
@@ -1776,13 +1789,13 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × mar
   test('property: an entry is surfaced iff it is NOT marked status: resolved; surfaced count == non-resolved count', () => {
     fc.assert(
       fc.property(
-        fc.array(entryArb, { maxLength: 20 }), markerArb, shapeArb, eolArb,
-        (rawEntries, marker, shape, eol) => {
+        fc.array(entryArb, { maxLength: 20 }), markerArb, shapeArb, eolArb, decoyOrdinal,
+        (rawEntries, marker, shape, eol, ordinal) => {
           // Index-prefix for uniqueness so surfaced items can be mapped back
           // to their source entry unambiguously even with colliding random text.
           const entries = rawEntries.map((e, i) => ({ ...e, text: `E${i}_${e.text}` }));
-          const content = render(entries, marker, shape, eol);
-          const where = `${shape} ${JSON.stringify(marker)} ${JSON.stringify(eol)}`;
+          const content = render(entries, marker, shape, eol, ordinal);
+          const where = `${shape} ${JSON.stringify(marker)} ${JSON.stringify(eol)} decoy=${ordinal}`;
 
           const items = parseDeferredItems(content);
           const surfacedIds = new Set(items.map((it) => idOf(it.name)));
@@ -1805,6 +1818,11 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × mar
           // whichever marker it was (the name is what acknowledge matches on).
           if (shape === 'headless') {
             for (const it of items) assert.strictEqual(it.name, entries[idOf(it.name)].text, where);
+          }
+          // A heading body carrying ONLY a decoy ordinal line is prose, not an entry.
+          if (shape === 'heading' && entries.length > 0) {
+            const decoyOnly = `## Deferred Items${eol}${eol}### only-decoy${eol}${eol}${ordinal}. ${entries[0].text} status: resolved${eol}`;
+            assert.deepStrictEqual(parseDeferredItems(decoyOnly), [], `${where}: decoy-only body`);
           }
 
           // Every returned item carries the fixed deferred category/result shape.
@@ -2564,8 +2582,14 @@ describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
     // `\d+`. Ten digits is not a list marker here.
     assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('1234567890. x'), false);
     assert.strictEqual(iterateBullets('1234567890. x').length, 1);
-    // And `\r` is no longer whitespace after a marker (round 1's `\s` was).
+    // And `\r` is no longer whitespace after a marker (round 1's `\s` was) —
+    // nor are NBSP, form-feed or vertical-tab, which `\s` also accepted and
+    // CommonMark does not: only a space or a tab follows a marker. This is
+    // the assertion that fails on a `[ \t]` → `\s` revert on its own.
     assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('-\r'), false);
+    for (const ws of ['\u00a0', '\f', '\v']) {
+      assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test(`-${ws}x`), false, JSON.stringify(ws));
+    }
   });
 });
 
