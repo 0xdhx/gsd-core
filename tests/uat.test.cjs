@@ -2506,6 +2506,67 @@ describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
   });
 });
 
+describe('#3702 round 2: the ordered marker and the prose contract (B2, m1)', () => {
+  const SECTION = '## Deferred Items\n\n';
+  const names = (md) => parseDeferredItems(SECTION + md).map((i) => i.name);
+
+  test('B2: a sentence that happens to open with `<number>.` is prose, not an item', () => {
+    // Both were items on round 1 — `\d+\.` accepted any digit run. CommonMark
+    // §5.3's own prose/list discriminator is that an ordered list interrupting
+    // a paragraph must START AT 1; this parser applies that rule everywhere
+    // an ordered marker is seen (see `matchListOpener`).
+    assert.deepStrictEqual(names('2026. was a bad year for this module\n'), []);
+    assert.deepStrictEqual(names('### Notes\n\n3. is the number of retries we settled on.\n'), []);
+    // And the mixed heading case: prose under one heading, a list under another.
+    const got = names('### Notes\n\n3. is the number of retries.\n\n### Steps\n\n1. do this\n2. then this\n');
+    assert.strictEqual(got.length, 1, JSON.stringify(got));
+    assert.match(got[0], /^Steps/);
+  });
+
+  test('B2: an ordered list that starts at 1. counts, at any later number in the run', () => {
+    assert.deepStrictEqual(names('1. alpha\n2. beta\n3. gamma\n'), ['alpha', 'beta', 'gamma']);
+    // CommonMark ignores the numbers after the first — so does the run.
+    assert.deepStrictEqual(names('1. alpha\n3. gamma\n7. delta\n'), ['alpha', 'gamma', 'delta']);
+    assert.deepStrictEqual(names('01. alpha\n02. beta\n'), ['alpha', 'beta']);
+    // Heading shape: the run is per entry body.
+    assert.strictEqual(names('### Steps\n\n1. do\n2. then\n').length, 1);
+    // Status fields under an ordered run still resolve their entry.
+    assert.deepStrictEqual(names('1. alpha\n   status: resolved\n2. beta\n'), ['beta']);
+  });
+
+  test('B2: the rule\'s stated cost — a run that does not start at 1 is prose', () => {
+    // Pinned so the trade is visible: a hand-numbered list starting at 2 is
+    // read as prose, the same way CommonMark refuses it as a paragraph
+    // interruption. The wild records (#3702) all start at 1.
+    assert.deepStrictEqual(names('2. alpha\n3. beta\n'), []);
+    // A non-ordered opener ends the run; a following non-1 ordered line is prose
+    // folded into the open entry rather than a new item.
+    assert.deepStrictEqual(names('1. alpha\n- beta\n2. gamma\n'), ['alpha', 'beta 2. gamma']);
+  });
+
+  test('m1: the 9-digit boundary of an ordered start', () => {
+    // `999999999.` is a legal CommonMark ordered marker; ten digits is not.
+    assert.deepStrictEqual(names('1. a\n999999999. b\n'), ['a', 'b']);
+    // Ten digits: not a marker at all — a lazy continuation of the open item.
+    assert.deepStrictEqual(names('1. a\n1234567890. b\n'), ['a 1234567890. b']);
+    // And a ten-digit line cannot open a run on its own.
+    assert.deepStrictEqual(names('1234567890. b\n'), []);
+  });
+
+  test('m1: the indentation cliff is deliberately NOT applied — indent-lenient by design', () => {
+    // CommonMark reads a 4-space-indented line outside a list as indented
+    // code. This parser does not: `deferred-items.md` is hand-written with no
+    // mandated shape, and surfacing a questionable entry beats dropping a real
+    // one (the #2766 stance). Pinned as a decision, with the 3-space twin that
+    // both readings agree on.
+    assert.deepStrictEqual(names('   - x\n'), ['x']);
+    assert.deepStrictEqual(names('    - x\n'), ['x']);
+    // Nesting still folds by the indent rule at the 2-space depth executors
+    // actually write, not only at the 4-space depth round 1 tested.
+    assert.deepStrictEqual(names('- alpha\n  - nested\n- beta\n'), ['alpha - nested', 'beta']);
+  });
+});
+
 // ─── Bug 3: table-shaped ## Gaps section ──────────────────────────────────────
 
 describe('#2766 parseGapsItems: GFM table shape', () => {

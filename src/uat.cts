@@ -1109,7 +1109,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
  * the new marker never resolves its entry).
  */
 interface BulletMarkers {
-  /** `^(indent)<marker>\s` — group 1 is the indent. */
+  /** `^(indent)(<marker>)\s` — group 1 is the indent, group 2 the marker token. */
   open: RegExp;
   /** `^(indent)<marker>\s+(rest)$` — group 1 indent, group 2 rest-of-line. */
   strip: RegExp;
@@ -1123,7 +1123,7 @@ interface BulletMarkers {
  * Gaps path stays byte-for-byte on its existing behaviour.
  */
 const HYPHEN_BULLET_MARKERS: BulletMarkers = {
-  open: /^(\s*)-\s/,
+  open: /^(\s*)(-)\s/,
   strip: /^(\s*)-\s+(.*)$/,
 };
 
@@ -1162,7 +1162,7 @@ const HYPHEN_BULLET_MARKERS: BulletMarkers = {
  */
 const DEFERRED_MARKER_ALT = '(?:[-*+]|\\d{1,9}\\.)';
 const DEFERRED_BULLET_MARKERS: BulletMarkers = {
-  open: new RegExp(`^(\\s*)${DEFERRED_MARKER_ALT}[ \\t]`),
+  open: new RegExp(`^(\\s*)(${DEFERRED_MARKER_ALT})[ \\t]`),
   strip: new RegExp(`^(\\s*)${DEFERRED_MARKER_ALT}[ \\t]+(.*?)\\r?$`),
 };
 
@@ -1177,6 +1177,48 @@ const DEFERRED_BULLET_MARKERS: BulletMarkers = {
  */
 const DEFERRED_STATUS_FIELD_RE = new RegExp(`^\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?(\\*+status:\\*+|status:)`, 'i');
 const DEFERRED_STATUS_REWRITE_RE = new RegExp(`^(\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?)(\\*+status:\\*+|status:)(\\s*).*$`, 'i');
+
+/** A line classified as a list-item opener by `matchListOpener`. */
+interface ListOpener {
+  /** Width of the indent before the marker. */
+  indent: number;
+  /** `true` for a dot-terminated ordered marker, `false` for `-`, `*`, `+`. */
+  ordered: boolean;
+}
+
+/**
+ * Classify `line` as a list-item opener under `markers`, applying the
+ * ORDERED-RUN rule (#3702 round 2, B2): a dot-terminated ordered marker opens
+ * an item only when it starts at `1.` (`01.` included) or continues a run
+ * that did — `inOrderedRun` is the caller's memory of whether the previous
+ * accepted opener in the same list was ordered.
+ *
+ * Why: `\d{1,9}\.` alone reads ordinary prose as a list. "2026. was a bad
+ * year for this module" and, under a `### Notes` heading, "3. is the number
+ * of retries we settled on." are both sentences, and both opened an entry on
+ * round 1 — the second one straight through the "prose is not an item"
+ * contract that round claimed to preserve. CommonMark §5.3 faces the same
+ * ambiguity when an ordered list would interrupt a paragraph, and resolves it
+ * the same way: the list must start with 1. The rule is applied wherever an
+ * ordered marker is seen, not only at a paragraph boundary, because this
+ * parser has no paragraph model to key it on. Numbers after the first are
+ * ignored, as CommonMark ignores them, so `1. / 3. / 7.` is a three-item run.
+ *
+ * Stated cost, pinned by test: a hand-numbered list that starts at 2 is read
+ * as prose. Every ordered record the #3702 scan found starts at 1, and the
+ * hyphen-style `- ` alternative loses nothing, so the trade buys the prose
+ * contract back at no measured cost.
+ *
+ * Bullet markers carry no rule — an asterisk bullet is not prose.
+ */
+function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boolean): ListOpener | null {
+  const m = line.match(markers.open);
+  if (!m) return null;
+  const token = m[2];
+  const ordered = /^\d/.test(token);
+  if (ordered && !inOrderedRun && parseInt(token, 10) !== 1) return null;
+  return { indent: m[1].length, ordered };
+}
 
 /**
  * Strip one leading bullet marker (#3457; marker set widened by #3702).
@@ -1214,7 +1256,8 @@ function stripLeadingBulletMarker(line: string): string {
  * A leaf entry is [heading text, ...body lines up to the next heading] and is
  * kept only when its body (minus table lines) contains at least one list item
  * — any of `-`, `*`, `+` or a dot-terminated ordered marker (#3702; the
- * hyphen-only form silently dropped `*`/`+`/ordered bodies):
+ * hyphen-only form silently dropped `*`/`+`/ordered bodies), where an
+ * ordered marker counts only under `matchListOpener`'s start-at-1 rule:
  * - a prose-only or bare heading contributes nothing — "prose is not an item"
  *   is this parser's pre-existing contract (see the `# Notes` case);
  * - a table-only body is left entirely to `parseDeferredTableItems`, which
@@ -1244,6 +1287,10 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
   let current: string[] | null = null; // accumulating a leaf heading's entry
   let pending: string[] = []; // preamble / container-heading body lines
   let currentHasBullet = false;
+  // Ordered-run memory for the leaf body being accumulated (#3702 round 2,
+  // B2) — reset at every heading, so `### Notes` + "3. is the number…" is
+  // prose while `### Steps` + "1. do / 2. then" is a list.
+  let inOrderedRun = false;
 
   const flushCurrent = (): void => {
     // Keep the leaf entry only when its body carries a list item; the heading
@@ -1266,6 +1313,7 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
       // ANY heading; flushing here keeps entries in document order even when
       // a container's direct bullets precede its first child entry.
       flushPending();
+      inOrderedRun = false;
       if (!heading.isContainer) {
         // Leaf heading: open an entry with the heading text as line 0.
         current = [heading.text];
@@ -1286,7 +1334,11 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
     if (/^\s*\|/.test(line)) continue;
     if (current !== null) {
       current.push(line);
-      if (DEFERRED_BULLET_MARKERS.open.test(line)) currentHasBullet = true;
+      const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, inOrderedRun);
+      if (opener !== null) {
+        currentHasBullet = true;
+        inOrderedRun = opener.ordered;
+      }
     } else {
       pending.push(line);
     }
@@ -1388,6 +1440,10 @@ function splitGapsEntriesCore(
   let currentStartLine = -1;
   let currentEndLine = -1;
   let baseIndent: number | null = null;
+  // Whether the previous TOP-LEVEL opener was ordered — the ordered-run
+  // memory `matchListOpener` consults (#3702 round 2, B2). Nested openers are
+  // continuation lines here and neither read nor move it.
+  let inOrderedRun = false;
 
   const flush = (): void => {
     if (current !== null) {
@@ -1397,15 +1453,16 @@ function splitGapsEntriesCore(
 
   rawLines.forEach((rawLine, idx) => {
     const line = rawLine.replace(/\r$/, '');
-    const bulletMatch = line.match(markers.open);
-    if (bulletMatch) {
-      const indent = bulletMatch[1].length;
+    const opener = matchListOpener(line, markers, inOrderedRun);
+    if (opener !== null) {
+      const { indent } = opener;
       if (baseIndent === null) baseIndent = indent;
       if (indent <= baseIndent) {
         flush();
         current = [line];
         currentStartLine = idx;
         currentEndLine = idx;
+        inOrderedRun = opener.ordered;
         return;
       }
     }
