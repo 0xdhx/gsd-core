@@ -1044,12 +1044,12 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   }
 
   const matchIndexInContent = sectionOffset + start;
-  // #3702: the optional entry-opening marker matches the widened deferred set.
-  // A bolded `**Status:**` still parses — the `*` alternative requires trailing
-  // whitespace, which `**` does not supply, so the optional group declines and
-  // the bolded-key alternative matches as before.
-  const statusFieldRe = /^\s*(?:(?:[-*+]|\d+\.)\s+)?(\*+status:\*+|status:)/i;
-  const statusLineIdx = matchedLines.findIndex((rawLine) => statusFieldRe.test(rawLine.replace(/\r$/, '')));
+  // #3702: the optional entry-opening marker is the widened deferred set,
+  // derived from the same source as the entry splitter's (see
+  // `DEFERRED_MARKER_ALT`). A bolded `**Status:**` still parses — the `*`
+  // alternative requires trailing whitespace, which `**` does not supply, so
+  // the optional group declines and the bolded-key alternative matches.
+  const statusLineIdx = matchedLines.findIndex((rawLine) => DEFERRED_STATUS_FIELD_RE.test(rawLine.replace(/\r$/, '')));
 
   // The rewrite below and the indent probe both run on a CR-STRIPPED copy of
   // their line (#3702 round 2, M4 / m2). Pre-existing on `next`: the FINDER
@@ -1088,7 +1088,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   } else {
     const original = matchedLines[statusLineIdx].replace(/\r$/, '');
     const replaced = original.replace(
-      /^(\s*(?:(?:[-*+]|\d+\.)\s+)?)(\*+status:\*+|status:)(\s*).*$/i,
+      DEFERRED_STATUS_REWRITE_RE,
       (_m, indent: string, key: string, ws: string) => `${indent}${key}${ws}acknowledged`,
     );
     newMatchedLines = matchedLines.slice();
@@ -1148,11 +1148,35 @@ const HYPHEN_BULLET_MARKERS: BulletMarkers = {
  * The paren-terminated ordered form (`1)`) is out of scope for this fix: the
  * #3702 ruling scopes the widening to `*`, `+` and the dot-terminated ordered
  * marker.
+ *
+ * `DEFERRED_MARKER_ALT` is THE source every deferred-items marker regex is
+ * built from (#3702 round 2, M3) — the splitter's `open`/`strip` pair here
+ * and `acknowledgeDeferredItem`'s two status-line shapes below. CommonMark
+ * §5.2: bullet markers `-`, `*`, `+`; an ordered marker is 1-9 digits and a
+ * `.` (round-1's `\d+` was uncapped). The marker is followed by a space or a
+ * tab — `[ \t]`, where round 1 wrote `\s`, which also accepted `\r`.
+ * `markdown-sectionizer`'s `iterateBullets` is the repo's other list-marker
+ * grammar; the `#3702 round 2: marker-grammar parity` test pins this one to
+ * it on the shared vocabulary and names the two points they deliberately
+ * differ (tab after the marker, the 9-digit cap).
  */
+const DEFERRED_MARKER_ALT = '(?:[-*+]|\\d{1,9}\\.)';
 const DEFERRED_BULLET_MARKERS: BulletMarkers = {
-  open: /^(\s*)(?:[-*+]|\d+\.)\s/,
-  strip: /^(\s*)(?:[-*+]|\d+\.)\s+(.*?)\r?$/,
+  open: new RegExp(`^(\\s*)${DEFERRED_MARKER_ALT}[ \\t]`),
+  strip: new RegExp(`^(\\s*)${DEFERRED_MARKER_ALT}[ \\t]+(.*?)\\r?$`),
 };
+
+/**
+ * `acknowledgeDeferredItem`'s two status-line shapes — the finder and the
+ * rewrite — derived from `DEFERRED_MARKER_ALT` like the splitter's regexes
+ * above, so the marker set an entry may OPEN with and the marker set a status
+ * line may CARRY cannot drift apart. Round 1 of #3702 carried both as inline
+ * literals; the doc comment on `BulletMarkers` said the interface existed so
+ * a detection site and its strip site could not drift, and two sites drifted
+ * out of it in the same diff.
+ */
+const DEFERRED_STATUS_FIELD_RE = new RegExp(`^\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?(\\*+status:\\*+|status:)`, 'i');
+const DEFERRED_STATUS_REWRITE_RE = new RegExp(`^(\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?)(\\*+status:\\*+|status:)(\\s*).*$`, 'i');
 
 /**
  * Strip one leading bullet marker (#3457; marker set widened by #3702).
@@ -1739,4 +1763,9 @@ export = {
   parseDeferredItems,
   parseDeferredItemsWithStatus,
   acknowledgeDeferredItem,
+  // #3702 round 2 (M3): exposed for the marker-grammar parity test only.
+  DEFERRED_MARKER_ALT,
+  DEFERRED_BULLET_MARKERS,
+  DEFERRED_STATUS_FIELD_RE,
+  DEFERRED_STATUS_REWRITE_RE,
 };

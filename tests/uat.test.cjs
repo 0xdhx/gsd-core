@@ -18,7 +18,12 @@ const {
   parseDeferredItems,
   parseDeferredItemsWithStatus,
   acknowledgeDeferredItem,
+  DEFERRED_MARKER_ALT,
+  DEFERRED_BULLET_MARKERS,
+  DEFERRED_STATUS_FIELD_RE,
+  DEFERRED_STATUS_REWRITE_RE,
 } = require('../gsd-core/bin/lib/uat.cjs');
+const { iterateBullets } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
 
 describe('audit-uat command', () => {
   let tmpDir;
@@ -2445,6 +2450,59 @@ describe('#3702 round 2: CRLF on the heading path and in the acknowledge writer'
       assert.strictEqual(got.status, 'ok', `marker ${JSON.stringify(m)}`);
       assert.match(got.content, /\n {6}status: acknowledged/, `marker ${JSON.stringify(m)}: indent 4 + 2, not the indent-0 fallback`);
     }
+  });
+});
+
+describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
+  test('every deferred-items marker regex derives from the one alternation source', () => {
+    // Structural, not behavioural: the four regexes embed the SAME source
+    // string, so a marker added to one cannot be absent from another.
+    for (const [name, re] of [
+      ['open', DEFERRED_BULLET_MARKERS.open],
+      ['strip', DEFERRED_BULLET_MARKERS.strip],
+      ['status finder', DEFERRED_STATUS_FIELD_RE],
+      ['status rewrite', DEFERRED_STATUS_REWRITE_RE],
+    ]) {
+      assert.ok(re.source.includes(DEFERRED_MARKER_ALT), `${name}: ${re.source}`);
+    }
+  });
+
+  test('the entry opener and the status-line shapes agree on every marker', () => {
+    for (const m of ['-', '*', '+', '1.', '12.', '999999999.']) {
+      assert.ok(DEFERRED_BULLET_MARKERS.open.test(`${m} x`), `open: ${m}`);
+      assert.ok(DEFERRED_STATUS_FIELD_RE.test(`${m} status: x`), `finder: ${m}`);
+      assert.strictEqual(`${m} status: x`.replace(DEFERRED_STATUS_REWRITE_RE, '$1$2$3ok'), `${m} status: ok`, `rewrite: ${m}`);
+    }
+  });
+
+  test('parity with markdown-sectionizer iterateBullets on the shared vocabulary', () => {
+    // `iterateBullets` is the repo's other list-marker grammar. On everything
+    // both grammars are meant to agree on, they do — including the negatives.
+    const opens = (line) => DEFERRED_BULLET_MARKERS.open.test(line);
+    const sectionizerOpens = (line) => iterateBullets(line).length === 1;
+    const shared = [
+      ['- x', true], ['* x', true], ['+ x', true], ['1. x', true], ['12. x', true], ['01. x', true],
+      ['  - x', true], ['- [ ] x', true], ['- [x] x', true],
+      ['**Status:** x', false], ['1) x', false], ['-x', false], ['*x', false], ['1.x', false],
+      ['prose', false], ['| a | b |', false], ['2026 was a year', false],
+    ];
+    for (const [line, expected] of shared) {
+      assert.strictEqual(opens(line), expected, `deferred: ${JSON.stringify(line)}`);
+      assert.strictEqual(sectionizerOpens(line), expected, `sectionizer: ${JSON.stringify(line)}`);
+    }
+  });
+
+  test('the two deliberate divergences from iterateBullets are exactly these', () => {
+    // N2 — a tab after the marker is CommonMark-legal; `iterateBullets`
+    // requires a literal space. Kept, and pinned so the difference is visible.
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('-\tx'), true);
+    assert.strictEqual(iterateBullets('-\tx').length, 0);
+    // N1 — CommonMark caps an ordered start at 9 digits; `iterateBullets` is
+    // `\d+`. Ten digits is not a list marker here.
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('1234567890. x'), false);
+    assert.strictEqual(iterateBullets('1234567890. x').length, 1);
+    // And `\r` is no longer whitespace after a marker (round 1's `\s` was).
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('-\r'), false);
   });
 });
 
