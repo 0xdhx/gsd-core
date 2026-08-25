@@ -1051,6 +1051,14 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   const statusFieldRe = /^\s*(?:(?:[-*+]|\d+\.)\s+)?(\*+status:\*+|status:)/i;
   const statusLineIdx = matchedLines.findIndex((rawLine) => statusFieldRe.test(rawLine.replace(/\r$/, '')));
 
+  // The rewrite below and the indent probe both run on a CR-STRIPPED copy of
+  // their line (#3702 round 2, M4 / m2). Pre-existing on `next`: the FINDER
+  // above tests a stripped copy, but the rewrite ran on the raw line with a
+  // `$`-anchored `.*` — which cannot consume `\r` — so `replace` returned its
+  // input unchanged, `newMatchedLines` was identical, and the writer reported
+  // `ok` over byte-identical content. `cmdAuditAcknowledge` then announced a
+  // suppression that never happened and the item resurfaced on every audit.
+  //
   // No CRLF-preservation branch here (WARNING 1, #3458 follow-up review):
   // every write goes through `platformWriteSync` → `normalizeContent`, which
   // for a `.md` path unconditionally runs `_normalizeMd` — whole-file
@@ -1062,14 +1070,15 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   // disk) the seam already makes impossible. A marker write on a CRLF
   // `deferred-items.md` normalizes the WHOLE file to LF, same as any other
   // `.md` write in this codebase — expected, not a regression to guard
-  // against. Where a source line still carries a trailing `\r` (read from an
-  // on-disk CRLF document before normalization), `String.prototype.replace`
-  // consumes it as part of `.*$` and the replacement text does not
-  // reproduce it, so it is dropped here too — consistent with the eventual
-  // whole-file normalization rather than duplicating it.
+  // against. A source line that still carries a trailing `\r` (read from an
+  // on-disk CRLF document before normalization) is CR-stripped before the
+  // rewrite and the replacement does not reproduce it — dropped here,
+  // consistent with the eventual whole-file normalization. (Until #3702
+  // round 2 this comment claimed `.*$` consumed the `\r`; it does not — `.`
+  // never matches `\r` — and that was M4.)
   let newMatchedLines: string[];
   if (statusLineIdx === -1) {
-    const bulletIndentMatch = matchedLines[0].match(DEFERRED_BULLET_MARKERS.strip);
+    const bulletIndentMatch = matchedLines[0].replace(/\r$/, '').match(DEFERRED_BULLET_MARKERS.strip);
     const continuationIndent = ' '.repeat((bulletIndentMatch ? bulletIndentMatch[1].length : 0) + 2);
     newMatchedLines = [
       matchedLines[0],
@@ -1077,7 +1086,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
       ...matchedLines.slice(1),
     ];
   } else {
-    const original = matchedLines[statusLineIdx];
+    const original = matchedLines[statusLineIdx].replace(/\r$/, '');
     const replaced = original.replace(
       /^(\s*(?:(?:[-*+]|\d+\.)\s+)?)(\*+status:\*+|status:)(\s*).*$/i,
       (_m, indent: string, key: string, ws: string) => `${indent}${key}${ws}acknowledged`,
@@ -1142,7 +1151,7 @@ const HYPHEN_BULLET_MARKERS: BulletMarkers = {
  */
 const DEFERRED_BULLET_MARKERS: BulletMarkers = {
   open: /^(\s*)(?:[-*+]|\d+\.)\s/,
-  strip: /^(\s*)(?:[-*+]|\d+\.)\s+(.*)$/,
+  strip: /^(\s*)(?:[-*+]|\d+\.)\s+(.*?)\r?$/,
 };
 
 /**
@@ -1240,13 +1249,22 @@ function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
       }
       continue;
     }
+    // CR-strip ONCE and carry the stripped line everywhere below — into the
+    // entry itself included (#3702 round 2, B1). `collectSection` slices raw
+    // `\n`-split lines, so on a CRLF file every body line but the last still
+    // carries its `\r`; the per-line marker strip feeding field extraction is
+    // `$`-anchored and fails on such a line, the marker survives into
+    // `extractGapEntryFields`, and the field is silently lost — a `**Status:**`
+    // that is not the file's final line then resurfaces its entry as open.
+    // The headless path (`splitGapsEntriesCore`) already stores stripped lines.
+    const line = lines[i].replace(/\r$/, '');
     // Table lines belong to parseDeferredTableItems, never to a heading entry.
-    if (/^\s*\|/.test(lines[i].replace(/\r$/, ''))) continue;
+    if (/^\s*\|/.test(line)) continue;
     if (current !== null) {
-      current.push(lines[i]);
-      if (DEFERRED_BULLET_MARKERS.open.test(lines[i].replace(/\r$/, ''))) currentHasBullet = true;
+      current.push(line);
+      if (DEFERRED_BULLET_MARKERS.open.test(line)) currentHasBullet = true;
     } else {
-      pending.push(lines[i]);
+      pending.push(line);
     }
   }
   flushCurrent();

@@ -2388,6 +2388,66 @@ describe('#3702 parseDeferredItems: list-marker grammar', () => {
   });
 });
 
+describe('#3702 round 2: CRLF on the heading path and in the acknowledge writer', () => {
+  const MARKERS = ['-', '*', '+', '1.'];
+  const CRLF_SECTION = '## Deferred Items\r\n\r\n';
+
+  test('B1: a CRLF heading entry resolves when **Status:** is NOT the last line', () => {
+    // Round-1's CRLF test put `**Status:**` on the fixture's LAST line, where
+    // `collectSection`'s `.trimEnd()` had already removed the one `\r` that
+    // mattered — a false green. Every other line of a CRLF body still carries
+    // its `\r`, and a `$`-anchored marker strip fails on it, so the marker
+    // survived into field extraction and the field was silently lost.
+    for (const m of MARKERS) {
+      const statusFirst = `${CRLF_SECTION}### Entry\r\n\r\n${m} **Status:** resolved\r\n${m} **What:** x.\r\n`;
+      const withStatus = parseDeferredItemsWithStatus(statusFirst);
+
+      assert.strictEqual(withStatus.length, 1, `marker ${JSON.stringify(m)}: ${JSON.stringify(withStatus)}`);
+      assert.strictEqual(withStatus[0].status, 'resolved', `marker ${JSON.stringify(m)}: status-first CRLF must resolve`);
+      assert.deepStrictEqual(parseDeferredItems(statusFirst), [], `marker ${JSON.stringify(m)}`);
+
+      // And the mirror: a field ABOVE a trailing status line is not lost either.
+      const whatFirst = `${CRLF_SECTION}### Entry\r\n\r\n${m} **What:** x.\r\n${m} **Status:** resolved\r\n${m} **Why:** y.\r\n`;
+      assert.strictEqual(parseDeferredItemsWithStatus(whatFirst)[0].status, 'resolved', `marker ${JSON.stringify(m)}: mid-body status`);
+    }
+  });
+
+  test('B1: a CRLF heading entry parses byte-for-byte like its LF twin', () => {
+    for (const m of MARKERS) {
+      const body = `### Entry\n\n${m} **Status:** resolved\n${m} **What:** x.\n`;
+      const lf = parseDeferredItemsWithStatus(`## Deferred Items\n\n${body}`);
+      const crlf = parseDeferredItemsWithStatus(`${CRLF_SECTION}${body.replace(/\n/g, '\r\n')}`);
+      assert.deepStrictEqual(crlf, lf, `marker ${JSON.stringify(m)}`);
+    }
+  });
+
+  test('M4: acknowledge REWRITES an existing status line on a CRLF file (was: ok + no write)', () => {
+    // Pre-existing on `next`: the finder tested a CR-stripped copy, the rewrite
+    // ran on the raw `\r`-terminated line with a `$`-anchored regex, `replace`
+    // returned the input unchanged, and the writer reported `ok` over content
+    // that was byte-identical — the item then resurfaced on every audit.
+    for (const m of MARKERS) {
+      const content = `${CRLF_SECTION}${m} alpha\r\n  status: pending\r\n${m} beta\r\n`;
+      const target = parseDeferredItemsWithStatus(content)[0].name;
+      const got = acknowledgeDeferredItem(content, target);
+
+      assert.strictEqual(got.status, 'ok', `marker ${JSON.stringify(m)}`);
+      assert.notStrictEqual(got.content, content, `marker ${JSON.stringify(m)}: an ok must have written`);
+      assert.strictEqual(parseDeferredItemsWithStatus(got.content)[0].status, 'acknowledged', `marker ${JSON.stringify(m)}`);
+    }
+  });
+
+  test('m2: the inserted status line takes the entry indent on a CRLF file', () => {
+    for (const m of MARKERS) {
+      const content = `${CRLF_SECTION}    ${m} alpha\r\n    ${m} beta\r\n`;
+      const got = acknowledgeDeferredItem(content, 'alpha');
+
+      assert.strictEqual(got.status, 'ok', `marker ${JSON.stringify(m)}`);
+      assert.match(got.content, /\n {6}status: acknowledged/, `marker ${JSON.stringify(m)}: indent 4 + 2, not the indent-0 fallback`);
+    }
+  });
+});
+
 // ─── Bug 3: table-shaped ## Gaps section ──────────────────────────────────────
 
 describe('#2766 parseGapsItems: GFM table shape', () => {
