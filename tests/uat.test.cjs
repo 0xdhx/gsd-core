@@ -2722,6 +2722,20 @@ describe('#3702 round 2: round-review refinements (ordered run, rejected ordinal
     assert.strictEqual(names('### Steps\n\n1. do\n\nsome prose.\n\n4. not an item\n').length, 1);
   });
 
+  test('an accepted opener clears the blank-line memory — lazy continuation right after it keeps the run', () => {
+    // Round-review continuation: `blankSeen` survived the opener branch, so
+    // `2. b` + a lazy line ended the run and `3. c` folded into `b`.
+    assert.deepStrictEqual(names('1. a\n\n2. b\nlazy continuation\n3. c\n'), ['a', 'b lazy continuation', 'c']);
+  });
+
+  test('a headless region of a heading-shaped file applies the SAME paragraph reset — opener flags come from the splitter, not a re-derivation', () => {
+    // Round-review continuation: a re-derived flag set re-accepted `3.` under a
+    // stale run after the paragraph had ended it, and stripped it into a field.
+    const md = '1. alpha\n\nparagraph\n\n3. status: resolved\n\n### Entry\n\n- **What:** x\n';
+    assert.deepStrictEqual(statuses(md), ['', '']);
+    assert.strictEqual(names(md).length, 2);
+  });
+
   test('a REJECTED ordinal line under a heading is not marker-stripped, so it cannot manufacture a field', () => {
     // `3. status: resolved` is prose by the start-at-1 rule; before this fix the
     // heading path stripped its marker anyway and read a resolved field off it.

@@ -1326,23 +1326,6 @@ interface DeferredHeadingEntry {
 }
 
 /**
- * Per-line opener flags for a headless-region entry (`splitGapsEntries`
- * output): line 0 opened it by construction; later lines are classified with
- * the run carried from line 0, so a nested `3. status: x` under a `-` entry
- * is prose there exactly as it is under a leaf heading.
- */
-function headlessEntryOpeners(entryLines: string[]): boolean[] {
-  const flags: boolean[] = [];
-  let inOrderedRun = false;
-  entryLines.forEach((line, i) => {
-    const opener = i === 0 ? matchListOpener(line, DEFERRED_BULLET_MARKERS, true) : matchListOpener(line, DEFERRED_BULLET_MARKERS, inOrderedRun);
-    flags.push(opener !== null);
-    if (opener !== null) inOrderedRun = opener.ordered;
-  });
-  return flags;
-}
-
-/**
  * `splitDeferredHeadingEntries` with the per-line opener flags the deferred
  * field-extraction path needs (#3702 round 2, round review): the heading path
  * strips the marker off EVERY body line before field extraction (#3457), and a
@@ -1384,8 +1367,10 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     currentHasBullet = false;
   };
   const flushPending = (): void => {
-    for (const lines of splitGapsEntries(pending.join('\n'), DEFERRED_BULLET_MARKERS)) {
-      entries.push({ lines, opener: headlessEntryOpeners(lines) });
+    // Headless-region entries carry the splitter's own opener flags — the
+    // same run state (start-at-1, paragraph reset) that split them.
+    for (const { lines, opener } of splitGapsEntriesCore(pending.join('\n'), DEFERRED_BULLET_MARKERS)) {
+      entries.push({ lines, opener });
     }
     pending = [];
   };
@@ -1509,6 +1494,8 @@ function parseDeferredTableItems(sectionBody: string): UatItem[] {
  */
 interface GapsEntrySpan {
   lines: string[];
+  /** `opener[i]` — line `i` was an ACCEPTED list opener (line 0 always; a nested one when accepted). */
+  opener: boolean[];
   start: number;
   end: number;
 }
@@ -1554,10 +1541,15 @@ function splitGapsEntriesCore(
   // memory `matchListOpener` consults (#3702 round 2, B2). Nested openers are
   // continuation lines here and neither read nor move it.
   let inOrderedRun = false;
+  // Per-line opener flags for `current`, recorded HERE — the one place the
+  // run state is known — so the heading path's strip-only-openers rule reads
+  // the splitter's own verdict instead of re-deriving it (round review: a
+  // re-derivation without the paragraph reset re-accepted a rejected ordinal).
+  let currentOpeners: boolean[] = [];
 
   const flush = (): void => {
     if (current !== null) {
-      entries.push({ lines: current, start: lineStarts[currentStartLine], end: lineEnds[currentEndLine] });
+      entries.push({ lines: current, opener: currentOpeners, start: lineStarts[currentStartLine], end: lineEnds[currentEndLine] });
     }
   };
 
@@ -1573,6 +1565,7 @@ function splitGapsEntriesCore(
       // re-verifies still holds; before the first entry it is discarded.
       if (current !== null) {
         current.push(line);
+        currentOpeners.push(false);
         currentEndLine = idx;
       }
       return;
@@ -1594,14 +1587,17 @@ function splitGapsEntriesCore(
       if (indent <= baseIndent) {
         flush();
         current = [line];
+        currentOpeners = [true];
         currentStartLine = idx;
         currentEndLine = idx;
         inOrderedRun = opener.ordered;
+        blankSeen = false; // an opener is not blank — the memory must not survive it
         return;
       }
     }
     if (current !== null) {
       current.push(line);
+      currentOpeners.push(opener !== null);
       currentEndLine = idx;
       // A blank line then a top-level non-list line is a PARAGRAPH: the list
       // is over (CommonMark §5.3) and a later `5. x` is prose. Without the
