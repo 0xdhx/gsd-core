@@ -5356,6 +5356,71 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
   // commit runs WITHOUT the pathspec and the named paths describe nothing about
   // what would land. Deciding "nothing to commit" from them would abandon the
   // merge — which is why the empty-diff probe is gated on !isMergeInProgress.
+  // Sets up a conflicted history and leaves the caller mid-sequence. `rel` (the
+  // file the commit call names) is never touched by the conflict, so it always
+  // contributes no diff of its own — which is what puts these arms on the
+  // empty-diff branch under test.
+  function conflictedSequence(kind) {
+    const shared = path.posix.join('.planning', 'shared.md');
+    fs.writeFileSync(path.join(tmpDir, shared), 'base\n');
+    gitOrThrow(['add', '--', shared], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'shared base'], { cwd: tmpDir });
+    const trunk = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+
+    if (kind === 'revert') {
+      fs.writeFileSync(path.join(tmpDir, shared), 'second\n');
+      gitOrThrow(['commit', '-am', 'second'], { cwd: tmpDir });
+      fs.writeFileSync(path.join(tmpDir, shared), 'third\n');
+      gitOrThrow(['commit', '-am', 'third'], { cwd: tmpDir });
+      runGit(['revert', '--no-edit', 'HEAD~1'], { cwd: tmpDir });
+    } else {
+      gitOrThrow(['checkout', '-b', 'side'], { cwd: tmpDir });
+      fs.writeFileSync(path.join(tmpDir, shared), 'side\n');
+      gitOrThrow(['commit', '-am', 'side edit'], { cwd: tmpDir });
+      gitOrThrow(['checkout', trunk], { cwd: tmpDir });
+      fs.writeFileSync(path.join(tmpDir, shared), 'trunk\n');
+      gitOrThrow(['commit', '-am', 'trunk edit'], { cwd: tmpDir });
+      runGit([kind === 'merge' ? 'merge' : 'cherry-pick', 'side'], { cwd: tmpDir });
+    }
+    fs.writeFileSync(path.join(tmpDir, shared), 'resolved\n');
+    gitOrThrow(['add', '--', shared], { cwd: tmpDir });
+  }
+
+  // git refuses a partial commit during a cherry-pick exactly as it does during
+  // a merge, so the guard must stay out of the way there too — this arm pins
+  // that the pre-fix outcome is preserved rather than turned into a silent
+  // no-op. Driven, not assumed: the three sequencer states disagree.
+  test('a cherry-pick in progress keeps its pre-existing outcome', () => {
+    const rel = commitFixtureFile();
+    conflictedSequence('cherry-pick');
+    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
+      'fixture must leave a cherry-pick in progress');
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'commit_failed',
+      'git refuses the partial commit here; that must not become a silent nothing_to_commit');
+    assert.match(String(output.error), /partial commit/,
+      "git's own refusal must reach the caller");
+  });
+
+  // REVERT_HEAD is deliberately NOT in the refusal set: a revert permits partial
+  // commits, so the fix must still apply there. Including it would suppress the
+  // fix during a revert and reintroduce the misreport.
+  test('a revert in progress still reports nothing_to_commit, not the hook rejection', () => {
+    const rel = commitFixtureFile();
+    conflictedSequence('revert');
+    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'REVERT_HEAD')),
+      'fixture must leave a revert in progress');
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit',
+      'a revert permits partial commits, so the empty-diff guard must still apply');
+  });
+
   test('a merge in progress is still concluded when the named paths carry no diff', () => {
     const shared = path.posix.join('.planning', 'shared.md');
     fs.writeFileSync(path.join(tmpDir, shared), 'base\n');

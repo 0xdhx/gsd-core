@@ -1808,7 +1808,21 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // --amend is left without a pathspec: amending with -- <paths> is a different
   // operation that rewrites the tip with only those paths.
   const isMergeInProgress = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd }).exitCode === 0;
-  // #3776: `stagedPaths` records paths whose `git add` exited 0 — that is "did
+  // #3776: git refuses a PARTIAL commit (`git commit -- <paths>`) while a merge
+  // or a cherry-pick is in progress, so in those states the pathspec describes
+  // nothing about what would actually land and the empty-diff decision below
+  // must not be made from it. Driven against git 2.54 rather than reasoned by
+  // analogy, because the three sequencer states do NOT agree:
+  //   MERGE_HEAD        -> `fatal: cannot do a partial commit during a merge.`
+  //   CHERRY_PICK_HEAD  -> `fatal: cannot do a partial commit during a cherry-pick.`
+  //   REVERT_HEAD       -> permitted; behaves like an ordinary commit.
+  // REVERT_HEAD is therefore deliberately absent: including it would suppress
+  // this fix during a revert, reintroducing the very misreport it removes.
+  // `canScope` below keeps its narrower merge-only test on purpose — widening it
+  // would change pre-existing cherry-pick behaviour, which is outside this fix.
+  const isCherryPickInProgress = execGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], { cwd }).exitCode === 0;
+  const partialCommitRefused = isMergeInProgress || isCherryPickInProgress;
+  // `stagedPaths` records paths whose `git add` exited 0 — that is "did
   // staging succeed", not "is there anything to commit". Staging an
   // already-committed, unmodified file succeeds while contributing no diff, so
   // `length === 0` is reachable only when EVERY named path was missing from
@@ -1823,14 +1837,13 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   //    Spreading an empty array yields a pathspec-less `diff --cached`, which
   //    tests the WHOLE index — unrelated staged work elsewhere would then
   //    suppress the guard and regress the skip-missing contract (#2014).
-  //  - `!isMergeInProgress`: during a merge git refuses a partial commit, so
-  //    `canScope` is false below and the pathspec describes nothing about what
-  //    would actually be committed. Deciding "nothing to commit" from it would
-  //    abandon the merge, so that path keeps its pre-existing behaviour.
+  //  - `!partialCommitRefused`: see above — deciding "nothing to commit" from a
+  //    pathspec git will not honour would abandon an in-progress merge, so those
+  //    states keep their pre-existing behaviour untouched.
   // Any other non-zero exit from the probe (a genuine git error) leaves the
   // guard shut and falls through to the commit — failing toward today's path.
   const stagedDiffIsEmpty = stagedPaths.length === 0
-    || (!isMergeInProgress
+    || (!partialCommitRefused
       && execGit(['diff', '--cached', '--quiet', '--', ...stagedPaths], { cwd }).exitCode === 0);
   if (explicitFiles && stagedDiffIsEmpty && !amend) {
     const result = { committed: false, hash: null, reason: 'nothing_to_commit' };
