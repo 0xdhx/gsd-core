@@ -144,7 +144,7 @@ interface UatDeferredModule {
 /** Result of `UatDeferredModule.acknowledgeDeferredItem`. */
 interface AcknowledgeDeferredItemResult {
   content: string;
-  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed';
+  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed' | 'rewrite_not_readable';
 }
 
 /**
@@ -1568,6 +1568,9 @@ function cmdAuditAcknowledge(cwd: string, args: string[], raw: boolean): void {
       }
       if (result.status === 'match_verification_failed') {
         ioError(`internal error: matched span for --text "${text as string}" did not re-verify before write — refused rather than risk writing the wrong entry`);
+      }
+      if (result.status === 'rewrite_not_readable') {
+        ioError(`internal error: the acknowledgement written for --text "${text as string}" does not read back as "status: acknowledged" — refused rather than report a write the audit would not honor`);
       }
       platformWriteSync(safeFilePath, result.content);
       output({ acknowledged: true, category, phase, file, text }, raw, 'true');

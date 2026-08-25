@@ -937,7 +937,7 @@ function parseDeferredItems(content: string): UatItem[] {
 /** Result of `acknowledgeDeferredItem`. */
 interface AcknowledgeDeferredItemResult {
   content: string;
-  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed';
+  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed' | 'rewrite_not_readable';
 }
 
 /**
@@ -999,6 +999,12 @@ interface AcknowledgeDeferredItemResult {
  * comparison above), not a no-op — if it does not match, the write is
  * refused with `match_verification_failed` rather than risk touching the
  * wrong span.
+ *
+ * Read back before `ok` (#3740 follow-up): the rewritten entry is re-read
+ * through `extractGapEntryFields`, and unless it now reads `acknowledged`
+ * the write is refused with `rewrite_not_readable`. The status-line SEARCH
+ * shares the reader's classifier so it cannot select a line the reader
+ * skips; this is the floor under the REWRITE, which is still its own regex.
  */
 function acknowledgeDeferredItem(content: string, targetText: string): AcknowledgeDeferredItemResult {
   const deferredSection = collectSection(
@@ -1100,6 +1106,22 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     ) + cr;
     newMatchedLines = matchedLines.slice();
     newMatchedLines[statusLineIdx] = replaced;
+  }
+
+  // Read the result back through the READER before reporting `ok`. Every
+  // defect this function has shipped (#3740 and the two siblings its review
+  // found) had the same shape — `ok`, nothing the reader could see — and a
+  // shared classifier closes the SELECTION half of that only. The REWRITE
+  // above is still its own regex, and the two can drift again in exactly the
+  // way #3702/#3739 warns about: widen the bullet set one side reads and not
+  // the set the other side rewrites, and a status line under the new marker
+  // comes back untouched. Unreachable by construction today (the rewrite
+  // accepts every shape the classifier selects); it is the fail-loud floor
+  // under the next divergence, so that it costs a refused command rather than
+  // an item that stays outstanding forever while claiming to be acknowledged.
+  const readBack = extractGapEntryFields(newMatchedLines);
+  if ((readBack.status || '').toLowerCase() !== 'acknowledged') {
+    return { content, status: 'rewrite_not_readable' };
   }
 
   const newContent = content.slice(0, matchIndexInContent) + newMatchedLines.join('\n') + content.slice(matchIndexInContent + (end - start));
