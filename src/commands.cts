@@ -1807,12 +1807,36 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // During a merge, git refuses partial commits — fall back to a bare commit.
   // --amend is left without a pathspec: amending with -- <paths> is a different
   // operation that rewrites the tip with only those paths.
-  if (explicitFiles && stagedPaths.length === 0 && !amend) {
+  const isMergeInProgress = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd }).exitCode === 0;
+  // #3776: `stagedPaths` records paths whose `git add` exited 0 — that is "did
+  // staging succeed", not "is there anything to commit". Staging an
+  // already-committed, unmodified file succeeds while contributing no diff, so
+  // `length === 0` is reachable only when EVERY named path was missing from
+  // disk. For the ordinary empty-diff case control fell through to `git commit`,
+  // and the only thing converting that back to `nothing_to_commit` was the
+  // string match on git's output below — which a rejecting pre-commit hook
+  // pre-empts, because git runs the hook before it decides there is nothing to
+  // commit. The caller was then handed `commit_failed` carrying a gate message
+  // about a commit that had nothing to gate. Ask git whether the staged paths
+  // actually differ instead. Two conjuncts are load-bearing:
+  //  - the `length === 0` short-circuit keeps the all-missing-paths case exact.
+  //    Spreading an empty array yields a pathspec-less `diff --cached`, which
+  //    tests the WHOLE index — unrelated staged work elsewhere would then
+  //    suppress the guard and regress the skip-missing contract (#2014).
+  //  - `!isMergeInProgress`: during a merge git refuses a partial commit, so
+  //    `canScope` is false below and the pathspec describes nothing about what
+  //    would actually be committed. Deciding "nothing to commit" from it would
+  //    abandon the merge, so that path keeps its pre-existing behaviour.
+  // Any other non-zero exit from the probe (a genuine git error) leaves the
+  // guard shut and falls through to the commit — failing toward today's path.
+  const stagedDiffIsEmpty = stagedPaths.length === 0
+    || (!isMergeInProgress
+      && execGit(['diff', '--cached', '--quiet', '--', ...stagedPaths], { cwd }).exitCode === 0);
+  if (explicitFiles && stagedDiffIsEmpty && !amend) {
     const result = { committed: false, hash: null, reason: 'nothing_to_commit' };
     output(result, raw, 'nothing');
     return;
   }
-  const isMergeInProgress = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd }).exitCode === 0;
   const canScope = explicitFiles && stagedPaths.length > 0 && !amend
     && !isMergeInProgress;
   const commitArgs = amend

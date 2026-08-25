@@ -5189,6 +5189,204 @@ describe('query commit --files scoping (#2269)', () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// #3776: `query commit --files` must report an empty diff as `nothing_to_commit`
+// even when a pre-commit hook would reject.
+//
+// `stagedPaths` records paths whose `git add` exited 0 — "did staging succeed",
+// not "is there anything to commit". Staging an already-committed, unmodified
+// file succeeds and contributes nothing, so the old `stagedPaths.length === 0`
+// guard was reachable only when EVERY named path was missing from disk. The
+// ordinary empty-diff case fell through to `git commit`, where the sole rescue
+// was a string match on git's "nothing to commit" output — and git runs the
+// pre-commit hook BEFORE deciding there is nothing to commit, so a rejecting
+// hook pre-empted the match and the caller was handed `commit_failed` carrying
+// a gate message about a commit that had nothing to gate.
+//
+// The residual sibling of #2608/#2693, which covered `git add` FAILING; this
+// covers `git add` succeeding and contributing nothing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#3776: query commit --files reports an empty diff as nothing_to_commit', () => {
+  const { createTempGitProject } = require('./helpers.cjs');
+  // runGit (never gitOrThrow) for the conflicting merge below — that merge is
+  // MEANT to exit non-zero, and the throwing wrapper would fail the fixture.
+  const { runGit } = require('./helpers/process-seam.cjs');
+  let tmpDir;
+
+  const REJECTING_HOOK = '#!/bin/sh\necho "gate: BACKLOG.md is stale" >&2\nexit 1\n';
+  const PASSING_HOOK = '#!/bin/sh\nexit 0\n';
+
+  // Writes .git/hooks/pre-commit. Every arm below drives the real hook, not a
+  // stub of it: the defect lives in git's own hook-before-empty-diff ordering,
+  // so a faked rejection would not exercise the mechanism under test.
+  function installHook(body) {
+    const hookPath = path.join(tmpDir, '.git', 'hooks', 'pre-commit');
+    fs.writeFileSync(hookPath, body);
+    fs.chmodSync(hookPath, 0o755);
+  }
+
+  // A tracked, committed, unmodified file — `git add` on it succeeds and
+  // contributes no diff. This is the exact shape the guard used to miss.
+  function commitFixtureFile(name = 'doc.md', body = 'hello\n') {
+    const rel = path.posix.join('.planning', name);
+    fs.writeFileSync(path.join(tmpDir, '.planning', name), body);
+    gitOrThrow(['add', '--', rel], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'fixture: ' + name], { cwd: tmpDir });
+    return rel;
+  }
+
+  // The command emits its JSON payload on either stream depending on outcome;
+  // read whichever carries it rather than assuming success.
+  function commitFiles(rel, extra = '') {
+    const result = runGsdTools('commit "m"' + extra + ' --files ' + rel, tmpDir);
+    const payload = (result.output && result.output.trim()) ? result.output : result.error;
+    return JSON.parse(payload);
+  }
+
+  beforeEach(() => {
+    tmpDir = createTempGitProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  // AC1 — the defect. Pre-fix this returned commit_failed + the hook's message.
+  test('AC1: empty diff + rejecting pre-commit hook reports nothing_to_commit, not the hook rejection', () => {
+    const rel = commitFixtureFile();
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit',
+      'an empty-diff --files call must not be reported as a failed commit');
+    assert.ok(!output.error,
+      'no hook message may be surfaced for a call that had nothing to gate');
+  });
+
+  // AC2 — the two controls that isolate the hook as the only variable.
+  test('AC2: empty diff + no hook still reports nothing_to_commit', () => {
+    const rel = commitFixtureFile();
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit');
+  });
+
+  test('AC2: empty diff + passing hook still reports nothing_to_commit', () => {
+    const rel = commitFixtureFile();
+    installHook(PASSING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit');
+  });
+
+  // AC3 — the all-missing short-circuit must not regress.
+  test('AC3: every named path missing from disk still reports nothing_to_commit', () => {
+    const rel = commitFixtureFile();
+    fs.unlinkSync(path.join(tmpDir, rel));
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit');
+  });
+
+  // AC3, sharp edge: the `stagedPaths.length === 0` short-circuit is
+  // load-bearing, not defensive noise. Without it an all-missing call spreads
+  // an empty array into the pathspec, and a pathspec-less `git diff --cached`
+  // tests the WHOLE index — so unrelated staged work would suppress the guard
+  // and turn this arm into a commit of somebody else's staged changes.
+  test('AC3: all named paths missing does not consult unrelated staged work', () => {
+    const rel = commitFixtureFile();
+    fs.unlinkSync(path.join(tmpDir, rel));
+    const unrelated = path.posix.join('.planning', 'unrelated.md');
+    fs.writeFileSync(path.join(tmpDir, unrelated), 'staged by the caller\n');
+    gitOrThrow(['add', '--', unrelated], { cwd: tmpDir });
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'nothing_to_commit');
+
+    const staged = gitOrThrow(['diff', '--cached', '--name-only'], { cwd: tmpDir });
+    assert.match(staged, /unrelated\.md/,
+      "the caller's own staged work must be left in the index, not swept into a commit");
+  });
+
+  // AC4 — a genuine rejection must still be reported. The goal is to stop
+  // reporting a rejection for a call that never had anything to gate, not to
+  // stop reporting rejections.
+  test('AC4: a real diff rejected by the hook still reports commit_failed with the hook message', () => {
+    const rel = commitFixtureFile();
+    fs.writeFileSync(path.join(tmpDir, rel), 'hello\nmodified\n');
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'commit_failed');
+    assert.match(String(output.error), /BACKLOG\.md is stale/,
+      "the hook's own message must still reach the caller");
+  });
+
+  test('AC4: a real diff with no hook still commits', () => {
+    const rel = commitFixtureFile();
+    fs.writeFileSync(path.join(tmpDir, rel), 'hello\nmodified\n');
+
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, true);
+    assert.strictEqual(output.reason, 'committed');
+    assert.ok(output.hash, 'a successful commit must carry its hash');
+  });
+
+  // AC5 — amending has a different empty-diff meaning; the guard stays exempt.
+  test('AC5: --amend remains exempt from the empty-diff guard', () => {
+    const rel = commitFixtureFile();
+    installHook(REJECTING_HOOK);
+
+    const output = commitFiles(rel, ' --amend');
+    assert.strictEqual(output.committed, false);
+    assert.strictEqual(output.reason, 'commit_failed',
+      '--amend must still reach git, where the hook governs the rewrite');
+  });
+
+  // Beyond the brief's ACs: during a merge git refuses a partial commit, so the
+  // commit runs WITHOUT the pathspec and the named paths describe nothing about
+  // what would land. Deciding "nothing to commit" from them would abandon the
+  // merge — which is why the empty-diff probe is gated on !isMergeInProgress.
+  test('a merge in progress is still concluded when the named paths carry no diff', () => {
+    const shared = path.posix.join('.planning', 'shared.md');
+    fs.writeFileSync(path.join(tmpDir, shared), 'base\n');
+    gitOrThrow(['add', '--', shared], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'shared base'], { cwd: tmpDir });
+    const rel = commitFixtureFile();
+
+    const trunk = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir }).trim();
+    gitOrThrow(['checkout', '-b', 'side'], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, shared), 'side\n');
+    gitOrThrow(['commit', '-am', 'side edit'], { cwd: tmpDir });
+    gitOrThrow(['checkout', trunk], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, shared), 'trunk\n');
+    gitOrThrow(['commit', '-am', 'trunk edit'], { cwd: tmpDir });
+
+    // Conflicting merge, then resolve it so the index carries real content.
+    runGit(['merge', 'side'], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, shared), 'resolved\n');
+    gitOrThrow(['add', '--', shared], { cwd: tmpDir });
+    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
+      'fixture must leave a merge in progress');
+
+    // `rel` is committed and unmodified — it contributes no diff of its own.
+    const output = commitFiles(rel);
+    assert.strictEqual(output.committed, true,
+      'the merge must still be concluded, not reported as nothing to commit');
+    assert.ok(!fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
+      'MERGE_HEAD must be gone once the merge commit lands');
+  });
+});
+
 describe('#2279: map-codebase date stamp instructions overwrite existing dates', () => {
   const REPO_ROOT = path.join(__dirname, '..');
 
