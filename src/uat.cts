@@ -1244,9 +1244,24 @@ class OrderedRuns {
   clear(): void { this.byIndent.clear(); }
 }
 
-/** Leading-whitespace width of a line. */
+/**
+ * Leading-whitespace width of a line in CommonMark COLUMNS (§2.2: a tab
+ * advances to the next multiple of 4), so `\t` and ` ` are different levels
+ * and `\t` equals four spaces — character counting aliased them.
+ */
 function indentOf(line: string): number {
-  return (line.match(/^[ \t]*/) as RegExpMatchArray)[0].length;
+  let col = 0;
+  for (const ch of line) {
+    if (ch === ' ') col += 1;
+    else if (ch === '\t') col += 4 - (col % 4);
+    else break;
+  }
+  return col;
+}
+
+/** Line indices of fence OPENING delimiters — a fence at indent d ends the runs at d and deeper. */
+function fenceOpenerLines(lines: string[]): Set<number> {
+  return new Set(scanFencedBlocks(lines).map((block) => block.openLineIdx));
 }
 
 /** A line classified as a list-item opener by `matchListOpener`. */
@@ -1288,7 +1303,7 @@ function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boo
   const token = m[2];
   const ordered = /^\d/.test(token);
   if (ordered && !inOrderedRun && parseInt(token, 10) !== 1) return null;
-  return { indent: m[1].length, ordered };
+  return { indent: indentOf(m[1]), ordered };
 }
 
 /**
@@ -1385,6 +1400,13 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
   // continuation and keeps it open.
   const runs = new OrderedRuns();
   let blankSeen = false;
+  // Same level rule as the headless splitter: the first opener in a leaf body
+  // sets the base, and every indent at or shallower than it is one level.
+  let bodyBase: number | null = null;
+  const levelOf = (line: string): number => {
+    const ind = indentOf(line);
+    return bodyBase !== null && ind <= bodyBase ? bodyBase : ind;
+  };
 
   const flushCurrent = (): void => {
     // Keep the leaf entry only when its body carries a list item; the heading
@@ -1403,6 +1425,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
   };
 
   const fenced = fencedLineSet(lines);
+  const fenceOpens = fenceOpenerLines(lines);
   for (let i = 0; i < lines.length; i++) {
     const lineNo = i + 1;
     const heading = headingByLine.get(lineNo);
@@ -1414,6 +1437,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
       flushPending();
       runs.clear();
       blankSeen = false;
+      bodyBase = null;
       if (!heading.isContainer) {
         // Leaf heading: open an entry with the heading text as line 0.
         current = { lines: [heading.text], opener: [false] };
@@ -1433,6 +1457,8 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     if (fenced.has(i)) {
       // Fence content is body text, never list-item evidence (M2) — and
       // never an opener, so it is never marker-stripped for fields either.
+      // Its opener ends the runs at its level and deeper, as a paragraph does.
+      if (fenceOpens.has(i)) runs.endedAt(levelOf(line));
       if (current !== null) {
         current.lines.push(line);
         current.opener.push(false);
@@ -1451,13 +1477,14 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     if (/^\s*\|/.test(line)) continue;
     if (current !== null) {
       current.lines.push(line);
-      const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, runs.at(indentOf(line)));
+      const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, runs.at(levelOf(line)));
       current.opener.push(opener !== null);
       if (opener !== null) {
         currentHasBullet = true;
-        runs.opened(opener.indent, opener.ordered);
+        if (bodyBase === null) bodyBase = opener.indent;
+        runs.opened(levelOf(line), opener.ordered);
       } else if (blankSeen && line.trim() !== '') {
-        runs.endedAt(indentOf(line)); // a paragraph after a blank line ends the lists at its level and deeper
+        runs.endedAt(levelOf(line)); // a paragraph after a blank line ends the lists at its level and deeper
       }
       if (line.trim() === '') blankSeen = true;
       else blankSeen = false;
@@ -1583,13 +1610,24 @@ function splitGapsEntriesCore(
   // Block structure (M1/M2) is a property of the GRAMMAR, not of this seam:
   // the Gaps set opts out and stays byte-for-byte on its `next` behaviour.
   const fenced = markers.blockStructure ? fencedLineSet(rawLines) : new Set<number>();
+  const fenceOpens = markers.blockStructure ? fenceOpenerLines(rawLines) : new Set<number>();
   let blankSeen = false;
+  // The run LEVEL of a line: every indent at or shallower than the list's
+  // base is the one top level (a dedenting list keeps its entry boundaries);
+  // deeper indents are their own nested levels.
+  const levelOf = (line: string): number => {
+    const ind = indentOf(line);
+    return baseIndent !== null && ind <= baseIndent ? baseIndent : ind;
+  };
   rawLines.forEach((rawLine, idx) => {
     const line = rawLine.replace(/\r$/, '');
     if (fenced.has(idx)) {
       // Fence content never opens an entry (M2). Inside an open entry it is
       // continuation — pushed, so the span invariant `acknowledgeDeferredItem`
-      // re-verifies still holds; before the first entry it is discarded.
+      // re-verifies still holds; before the first entry it is discarded. A
+      // fence is a non-list block: its opener ends the runs at its level and
+      // deeper, exactly as a paragraph does.
+      if (fenceOpens.has(idx)) runs.endedAt(levelOf(line));
       if (current !== null) {
         current.push(line);
         currentOpeners.push(false);
@@ -1607,11 +1645,11 @@ function splitGapsEntriesCore(
       blankSeen = false;
       return;
     }
-    const opener = matchListOpener(line, markers, runs.at(indentOf(line)));
+    const opener = matchListOpener(line, markers, runs.at(levelOf(line)));
     if (opener !== null) {
       const { indent } = opener;
       if (baseIndent === null) baseIndent = indent;
-      runs.opened(indent, opener.ordered);
+      runs.opened(levelOf(line), opener.ordered);
       if (indent <= baseIndent) {
         flush();
         current = [line];
@@ -1630,7 +1668,7 @@ function splitGapsEntriesCore(
       // is over (CommonMark §5.3) and a later `5. x` is prose. Without the
       // blank it is lazy continuation and the run stays open.
       const blank = line.trim() === '';
-      if (!blank && blankSeen && opener === null) runs.endedAt(indentOf(line));
+      if (!blank && blankSeen && opener === null) runs.endedAt(levelOf(line));
       blankSeen = opener === null && blank;
     }
     // else: pre-first-bullet content (e.g. the template's HTML comment) — discarded.

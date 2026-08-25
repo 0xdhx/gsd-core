@@ -2751,6 +2751,37 @@ describe('#3702 round 2: round-review refinements (ordered run, rejected ordinal
     assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n  1. step\n  2. **Status:** resolved\n'), ['resolved']);
   });
 
+  test('a DEDENTING top-level list keeps its entry boundaries — every indent at or above the base is one level', () => {
+    // Round-review continuation 3: the exact-indent run lookup rejected the
+    // shallower ordinals, collapsing three entries into one.
+    assert.deepStrictEqual(names('    1. alpha\n  2. beta\n3. gamma\n'), ['alpha', 'beta', 'gamma']);
+    assert.deepStrictEqual(names('  - alpha\n- beta\n    - gamma\n'), ['alpha', 'beta - gamma']);
+  });
+
+  test('indent is measured in CommonMark COLUMNS (a tab advances to the next multiple of 4), so a tab and a space are different levels', () => {
+    // Round-review continuation 3: character counting aliased `\t` and ` `.
+    // Heading shape, where every ACCEPTED nested opener is marker-stripped
+    // before field extraction (the headless path strips line 0 only — #3740).
+    for (const eol of ['\n', '\r\n']) {
+      const body = (nested) => `### Entry\n\n- **What:** x\n${nested}`.replace(/\n/g, eol);
+      assert.deepStrictEqual(statuses(body('\t1. nested\n 2. **Status:** resolved\n')), [''], JSON.stringify(eol));
+      assert.deepStrictEqual(statuses(body('\t1. nested\n\t2. **Status:** resolved\n')), ['resolved'], JSON.stringify(eol));
+      assert.deepStrictEqual(statuses(body('    1. nested\n\t2. **Status:** resolved\n')), ['resolved'], JSON.stringify(eol));
+    }
+  });
+
+  test('a fenced block ends the runs at its indent and deeper, like a paragraph does', () => {
+    // Round-review continuation 3: a nested run stayed open across a fence,
+    // so a post-fence `2. status: resolved` resolved the entry. Heading shape,
+    // for the reason the columns test states.
+    const body = (nested) => `### Entry\n\n- **What:** x\n${nested}`;
+    assert.deepStrictEqual(statuses(body('  1. a\n  ```\n  code\n  ```\n  2. **Status:** resolved\n')), ['']);
+    // A deeper fence (3 spaces — the sectionizer's CommonMark `{0,3}` limit) leaves the shallower run alone.
+    assert.deepStrictEqual(statuses(body('  1. a\n   ```\n   code\n   ```\n  2. **Status:** resolved\n')), ['resolved']);
+    // Control: without the fence the run continues and resolves.
+    assert.deepStrictEqual(statuses(body('  1. a\n  2. **Status:** resolved\n')), ['resolved']);
+  });
+
   test('a REJECTED ordinal line under a heading is not marker-stripped, so it cannot manufacture a field', () => {
     // `3. status: resolved` is prose by the start-at-1 rule; before this fix the
     // heading path stripped its marker anyway and read a resolved field off it.
