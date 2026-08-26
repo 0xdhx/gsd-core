@@ -2714,6 +2714,33 @@ describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\
   });
 });
 
+// #3740 round 3 (PR #3773 review, Minor 3): the insert branch's continuation
+// indent is built from the entry's own indent, so a tab-indented entry must not
+// get a space-built continuation. The old form counted the indent's characters
+// and re-emitted that many SPACES, turning one tab into three spaces.
+describe('#3740 acknowledgeDeferredItem: the inserted line reuses the entry\'s indent characters', () => {
+  const insertedIndentFor = (opener) => {
+    const content = `## Deferred Items\n\n${opener} alpha thing\n`;
+    const ack = acknowledgeDeferredItem(content, parseDeferredItemsWithStatus(content)[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+    const line = ack.content.split('\n').find((l) => l.includes('status: acknowledged'));
+    return line.match(/^\s*/)[0];
+  };
+
+  test('a TAB-indented entry keeps the tab and adds two spaces', () => {
+    assert.strictEqual(insertedIndentFor('\t-'), '\t  ');
+  });
+
+  test('control: a space-indented entry is unchanged by the fix', () => {
+    assert.strictEqual(insertedIndentFor('  -'), '    ');
+  });
+
+  test('control: an unindented entry still gets a two-space continuation', () => {
+    assert.strictEqual(insertedIndentFor('-'), '  ');
+  });
+});
+
 // #3740 round 2 (PR #3773 review, Major 1): the parse → acknowledge → parse
 // contract as a property over the boundary the review named — status marker ×
 // line ending × status-line position — rather than the hand-picked corners

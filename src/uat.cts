@@ -1111,7 +1111,11 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   let newMatchedLines: string[];
   if (statusLineIdx === -1) {
     const bulletIndentMatch = matchedLines[0].match(/^(\s*)-\s+/);
-    const continuationIndent = ' '.repeat((bulletIndentMatch ? bulletIndentMatch[1].length : 0) + 2);
+    // Reuse the entry's own indent CHARACTERS, never a count of them: a tab
+    // counted as one column and re-emitted as one space put a 3-space
+    // continuation under a tab-indented bullet (#3773 review, Minor 3).
+    // Identical output for all-space indents, which is every existing case.
+    const continuationIndent = `${bulletIndentMatch ? bulletIndentMatch[1] : ''}  `;
     // The new line goes right after line 0, so line 0 stops being the span's
     // last line. Under CRLF the span's last line is the one line WITHOUT a
     // `\r` (the file's own `\r\n` follows the span). So the ending is read
