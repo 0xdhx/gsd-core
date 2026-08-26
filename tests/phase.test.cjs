@@ -12517,13 +12517,33 @@ describe('#3697 round 3: the two warning channels', () => {
     assert.strictEqual(hi.length, 2049, `#3697-9f fixture is ${hi.length} chars, expected 2049`);
     const a = analyzeRequirementsLine(`${lo} .. ${hi}`);
     assert.strictEqual(a.hasSpacedRange, false, '#3697-9f: an over-cap endpoint must not be classified');
-    // And silence is CORRECT here, not a gap: the selector is uncapped and
-    // anchored, so it examined and selected both endpoints. Nothing was
-    // dropped, so there is nothing to report.
     assert.deepStrictEqual(a.citedReqIds, [lo, hi], '#3697-9f: both endpoints are selected');
-    assert.deepStrictEqual(a.oversizedTokens, [], '#3697-9f: selected means verified');
-    assert.strictEqual(a.warn, false, '#3697-9f: nothing was dropped, so nothing is reported');
+    // Selected does NOT mean nothing was suppressed. The second continuation
+    // review's CLAIM J/K: an earlier cut exempted every selector-accepted token
+    // from `oversizedTokens`, so this line — which WARNED before the round,
+    // when R2 was uncapped — went silent. Both endpoints are unexaminable and
+    // sit either side of a range operator, so the line is reported unverified.
+    assert.deepStrictEqual(a.oversizedTokens, [lo, hi], '#3697-9f: both endpoints are unexaminable');
+    assert.strictEqual(a.warn, true, '#3697-9f: a suppressed classification is not clean');
   });
+
+  test(
+    '#3697-9j (over-cap exemption scope): a selected over-cap ID is exempt ONLY when nothing could ' +
+    'have paired with it',
+    () => {
+      // The other half of CLAIM J/K. The exemption is what keeps #3697-9i
+      // silent; it must not extend to a token whose neighbour could have formed
+      // a range with it, because that is exactly where the cap suppressed a
+      // rule rather than merely declining to classify a lone token.
+      const big = `R-${'1'.repeat(2047)}`;
+      assert.strictEqual(big.length, 2049, `#3697-9j fixture is ${big.length} chars, expected 2049`);
+      // No neighbour that could pair -> exempt, silent.
+      assert.strictEqual(analyzeRequirementsLine(`REQ-01, ${big}`).warn, false, '#3697-9j: no pairing neighbour');
+      // A range operator beside it -> R2 was suppressed, so report.
+      assert.strictEqual(analyzeRequirementsLine(`${big} .. REQ-05`).warn, true, '#3697-9j: operator neighbour');
+      assert.strictEqual(analyzeRequirementsLine(`REQ-01 .. ${big}`).warn, true, '#3697-9j: operator neighbour');
+    },
+  );
 
   test(
     '#3697-9g (assertive voice): the skipped-text clause is on BOTH voices, and does not repeat ' +

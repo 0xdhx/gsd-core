@@ -2677,10 +2677,9 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // ANY over-cap token, not just one carrying `-`. The first cut filtered on
   // `includes('-')` and therefore missed an over-cap OPERATOR:
   // `REQ-01 <2049 dots> REQ-05` warned before this round (R2 was uncapped) and
-  // went silent after it, which is the very regression this field was added to
-  // close. A token we could not examine makes the line unverified whatever
-  // characters it happens to contain.
-  const oversizedRaw = tokens.filter((t) => !short(t));
+  // went silent after it. A token we could not examine makes the line
+  // unverified whatever characters it happens to contain. Computed below,
+  // where the selected set is available.
 
   // ID-shaped tokens the selector did not take, ANYWHERE on the line. This is
   // reported as a fact, never used to pick the channel: `(ADR-7)` and
@@ -2689,12 +2688,30 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // Naming them lets the author see what the tokenizer skipped without the
   // warning asserting a verdict it cannot support in either direction.
   const selected = new Set(citedReqIds.map((id) => id.toUpperCase()));
-  // A token the SELECTOR took is verified by definition — the selector is
-  // uncapped and anchored, so it examined the whole token. Reporting it as
-  // "unverified" because the secondary detector declined to classify it is a
-  // contradiction the round's continuation review caught: a 2049-character
-  // canonical REQ-ID was selected AND flagged unverified in the same warning.
-  const oversizedTokens = oversizedRaw.filter((t) => !selected.has(t.toUpperCase()));
+  // A token the SELECTOR took has had its own SELECTION verified — the selector
+  // is uncapped and anchored, so it examined the whole token. That is not the
+  // same as "no rule was suppressed by it", and conflating the two was the
+  // second continuation review's CLAIM J/K: two over-cap valid IDs either side
+  // of `..` are both selected, both exempted, and R2 is capped — so a line that
+  // warned before this round went silent, which is the very regression the
+  // field exists to close, arriving through the fix for its own over-report.
+  //
+  // The exemption therefore applies only when nothing could have been
+  // suppressed: an over-cap token that was selected AND has no neighbour that
+  // could pair with it into a range. Everything else is unexaminable and is
+  // reported as such.
+  const couldPairIntoRange = (i: number): boolean => {
+    for (const n of [tokens[i - 1], tokens[i + 1]]) {
+      if (n === undefined) continue;
+      if (!short(n)) return true;
+      if (REQ_PURE_RANGE_OP_RE.test(n)) return true;
+      if (REQ_GLUED_RANGE_LEAD_RE.test(n) || REQ_GLUED_RANGE_TRAIL_RE.test(n)) return true;
+    }
+    return false;
+  };
+  const oversizedTokens = tokens.filter(
+    (t, i) => !short(t) && (!selected.has(t.toUpperCase()) || couldPairIntoRange(i)),
+  );
   const unselectedIdShaped = tokens.filter(
     (t) => short(t) && REQ_ID_SUBSTRING_RE.test(t) && !selected.has(t.toUpperCase()),
   );

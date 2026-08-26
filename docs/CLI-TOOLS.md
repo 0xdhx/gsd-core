@@ -338,9 +338,12 @@ is the documented form — but parentheses are not, so `(REQ-02)` is not marked.
 The command cannot tell that from `(ADR-7)`, which is a citation and correctly
 ignored, so it names what it skipped and leaves the judgement to you.
 The third voice is for input the command could not examine: *"could not be
-checked ... the REQ-ID selection on this line is unverified"*. A token longer
-than 2,048 characters is not classified at all — the scan is bounded — and the
-warning says so explicitly rather than treating unclassified as clean.
+checked ... the REQ-ID selection on this line is unverified"*. Range detection
+is bounded at 2,048 characters per token, so a longer token is not classified —
+and unclassified is reported, never treated as clean. Selection itself is *not*
+bounded, so a valid REQ-ID longer than that is still selected and marked
+normally; it only triggers this voice if something beside it could have formed a
+range with it, which is the case where the bound actually suppressed a check.
 
 ---
 
