@@ -283,6 +283,45 @@ consumer using `wave` for scheduling (`WAVE_FILTER`, the wave-safety check)
 is still working from the degraded assignment; only the diagnostic surfaces
 the loss.
 
+### The ROADMAP `**Requirements**:` line grammar
+
+`phase complete` reads each phase's `**Requirements**:` line to decide which
+REQ-IDs to mark. The grammar is deliberately small, and it is documented here
+because the command now warns about it (#3697) — a warning about a rule that
+cannot be looked up is not actionable.
+
+**The only supported form is a comma-separated list of REQ-IDs.** Square
+brackets are optional; a REQ-ID is `PREFIX-N`, where the prefix is an uppercase
+letter followed by letters or digits:
+
+```
+**Requirements**: REQ-01, REQ-02, REQ-03
+**Requirements**: [REQ-01, REQ-02, REQ-03]
+```
+
+**Ranges are not expanded** — `REQ-01 … REQ-05` selects the two endpoints and
+nothing between them, and `REQ-01..REQ-05` selects nothing at all, because the
+whole token fails the ID shape. This is a deliberate non-feature, not an
+oversight: the line is a traceability record, and silently inventing IDs that
+appear nowhere in `REQUIREMENTS.md` is worse than declining to.
+
+**A deliberately empty line is written `TBD` or `None`.** Those two words are
+the placeholder vocabulary; any other wording (`Deferred`, `N/A`, `Pending`)
+selects no REQ-IDs and warns, because from the command's side it is
+indistinguishable from a line that was meant to cite requirements and failed to.
+
+**What warns, and in which of the two voices.** Both go to `warnings[]` and
+neither blocks completion:
+
+- *"could not be parsed as a comma-separated REQ-ID list"* — ID-shaped text on
+  the line was **not** selected. Something was demonstrably dropped; the line
+  needs fixing.
+- *"contains what reads as a range between two cited REQ-IDs"* — every ID on the
+  line **was** selected, and a separator between two of them could equally be a
+  range or an annotation. The command cannot tell these apart, so it states both
+  readings rather than asserting a failure that may not have happened. If the
+  separator is an annotation, the line is already correct.
+
 ---
 
 ## Roadmap Commands
