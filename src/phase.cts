@@ -2491,7 +2491,7 @@ type RequirementsLineAnalysis = {
 // the over-warning class #2334 cost three rounds. The Unicode dashes carry no
 // such collision — they are not the REQ-ID separator (that is ASCII `-`), so
 // they belong in the NOHYPHEN arm beside `—` and `–`, never in the strict arm.
-const REQ_RANGE_DASHES = '\\u2013\\u2014';
+const REQ_RANGE_DASHES = '\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\u2212';
 const REQ_RANGE_OP = `(?:\\.{2,}|\\u2026|[${REQ_RANGE_DASHES}]|-|to|thru|through)`;
 const REQ_RANGE_OP_NOHYPHEN = `(?:\\.{2,}|\\u2026|[${REQ_RANGE_DASHES}]|to|thru|through)`;
 const REQ_RANGE_OP_SYMBOL = `(?:\\.{2,}|\\u2026|[${REQ_RANGE_DASHES}]|-)`;
@@ -2557,9 +2557,10 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // Every predicate below is applied through the scan limit (Nit 6): a token
   // past the bound is not classified at all rather than classified expensively.
   const short = (t: string): boolean => t.length <= REQ_TOKEN_SCAN_LIMIT;
-  const rangeTokens = tokens.filter((t) => REQ_RANGE_TOKEN_RE.test(t));
+  const rangeTokens = tokens.filter((t) => short(t) && REQ_RANGE_TOKEN_RE.test(t));
   const hasSpacedRange = tokens.some(
     (t, i) =>
+      short(t) &&
       REQ_PURE_RANGE_OP_RE.test(t) &&
       i > 0 &&
       i < tokens.length - 1 &&
@@ -2573,6 +2574,7 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // keeps the word operators, because a valid ID must end in digits, so
   // `REQ-01through` can only be a glued typo.
   const hasGluedRangeFragment = tokens.some((t, i) => {
+    if (!short(t)) return false;
     const lead = REQ_GLUED_RANGE_LEAD_RE.exec(t);
     if (
       lead &&

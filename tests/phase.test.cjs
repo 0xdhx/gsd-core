@@ -12106,6 +12106,52 @@ const {
   formatRequirementsLineWarning,
 } = require('../gsd-core/bin/lib/phase.cjs');
 
+describe('#3697 round 3: the 2048-char token scan cap (RULESET.TESTS.boundary-coverage)', () => {
+  // `REQ_TOKEN_SCAN_LIMIT` is a hard cap with NO reserve or safety constant
+  // beside it, so clause (d) of RULESET.TESTS.boundary-coverage.fixtures — an
+  // input pushed within reserve-distance of the limit — has no referent here.
+  // (a)/(b)/(c) are the whole obligation, and they are exercised through BOTH
+  // predicate families the cap now guards: the unanchored ID-substring scan
+  // (R3) and the anchored range-token scan (R1, capped in round 3 per Nit 6).
+  const inertOfLength = (n) => `REQ-01${'X'.repeat(n - 'REQ-01'.length)}`;
+  const rangeTokenOfLength = (n) => {
+    const suffix = '..RANGE-05';
+    const digits = n - 'RANGE-'.length - suffix.length;
+    return `RANGE-${'0'.repeat(digits - 1)}1${suffix}`;
+  };
+
+  for (const [label, n, expectWarn] of [
+    ['limit-1 (2047)', 2047, true],
+    ['limit (2048)', 2048, true],
+    ['limit+1 (2049)', 2049, false],
+  ]) {
+    test(`#3697-B1 (${label}): the UNANCHORED ID-substring scan is applied at and below the cap only`, () => {
+      const tok = inertOfLength(n);
+      assert.strictEqual(tok.length, n, `#3697-B1 fixture is ${tok.length} chars, expected ${n}`);
+      const a = analyzeRequirementsLine(tok);
+      assert.deepStrictEqual(a.citedReqIds, [], '#3697-B1: the padded token is not itself an ID');
+      assert.strictEqual(
+        a.inertIdShaped.length > 0,
+        expectWarn,
+        `#3697-B1 (${label}): inertIdShaped membership must be ${expectWarn} at length ${n}`,
+      );
+      assert.strictEqual(a.warn, expectWarn, `#3697-B1 (${label}): warn must be ${expectWarn}`);
+    });
+
+    test(`#3697-B2 (${label}): the ANCHORED range-token scan takes the SAME cap (round-3 Nit 6)`, () => {
+      const tok = rangeTokenOfLength(n);
+      assert.strictEqual(tok.length, n, `#3697-B2 fixture is ${tok.length} chars, expected ${n}`);
+      const a = analyzeRequirementsLine(tok);
+      assert.strictEqual(
+        a.rangeTokens.length > 0,
+        expectWarn,
+        `#3697-B2 (${label}): rangeTokens membership must be ${expectWarn} at length ${n}`,
+      );
+      assert.strictEqual(a.warn, expectWarn, `#3697-B2 (${label}): warn must be ${expectWarn}`);
+    });
+  }
+});
+
 describe('#3697 round 3: the two warning channels', () => {
   // ── Major 3 ────────────────────────────────────────────────────────────────
   // An annotation separator between two NON-ADJACENT same-prefix IDs is
@@ -12185,6 +12231,61 @@ describe('#3697 round 3: the two warning channels', () => {
     );
   }
 
+  // ── Census closure ─────────────────────────────────────────────────────────
+  // The range-operator enumeration is a set the code fixes at author time over
+  // a domain (separator spellings) that grows without it. Round 3's census
+  // found the ASCII and typographic dashes split: U+2013/U+2014 were reached,
+  // the five other Unicode dashes were not, and each miss is a SILENT
+  // under-selection — #3697's own defect. They carry no collision risk because
+  // they are not the REQ-ID separator (that is ASCII `-`), so they close.
+  for (const [label, cp] of [
+    ['U+2010 hyphen', '‐'],
+    ['U+2011 non-breaking hyphen', '‑'],
+    ['U+2012 figure dash', '‒'],
+    ['U+2015 horizontal bar', '―'],
+    ['U+2212 minus sign', '−'],
+  ]) {
+    test(`#3697-11 (${label}): a typographic dash is the same range operator at a different codepoint`, () => {
+      const spaced = `RANGE-01 ${cp} RANGE-05`;
+      assert.strictEqual(
+        analyzeRequirementsLine(spaced).warn,
+        true,
+        `#3697-11 (${label}): spaced form must warn`,
+      );
+      const tight = `RANGE-01${cp}RANGE-05`;
+      assert.strictEqual(
+        analyzeRequirementsLine(tight).warn,
+        true,
+        `#3697-11 (${label}): tight form must warn`,
+      );
+      // And the collision the ASCII hyphen has must NOT arrive with them: a
+      // date-shaped annotation stays silent because its own separators are
+      // ASCII, so it never reaches the ID shape at all.
+      assert.strictEqual(
+        analyzeRequirementsLine(`RANGE-01 (target FY-2026-08)`).warn,
+        false,
+        `#3697-11 (${label}): the date-annotation control must stay silent`,
+      );
+    });
+  }
+
+  test('#3697-12: the ASCII-hyphen strict shape is unchanged by the dash widening', () => {
+    // `LETTERS-\d+-\d+` is also a date and a sub-numbered ID, which is why the
+    // bare-hyphen tight arm demands a full ID on both sides. Widening the
+    // NOHYPHEN arm must not relax that.
+    for (const line of ['RANGE-01-05', 'FY-2026-08', 'API-2-01']) {
+      assert.strictEqual(
+        analyzeRequirementsLine(line).rangeTokens.length,
+        0,
+        `#3697-12: ${JSON.stringify(line)} must not read as a tight range`,
+      );
+    }
+    assert.strictEqual(
+      analyzeRequirementsLine('RANGE-01-RANGE-05').rangeTokens.length,
+      1,
+      '#3697-12: the full-ID-both-sides spelling must still read as a range',
+    );
+  });
 });
 
 // ─── #2572: phase-SUMMARY artifact↔disk advisory at phase completion ─────────
