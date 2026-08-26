@@ -1907,7 +1907,7 @@ function crlfAtEof(before: string): boolean {
 /** Result of `acknowledgeDeferredItem`. */
 interface AcknowledgeDeferredItemResult {
   content: string;
-  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed' | 'rewrite_not_readable';
+  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed';
 }
 
 /**
@@ -2109,18 +2109,34 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     newMatchedLines[statusLineIdx] = `${prefix}${sep}acknowledged${cr}`;
   }
 
-  // Read the result back through the READER before reporting `ok` (#3773's
-  // floor, adopted here). Every defect this function has shipped had the same
-  // shape — `ok`, and nothing the reader could see. It costs a refused command
-  // rather than an item that stays outstanding forever while claiming to have
-  // been acknowledged. Do NOT describe it as unreachable: this round shipped a
-  // reachable path to it for one review cycle (a fenced `status:` line, when
-  // the fence gate lived only on the reader's side), and an invariant asserted
-  // in a comment is exactly what that claim was.
-  const readBack = extractGapEntryFields(newMatchedLines, DEFERRED_BULLET_MARKERS);
-  if ((readBack.status || '').toLowerCase() !== 'acknowledged') {
-    return { content, status: 'rewrite_not_readable' };
-  }
+  // NO post-write read-back guard here, deliberately (round 4, B3). Round 3
+  // added one — `rewrite_not_readable` — after a fenced `status:` line proved
+  // the writer could select a line the reader would not read back. Round 3
+  // then closed that divergence STRUCTURALLY, by routing the writer's line
+  // selection and the reader's field extraction through the one
+  // `entryFieldLines` seam above, and the guard became unreachable from the
+  // public API: 21 document shapes were driven against it (fence openers on
+  // the bullet line for every marker, duplicate and triplicate `status:`
+  // lines, bolded and nested variants, fences between duplicates) and none
+  // reached it.
+  //
+  // An unreachable branch is not free here. This repo's own
+  // `RULESET.TESTS.mutation-score` runs Stryker incrementally over changed
+  // files at an 80% threshold and says to "treat surviving mutant as a failing
+  // test specification"; an undriven `if` is exactly that. The only seam that
+  // would drive it is routing this call through the module's exports so a test
+  // could stub it — production surface reshaped for a test, which is a worse
+  // trade than the guard is worth now that construction, not assertion,
+  // enforces the invariant.
+  //
+  // What that gives up, stated plainly rather than hidden: if a future change
+  // re-splits the writer's selection from the reader's extraction, this
+  // function returns `ok` over an item that stays outstanding — the original
+  // #3702 defect class. `match_verification_failed` does NOT backfill it; that
+  // check runs BEFORE the write and compares the matched span to the target,
+  // so it cannot see a post-write read-back failure. The protection against
+  // re-splitting is the shared seam plus the round-3 tests that pin it, not a
+  // runtime assertion.
 
   const newContent = content.slice(0, matchIndexInContent) + newMatchedLines.join('\n') + content.slice(matchIndexInContent + (end - start));
   return { content: newContent, status: 'ok' };
