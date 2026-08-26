@@ -5561,7 +5561,7 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
       assert.notStrictEqual(
         gitOrThrow(['rev-parse', 'HEAD:sub'], { cwd: tmpDir }).trim(), before,
         'the recorded gitlink must actually advance');
-      fs.rmSync(subSrc, { recursive: true, force: true });
+      cleanup(subSrc);
     });
   }
 
@@ -5580,7 +5580,7 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
 
     assert.strictEqual(commitFiles('sub').reason, 'nothing_to_commit',
       'nothing would land, so nothing_to_commit is the correct answer, not a misreport');
-    fs.rmSync(subSrc, { recursive: true, force: true });
+    cleanup(subSrc);
   });
 
   // No submodule involved. A textconv driver maps two different blobs to the
