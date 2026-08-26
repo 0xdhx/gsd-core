@@ -12059,6 +12059,108 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     },
   );
 
+  // ==========================================================================
+  // #3697-14 — AC-1b / AC-4: zero selection on a non-placeholder line.
+  //
+  // The issue's narrow clause verbatim: "warn when `citedReqIds.length === 0`
+  // while the raw capture is non-empty and not `TBD`". Before R3b these five
+  // words selected nothing and stayed SILENT, while `docs/CLI-TOOLS.md`, the
+  // `placeholderLed` census comment and the advice string all stated they
+  // warned — a claim written into three artifacts and never executed once.
+  // The asymmetry was the tell: `Deferred (see ADR-7)` warned (the citation
+  // supplied ID-shaped residue) while bare `Deferred` did not.
+  // ==========================================================================
+  for (const [label14, line14] of [
+    ['Deferred', 'Deferred'],
+    ['N/A', 'N/A'],
+    ['Pending', 'Pending'],
+    ['TBA', 'TBA'],
+    ['bare dash', '-'],
+    // Prose with no ID-shaped token anywhere — the class R3's ID-shape gate
+    // could never reach, whatever the wording.
+    ['free prose', 'to be scoped after the spike'],
+  ]) {
+    test(
+      `#3697-14 (zero selection, ${label14}): a non-empty, non-placeholder line that selects NO ` +
+      'REQ-IDs must warn — #3697 AC-1b/AC-4',
+      (t) => {
+        const tmpDir = build3697RangeFixture(line14);
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-14 FAILED (${label14}): ${JSON.stringify(line14)} is non-empty, is not a ` +
+          `placeholder and selects zero REQ-IDs, so it must warn. ` +
+          `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+        // The warning must name the escape the author actually has, or it
+        // reports a problem with no remedy.
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /`TBD` or `None`/.test(w)),
+          `#3697-14 FAILED (${label14}): the warning must name the TBD/None placeholder escape, ` +
+          `got: ${JSON.stringify(warnings)}`,
+        );
+        // Selection behavior is UNCHANGED — this rule warns, it never invents IDs.
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent), [],
+          `#3697-14 FAILED (${label14}): a zero-selection line must tick NOTHING.\n` +
+          `REQUIREMENTS.md:\n${reqContent}`,
+        );
+      },
+    );
+  }
+
+  // The placeholder gate is what holds the whole #2334 negative space silent
+  // under R3b, so it is pinned in every spelling an author actually writes.
+  // Whole-channel silence, same rationale as #3697-4: a phrase filter pins
+  // wording, not silence.
+  for (const [label14b, line14b] of [
+    ['lowercase tbd', 'tbd'],
+    ['lowercase none', 'none'],
+    ['bold None only', '**None**'],
+    ['backticked TBD', '`TBD`'],
+    ['TBD with trailing note', 'TBD  <!-- pending scoping -->'],
+  ]) {
+    test(
+      `#3697-14b (placeholder spelling, ${label14b}): the placeholder gate must hold R3b off`,
+      (t) => {
+        const tmpDir = build3697RangeFixture(line14b);
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.deepStrictEqual(
+          warnings, [],
+          `#3697-14b FAILED (${label14b}): ${JSON.stringify(line14b)} is a declared-empty line and ` +
+          `must produce NO warning at all, got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+      },
+    );
+  }
+
+  // R3b's `tokens.length > 0` guard. The tokenizer strips `<!-- ... -->`
+  // BEFORE splitting, so a comment-only line yields no tokens and cannot
+  // reach the rule — without this guard the shipped template's own comment
+  // line would warn, which is #2334's opening move.
+  test(
+    '#3697-14c (comment-only line): a line whose only content is a template comment stays silent',
+    (t) => {
+      const tmpDir = build3697RangeFixture('<!-- fill in once the spike lands -->');
+      t.after(() => cleanup(tmpDir));
+      const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+      const parsed = JSON.parse(output);
+      const warnings = parsed.warnings || [];
+      assert.deepStrictEqual(
+        warnings, [],
+        `#3697-14c FAILED: a comment-only Requirements line has no content tokens and must not ` +
+        `warn, got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+      );
+    },
+  );
+
   // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
   // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
   // only the well-formed side. The glued-fragment rule must warn, and the

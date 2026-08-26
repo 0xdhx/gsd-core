@@ -2464,6 +2464,20 @@ type RequirementsLineAnalysis = {
   hasGluedRangeFragment: boolean;
   /** R3 — zero selection on a non-placeholder line, with ID-shaped residue. */
   inertIdShaped: string[];
+  /**
+   * R3b — zero selection on a non-placeholder line that carries ANY content.
+   *
+   * This is #3697's AC-1b/AC-4 verbatim ("warn when `citedReqIds.length === 0`
+   * while the raw capture is non-empty and not `TBD`"), and it is deliberately
+   * NOT gated on ID-shaped residue the way R3 is. Round 4 measured the reason:
+   * every one of the fifteen #2334/#2339 negative-space fixtures is held
+   * silent by non-zero SELECTION or by `placeholderLed`, and not one of them by
+   * the ID-shape gate — so the gate was buying no negative space while costing
+   * the acceptance criterion. `Deferred`, `N/A`, `Pending`, `TBA` and `-` were
+   * silent because of it, while the docs, this census and the advice string all
+   * said they warned.
+   */
+  zeroSelectionInert: boolean;
   /** Tokens past the scan cap that could carry an ID — reported, never dropped. */
   oversizedTokens: string[];
   /** ID-shaped tokens the selector did not take. Reported as a fact; never routes. */
@@ -2647,18 +2661,28 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // GSD itself seeds plus what an author writes for "deliberately empty".
   // Reached: `TBD` — the ONLY machine-written seed, at the three phase.add /
   // -batch / -insert sites — and `None`, the author convention. NOT reached:
-  // `N/A`, `Deferred`, `Pending`, `TBA`, `-`. Consequence, stated rather than
-  // fixed: such a line selects zero IDs and warns, which is what #3697's
-  // acceptance criterion asks for ("when it selects zero IDs from a line that
-  // is non-empty and is not the `TBD` placeholder") — so the trigger is
-  // correct and deliberate. Inferring placeholder-ness from arbitrary prose is
-  // the free-text heuristic this detector exists to avoid. What WAS wrong is
-  // the wording, and that is fixed in the formatter below.
+  // `N/A`, `Deferred`, `Pending`, `TBA`, `-`. Consequence, and it is now
+  // ENFORCED rather than asserted: such a line selects zero IDs and warns
+  // through R3b below, which is what #3697's acceptance criterion asks for
+  // ("when it selects zero IDs from a line that is non-empty and is not the
+  // `TBD` placeholder"). Round 3 shipped this same paragraph while R3's
+  // ID-shape gate made it false for all five words — bare `Deferred` was
+  // silent, `Deferred (see ADR-7)` warned — and the claim sat in three
+  // artifacts with no test in either direction. Inferring placeholder-ness
+  // from arbitrary prose is still the free-text heuristic this detector
+  // avoids: R3b keys on the SELECTION being empty, never on what the prose
+  // means.
   const placeholderLed = leadToken === 'TBD' || leadToken === 'NONE';
   const inertIdShaped =
     citedReqIds.length === 0 && !placeholderLed
       ? tokens.filter((t) => short(t) && t.includes('-') && REQ_ID_SUBSTRING_RE.test(t))
       : [];
+  // R3b — the acceptance criterion's own narrow form. `tokens.length > 0` is
+  // what keeps an empty line and a comment-only line silent: the tokenizer
+  // strips `<!-- ... -->` before splitting, so `<!-- fill in -->` yields no
+  // tokens and cannot reach this rule. Every other zero-selection,
+  // non-placeholder line warns.
+  const zeroSelectionInert = citedReqIds.length === 0 && !placeholderLed && tokens.length > 0;
 
   // R2 is the ONLY ambiguous rule — a tight range, a glued fragment and R3
   // residue each implicate ID-shaped text the selector demonstrably did not
@@ -2722,6 +2746,20 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     inertIdShaped.length === 0 &&
     spacedRangePairs.every(([a, b]) => selected.has(a.toUpperCase()) && selected.has(b.toUpperCase()));
 
+  // Named rather than inlined into the return literal (round 3 review Minor 3):
+  // this disjunction is the module's single most important predicate, and in
+  // the literal a later edit that reordered a local below the `return` would be
+  // a TDZ ReferenceError at runtime rather than an error at the reader's eye
+  // level. R3b joins it here — see its field docs above for why it is not
+  // gated on ID shape.
+  const warn =
+    rangeTokens.length > 0 ||
+    hasSpacedRange ||
+    hasGluedRangeFragment ||
+    inertIdShaped.length > 0 ||
+    zeroSelectionInert ||
+    oversizedTokens.length > 0;
+
   return {
     citedReqIds,
     tokens,
@@ -2729,17 +2767,13 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     hasSpacedRange,
     hasGluedRangeFragment,
     inertIdShaped,
+    zeroSelectionInert,
     placeholderLed,
     spacedRangePairs,
     rangeReadingOnly,
     oversizedTokens,
     unselectedIdShaped,
-    warn:
-      rangeTokens.length > 0 ||
-      hasSpacedRange ||
-      hasGluedRangeFragment ||
-      inertIdShaped.length > 0 ||
-      oversizedTokens.length > 0,
+    warn,
   };
 }
 
