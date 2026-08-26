@@ -306,9 +306,20 @@ oversight: the line is a traceability record, and silently inventing IDs that
 appear nowhere in `REQUIREMENTS.md` is worse than declining to.
 
 **A deliberately empty line is written `TBD` or `None`.** Those two words are
-the placeholder vocabulary; any other wording (`Deferred`, `N/A`, `Pending`)
-selects no REQ-IDs and warns, because from the command's side it is
-indistinguishable from a line that was meant to cite requirements and failed to.
+the placeholder vocabulary, and they are matched as the line's leading token, so
+`None (per ADR-7)` and `**None**` are declared-empty too. **Any other wording
+that selects no REQ-IDs warns** — `Deferred`, `N/A`, `Pending`, `TBA`, a bare
+`-`, or free prose — because from the command's side an unrecognised word is
+indistinguishable from a line that was meant to cite requirements and failed
+to. A line whose only content is an HTML comment is not "other wording" and
+stays silent, so the shipped template's own `<!-- ... -->` does not warn.
+
+**Separate every requirement with a comma.** The line is split on commas and
+whitespace only, so a `;` or `:` glued to an ID takes the ID with it:
+`REQ-01; REQ-02` marks **only** `REQ-02`. That is the quietest way to lose a
+requirement here — the command reports `requirements_updated: true` either way —
+so it is called out by name in the warning. A delimiter inside parentheses is
+left alone: `(see ADR-7: section 3)` is a citation, not a dropped requirement.
 
 **Dash spellings need a full ID on both sides.** `REQ-01-REQ-05` reads as a
 range; `REQ-01-05` does not, and neither does any of its typographic variants
@@ -332,11 +343,21 @@ none blocks completion:
   states both readings rather than asserting a failure that may not have
   happened. It speaks about the **separator**, not about the whole line.
 
+**Each warning carries a machine-readable kind.** The prose goes to
+`warnings[]` as before — that field is unchanged and is still an array of
+strings — and the kind is emitted beside it as `requirements_line_warning`,
+one of `req-line-misparse`, `req-line-range-reading` or `req-line-unverified`.
+The field is absent entirely when the line is clean. Key on the kind rather
+than on the wording; the wording is free to improve.
+
 Either of those two voices may add a factual note naming **ID-shaped text on the
 line that was not selected**. Square brackets *are* stripped — `[REQ-01, REQ-02]`
 is the documented form — but parentheses are not, so `(REQ-02)` is not marked.
 The command cannot tell that from `(ADR-7)`, which is a citation and correctly
-ignored, so it names what it skipped and leaves the judgement to you.
+ignored, so it names what it skipped and leaves the judgement to you. It stays
+quiet about `PREFIX-<digits>-<digits>` there — the date and sub-numbered shapes
+the dash rule above already declines to adjudicate — rather than asking you to
+check whether a date is a requirement.
 The third voice is for input the command could not examine: *"could not be
 checked ... the REQ-ID selection on this line is unverified"*. Range detection
 is bounded at 2,048 characters per token, so a longer token is not classified —
