@@ -2577,7 +2577,13 @@ const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
 // "check whether any of it is a requirement" about a date. Not a false
 // warning — the line was warning anyway — but false CONTENT, and it is the
 // #2334 voice.
-const REQ_DATE_LIKE_RE = /^[A-Z][A-Z0-9]*-\d+-\d+$/i;
+// The YEAR segment is what makes this a date rather than a requirement.
+// `API-2-01` is a LEGAL requirement id — gap-checker's parseRequirements
+// accepts it from REQUIREMENTS.md — so the round 4 pre-push review was right
+// that a `\d+-\d+` filter suppresses a rider naming a genuinely dropped
+// requirement. Four digits in the middle segment is a date and is not a
+// requirement number anyone writes.
+const REQ_DATE_LIKE_RE = /^[A-Z][A-Z0-9]*-\d{4}-\d{1,2}$/i;
 
 // The token-length cap. It bounds REQ_ID_SUBSTRING_RE, the one UNANCHORED
 // regex here, which backtracks quadratically on a pathological token. Round 3
@@ -2638,13 +2644,44 @@ const REQ_DELIMITER_DROPPED_RE = /^([A-Z][A-Z0-9]*-\d+)[;:]+$/i;
  * the semicolon; the colon is the sibling that sweep found, and it fails
  * identically.
  *
- * NOT reached, and stated rather than fixed: a delimiter glued to an ID
- * INSIDE a parenthetical (`(see ADR-7: section 3)`). Those are citations, not
- * requirements, and reporting them is the #2334 over-warning class — so the
- * parenthetical test below is the rule's boundary, not an optimisation.
+ * NOT reached, and stated rather than fixed — TWO members, both citations:
+ *   - a delimiter glued to an ID inside a parenthetical, `(see ADR-7: sec 3)`;
+ *   - a BARE citation whose prefix appears nowhere among the SELECTED ids,
+ *     `REQ-01, see ADR-7: section 3`. The parenthetical test does not reach
+ *     this one, and it is textually identical to a real drop — `ADR-7:` and
+ *     `REQ-01;` are the same shave class. Same-prefix agreement is what
+ *     separates them, and it is the module's own idiom rather than a new
+ *     heuristic (reqEndpointsImplyInterior already requires an agreeing
+ *     prefix for the same reason).
+ * The cost of that gate, stated: a genuinely dropped id whose prefix appears
+ * on no selected id — `REQ-01, FOO-02: x` where FOO-02 is real — stays
+ * silent. That is the deliberate trade, the same one the strict-dash rule
+ * takes: an under-report on a rare shape, over an over-report on a common
+ * one. Both NOT-reached members were found by the round's own pre-push
+ * adversarial review, driving inputs this rule's author had not probed.
  */
 function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: number): string[] {
-  const line = String(rawLine).replace(/<!--[\s\S]*?-->/g, ' ');
+  // Square brackets are stripped exactly as the SELECTOR strips them, because
+  // `[REQ-01, REQ-02]` is the documented form — round 4 pre-push review found
+  // `[REQ-01; REQ-02]` silently dropping REQ-01 with no warning at all, which
+  // is this rule failing on the very shape the template recommends.
+  const line = String(rawLine)
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/[[\]]/g, '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+  // The prefixes actually SELECTED on this line. A dropped token must agree
+  // with one of them, and that is what separates a delimiter typo from a
+  // citation: `REQ-01, see ADR-7: section 3` carries `ADR-7:` — same shave
+  // class as `REQ-01;`, and the parenthetical test does not reach it because
+  // the citation is bare. Round 4 pre-push review drove exactly that false
+  // positive, which is the #2334 over-warning class arriving through the rule
+  // added to close a different hole. Same-prefix agreement is the module's own
+  // existing idiom (see reqEndpointsImplyInterior), not a new heuristic.
+  const selectedPrefixes = new Set<string>();
+  for (const id of selected) {
+    const m = REQ_ID_PARTS_RE.exec(id);
+    if (m) selectedPrefixes.add(m[1].toUpperCase());
+  }
   const hits: string[] = [];
   let depth = 0;
   let cur = '';
@@ -2652,7 +2689,10 @@ function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: num
   const flush = (): void => {
     if (cur && cur.length <= cap && curDepth === 0) {
       const m = REQ_DELIMITER_DROPPED_RE.exec(cur);
-      if (m && !selected.has(m[1].toUpperCase())) hits.push(m[1]);
+      if (m && !selected.has(m[1].toUpperCase())) {
+        const parts = REQ_ID_PARTS_RE.exec(m[1]);
+        if (parts && selectedPrefixes.has(parts[1].toUpperCase())) hits.push(m[1]);
+      }
     }
     cur = '';
   };
@@ -2707,6 +2747,13 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // range operator (`REQ-01.. REQ-05`), not sentence punctuation — keep it.
   const tokens = line
     .replace(/<!--[\s\S]*?-->/g, ' ')
+    // Zero-width and format characters are INVISIBLE, so a line carrying only
+    // them reads as empty to the author while carrying a token to the parser.
+    // Round 4 pre-push review: a lone U+200B warned, and no author could have
+    // seen why. Stripped rather than treated as a delimiter — they can also sit
+    // inside an otherwise valid token, where splitting on them would fabricate
+    // two fragments out of one ID.
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
     .split(/[,\s]+/)
     .map((t) => {
       const trimmed = t.trim();

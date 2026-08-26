@@ -290,9 +290,13 @@ REQ-IDs to mark. The grammar is deliberately small, and it is documented here
 because the command now warns about it (#3697) — a warning about a rule that
 cannot be looked up is not actionable.
 
-**The only supported form is a comma-separated list of REQ-IDs.** Square
-brackets are optional; a REQ-ID is `PREFIX-N`, where the prefix is an uppercase
-letter followed by letters or digits:
+**The canonical form is a comma-separated list of REQ-IDs.** Square brackets are
+optional; a REQ-ID is `PREFIX-N`, where the prefix is a letter followed by
+letters or digits. Two tolerances are worth knowing because the warnings below
+do **not** fire on them: the line is split on commas *and whitespace*, so
+`REQ-01 REQ-02` selects both; and the ID shape is matched case-insensitively,
+so `req-01` is selected and marked. Write the comma list anyway — it is what
+every template and every example uses — but neither spelling is an error:
 
 ```
 **Requirements**: REQ-01, REQ-02, REQ-03

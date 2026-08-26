@@ -232,7 +232,7 @@
     {
       "id": "PHASE.REQ-LINE.SEAM.census-domains",
       "klass": "PHASE",
-      "value": "TWO open domains, each censused in-source with its NOT-reached consequence: range-operator spellings (reached: ..+, seven Unicode dashes plus ASCII -, …, to/thru/through; not reached: →, ~, ..=, ..<, until, up to) and comma-SUBSTITUTE separators (26 swept; exactly ;  and :  produce a silent under-selection, now R4; every other spelling selects both IDs or already warns)",
+      "value": "TWO open domains, each censused in-source with its NOT-reached consequence: range-operator spellings (reached: ..+, seven Unicode dashes plus ASCII -, …, to/thru/through; not reached: →, ~, ..=, ..<, until, up to) and comma-SUBSTITUTE separators (26 swept; exactly ;  and :  produce a silent under-selection, now R4; every other spelling selects both IDs or already warns); R4's own NOT-reached set is TWO citation shapes — a delimiter inside a parenthetical, and a bare citation whose prefix is on no selected id — bought at the cost of a dropped id with an unshared prefix staying silent",
       "line": 708
     },
     {
@@ -262,7 +262,7 @@
     {
       "id": "PHASE.REQ-LINE.SEAM.rules",
       "klass": "PHASE",
-      "value": "R1 whole-token range | R2 spaced operator between two selected interior-implying endpoints | R2' operator glued to one endpoint | R3 zero selection with ID-shaped residue | R3b zero selection on any non-placeholder non-empty line (#3697 AC-1b/AC-4) | R4 an ID the selector dropped to a glued ;/: outside any parenthetical | over-cap unclassified; warn is their disjunction, named rather than inlined in the return literal",
+      "value": "R1 whole-token range | R2 spaced operator between two selected interior-implying endpoints | R2' operator glued to one endpoint | R3 zero selection with ID-shaped residue | R3b zero selection on any non-placeholder non-empty line (#3697 AC-1b/AC-4) | R4 an ID the selector dropped to a glued ;/: outside any parenthetical AND sharing a prefix with a SELECTED id (square brackets stripped as the selector strips them) | over-cap unclassified; warn is their disjunction, named rather than inlined in the return literal",
       "line": 704
     },
     {
