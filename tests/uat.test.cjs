@@ -3444,6 +3444,18 @@ describe('#3702 round 2: round-review refinements (ordered run, rejected ordinal
     // `BulletMarkers.blockStructure`; the Gaps section is template-mandated and
     // out of #3702's blast radius, so a fenced hyphen line still counts there,
     // and a fenced field is still read — exactly as on `next`.
+    //
+    // THE SECOND ASSERTION PINS A KNOWN DEFECT, deliberately, and it is filed:
+    // open-gsd/gsd-core#3898. A spaced hyphen thematic break in `## Gaps` is
+    // read as an ITEM, so `- - -` surfaces a phantom open gap named `- -`.
+    // That reproduces on pristine `next` (measured at 389bc86e0) and is not
+    // this PR's doing — the Gaps path is byte-identical across it. It is
+    // pinned rather than fixed because scope-limiting Gaps is the whole point
+    // of the `blockStructure` opt-out, and pinned rather than deleted because
+    // this assertion is the only thing that would notice the Gaps path moving.
+    // Round 4 (m4): a pinned defect with no issue behind it is indistinguishable
+    // from intended behaviour to the next reader, hence #3898. When that issue
+    // is fixed, this expectation becomes `['real']` in the same change.
     const uat = ['---', 'status: partial', 'phase: 01-x', '---', '', '## Gaps', '', '```', '- truth: phantom', '  status: open', '```', ''].join('\n');
     const got = parseUatItems(uat);
     assert.deepStrictEqual(got.map((i) => i.name), ['phantom'], JSON.stringify(got));
