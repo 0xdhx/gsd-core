@@ -2674,7 +2674,13 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // warning — so an over-cap token that could carry an ID is reported as
   // unclassified. The test is `includes('-')`, a linear scan, never the
   // unanchored regex the cap exists to keep off these tokens.
-  const oversizedTokens = tokens.filter((t) => !short(t) && t.includes('-'));
+  // ANY over-cap token, not just one carrying `-`. The first cut filtered on
+  // `includes('-')` and therefore missed an over-cap OPERATOR:
+  // `REQ-01 <2049 dots> REQ-05` warned before this round (R2 was uncapped) and
+  // went silent after it, which is the very regression this field was added to
+  // close. A token we could not examine makes the line unverified whatever
+  // characters it happens to contain.
+  const oversizedRaw = tokens.filter((t) => !short(t));
 
   // ID-shaped tokens the selector did not take, ANYWHERE on the line. This is
   // reported as a fact, never used to pick the channel: `(ADR-7)` and
@@ -2683,6 +2689,12 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // Naming them lets the author see what the tokenizer skipped without the
   // warning asserting a verdict it cannot support in either direction.
   const selected = new Set(citedReqIds.map((id) => id.toUpperCase()));
+  // A token the SELECTOR took is verified by definition — the selector is
+  // uncapped and anchored, so it examined the whole token. Reporting it as
+  // "unverified" because the secondary detector declined to classify it is a
+  // contradiction the round's continuation review caught: a 2049-character
+  // canonical REQ-ID was selected AND flagged unverified in the same warning.
+  const oversizedTokens = oversizedRaw.filter((t) => !selected.has(t.toUpperCase()));
   const unselectedIdShaped = tokens.filter(
     (t) => short(t) && REQ_ID_SUBSTRING_RE.test(t) && !selected.has(t.toUpperCase()),
   );
@@ -2752,10 +2764,17 @@ function formatRequirementsLineWarning(
   // but the author can, and only if the warning tells them. Round 3's first
   // cut instead let this drive the channel, which put the false "could not be
   // parsed" claim back on a line carrying a citation.
+  // Names only what the rule-specific clauses did NOT already name, so the
+  // assertive voice can carry it too without repeating itself.
+  const alreadyNamed = new Set(
+    [...analysis.rangeTokens, ...analysis.inertIdShaped].map((t) => t.toUpperCase()),
+  );
+  const skippedNames = analysis.unselectedIdShaped.filter((t) => !alreadyNamed.has(t.toUpperCase()));
   const skipped =
-    analysis.unselectedIdShaped.length > 0
-      ? ` ID-shaped text on the line that was NOT selected: ${analysis.unselectedIdShaped.join(', ')}` +
-        ` (brackets and parentheses are not stripped) — check whether any of it is a requirement.`
+    skippedNames.length > 0
+      ? ` ID-shaped text on the line that was NOT selected: ${skippedNames.join(', ')}` +
+        ` (parentheses are not stripped, unlike square brackets) — check whether any of it is a` +
+        ` requirement.`
       : '';
   const oversized =
     analysis.oversizedTokens.length > 0
@@ -2831,6 +2850,7 @@ function formatRequirementsLineWarning(
         : ` ID-shaped text that was not selected: ${unparsed.join(', ')}.`
       : '') +
     advice +
+    skipped +
     oversized
   );
 }

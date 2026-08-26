@@ -333,9 +333,10 @@ none blocks completion:
   happened. It speaks about the **separator**, not about the whole line.
 
 Either of those two voices may add a factual note naming **ID-shaped text on the
-line that was not selected**. Brackets and parentheses are not stripped, so `(REQ-02)` is not
-marked — and the command cannot tell that from `(ADR-7)`, which is a citation
-and correctly ignored. It names what it skipped and leaves the judgement to you.
+line that was not selected**. Square brackets *are* stripped — `[REQ-01, REQ-02]`
+is the documented form — but parentheses are not, so `(REQ-02)` is not marked.
+The command cannot tell that from `(ADR-7)`, which is a citation and correctly
+ignored, so it names what it skipped and leaves the judgement to you.
 The third voice is for input the command could not examine: *"could not be
 checked ... the REQ-ID selection on this line is unverified"*. A token longer
 than 2,048 characters is not classified at all — the scan is bounded — and the

@@ -12503,16 +12503,90 @@ describe('#3697 round 3: the two warning channels', () => {
   );
 
   test('#3697-9f (cap uniformity): R2 and the glued rule cap their NEIGHBOURS, not just the operator', () => {
-    // The review's MISSED finding. Capping the operator alone left
-    // `<2049-char ID> .. <2049-char ID>` running REQ_ID_SHAPE_RE and BigInt
-    // over both neighbours unbounded — the cap read as uniform and was not.
-    const bigId = `RANGE-${'0'.repeat(2049 - 'RANGE-'.length - 1)}1`;
-    assert.strictEqual(bigId.length, 2049, `#3697-9f fixture is ${bigId.length} chars, expected 2049`);
-    const a = analyzeRequirementsLine(`${bigId} .. ${bigId}`);
+    // The first review's MISSED finding. Capping the operator alone left
+    // `<over-cap ID> .. <over-cap ID>` running REQ_ID_SHAPE_RE and BigInt over
+    // both neighbours unbounded.
+    //
+    // The endpoints must DIFFER by more than 1, or R2 could not fire even
+    // uncapped and the fixture would prove nothing — the first cut of this test
+    // used the same ID twice and was exactly that vacuous.
+    const pad = '0'.repeat(2049 - 'RANGE-'.length - 1);
+    const lo = `RANGE-${pad}1`;
+    const hi = `RANGE-${pad}9`;
+    assert.strictEqual(lo.length, 2049, `#3697-9f fixture is ${lo.length} chars, expected 2049`);
+    assert.strictEqual(hi.length, 2049, `#3697-9f fixture is ${hi.length} chars, expected 2049`);
+    const a = analyzeRequirementsLine(`${lo} .. ${hi}`);
     assert.strictEqual(a.hasSpacedRange, false, '#3697-9f: an over-cap endpoint must not be classified');
-    // Still not silent — the over-cap tokens are reported.
-    assert.strictEqual(a.warn, true, '#3697-9f: unclassified is not clean');
+    // And silence is CORRECT here, not a gap: the selector is uncapped and
+    // anchored, so it examined and selected both endpoints. Nothing was
+    // dropped, so there is nothing to report.
+    assert.deepStrictEqual(a.citedReqIds, [lo, hi], '#3697-9f: both endpoints are selected');
+    assert.deepStrictEqual(a.oversizedTokens, [], '#3697-9f: selected means verified');
+    assert.strictEqual(a.warn, false, '#3697-9f: nothing was dropped, so nothing is reported');
   });
+
+  test(
+    '#3697-9g (assertive voice): the skipped-text clause is on BOTH voices, and does not repeat ' +
+    'what the rule-specific clause already named',
+    () => {
+      // The continuation review found the clause wired into the soft return
+      // only, while the round claimed both. It also found the wording wrong:
+      // square brackets ARE stripped by the selector, only parentheses are not.
+      const line = 'REQ-01, (REQ-02), REQ-03..REQ-05';
+      const w = formatRequirementsLineWarning('1', line, analyzeRequirementsLine(line));
+      assert.match(w, REQ_LINE_MISPARSE_RE, `#3697-9g: assertive voice expected: ${w}`);
+      assert.match(w, /ID-shaped text on the line that was NOT selected: REQ-02/i, `#3697-9g: ${w}`);
+      assert.match(w, /parentheses are not stripped, unlike square brackets/i, `#3697-9g: ${w}`);
+      // `REQ-03..REQ-05` is already named by "Unparsed text"; naming it twice
+      // is noise, and a warning that repeats itself is one readers skim.
+      // Count OUTSIDE the echoed line — the warning quotes the whole
+      // Requirements line first, so the raw echo is one legitimate occurrence.
+      const afterEcho = w.slice(w.indexOf('`)') + 2);
+      assert.strictEqual(
+        (afterEcho.match(/REQ-03\.\.REQ-05/g) || []).length,
+        1,
+        `#3697-9g: the range token must be diagnosed exactly once: ${w}`,
+      );
+      // And the claim must be TRUE: a bracketed ID is selected, so it can never
+      // appear in the skipped clause.
+      assert.deepStrictEqual(
+        analyzeRequirementsLine('[REQ-01, REQ-02]').citedReqIds,
+        ['REQ-01', 'REQ-02'],
+        '#3697-9g: square brackets are stripped by the selector',
+      );
+    },
+  );
+
+  test(
+    '#3697-9h (over-cap token with no hyphen): an unexaminable OPERATOR must not silence the line',
+    () => {
+      // The continuation review's CLAIM B. `oversizedTokens` first filtered on
+      // `includes('-')`, so a 2049-character run of dots between two IDs was
+      // missed: R2 declined to classify it (capped) and nothing reported it, so
+      // a line that warned before the round went silent after it.
+      const line = `REQ-01 ${'.'.repeat(2049)} REQ-05`;
+      const a = analyzeRequirementsLine(line);
+      assert.strictEqual(a.hasSpacedRange, false, '#3697-9h: the operator is past the cap');
+      assert.strictEqual(a.oversizedTokens.length, 1, '#3697-9h: and is recorded as unexaminable');
+      assert.strictEqual(a.warn, true, '#3697-9h: so the line is not silent');
+    },
+  );
+
+  test(
+    '#3697-9i (over-cap token the SELECTOR took): a selected ID is verified, never "unverified"',
+    () => {
+      // The continuation review's MISSED finding. The selector is uncapped and
+      // fully anchored, so a token it accepted was examined end to end.
+      // Reporting it unverified because the secondary detector declined to
+      // classify it is a contradiction inside one warning.
+      const bigId = `R-${'1'.repeat(2047)}`;
+      assert.strictEqual(bigId.length, 2049, `#3697-9i fixture is ${bigId.length} chars, expected 2049`);
+      const a = analyzeRequirementsLine(bigId);
+      assert.deepStrictEqual(a.citedReqIds, [bigId], '#3697-9i: it is a valid canonical REQ-ID');
+      assert.deepStrictEqual(a.oversizedTokens, [], '#3697-9i: selected means verified');
+      assert.strictEqual(a.warn, false, '#3697-9i: nothing to report');
+    },
+  );
 
   // ── Minor 4 ────────────────────────────────────────────────────────────────
   // A zero-selection non-placeholder line MUST warn — #3697's own acceptance
