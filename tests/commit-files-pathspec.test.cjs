@@ -779,6 +779,162 @@ describe('#2608: commit --files fails closed when git add fails', () => {
   });
 });
 
+describe('#3859: an unanswered sequencer probe must not open the empty-diff guard', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempGitProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  // `execGit` reports a spawn timeout as `exitCode: 1` (`_spawnResult`:
+  // `result.status ?? 1`) — byte-identical to the code `rev-parse --verify`
+  // returns for a ref that does not exist. So "the probe says no merge" and
+  // "the probe never answered" are the same value, and the #3776 guard read
+  // both as "no merge". These arms pin the conservative reading.
+  //
+  // The seam is `commitWithFailingAdd`'s injected `execGit` with
+  // `gitVerb: 'rev-parse'`: `args[0]` is `rev-parse` and `args[args.length-1]`
+  // is the ref, so `failFor: ['MERGE_HEAD']` selects exactly that one probe and
+  // leaves every other git call real.
+
+  // Leaves a conflicted merge or cherry-pick in progress with `bystander`
+  // committed and unmodified — the empty-diff shape that reaches the guard.
+  const BYSTANDER = path.posix.join('.planning', 'bystander.md');
+  function conflictedSequence(kind) {
+    const shared = path.posix.join('.planning', 'shared.md');
+    fs.writeFileSync(path.join(tmpDir, shared), 'base\n');
+    fs.writeFileSync(path.join(tmpDir, BYSTANDER), 'bystander\n');
+    gitOrThrow(['add', '--', shared, BYSTANDER], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['commit', '-m', 'shared base'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    const trunk = gitOrThrow(['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS }).trim();
+    gitOrThrow(['checkout', '-b', 'side'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    fs.writeFileSync(path.join(tmpDir, shared), 'side\n');
+    gitOrThrow(['commit', '-am', 'side edit'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['checkout', trunk], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    fs.writeFileSync(path.join(tmpDir, shared), 'trunk\n');
+    gitOrThrow(['commit', '-am', 'trunk edit'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    // Deliberately conflicting — that is what leaves the sequencer ref behind.
+    spawnSync('git', [kind === 'merge' ? 'merge' : 'cherry-pick', 'side'], {
+      cwd: tmpDir, encoding: 'utf8', timeout: STAGING_GIT_TIMEOUT_MS,
+    });
+    fs.writeFileSync(path.join(tmpDir, shared), 'resolved\n');
+    gitOrThrow(['add', '--', shared], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+  }
+
+  for (const shape of ['posix', 'windows']) {
+    test(`a timed-out MERGE_HEAD probe (${shape}) reaches git instead of silently abandoning the merge`, () => {
+      conflictedSequence('merge');
+      assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
+        'fixture must leave a merge in progress');
+
+      const { result, gitCalls } = commitWithFailingAdd({
+        cwd: tmpDir,
+        files: [BYSTANDER],
+        failFor: ['MERGE_HEAD'],
+        gitVerb: 'rev-parse',
+        timeout: shape,
+      });
+
+      assert.notEqual(result.reason, 'nothing_to_commit',
+        'an unanswered merge probe must not be read as "no merge in progress" — doing so decides '
+        + 'nothing_to_commit from a pathspec git will not honour and leaves the merge unconcluded');
+      assert.equal(result.reason, 'commit_failed',
+        'git must be the one to refuse the partial commit, loudly, as it did before #3776');
+      assert.ok(gitCalls.some((a) => a[0] === 'commit'),
+        'the guard must fall through to git commit rather than returning early');
+      assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'MERGE_HEAD')),
+        'the merge must still be in progress — silently abandoning it is the defect');
+    });
+  }
+
+  test('a timed-out CHERRY_PICK_HEAD probe reaches git too', () => {
+    conflictedSequence('cherry-pick');
+    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
+      'fixture must leave a cherry-pick in progress');
+
+    const { result, gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [BYSTANDER],
+      failFor: ['CHERRY_PICK_HEAD'],
+      gitVerb: 'rev-parse',
+      timeout: true,
+    });
+
+    assert.notEqual(result.reason, 'nothing_to_commit',
+      'the cherry-pick probe carries the identical conflation — #3776 added it, so it is in scope here');
+    assert.equal(result.reason, 'commit_failed');
+    assert.ok(gitCalls.some((a) => a[0] === 'commit'));
+    assert.ok(fs.existsSync(path.join(tmpDir, '.git', 'CHERRY_PICK_HEAD')),
+      'the cherry-pick must still be in progress');
+  });
+
+  // THE ADAPTATION, PINNED. The obvious implementation — treat the timeout as
+  // `isMergeInProgress` — also flips `canScope`, which is PRE-EXISTING and
+  // gates the pathspec. A spurious timeout would then turn a scoped commit into
+  // a bare one and record whatever else happened to be staged, under a message
+  // describing only the named file: #2112, reintroduced by the fix for a
+  // misreport. The timeout must reach `partialCommitRefused` and nothing else.
+  test('a timed-out MERGE_HEAD probe outside a merge still commits ONLY the named paths', () => {
+    const named = path.posix.join('.planning', 'named.md');
+    const unrelated = path.posix.join('.planning', 'unrelated.md');
+    fs.writeFileSync(path.join(tmpDir, named), 'seed\n');
+    fs.writeFileSync(path.join(tmpDir, unrelated), 'seed\n');
+    gitOrThrow(['add', '--', named, unrelated], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['commit', '-m', 'seed'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+
+    // A real change to the named file, and an UNRELATED file sitting staged in
+    // the index — the #2112 shape a bare commit would sweep up.
+    fs.writeFileSync(path.join(tmpDir, named), 'named edit\n');
+    fs.writeFileSync(path.join(tmpDir, unrelated), 'unrelated edit\n');
+    gitOrThrow(['add', '--', unrelated], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+
+    const { result, gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [named],
+      failFor: ['MERGE_HEAD'],
+      gitVerb: 'rev-parse',
+      timeout: true,
+    });
+
+    assert.equal(result.committed, true, 'the commit must still happen — there is a real diff');
+    const commitCall = gitCalls.find((a) => a[0] === 'commit');
+    assert.ok(commitCall, 'git commit must have run');
+    assert.ok(commitCall.includes('--') && commitCall.includes(named),
+      'the pathspec must survive the timeout: routing it through isMergeInProgress would drop it');
+    assert.deepEqual(committedFiles(tmpDir), [named],
+      'only the named path may land — the staged unrelated file must not be swept in (#2112)');
+  });
+
+  // NEGATIVE CONTROL for the conservative reading: outside a merge, treating an
+  // unanswered probe as "refused" must not manufacture a DIFFERENT answer. It
+  // falls through to git, git says there is nothing to commit, and the caller
+  // sees the same reason it would have seen anyway.
+  test('a timed-out MERGE_HEAD probe on a genuinely empty diff still reports nothing_to_commit', () => {
+    const rel = path.posix.join('.planning', 'quiet.md');
+    fs.writeFileSync(path.join(tmpDir, rel), 'unchanged\n');
+    gitOrThrow(['add', '--', rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['commit', '-m', 'quiet'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+
+    const { result, gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [rel],
+      failFor: ['MERGE_HEAD'],
+      gitVerb: 'rev-parse',
+      timeout: true,
+    });
+
+    assert.equal(result.reason, 'nothing_to_commit',
+      'the conservative reading defers to git, which reports the same thing the guard would have');
+    assert.ok(gitCalls.some((a) => a[0] === 'commit'),
+      'and it gets there by asking git, not by short-circuiting on an unanswered probe');
+  });
+});
+
+
 describe('workflow call sites declare --files (#2269)', () => {
   // WHAT COUNTS AS AN INVOCATION — the question this scan kept answering by
   // proxy, and kept getting wrong in both directions at once.

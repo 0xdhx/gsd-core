@@ -1807,7 +1807,8 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // During a merge, git refuses partial commits — fall back to a bare commit.
   // --amend is left without a pathspec: amending with -- <paths> is a different
   // operation that rewrites the tip with only those paths.
-  const isMergeInProgress = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd }).exitCode === 0;
+  const mergeHeadProbe = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd });
+  const isMergeInProgress = mergeHeadProbe.exitCode === 0;
   // #3776: git refuses a PARTIAL commit (`git commit -- <paths>`) while a merge
   // or a cherry-pick is in progress, so in those states the pathspec describes
   // nothing about what would actually land and the empty-diff decision below
@@ -1823,10 +1824,31 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // Only the scoped, non-amend call can return through the guard below, so both
   // added probes are gated on that — an unscoped commit or an --amend would
   // otherwise pay for git invocations whose answer it can never use.
+  // A non-zero exit from either sequencer probe means "not in that state" AND
+  // "the probe never answered" — `execGit` surfaces a spawn timeout as
+  // `exitCode: 1` (`_spawnResult`: `result.status ?? 1`), which is the exact
+  // code `rev-parse --verify` returns for a ref that does not exist. Conflating
+  // them is the one path in this fix that does NOT fail toward the old
+  // behaviour: a timeout during a real merge would leave `partialCommitRefused`
+  // false, the guard would decide `nothing_to_commit` from a pathspec git will
+  // not honour, and the merge would be silently abandoned where it previously
+  // reported a loud `commit_failed`. So an unanswered probe is treated as
+  // "assume the partial commit would be refused" — the conservative reading,
+  // which falls through to `git commit` and lets git speak for itself.
+  //
+  // This is deliberately routed into `partialCommitRefused` ONLY, never into
+  // `isMergeInProgress`: that flag also feeds the pre-existing `canScope` below,
+  // where a spurious timeout would convert a scoped commit into a bare one and
+  // record the whole index instead of the named paths. Suppressing a misreport
+  // must not be paid for by committing content the caller never named.
   const guardApplies = explicitFiles && !amend;
+  const cherryPickProbe = guardApplies
+    ? execGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], { cwd })
+    : null;
   const partialCommitRefused = isMergeInProgress
-    || (guardApplies
-      && execGit(['rev-parse', '-q', '--verify', 'CHERRY_PICK_HEAD'], { cwd }).exitCode === 0);
+    || isSpawnTimeout(mergeHeadProbe)
+    || (cherryPickProbe !== null
+      && (cherryPickProbe.exitCode === 0 || isSpawnTimeout(cherryPickProbe)));
   // `stagedPaths` records paths whose `git add` exited 0 — that is "did
   // staging succeed", not "is there anything to commit". Staging an
   // already-committed, unmodified file succeeds while contributing no diff, so
