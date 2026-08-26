@@ -844,7 +844,7 @@ describe('#2142: quick task archival at milestone close-out', () => {
     const names = ['2026-07-01-preview-a', '2026-07-02-preview-b'];
     for (const name of names) writeQuickTaskDir(tmpDir, name);
 
-    const result = runSdkQuery(['milestone.complete', 'v1.0', '--dry-run', '--archive-quick', '--confirm'], tmpDir);
+    const result = runSdkQuery(['milestone.complete', 'v1.0', '--dry-run', '--archive-quick'], tmpDir);
     assert.ok(result.success, `milestone.complete --dry-run failed: ${result.error}`);
     assert.ok(Array.isArray(result.data.would_archive.quick), 'would_archive.quick must be an array');
     for (const name of names) {
@@ -1174,7 +1174,7 @@ describe('#2142 review: README injection, symlink escape, dry-run/real-run parit
     try {
       writeQuickTaskDir(tmpDir, '2026-10-04-keep');
 
-      const dryRun = runSdkQuery(['milestone.complete', 'v1.0', '--dry-run', '--archive-quick', '--confirm'], tmpDir);
+      const dryRun = runSdkQuery(['milestone.complete', 'v1.0', '--dry-run', '--archive-quick'], tmpDir);
       assert.ok(dryRun.success, `dry-run failed: ${dryRun.error}`);
       assert.deepStrictEqual(
         dryRun.data.would_archive.quick,
@@ -1280,7 +1280,7 @@ describe('#3597: milestone complete refuses to archive on a non-COMPLETE window 
   test('--dry-run previews an empty archive list and the same refusal on the unreadable-window workstream', () => {
     seedUnreadableWorkstream(tmpDir);
 
-    const result = runSdkQuery(['milestone.complete', 'v1.0', '--dry-run', '--confirm'], tmpDir);
+    const result = runSdkQuery(['milestone.complete', 'v1.0', '--dry-run'], tmpDir);
     assert.ok(result.success, `milestone.complete --dry-run should succeed: ${result.error}`);
     assert.deepStrictEqual(result.data.would_archive.phases, [], 'dry-run must preview an EMPTY archive list');
     assert.strictEqual(result.data.would_archive.phases_archive_skipped, true);

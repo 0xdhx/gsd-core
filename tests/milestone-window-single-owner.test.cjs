@@ -875,7 +875,7 @@ test('milestone.complete scoping matches the owner window', (t) => {
   fs.mkdirSync(path.join(cwd, '.planning', 'phases', '05-old-shipped'), { recursive: true });
   fs.mkdirSync(path.join(cwd, '.planning', 'phases', '01-foo'), { recursive: true });
 
-  const dryRun = runGsdTools(['milestone', 'complete', 'v2.0', '--dry-run', '--cwd', cwd, '--raw', '--confirm'], cwd);
+  const dryRun = runGsdTools(['milestone', 'complete', 'v2.0', '--dry-run', '--cwd', cwd, '--raw'], cwd);
   assert.strictEqual(dryRun.success, true, dryRun.error);
   const parsed = JSON.parse(dryRun.output);
 
