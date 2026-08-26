@@ -2608,6 +2608,89 @@ describe('#3740 acknowledgeDeferredItem: CRLF status line that is not the entry\
     assertUniformCrlf(ack.content);
   });
 
+  test('CRLF document with NO final newline: a single-line entry still inserts with CRLF', () => {
+    // The span runs to end-of-file, so there is no separator AFTER it to read
+    // the ending from — and its absence is not evidence of LF (#3773 review,
+    // Minor 2). Without a fallback the insert joined line 0 to the new line
+    // with a bare `\n`, in a document whose every other break is `\r\n`. The
+    // fallback asks whether anything EARLIER IN THE SECTION contradicts CRLF;
+    // here nothing does. The two tests below are the counterexamples that
+    // fixed that scope.
+    const content = '## Deferred Items\r\n\r\n- alpha thing\r\n- beta thing';
+    const before = parseDeferredItemsWithStatus(content);
+    const ack = acknowledgeDeferredItem(content, before.find((i) => i.name === 'beta thing').name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0 + 1].status, 'acknowledged');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha thing\r\n- beta thing\r\n  status: acknowledged');
+    assertUniformCrlf(ack.content);
+  });
+
+  test('LF-dominant document with ONE stray CRLF: the EOF entry does not inherit it', () => {
+    // The counterexample the round's pre-push review produced against the first
+    // cut of the end-of-file fallback. `delta`'s CRLF terminates DELTA, not the
+    // unterminated `beta` after it, so copying it propagated an isolated CRLF
+    // into an otherwise-LF file — strictly worse than the bare `\n` the fix
+    // replaced. Only a file with no contradicting bare `\n` may assert CRLF here.
+    const content = '## Deferred Items\n\n- alpha\n- gamma\n- delta\r\n- beta';
+    const ack = acknowledgeDeferredItem(content, 'beta');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[3].status, 'acknowledged');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n- gamma\n- delta\r\n- beta\n  status: acknowledged');
+    const endings = (ack.content.match(/\r?\n/g) || []).map((b) => (b === '\r\n' ? 'CRLF' : 'LF'));
+    assert.deepStrictEqual(endings, ['LF', 'LF', 'LF', 'LF', 'CRLF', 'LF'],
+      'the inserted break must not duplicate the unrelated CRLF above it');
+  });
+
+  test('a bare LF OUTSIDE the deferred section does not veto the CRLF insert', () => {
+    // The second counterexample from this round's pre-push review. Scanning the
+    // whole document for a contradicting `\n` rejects CRLF over an unrelated
+    // bare LF — here inside a fenced code block in another section — and drops
+    // an isolated LF into an otherwise-CRLF deferred section. The scan is
+    // scoped to the section the entry belongs to, which is already the unit the
+    // entry span and the ambiguity guard are computed over.
+    const content = '# Notes\r\n\r\n```text\r\nfirst\nsecond\r\n```\r\n\r\n'
+      + '## Deferred Items\r\n\r\n- alpha\r\n- beta';
+    const ack = acknowledgeDeferredItem(content, 'beta');
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /- beta\r\n {2}status: acknowledged$/);
+    const section = ack.content.slice(ack.content.indexOf('## Deferred Items'));
+    assert.ok(!/(^|[^\r])\n/.test(section), `bare LF in the deferred section: ${JSON.stringify(section)}`);
+    // The pre-existing anomaly inside the fenced block is left exactly as found.
+    assert.ok(ack.content.includes('first\nsecond'), 'the unrelated bare LF must not be rewritten');
+  });
+
+  test('a document with NO deferred-items heading still reads only the entry list', () => {
+    // The third counterexample from this round's pre-push review, and the one
+    // that rules out the SECTION as the scope. With no `## Deferred Items`
+    // heading the section body IS the whole document, so a section-scoped scan
+    // silently becomes the whole-document scan the case above already refuted:
+    // the fenced block's bare LF vetoes CRLF and the entry list gets an
+    // isolated LF. Reading the entry-list region instead is scope-stable
+    // whether or not the heading exists.
+    const content = '```text\r\nfirst\nsecond\r\n```\r\n\r\n- alpha\r\n- beta';
+    const ack = acknowledgeDeferredItem(content, 'beta');
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /- beta\r\n {2}status: acknowledged$/);
+    assert.ok(ack.content.includes('first\nsecond'), 'the unrelated bare LF must not be rewritten');
+  });
+
+  test('a SINGLE-entry list still has evidence: the section preamble is in scope', () => {
+    // The scope must not shrink to the entry list alone. With exactly one
+    // entry that region is EMPTY, and an empty region is no evidence — the
+    // insert falls back to `\n` and reintroduces the very defect this fix
+    // exists for. The delimited section's own preamble belongs to the section,
+    // so it counts; only an UNdelimited list has to fall back to the entries.
+    const one = '## Deferred Items\r\n\r\n- alpha thing';
+    const ack = acknowledgeDeferredItem(one, 'alpha thing');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha thing\r\n  status: acknowledged');
+    assertUniformCrlf(ack.content);
+    // Control: the same shape under LF must stay LF.
+    const lf = '## Deferred Items\n\n- alpha thing';
+    const ackLf = acknowledgeDeferredItem(lf, 'alpha thing');
+    assert.strictEqual(ackLf.content, '## Deferred Items\n\n- alpha thing\n  status: acknowledged');
+  });
+
   test('mixed-ending document: the insert branch reads the ENTRY\'s ending, not the file\'s', () => {
     // A CRLF heading over an LF entry. The opener's own `\n` must survive;
     // a document-wide `\r\n` sniff would rewrite it to `\r\n` and hand the

@@ -932,6 +932,36 @@ function parseDeferredItems(content: string): UatItem[] {
     }));
 }
 
+/**
+ * The line ending for an entry that ends the FILE, where the entry is a single
+ * line and therefore carries no terminator of its own to copy (#3773 review,
+ * Minor 2). No entry-local evidence exists here — the separator before the
+ * entry terminates the PREVIOUS line, not this one — so this asks the weaker
+ * question that can be answered: does anything BEFORE the entry, WITHIN ITS
+ * OWN SECTION, contradict CRLF? Uniform-CRLF across the section is the one
+ * case where appending a `\r\n` cannot make it more irregular.
+ *
+ * The caller passes the region to read, and every simpler choice is refuted by
+ * a named test here. The separator immediately PRECEDING the entry propagates
+ * an isolated CRLF into an LF-dominant list, because it terminates the
+ * previous line rather than this one. The whole DOCUMENT rejects CRLF over an
+ * unrelated bare `\n` elsewhere — inside a fenced code block, say. The
+ * deferred-items SECTION body is right when the heading exists and becomes the
+ * whole document when it does not. The ENTRY LIST alone is scope-stable but
+ * goes empty for a single-entry list, losing the evidence the fix needs.
+ *
+ * So: the section body when a `## Deferred Items` heading delimits one — its
+ * own preamble is in scope, being part of that section — and the entry-list
+ * region when nothing delimits it, where only the entries can be trusted.
+ *
+ * Still not the whole-document sniff removed in `cea3dcbf5`: that one OVERRODE
+ * per-entry evidence, this runs only where none exists and refuses to assert
+ * on any contradiction inside its scope.
+ */
+function crlfAtEof(before: string): boolean {
+  return before.length > 0 && !/(^|[^\r])\n/.test(before);
+}
+
 // ─── acknowledgeDeferredItem ───────────────────────────────────────────────────
 
 /** Result of `acknowledgeDeferredItem`. */
@@ -1092,9 +1122,21 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     // it is not last; the inserted line inherits whatever line 0 had — it is
     // last exactly when line 0 was.
     const line0HadCr = matchedLines[0].endsWith('\r');
+    // A single-line entry's line 0 IS the span's last line, so its own
+    // terminator sits OUTSIDE the span and the separator that FOLLOWS the span
+    // is the evidence. At end-of-file there is no such separator (a document
+    // with no final newline), and reading its absence as "not CRLF" is what
+    // joined a CRLF entry to its inserted line with a bare `\n` (#3773 review,
+    // Minor 2). There is no second entry-local signal to fall back on — the
+    // separator BEFORE the entry terminates the previous line, not this one —
+    // so `crlfAtEof` answers the weaker question it can actually answer, over
+    // the entry's own SECTION when one is delimited, and the entry list alone
+    // when none is.
+    const spanEnd = matchIndexInContent + (end - start);
     const crlf = matchedLines.length > 1
       ? line0HadCr
-      : content.startsWith('\r\n', matchIndexInContent + (end - start));
+      : content.startsWith('\r\n', spanEnd)
+        || (spanEnd >= content.length && crlfAtEof(sectionBody.slice(deferredSection ? 0 : entries[0].start, start)));
     newMatchedLines = [
       crlf ? `${matchedLines[0].replace(/\r$/, '')}\r` : matchedLines[0],
       `${continuationIndent}status: acknowledged${line0HadCr ? '\r' : ''}`,
