@@ -12245,6 +12245,67 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     );
   }
 
+  // ==========================================================================
+  // #3697-16 — the warning's machine kind reaches the JSON output (round 4
+  // review Major 3).
+  //
+  // `warnings[]` stays a string[] — it is a documented output field rendered by
+  // execute-phase.md, so re-typing its elements would break a shipped
+  // contract. The kind is emitted as its own additive field, and THAT is what
+  // a consumer and a test key on. Rewording a message must not silently
+  // un-assert anything.
+  // ==========================================================================
+  for (const [label16, line16, expectCode16] of [
+    ['assertive / misparse', 'RANGE-01..RANGE-05', 'req-line-misparse'],
+    ['ambiguous / range reading', 'RANGE-01 … RANGE-05', 'req-line-range-reading'],
+    ['zero selection', 'Deferred', 'req-line-misparse'],
+    ['delimiter drop', 'RANGE-01; RANGE-02', 'req-line-misparse'],
+  ]) {
+    test(
+      `#3697-16 (warning kind, ${label16}): the JSON result carries a stable machine code`,
+      (t) => {
+        const tmpDir = build3697RangeFixture(line16);
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        assert.ok(
+          parsed.requirements_line_warning,
+          `#3697-16 FAILED (${label16}): a warning fired, so the result must carry ` +
+          `requirements_line_warning.\nFull output: ${output}`,
+        );
+        assert.strictEqual(
+          parsed.requirements_line_warning.code, expectCode16,
+          `#3697-16 FAILED (${label16}): wrong kind for ${JSON.stringify(line16)}.\n` +
+          `Full output: ${output}`,
+        );
+        // The prose channel is UNCHANGED — this field is additive, and a
+        // consumer reading warnings[] must see exactly what it saw before.
+        assert.ok(
+          Array.isArray(parsed.warnings) && parsed.warnings.every((w) => typeof w === 'string'),
+          `#3697-16 FAILED (${label16}): warnings[] must remain a string[]; ` +
+          `got ${JSON.stringify(parsed.warnings)}`,
+        );
+      },
+    );
+  }
+
+  // The absent half. A field that is present on every run carries no
+  // information, and a consumer keying on its presence would be wrong forever.
+  test(
+    '#3697-16b (clean line): no warning kind is emitted when the line parses',
+    (t) => {
+      const tmpDir = build3697RangeFixture('RANGE-01, RANGE-02, RANGE-03, RANGE-04, RANGE-05');
+      t.after(() => cleanup(tmpDir));
+      const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+      const parsed = JSON.parse(output);
+      assert.strictEqual(
+        parsed.requirements_line_warning, undefined,
+        `#3697-16b FAILED: a clean Requirements line must emit no warning kind at all, got ` +
+        `${JSON.stringify(parsed.requirements_line_warning)}\nFull output: ${output}`,
+      );
+    },
+  );
+
   // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
   // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
   // only the well-formed side. The glued-fragment rule must warn, and the
@@ -12303,9 +12364,15 @@ const fc = require('fast-check');
 const {
   analyzeRequirementsLine,
   formatRequirementsLineWarning,
+  REQ_LINE_WARNING_CODE,
 } = require('../gsd-core/bin/lib/phase.cjs');
 
-// The two channel regexes are declared once, module scope, above.
+// Round 4 review Major 3: the formatter returns `{ code, message }`, so channel
+// IDENTITY is asserted on the stable code and never on the English sentence.
+// The two channel regexes below survive for the assertions where the
+// USER-VISIBLE wording is itself the thing under test.
+const reqLineText = (w) => (w === null ? null : w.message);
+const reqLineCode = (w) => (w === null ? null : w.code);
 
 describe('#3697 round 3: Requirements-line detector — properties (RULESET.TESTS.property-based-testing)', () => {
   // fc arbitraries for a well-formed REQ-ID. The shape is the selector's own:
@@ -12425,7 +12492,24 @@ describe('#3697 round 3: Requirements-line detector — properties (RULESET.TEST
           assert.strictEqual(typeof a.warn, 'boolean');
           assert.ok(Array.isArray(a.citedReqIds) && Array.isArray(a.tokens));
           assert.deepStrictEqual(a, b, '#3697-P4: analysis must be deterministic');
-          const w = formatRequirementsLineWarning('1', s, a);
+          const wr = formatRequirementsLineWarning('1', s, a);
+          const w = reqLineText(wr);
+          const wc = reqLineCode(wr);
+          // Round 4 review Major 3: a message without a kind, or a kind that is
+          // not in the declared vocabulary, is a channel no consumer can route
+          // on. Held over ARBITRARY input, so a new channel added later cannot
+          // ship without one.
+          assert.strictEqual(
+            wc === null,
+            w === null,
+            `#3697-P4: kind and message must appear together; got ${JSON.stringify(wr)}`,
+          );
+          if (wc !== null) {
+            assert.ok(
+              Object.values(REQ_LINE_WARNING_CODE).includes(wc),
+              `#3697-P4: ${JSON.stringify(wc)} is not a declared warning kind`,
+            );
+          }
           // The formatter and the analysis must agree on whether there is
           // anything to say — a warn with no text, or text with no warn, is a
           // channel that can go silent or noisy on its own.
@@ -12584,12 +12668,18 @@ describe('#3697 round 3: the two warning channels', () => {
           `#3697-9 (${label}): only the spaced-range rule fired and both endpoints were selected — ` +
           'that is why this channel exists',
         );
-        const w = formatRequirementsLineWarning('1', line, a);
+        const wr = formatRequirementsLineWarning('1', line, a);
+        const w = reqLineText(wr);
+        const wc = reqLineCode(wr);
         assert.ok(w, `#3697-9 (${label}): the range reading is live, so the line must still warn`);
-        assert.match(w, REQ_LINE_RANGE_READING_RE, `#3697-9 (${label}): wrong channel: ${w}`);
-        assert.doesNotMatch(
-          w,
-          REQ_LINE_MISPARSE_RE,
+        assert.strictEqual(
+          wc,
+          REQ_LINE_WARNING_CODE.rangeReading,
+          `#3697-9 (${label}): wrong channel: ${wc} / ${w}`,
+        );
+        assert.notStrictEqual(
+          wc,
+          REQ_LINE_WARNING_CODE.misparse,
           `#3697-9 (${label}): nothing was dropped, so the warning must not assert a parse failure: ${w}`,
         );
         // Both readings must be offered — the author is the only one who can
@@ -12623,9 +12713,11 @@ describe('#3697 round 3: the two warning channels', () => {
       // but #3697-4 already pins a parenthetical citation as NOT unparsed
       // residue, and no rule fires on it. Only the rules that fired may speak.
       assert.strictEqual(a.rangeReadingOnly, true, '#3697-9b: R2 alone fired, on selected endpoints');
-      const w = formatRequirementsLineWarning('1', line, a);
-      assert.match(w, REQ_LINE_RANGE_READING_RE, `#3697-9b: wrong channel: ${w}`);
-      assert.doesNotMatch(w, REQ_LINE_MISPARSE_RE, `#3697-9b: ${w}`);
+      const wr = formatRequirementsLineWarning('1', line, a);
+      const w = reqLineText(wr);
+      const wc = reqLineCode(wr);
+      assert.strictEqual(wc, REQ_LINE_WARNING_CODE.rangeReading, `#3697-9b: wrong channel: ${wc} / ${w}`);
+      assert.notStrictEqual(wc, REQ_LINE_WARNING_CODE.misparse, `#3697-9b: ${wc} / ${w}`);
     },
   );
 
@@ -12640,8 +12732,10 @@ describe('#3697 round 3: the two warning channels', () => {
       assert.deepStrictEqual(a.citedReqIds, ['RANGE-01', 'RANGE-05'], '#3697-9c: RANGE-02 is not selected');
       assert.strictEqual(a.hasSpacedRange, true, '#3697-9c: R2 still fires');
       assert.strictEqual(a.rangeReadingOnly, false, '#3697-9c: an unselected endpoint is a drop');
-      const w = formatRequirementsLineWarning('1', line, a);
-      assert.match(w, REQ_LINE_MISPARSE_RE, `#3697-9c: wrong channel: ${w}`);
+      const wr = formatRequirementsLineWarning('1', line, a);
+      const w = reqLineText(wr);
+      const wc = reqLineCode(wr);
+      assert.strictEqual(wc, REQ_LINE_WARNING_CODE.misparse, `#3697-9c: wrong channel: ${wc} / ${w}`);
     },
   );
 
@@ -12660,7 +12754,13 @@ describe('#3697 round 3: the two warning channels', () => {
       assert.deepStrictEqual(a.citedReqIds, ['REQ-01', 'REQ-03', 'REQ-05'], '#3697-9d: REQ-02 is dropped');
       assert.strictEqual(a.rangeReadingOnly, true, '#3697-9d: R2 alone fired, on selected endpoints');
       assert.deepStrictEqual(a.unselectedIdShaped, ['REQ-02'], '#3697-9d: the skip is recorded as a fact');
-      const w = formatRequirementsLineWarning('1', line, a);
+      const wr = formatRequirementsLineWarning('1', line, a);
+      const w = reqLineText(wr);
+      const wc = reqLineCode(wr);
+      assert.strictEqual(
+        wc, REQ_LINE_WARNING_CODE.rangeReading,
+        `#3697-9d: R2 alone fired on selected endpoints, so this is the range-reading kind: ${wc}`,
+      );
       assert.doesNotMatch(w, /the line is already correct/i, `#3697-9d: ${w}`);
       assert.match(w, /ID-shaped text on the line that was NOT selected: REQ-02/i, `#3697-9d: ${w}`);
       assert.match(w, /check whether any of it is a requirement/i, `#3697-9d: ${w}`);
@@ -12681,7 +12781,14 @@ describe('#3697 round 3: the two warning channels', () => {
       assert.strictEqual(a.rangeTokens.length, 0, '#3697-9e: past the cap, no predicate classifies it');
       assert.deepStrictEqual(a.oversizedTokens, [big], '#3697-9e: but it IS recorded as unclassified');
       assert.strictEqual(a.warn, true, '#3697-9e: and the line still warns');
-      const w = formatRequirementsLineWarning('1', big, a);
+      const wr = formatRequirementsLineWarning('1', big, a);
+      const w = reqLineText(wr);
+      const wc = reqLineCode(wr);
+      assert.strictEqual(
+        wc, REQ_LINE_WARNING_CODE.unverified,
+        `#3697-9e: an unclassifiable line is the 'unverified' kind — the same seam CONTEXT.md ` +
+        `already records for a truncated scan: ${wc}`,
+      );
       assert.match(w, /could not be checked/i, `#3697-9e: ${w}`);
       assert.match(w, /2048-character scan limit/i, `#3697-9e: ${w}`);
       assert.match(w, /unverified/i, `#3697-9e: ${w}`);
@@ -12739,8 +12846,10 @@ describe('#3697 round 3: the two warning channels', () => {
       // only, while the round claimed both. It also found the wording wrong:
       // square brackets ARE stripped by the selector, only parentheses are not.
       const line = 'REQ-01, (REQ-02), REQ-03..REQ-05';
-      const w = formatRequirementsLineWarning('1', line, analyzeRequirementsLine(line));
-      assert.match(w, REQ_LINE_MISPARSE_RE, `#3697-9g: assertive voice expected: ${w}`);
+      const wr = formatRequirementsLineWarning('1', line, analyzeRequirementsLine(line));
+      const w = reqLineText(wr);
+      const wc = reqLineCode(wr);
+      assert.strictEqual(wc, REQ_LINE_WARNING_CODE.misparse, `#3697-9g: assertive voice expected: ${wc} / ${w}`);
       assert.match(w, /ID-shaped text on the line that was NOT selected: REQ-02/i, `#3697-9g: ${w}`);
       assert.match(w, /parentheses are not stripped, unlike square brackets/i, `#3697-9g: ${w}`);
       // `REQ-03..REQ-05` is already named by "Unparsed text"; naming it twice
@@ -12809,7 +12918,13 @@ describe('#3697 round 3: the two warning channels', () => {
       () => {
         const a = analyzeRequirementsLine(line);
         assert.deepStrictEqual(a.citedReqIds, [], `#3697-10 (${label}): nothing is selected here`);
-        const w = formatRequirementsLineWarning('1', line, a);
+        const wr = formatRequirementsLineWarning('1', line, a);
+        const w = reqLineText(wr);
+        const wc = reqLineCode(wr);
+        assert.strictEqual(
+          wc, REQ_LINE_WARNING_CODE.misparse,
+          `#3697-10 (${label}): zero selection is a demonstrated parse failure: ${wc}`,
+        );
         assert.ok(w, `#3697-10 (${label}): a non-empty non-placeholder line selecting zero must warn`);
         assert.match(w, /ID-shaped text that was not selected/i, `#3697-10 (${label}): ${w}`);
         assert.doesNotMatch(

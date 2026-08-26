@@ -2576,6 +2576,37 @@ const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
 // REQ-ID-carrying token approaches this bound.
 const REQ_TOKEN_SCAN_LIMIT = 2048;
 
+/**
+ * The Requirements-line warning KINDS, as a stable machine vocabulary (round 4
+ * review Major 3).
+ *
+ * Before this, the kind existed only in the prose of the message, so every
+ * consumer and every test had to regex an English sentence — and rewording a
+ * message silently un-asserted the tests that pinned it. The repo already had
+ * the settled seam for exactly these semantics: `diffLiveConfig` emits
+ * `kind:'unverified'` for a truncated scan (`CONTEXT.md`), and
+ * `WAVE_CLEANUP_WARNING` carries codes in `src/worktree-safety.cts`.
+ *
+ * Carried ALONGSIDE the prose, never instead of it. `warnings[]` is a
+ * documented `string[]` in `phase complete`'s JSON output, rendered by
+ * execute-phase.md's "If has_warnings is true" step, so changing its element
+ * shape would be a breaking output-contract change for a shipped command. The
+ * code is emitted as its own additive `requirements_line_warning` field.
+ */
+const REQ_LINE_WARNING_CODE = {
+  /** ID-shaped content was demonstrably not selected — the line failed to parse. */
+  misparse: 'req-line-misparse',
+  /** A range READING is at stake; every endpoint the rule fired on was selected. */
+  rangeReading: 'req-line-range-reading',
+  /** A token past the scan cap means the line was not classified — never that it is clean. */
+  unverified: 'req-line-unverified',
+} as const;
+
+type ReqLineWarningCode = (typeof REQ_LINE_WARNING_CODE)[keyof typeof REQ_LINE_WARNING_CODE];
+
+/** The formatter's result. `null` still means CLEAN, which is a value, not a failure. */
+type ReqLineWarning = { code: ReqLineWarningCode; message: string };
+
 // R4 — a full ID with a trailing statement delimiter glued to it. ANCHORED on
 // both ends, so it is linear and needs no cap of its own beyond the token
 // length guard its caller applies.
@@ -2891,7 +2922,7 @@ function formatRequirementsLineWarning(
   phaseNum: string,
   rawLine: string,
   analysis: RequirementsLineAnalysis,
-): string | null {
+): ReqLineWarning | null {
   if (!analysis.warn) return null;
   const shown = String(rawLine).trim();
   const rangeRuleFired =
@@ -2942,7 +2973,9 @@ function formatRequirementsLineWarning(
     // to change" is an affirmative false statement on exactly the input the
     // rule-scoped discriminator was built to reach. It speaks about the
     // SEPARATOR, and defers the rest to the skipped-text clause above.
-    return (
+    return {
+      code: REQ_LINE_WARNING_CODE.rangeReading,
+      message:
       `ROADMAP Phase ${phaseNum} **Requirements** line (\`${shown}\`) contains what reads as a range ` +
       `between two cited REQ-IDs. Range forms are not expanded, so no interior IDs were selected; ` +
       `the line selected: ${analysis.citedReqIds.join(', ')}. If a range was intended, rewrite it ` +
@@ -2950,8 +2983,8 @@ function formatRequirementsLineWarning(
       `an annotation rather than a range, it selected nothing to expand and needs no change.` +
       delimiterDropped +
       skipped +
-      oversized
-    );
+      oversized,
+    };
   }
 
   if (
@@ -2963,12 +2996,14 @@ function formatRequirementsLineWarning(
   ) {
     // OVER-CAP channel — no rule could run, so no rule may be diagnosed. Say
     // exactly that: the line was not classified, rather than not a problem.
-    return (
+    return {
+      code: REQ_LINE_WARNING_CODE.unverified,
+      message:
       `ROADMAP Phase ${phaseNum} **Requirements** line (\`${shown.slice(0, 200)}…\`) could not be ` +
       `checked: one or more tokens exceed the ${REQ_TOKEN_SCAN_LIMIT}-character scan limit, so the ` +
       `REQ-ID selection on this line is unverified. Rewrite it as a comma-separated list ` +
-      `(e.g. \`REQ-01, REQ-02, REQ-03\`).`
-    );
+      `(e.g. \`REQ-01, REQ-02, REQ-03\`).`,
+    };
   }
 
   // ASSERTIVE channel — ID-shaped content was demonstrably not selected.
@@ -2992,7 +3027,9 @@ function formatRequirementsLineWarning(
       '(e.g. `REQ-01, REQ-02, REQ-03`).'
     : ' If these are requirements, name them explicitly (e.g. `REQ-01, REQ-02, REQ-03`); if the line ' +
       'is deliberately empty, write `TBD` or `None` — any other wording selects nothing and warns.';
-  return (
+  return {
+    code: REQ_LINE_WARNING_CODE.misparse,
+    message:
     `ROADMAP Phase ${phaseNum} **Requirements** line could not be parsed as a comma-separated REQ-ID list ` +
     `(\`${shown}\`) - ${selectedDesc}.` +
     (unparsed.length > 0
@@ -3003,8 +3040,8 @@ function formatRequirementsLineWarning(
     advice +
     delimiterDropped +
     skipped +
-    oversized
-  );
+    oversized,
+  };
 }
 
 function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
@@ -3075,6 +3112,11 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
   let stateUpdated = false;
 
   const warnings: string[] = [];
+  // The machine kind of the Requirements-line warning, carried out to the JSON
+  // result as its own field (round 4 review Major 3). Declared HERE, in the
+  // same scope as `warnings[]`, because the assignment happens inside
+  // withPlanningLock and the emission happens after it.
+  let reqLineWarningCode: ReqLineWarningCode | undefined;
   // ADR-3408 §8.5 / D2 (#3374): "liberal but visible" — when the write-seam
   // composition's preservation stage restores a curated frontmatter value
   // over a disagreeing derived one, that divergence is surfaced here rather
@@ -3552,7 +3594,13 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
               reqMatch[1],
               reqLineAnalysis,
             );
-            if (reqLineWarning) warnings.push(reqLineWarning);
+            if (reqLineWarning) {
+              warnings.push(reqLineWarning.message);
+              // Carried out to the JSON result as its own field — see
+              // REQ_LINE_WARNING_CODE for why it is not folded into
+              // `warnings[]`.
+              reqLineWarningCode = reqLineWarning.code;
+            }
 
             for (const reqId of citedReqIds) {
               const reqEscaped = escapeRegex(reqId);
@@ -4219,6 +4267,10 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
     auto_pruned: autoPruned,
     warnings,
     has_warnings: warnings.length > 0,
+    // ADDITIVE, never a change to `warnings[]`'s element shape — that array is
+    // a documented string[] consumed by execute-phase.md, so re-typing it
+    // would break a shipped output contract. Absent when the line is clean.
+    ...(reqLineWarningCode ? { requirements_line_warning: { code: reqLineWarningCode } } : {}),
     verification_stale_check_indeterminate: staleCheckIndeterminate,
     milestone_conflict: milestoneConflict,
     preservation_warnings: preservationWarnings,
@@ -4301,6 +4353,7 @@ export = {
   cmdPhaseComplete,
   analyzeRequirementsLine,
   formatRequirementsLineWarning,
+  REQ_LINE_WARNING_CODE,
   cmdPhaseUatPassed,
   cmdPhaseListPlans,
   computeDependencyLevels,
