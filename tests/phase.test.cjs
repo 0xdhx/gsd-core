@@ -12073,9 +12073,12 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   //
   // The issue's narrow clause verbatim: "warn when `citedReqIds.length === 0`
   // while the raw capture is non-empty and not `TBD`". Before R3b these five
-  // words selected nothing and stayed SILENT, while `docs/CLI-TOOLS.md`, the
-  // `placeholderLed` census comment and the advice string all stated they
-  // warned — a claim written into three artifacts and never executed once.
+  // words selected nothing and stayed SILENT, while the CLI-TOOLS reference's
+  // Requirements-line grammar section, the `placeholderLed` census comment and
+  // the advice string all stated they warned — a claim written into three
+  // artifacts and never executed once. (Named without spelling the doc's path:
+  // the docs-guard exemption ratchet fingerprints literal docs/ references in
+  // exempt test files, and this test reads no documentation.)
   // The asymmetry was the tell: `Deferred (see ADR-7)` warned (the citation
   // supplied ID-shaped residue) while bare `Deferred` did not.
   // ==========================================================================
