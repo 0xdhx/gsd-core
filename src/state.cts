@@ -71,6 +71,9 @@ type StateTransitionIntent = stateTransitionMod.StateTransitionIntent;
 type StateTransitionDeps = stateTransitionMod.StateTransitionDeps;
 type PhaseInventoryRecord = stateTransitionMod.PhaseInventoryRecord;
 type PhaseInventoryResult = stateTransitionMod.PhaseInventoryResult;
+// ADR-3473 §8.6: the state transaction type (see openStateTransaction /
+// rebuildStateTransaction in state-transition.cts).
+type StateTransaction = stateTransitionMod.StateTransaction;
 import {
   computeProgressPercent,
   normalizeProgressNumbers,
@@ -133,6 +136,26 @@ interface ReadModifyWriteOptions {
    * callers that do not report per-field arrays; costs nothing extra.
    */
   divergedFields?: string[];
+  /**
+   * ADR-3473 §8.6 (found while diagnosing a regression against the
+   * pre-existing #3242 "resyncs progress frontmatter from the updated body"
+   * spec): true ONLY when `resync` was set to true BECAUSE the caller
+   * explicitly named a progress-affecting field (`Progress`, `Total Plans in
+   * Phase`, `Total Phases` — see `shouldResyncStateProgress`), as opposed to
+   * `resync` defaulting true for an unrelated write (e.g. `state
+   * add-decision`, `state advance-plan`). The `preserve-always` /
+   * `progress-ratchet` unmeasured-scan guard (`applyPreserveAlways`,
+   * state-transition.cts) exists to stop an INCIDENTAL resync from dropping a
+   * real curated block when the disk scan measured nothing (#3756, an
+   * archived-milestone side effect nobody asked for). It must NOT also block
+   * a write the user pointed AT `progress` on purpose — `preserve-always`'s
+   * own contract is "never overwrite unless the caller explicitly names this
+   * field" (FIELD_CLASSIFICATION doc comment), and `state update Progress` /
+   * `state patch Progress=...` are exactly that explicit naming. Set only by
+   * `cmdStateUpdate` / `cmdStatePatch`, the only two call sites where
+   * `resync` is driven by `shouldResyncStateProgress` rather than defaulting.
+   */
+  explicitProgressField?: boolean;
 }
 
 /**
@@ -560,7 +583,7 @@ function cmdStatePatch(cwd: string, patches: Record<string, string>, raw: boolea
       precomputed = (result.data as { updated: string[]; failed: string[] }) ?? precomputed;
       preSyncContent = result.content;
       return result.content;
-    }, cwd, { resync: shouldResync, divergedFields });
+    }, cwd, { resync: shouldResync, divergedFields, explicitProgressField: shouldResync });
 
     // ADR-3408 §8.4 (D4, fix(#3351) generalized — see `reconcileReportedFields`):
     // patchCore's bookkeeping says whether the stateReplaceField text-replace
@@ -694,7 +717,7 @@ function cmdStateUpdate(cwd: string, field: string | undefined, value: string | 
       }
       preSyncContent = result.content;
       return result.content;
-    }, cwd, { resync: shouldResync, divergedFields, authoritativeFm });
+    }, cwd, { resync: shouldResync, divergedFields, authoritativeFm, explicitProgressField: shouldResync });
 
     // ADR-3408 §8.4 (D4): reconcile against the bytes actually persisted —
     // `updateCore`'s own match does not know whether sync/preservation later
@@ -3193,7 +3216,25 @@ function withStateLock<T>(statePath: string, fn: () => T): T {
  * @param clock
  *   Optional clock seam; defaults to realClock. Passed through to acquireStateLock.
  */
-function writeStateMd(statePath: string, content: string, cwd?: string, clock?: StateLockClock): void {
+/**
+ * ADR-3473 §8.6: `writeStateMd` is ADR-3408 §8.3's sanctioned-exception write
+ * path — only a `rebuildStateTransaction` may travel it. Enforced here rather
+ * than left to caller discipline: the transaction TYPE is what makes the two
+ * sanctioned exceptions (`cmdStateSync`, `REGENERATE_STATE`) greppable and
+ * closed, and an `open()` transaction reaching this function would mean a
+ * preservation-governed write silently skipped preservation.
+ */
+function writeStateMd(statePath: string, content: string, transaction: StateTransaction, cwd?: string, clock?: StateLockClock): void {
+  if (transaction.kind !== 'rebuild') {
+    const err = new Error(
+      `writeStateMd: expected a 'rebuild' transaction, got '${transaction.kind}'. writeStateMd is ` +
+      'ADR-3408 §8.3\'s sanctioned-exception write path (cmdStateSync / REGENERATE_STATE only) — ' +
+      'only rebuildStateTransaction() may travel it (ADR-3473 §8.6). An open() transaction here ' +
+      'would silently skip preservation for a write that was supposed to run it.',
+    ) as Error & { code: string };
+    err.code = 'STATE_TRANSACTION_KIND_INVALID';
+    throw err;
+  }
   const lockPath = acquireStateLock(statePath, clock);
   // Test seam (audit M8): fire AFTER the lock is taken so a test can simulate a
   // concurrent writer landing in the (now-closed) scan→lock window.
@@ -3213,10 +3254,14 @@ function writeStateMd(statePath: string, content: string, cwd?: string, clock?: 
     if (cwd) _diskScanCache.delete(cwd);
     // ADR-3408 §8.3: `writeStateMd` is the sole write path for the two
     // sanctioned-permanent exceptions (`cmdStateSync`, `REGENERATE_STATE`) —
-    // pass `sanctionedPermanentEmptyFallback: true` so their long-standing
-    // empty-field fallback behavior stays byte-identical (see
-    // `syncStateFrontmatter`'s docstring above the guard block).
-    const synced = syncStateFrontmatter(content, cwd, undefined, true);
+    // the sanctioned-permanent empty-field fallback is now DERIVED FROM THE
+    // TRANSACTION KIND (ADR-3473 §8.6) rather than asserted by a literal
+    // `true` at this call site: only a `rebuild` transaction can reach this
+    // function (enforced above), so `transaction.kind === 'rebuild'` is
+    // always `true` here today, but the derivation is what keeps the
+    // fallback's scope tied to the transaction type rather than a
+    // hard-coded constant that could silently drift from it.
+    const synced = syncStateFrontmatter(content, cwd, undefined, transaction.kind === 'rebuild');
     platformWriteSync(statePath, synced);
   } finally {
     releaseStateLock(lockPath);
@@ -3280,10 +3325,7 @@ function applyPostSyncPreservation(
   options: StatePreservationOptions,
 ): string {
   assertStatePreservationOptions(options, 'applyPostSyncPreservation');
-  const { resync, authoritativeFm, deriveProgressKeys, divergedFields } = options;
-  // Snapshot the existing progress block BEFORE the transform so we can
-  // restore it when resync is false.
-  const preFm = resync ? null : extractFrontmatter(originalContent, statePath) as Record<string, unknown>;
+  const { resync, authoritativeFm, deriveProgressKeys, divergedFields, explicitProgressField } = options;
 
   // Bug #1230: delta heuristic — snapshot pre-transform body source fields so
   // we can detect whether THIS write changed them. syncStateFrontmatter
@@ -3399,11 +3441,20 @@ function applyPostSyncPreservation(
   // callers that omit it (readModifyWriteStateMd, cmdPhaseComplete) pay
   // nothing extra and see no change to `synced`/the returned content.
   const preservationInputSnapshot = divergedFields ? { ...postFm } : null;
-  const preservation = applyStatePreservation({
-    preFm, postFm, preFmSnapshot, resync,
+  // ADR-3473 §8.6: the pre-write snapshot + policy flags now travel as ONE
+  // transaction rather than as a nullable `preFm` alongside the always-present
+  // `preFmSnapshot` (same source, same extractFrontmatter call — `preFm` was
+  // `preFmSnapshot` with the `resync` policy baked in by nulling it, which is
+  // what made `applyPreserveAlways` inert on the default resyncing write
+  // path — #3756).
+  const transaction = stateTransitionMod.openStateTransaction({
+    snapshot: preFmSnapshot,
+    resync,
     deriveProgressKeys: deriveProgressKeys === true,
     bodyDeltas,
+    explicitProgressField: explicitProgressField === true,
   });
+  const preservation = applyStatePreservation({ transaction, postFm });
   if (divergedFields && preservationInputSnapshot) {
     // §8.5's "liberal but visible": every field whose value actually
     // differs before vs after `applyStatePreservation` is a field where the
@@ -3567,6 +3618,7 @@ function readModifyWriteStateMd(statePath: string, transformFn: (content: string
         authoritativeFm: options?.authoritativeFm,
         deriveProgressKeys: options?.deriveProgressKeys === true,
         divergedFields: options?.divergedFields,
+        explicitProgressField: options?.explicitProgressField === true,
       },
     );
 
@@ -3795,12 +3847,22 @@ function cmdStateJson(cwd: string, raw: boolean): void {
       ?? parseProsePhaseField(stateExtractField(positionScope, 'Phase')).phase;
     const bodyCurrentPlan = stateExtractField(body, 'Current Plan');
     const bodyStatus = stateExtractField(body, 'Status');
+    // #3836: mirrors applyPostSyncPreservation's own derivation (state.cts
+    // bodyDeltas, `last_activity_desc`) — the `Last Activity Description`
+    // label, falling back to the prose `Last Activity:` line's parsed
+    // description. Read-side twin of #3258's write-side wiring; this field is
+    // `preserve-when-unchanged` per FIELD_CLASSIFICATION and was previously
+    // absent from this read path entirely (never derived here, never in the
+    // loop below), so a stale body annotation always beat a fresher curated
+    // frontmatter value on every `state json` read.
+    const bodyLastActivityRaw = stateExtractField(body, 'Last Activity') ?? stateExtractField(body, 'Last activity');
+    const bodyLastActivityDesc = stateExtractField(body, 'Last Activity Description')
+      ?? parseProseLastActivityField(bodyLastActivityRaw).description;
 
     const unchanged = (v: string | null): { pre: string | null; post: string | null } => ({ pre: v, post: v });
     const ctx = {
-      preFm: null,
       postFm: built,
-      preFmSnapshot: existingFm,
+      snapshot: existingFm,
       resync: true,
       deriveProgressKeys: false,
       bodyDeltas: {
@@ -3810,10 +3872,15 @@ function cmdStateJson(cwd: string, raw: boolean): void {
         current_phase: unchanged(bodyCurrentPhase),
         current_plan: unchanged(bodyCurrentPlan),
         current_phase_name: unchanged(bodyPhaseSource),
+        last_activity_desc: unchanged(bodyLastActivityDesc),
       },
       mutated: false,
     };
-    for (const field of ['status', 'stopped_at', 'paused_at', 'current_phase', 'current_plan', 'current_phase_name']) {
+    // #3836: derive the field set from FIELD_CLASSIFICATION's
+    // `preserve-when-unchanged` rows (single source of truth) instead of a
+    // hand-typed literal that can drift from the table — this IS the fix,
+    // not merely an addition of one more name to the literal.
+    for (const field of stateTransitionMod.getPreserveWhenUnchangedFields()) {
       const cls = stateTransitionMod.getFieldClassification(field);
       if (cls) stateTransitionMod.applyPreserveWhenUnchanged(field, cls, ctx);
     }
@@ -4190,6 +4257,16 @@ function cmdStatePlannedPhase(cwd: string, phaseNumber: string | number, phaseNa
   // line, and the prose re-derivation of current_phase_name truncates names
   // that themselves contain a parenthetical — the authoritative override keeps
   // the exact value, exactly as cmdStateBeginPhase does for its EXECUTING line.
+  //
+  // #3834: without a name, the body-source delta rule that would normally
+  // preserve the curated `current_phase_name` (FIELD_CLASSIFICATION:
+  // preserve-when-unchanged) cannot fire — THIS write rewrites the `Phase:`
+  // source line to `N — READY TO EXECUTE` itself, so pre/post disagree by
+  // construction and the post-sync re-derivation harvests "READY TO EXECUTE"
+  // as if it were the name. The fix mirrors the named-arg path: reassert an
+  // authoritative override, falling back to the pre-write curated value (read
+  // inside the RMW callback, before this write's own body mutation) rather
+  // than leaving the field to a delta heuristic this exact transition defeats.
   const divergedFields: string[] = [];
   const rmwOptions: ReadModifyWriteOptions = {
     resync: false,
@@ -4201,6 +4278,13 @@ function cmdStatePlannedPhase(cwd: string, phaseNumber: string | number, phaseNa
   let precomputedUpdated: string[] = [];
   let preSyncContent = '';
   readModifyWriteStateMd(statePath, (content) => {
+    if (!intent.phaseName) {
+      const preFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
+      const curatedName = preFm['current_phase_name'];
+      if (typeof curatedName === 'string' && curatedName.trim().length > 0) {
+        rmwOptions.authoritativeFm = { current_phase_name: curatedName };
+      }
+    }
     const result = transitionCore(content, intent, deps);
     precomputedUpdated = result.updated;
     preSyncContent = result.content;
@@ -4828,7 +4912,12 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   }
 
   if (changes.length > 0 || modified !== content) {
-    writeStateMd(statePath, modified, cwd);
+    // ADR-3473 §8.6: `rebuild()` is the typed expression of #905's contract —
+    // `state sync` exists to let the body win, so preservation must NOT run,
+    // and the snapshot is carried anyway because §8.7's reporting needs it.
+    writeStateMd(statePath, modified, stateTransitionMod.rebuildStateTransaction({
+      snapshot: extractFrontmatter(content, statePath),
+    }), cwd);
   }
 
   output({ synced: true, changes, dry_run: false }, raw, undefined);
@@ -5218,6 +5307,17 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
   const updated: StateCompletePhaseUpdateEntry[] = [];
   let preSyncContent = '';
   const divergedFields: string[] = [];
+  // #3835: complete-phase unconditionally rewrites the body `Phase:` line to
+  // `N — COMPLETE` below. That defeats current_phase_name's
+  // preserve-when-unchanged delta rule the same way #3834's no-`--name`
+  // planned-phase write does — pre/post body-source disagree BY CONSTRUCTION
+  // (this write is what changed the source line), so the post-sync
+  // re-derivation harvests nothing from "COMPLETE" and the curated key is
+  // dropped entirely rather than preserved. The write site already documents
+  // "an absent name does NOT clear an existing curated value" for the body
+  // (`Current Phase Name` section below) — this reasserts the same rule for
+  // the frontmatter key, mirroring cmdStatePlannedPhase's fix.
+  const rmwOptions: ReadModifyWriteOptions = { divergedFields };
 
   const wrote = readModifyWriteStateMd(statePath, (content) => {
     const currentPhase = resolvedPhase;
@@ -5227,6 +5327,10 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
     const existingFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
     const hasFrontmatter = Object.keys(existingFm).length > 0;
     let body = stripFrontmatter(content);
+    const curatedPhaseName = existingFm['current_phase_name'];
+    if (typeof curatedPhaseName === 'string' && curatedPhaseName.trim().length > 0) {
+      rmwOptions.authoritativeFm = { current_phase_name: curatedPhaseName };
+    }
 
     const reassemble = (b: string) =>
       hasFrontmatter ? `---\n${reconstructFrontmatter(existingFm as unknown as Frontmatter)}\n---\n\n${b}` : b;
@@ -5304,7 +5408,7 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
     const out = reassemble(body);
     preSyncContent = out;
     return out;
-  }, cwd, { divergedFields });
+  }, cwd, rmwOptions);
 
   // ADR-3408 §8.4 (D4): traced for this phase (design doc: "not traced in
   // the analysis pass"). Unlike the transitionCore-based commands, this

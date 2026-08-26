@@ -6624,7 +6624,9 @@ describe('ADR-3408 §8.5 Matrix (#3471): stale-but-present, and the report resid
       ].join('\n');
       fs.writeFileSync(statePath, original);
 
-      stateLib.writeStateMd(statePath, original, tmp);
+      stateLib.writeStateMd(statePath, original, stateTransitionMod.rebuildStateTransaction({
+        snapshot: frontmatterLib.extractFrontmatter(original),
+      }), tmp);
 
       const onDisk = fs.readFileSync(statePath, 'utf8');
       const fm = frontmatterLib.extractFrontmatter(onDisk);
@@ -6657,7 +6659,9 @@ describe('ADR-3408 §8.5 Matrix (#3471): stale-but-present, and the report resid
       ].join('\n');
       fs.writeFileSync(statePath, original);
 
-      stateLib.writeStateMd(statePath, original, tmp);
+      stateLib.writeStateMd(statePath, original, stateTransitionMod.rebuildStateTransaction({
+        snapshot: frontmatterLib.extractFrontmatter(original),
+      }), tmp);
 
       const expected = [
         '---', 'gsd_state_version: 1.0', 'status: unknown', 'last_updated: "2023-11-14T22:13:20.000Z"',
@@ -6693,7 +6697,9 @@ describe('ADR-3408 §8.5 Matrix (#3471): stale-but-present, and the report resid
         '**Current phase:** (determining...)', '**Status:** Resuming', '',
       ].join('\n');
 
-      stateLib.writeStateMd(statePath, regenerated, tmp);
+      stateLib.writeStateMd(statePath, regenerated, stateTransitionMod.rebuildStateTransaction({
+        snapshot: frontmatterLib.extractFrontmatter(oldCurated),
+      }), tmp);
 
       const onDisk = fs.readFileSync(statePath, 'utf8');
       const fm = frontmatterLib.extractFrontmatter(onDisk);
@@ -14385,7 +14391,9 @@ describe('buildStateFrontmatter cache invalidation (#1967)', () => {
   test('writeStateMd invalidates cache so subsequent reads see new disk state', () => {
     // First write — populates cache via buildStateFrontmatter
     const content1 = fs.readFileSync(statePath, 'utf-8');
-    state.writeStateMd(statePath, content1, tmpDir);
+    state.writeStateMd(statePath, content1, stateTransitionMod.rebuildStateTransaction({
+      snapshot: frontmatterLib.extractFrontmatter(content1),
+    }), tmpDir);
 
     // Create a NEW phase directory AFTER the first write
     // Without cache invalidation, the second write would still see only 1 phase
@@ -14400,7 +14408,9 @@ describe('buildStateFrontmatter cache invalidation (#1967)', () => {
 
     // Second write in the SAME process — must see the new phase
     const content2 = fs.readFileSync(statePath, 'utf-8');
-    state.writeStateMd(statePath, content2, tmpDir);
+    state.writeStateMd(statePath, content2, stateTransitionMod.rebuildStateTransaction({
+      snapshot: frontmatterLib.extractFrontmatter(content2),
+    }), tmpDir);
 
     // Read back and parse frontmatter to verify it reflects 2 phases, not 1
     const result = fs.readFileSync(statePath, 'utf-8');
@@ -16893,5 +16903,615 @@ describe('#3699 state update — derived frontmatter keys explain themselves', (
       assert.strictEqual(stateTransitionMod.getFrontmatterBodySource(probe), null, `${probe} is not a frontmatter key`);
       assert.strictEqual(stateTransitionMod.frontmatterKeyForBodyField(probe), null, `${probe} is not a body field`);
     }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════
+// #3871 / #3756 (ADR-3473 §8.6): a curated `progress:` frontmatter block is
+// LOST on a write by verbs that have nothing to do with progress (state
+// record-session, state add-decision) once the CURRENT milestone's phase
+// dirs have been archived to `.planning/milestones/<version>-phases/` while
+// STATE.md/ROADMAP.md still identify that milestone as the current one
+// (ROADMAP heading "Current", Phase entries still listed in the ROADMAP
+// text — only the on-disk phase directories moved). The milestone-scoped
+// disk scan then finds none of the current milestone's phase directories
+// under `.planning/phases/` and derives an empty/zero progress projection —
+// verified empirically (see repro3756.js, run against the built lib): the
+// persisted frontmatter's `progress` key is dropped ENTIRELY after the
+// write (not merely zeroed-with-percent-omitted). Root cause is unchanged:
+// `applyPostSyncPreservation` (src/state.cts) computes
+// `const preFm = resync ? null : extractFrontmatter(...)` while
+// `readModifyWriteStateMd` defaults `resync` to `true`, so the declared
+// `preserve-always` policy row for `progress` never runs on this write path
+// and has no chance to restore the curated block before it is discarded.
+//
+// Fixture pattern mirrors `tests/health-validation.test.cjs`'s
+// `mkArchivePhases` (`.planning/milestones/<version>-phases/<NN>-phase-N/`)
+// and `tests/completion-ratio-scope-withholding.test.cjs`'s ROADMAP-heading
+// fixture builders — a "Current" milestone heading (so scope classifies as
+// SCOPE.COMPLETE / windowed rather than UNSCOPED — a "Shipped" heading gets
+// stripped by `stripShippedMilestones` and reproduces rule-4 withholding
+// instead, a different and pre-existing intentional behavior, NOT this
+// defect), phase dirs that exist ONLY under the archive path, and nothing
+// at all under `.planning/phases/` for the current milestone.
+// ═════════════════════════════════════════════════════════════════════════
+
+describe('#3871 / #3756: curated progress must survive a write on an archived milestone', () => {
+  // Builds an archived-milestone fixture: STATE.md asserts milestone v1.0
+  // and carries the curated progress block (5/5/32/32/100%) plus the body
+  // sections `record-session` and `add-decision` each need (Session
+  // Continuity, Decisions). ROADMAP.md shows v1.0 as the CURRENT milestone
+  // ("Current 🚧" heading, with all 5 Phase entries still listed in the
+  // ROADMAP text) with 5 phases. The phase dirs themselves live ONLY under
+  // `.planning/milestones/v1.0-phases/` — `.planning/phases/` has nothing
+  // for the current milestone, exactly as it is right after `milestone
+  // complete --archive-phases` runs while STATE.md has not yet been
+  // advanced to a new milestone.
+  function buildArchivedMilestoneFixture(cwd) {
+    const planningDir = path.join(cwd, '.planning');
+    fs.mkdirSync(planningDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      [
+        '## v1.0 Current 🚧',
+        '',
+        '### Phase 1: Foo',
+        '### Phase 2: Bar',
+        '### Phase 3: Baz',
+        '### Phase 4: Qux',
+        '### Phase 5: Quux',
+        '',
+      ].join('\n'),
+    );
+
+    // 5 archived phases totalling 32 plans, every plan paired with a
+    // SUMMARY (all complete) — mirrors mkArchivePhases in
+    // tests/health-validation.test.cjs, but with real PLAN/SUMMARY files
+    // rather than empty dirs, since this fixture is about the DISK SCAN
+    // finding zero CURRENT-milestone phases, not about archive discovery.
+    const archiveDir = path.join(planningDir, 'milestones', 'v1.0-phases');
+    const plansPerPhase = [7, 7, 6, 6, 6]; // sums to 32
+    plansPerPhase.forEach((count, i) => {
+      const phaseNum = String(i + 1).padStart(2, '0');
+      const phaseDir = path.join(archiveDir, `${phaseNum}-phase-${i + 1}`);
+      fs.mkdirSync(phaseDir, { recursive: true });
+      for (let p = 1; p <= count; p += 1) {
+        const planNum = String(p).padStart(2, '0');
+        fs.writeFileSync(path.join(phaseDir, `${phaseNum}-${planNum}-PLAN.md`), '# Plan\n');
+        fs.writeFileSync(path.join(phaseDir, `${phaseNum}-${planNum}-SUMMARY.md`), '# Summary\n');
+      }
+    });
+
+    // Deliberately NO .planning/phases/ directory at all for the current
+    // milestone — the archived-milestone shape this issue is about.
+
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'milestone: v1.0',
+        'status: executing',
+        'progress:',
+        '  total_phases: 5',
+        '  completed_phases: 5',
+        '  total_plans: 32',
+        '  completed_plans: 32',
+        '  percent: 100',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Session Continuity',
+        '',
+        '**Last session:** 2024-01-10',
+        '**Stopped at:** Phase 5, Plan 32',
+        '**Resume file:** None',
+        '',
+        '## Decisions',
+        'No decisions yet.',
+        '',
+        '## Blockers',
+        'None',
+        '',
+      ].join('\n'),
+    );
+  }
+
+  function assertCuratedProgressSurvived(cwd) {
+    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    const content = fs.readFileSync(statePath, 'utf-8');
+    const fm = frontmatterLib.extractFrontmatter(content);
+    assert.ok(fm && fm.progress, 'STATE.md frontmatter must still carry a progress block');
+    assert.strictEqual(Number(fm.progress.total_phases), 5, 'total_phases must remain the curated 5, not zeroed by the archived-milestone disk scan');
+    assert.strictEqual(Number(fm.progress.completed_phases), 5, 'completed_phases must remain the curated 5');
+    assert.strictEqual(Number(fm.progress.total_plans), 32, 'total_plans must remain the curated 32');
+    assert.strictEqual(Number(fm.progress.completed_plans), 32, 'completed_plans must remain the curated 32');
+    assert.strictEqual(Number(fm.progress.percent), 100, 'percent must remain the curated 100, not go missing');
+  }
+
+  // THIS TEST MUST FAIL TODAY (#3756): `state record-session` resyncs
+  // (readModifyWriteStateMd defaults resync:true), which forces `preFm` to
+  // null in applyPostSyncPreservation, which starves the preserve-always
+  // executor for `progress` of the one input (`ctx.preFm`) it actually
+  // reads — so the curated block is never restored and the persisted
+  // frontmatter's `progress` key is dropped entirely (verified via
+  // repro3756.js against the built lib, not merely inferred).
+  test('recordSessionOnArchivedMilestoneDoesNotZeroProgress', (t) => {
+    const cwd = createTempDir('gsd-3871-record-session-');
+    t.after(() => cleanup(cwd));
+    buildArchivedMilestoneFixture(cwd);
+
+    const result = runGsdTools(['state', 'record-session', '--stopped-at', 'Phase 5 complete'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    assertCuratedProgressSurvived(cwd);
+  });
+
+  // Same fixture, same failure mode, via `state add-decision` instead —
+  // pins that the defect is in the shared write seam (readModifyWriteStateMd
+  // / applyPostSyncPreservation), not something specific to record-session.
+  // THIS TEST MUST FAIL TODAY (#3756) for the same reason as above.
+  test('addDecisionOnArchivedMilestoneDoesNotZeroProgress', (t) => {
+    const cwd = createTempDir('gsd-3871-add-decision-');
+    t.after(() => cleanup(cwd));
+    buildArchivedMilestoneFixture(cwd);
+
+    const result = runGsdTools(
+      ['state', 'add-decision', '--phase', '05-01', '--summary', 'Ship v1.0', '--rationale', 'milestone complete'],
+      cwd,
+    );
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    assertCuratedProgressSurvived(cwd);
+  });
+
+  // The over-preservation guard: a genuinely empty project (no phases
+  // anywhere, no curated progress block at all) must still report zeros
+  // after the same verb — the fix for #3756 must not make
+  // applyStatePreservation invent a nonzero progress block out of nothing.
+  // This test MUST PASS both today and after the fix.
+  test('newProjectWithNoPhasesKeepsZeroProgress', (t) => {
+    const cwd = createTempProject('gsd-3871-empty-');
+    t.after(() => cleanup(cwd));
+
+    fs.writeFileSync(
+      path.join(cwd, '.planning', 'STATE.md'),
+      [
+        '# Project State',
+        '',
+        '## Session Continuity',
+        '',
+        '**Last session:** 2024-01-10',
+        '**Stopped at:** None',
+        '**Resume file:** None',
+        '',
+      ].join('\n'),
+    );
+
+    const result = runGsdTools(['state', 'record-session', '--stopped-at', 'Nothing started yet'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    const written = fs.readFileSync(statePath, 'utf-8');
+    const fm = frontmatterLib.extractFrontmatter(written);
+    const progress = fm && fm.progress;
+
+    // No curated progress ever existed, so exactly one deterministic outcome
+    // is acceptable — the block is entirely absent, or every count in it is
+    // a genuine, well-formed 0. Some assertion MUST run either way (no `if`
+    // guard around the assertion itself); which branch it took is stated in
+    // the failure message so a silent pass-through cannot hide which case
+    // fired. `Number.isFinite` (not `Number(x) || 0`) so a garbage/NaN value
+    // is caught rather than laundered into a false 0.
+    if (!progress) {
+      assert.strictEqual(progress, undefined, 'case: no progress block at all — this is the accepted degraded outcome for a project with no curated progress');
+    } else {
+      const counters = {
+        total_phases: Number(progress.total_phases),
+        completed_phases: Number(progress.completed_phases),
+        total_plans: Number(progress.total_plans),
+        completed_plans: Number(progress.completed_plans),
+      };
+      for (const [key, value] of Object.entries(counters)) {
+        assert.ok(Number.isFinite(value), `case: progress block present — ${key} must coerce to a finite number, got ${JSON.stringify(progress[key])}`);
+        assert.strictEqual(value, 0, `case: progress block present — ${key} must be exactly 0 on an empty project, not inflated`);
+      }
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADR-3473 §8.6 test matrix rows 31-33 (.gsd/phase/feat-3871-state-transaction-
+// snapshot/50-test-matrix.md): consumer-output identity for the two
+// sanctioned `rebuild()` exceptions (`state sync`, `/gsd-health --repair`'s
+// REGENERATE_STATE) and the second producer of the same composition
+// (`phase complete`'s atomic-commit adapter in src/phase.cts).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ADR-3473 §8.6 matrix row 31: state sync still lets the body win (#905, rebuild() did not invert the command)', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = createFixture(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  test('stateSyncStillLetsTheBodyWin', () => {
+    const content = [
+      '---',
+      'gsd_state_version: 1.0',
+      'stopped_at: "curated stale value — must NOT survive"',
+      '---',
+      '',
+      '# Project State',
+      '',
+      '## Session',
+      '',
+      '**Stopped at:** fresh body value from a contradicting body — must win',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'STATE.md'), content);
+
+    const result = runGsdTools('state sync', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    const fm = frontmatterLib.extractFrontmatter(state);
+    assert.strictEqual(
+      fm.stopped_at,
+      'fresh body value from a contradicting body — must win',
+      'the body must win over the frontmatter it contradicts — proves routing cmdStateSync through rebuild() did not invert the command',
+    );
+  });
+});
+
+describe('ADR-3473 §8.6 matrix row 32: REGENERATE_STATE still factory-resets and tolerates NO frontmatter at all', () => {
+  // NOTE — discrepancy from the brief's literal instruction, verified
+  // empirically (not assumed): driving this through the real CLI
+  // (`runGsdTools('validate health --repair', ...)`) cannot exercise this
+  // row. Two independent reasons, both confirmed against the built lib:
+  //   1. `REMEDY_ACTION.REGENERATE_STATE`'s risk is DESTRUCTIVE
+  //      (health-diagnostic-rules/root-existence.cjs's E004 rule), and
+  //      `applyRepairs`'s dispatch gate refuses every DESTRUCTIVE remedy
+  //      unconditionally — `--repair` NEVER actually calls
+  //      `rebuildStateTransaction` for it (see
+  //      tests/verify-health.test.cjs "refuses to regenerate STATE.md when
+  //      missing" and tests/health-diagnostic.test.cjs row 15, both pinning
+  //      the refusal-only contract).
+  //   2. Independently, E004 itself only fires when
+  //      `snapshot.currentPhaseLabel.scope === SCOPE.UNREADABLE` — a STATE.md
+  //      that exists, is readable, and simply has NO frontmatter block does
+  //      NOT trip that scope. Verified live: `validate health --repair` json
+  //      against exactly this fixture returns `"errors": []` and never
+  //      surfaces a `regenerateState` action at all.
+  // So the CLI can never reach this code path for this row, by policy (1)
+  // and by detection (2) independently. The invocation shape that DOES
+  // reach it is the one `runRepairAction`'s REGENERATE_STATE case (and the
+  // existing "D3" test in this same file, ADR-3408 §8.5 Matrix, Section A)
+  // already use: `stateLib.writeStateMd` + `stateTransitionMod
+  // .rebuildStateTransaction({ snapshot: extractFrontmatter(priorState) })`
+  // directly — the exact call `runRepairAction`'s REGENERATE_STATE case
+  // makes. This test drives that shape with a prior STATE.md carrying
+  // literally NO frontmatter block (not merely a missing file).
+  test('regenerateStateStillFactoryResetsAndToleratesNoFrontmatter', (t) => {
+    const tmp = createTempDir('gsd-3871-row32-');
+    t.after(() => cleanup(tmp));
+    const statePath = path.join(tmp, 'STATE.md');
+    const noFrontmatterContent = [
+      '# Session State',
+      '',
+      'No frontmatter here at all — a broken document, the usual reason',
+      'REGENERATE_STATE fires in the first place.',
+      '',
+    ].join('\n');
+    fs.writeFileSync(statePath, noFrontmatterContent);
+
+    const priorSnapshot = frontmatterLib.extractFrontmatter(noFrontmatterContent, statePath);
+    assert.deepStrictEqual(priorSnapshot, {}, 'precondition: extractFrontmatter must return {} (never throw/null) for a document with no frontmatter');
+
+    let tx;
+    assert.doesNotThrow(() => {
+      tx = stateTransitionMod.rebuildStateTransaction({ snapshot: priorSnapshot });
+    }, 'rebuildStateTransaction must NOT raise a construction failure for the {} snapshot of a frontmatter-less document');
+
+    const regenerated = [
+      '# Session State', '', '## Position', '',
+      '**Current phase:** (determining...)', '**Status:** Resuming', '',
+    ].join('\n');
+
+    stateLib.writeStateMd(statePath, regenerated, tx, tmp);
+
+    const onDisk = fs.readFileSync(statePath, 'utf8');
+    const fm = frontmatterLib.extractFrontmatter(onDisk);
+    assert.ok(fm && fm.gsd_state_version, 'the factory reset must produce a fresh, well-formed frontmatter block');
+    assert.strictEqual(fm.status, 'Resuming', 'the regenerated content must be what was written, not the old (nonexistent) curated content');
+    assert.match(onDisk, /## Position/, 'the regenerated body must be the fresh factory-reset content, not the old prose');
+  });
+});
+
+describe('ADR-3473 §8.6 matrix row 33: phase complete\'s adapter uses the identical transaction/preservation composition (#3374 Variant A stays fixed)', () => {
+  let tmpDir;
+  beforeEach(() => { tmpDir = createTempProject(); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  test('phaseCompleteAdapterUsesTheSameTransaction', () => {
+    const planningDir = path.join(tmpDir, '.planning');
+    const phase1Dir = path.join(planningDir, 'phases', '01-foundation');
+    const phase2Dir = path.join(planningDir, 'phases', '02-api');
+    fs.mkdirSync(phase1Dir, { recursive: true });
+    fs.mkdirSync(phase2Dir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '- [ ] Phase 1: Foundation',
+        '- [ ] Phase 2: API',
+        '',
+        '### Phase 1: Foundation',
+        '**Goal:** Setup',
+        '**Plans:** 1 plans',
+        '',
+        '### Phase 2: API',
+        '**Goal:** Build API',
+        '',
+        '## Progress',
+        '',
+        '| Phase | Plans Complete | Status | Completed |',
+        '|-------|----------------|--------|-----------|',
+        '| 01. Foundation | 0/1 | Not started | - |',
+        '| 02. API | 0/1 | Not started | - |',
+        '',
+      ].join('\n'),
+    );
+
+    // A curated `paused_at` frontmatter value with NO corresponding body
+    // source line — its body delta compares as unchanged (nothing to
+    // disagree with), so a stale/absent derived value would clobber it if
+    // cmdPhaseComplete's adapter did NOT route through the identical
+    // applyStatePreservation dispatch a `state` verb uses.
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'paused_at: "curated pause note — must survive phase complete"',
+        '---',
+        '',
+        '# State',
+        '',
+        '**Current Phase:** 01',
+        '**Current Phase Name:** Foundation',
+        '**Status:** In progress',
+        '**Current Plan:** 01-01',
+        '**Last Activity:** 2025-01-01',
+        '**Last Activity Description:** Working on phase 1',
+        '',
+      ].join('\n'),
+    );
+
+    fs.writeFileSync(path.join(phase1Dir, '01-01-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(path.join(phase1Dir, '01-01-SUMMARY.md'), '# Summary\n');
+    fs.writeFileSync(
+      path.join(phase1Dir, '01-VERIFICATION.md'),
+      ['---', 'status: passed', '---', '', '# Verification', ''].join('\n'),
+    );
+
+    const result = runGsdTools(['phase', 'complete', '1'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.ok(
+      Array.isArray(output.preservation_warnings) && output.preservation_warnings.some((w) => w.field === 'paused_at'),
+      `expected paused_at named in preservation_warnings — same policy a state verb reports; got ${JSON.stringify(output.preservation_warnings)}`,
+    );
+
+    const state = fs.readFileSync(path.join(planningDir, 'STATE.md'), 'utf-8');
+    const fm = frontmatterLib.extractFrontmatter(state);
+    assert.strictEqual(
+      fm.paused_at,
+      'curated pause note — must survive phase complete',
+      'the curated field must survive phase complete via the SAME composition (syncAndPreserveStateMd -> applyStatePreservation) a state verb uses',
+    );
+  });
+});
+
+// #3834/#3835/#3836 share the epic #3473 thesis: FIELD_CLASSIFICATION declares
+// a field's preservation policy once (src/state-transition.cts), and each of
+// these three is a call site that either defeats the delta heuristic by
+// rewriting the exact body source it compares against in the same write
+// (#3834, #3835), or maintains a hand-typed field list parallel to the table
+// that had already drifted from it (#3836).
+describe('#3834/#3835/#3836: current_phase_name / last_activity_desc preservation call-site gaps', () => {
+  function buildCuratedNameFixture(cwd) {
+    const planningDir = path.join(cwd, '.planning');
+    fs.mkdirSync(planningDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## v1.0 Demo Milestone',
+        '',
+        '### Phase 1: First Phase',
+        '**Goal:** demo',
+        '',
+        '### Phase 2: Second Phase Real Name',
+        '**Goal:** demo',
+        '',
+        '### Phase 3: Third Phase',
+        '**Goal:** demo',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'milestone: v1.0',
+        'milestone_name: Demo Milestone',
+        'current_phase: 1',
+        'current_phase_name: Real Curated Name',
+        'current_plan: 0',
+        'status: executing',
+        'stopped_at: "Phase 1 done"',
+        'last_updated: "2026-08-25T00:00:00.000Z"',
+        'last_activity: "2026-08-25"',
+        'last_activity_desc: "Fresh curated description"',
+        'progress:',
+        '  total_phases: 3',
+        '  completed_phases: 1',
+        '  total_plans: 6',
+        '  completed_plans: 2',
+        '  percent: 33',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Current Position',
+        '',
+        '**Phase:** 1 — Real Curated Name',
+        '**Current Plan:** 0',
+        '**Status:** executing',
+        '',
+        '## Session',
+        '',
+        '**Stopped At:** Phase 1 done',
+        '**Last Activity:** 2026-08-25',
+        '**Last Activity Description:** Fresh curated description',
+        '',
+      ].join('\n'),
+    );
+  }
+
+  // THIS TEST MUST FAIL BEFORE THE #3834 FIX: `state planned-phase` without
+  // `--name` rewrites the body `Phase:` source line to `N — READY TO EXECUTE`
+  // in the same write the preserve-when-unchanged delta rule compares
+  // against, so the rule cannot fire and the post-sync re-derivation harvests
+  // the status fragment as if it were the curated name.
+  test('plannedPhaseWithoutNameDoesNotClobberCuratedPhaseName', (t) => {
+    const cwd = createTempDir('gsd-3834-planned-phase-');
+    t.after(() => cleanup(cwd));
+    buildCuratedNameFixture(cwd);
+
+    const result = runGsdTools(['state', 'planned-phase', '--phase', '2', '--plans', '3'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    const written = fs.readFileSync(statePath, 'utf-8');
+    const fm = frontmatterLib.extractFrontmatter(written);
+    assert.strictEqual(
+      fm.current_phase_name,
+      'Real Curated Name',
+      `current_phase_name must keep the curated value, not the status fragment "READY TO EXECUTE" — got ${JSON.stringify(fm.current_phase_name)}`,
+    );
+  });
+
+  // THIS TEST MUST FAIL BEFORE THE #3835 FIX: `state complete-phase` rewrites
+  // the body `Phase:` source line to `N — COMPLETE` unconditionally, which
+  // defeats the same delta rule and DROPS the current_phase_name key from
+  // persisted frontmatter entirely (not merely blanks it).
+  test('completePhaseDoesNotDropCuratedPhaseName', (t) => {
+    const cwd = createTempDir('gsd-3835-complete-phase-');
+    t.after(() => cleanup(cwd));
+    buildCuratedNameFixture(cwd);
+    // Phase directories so `progress` is legitimately re-derived from disk
+    // and does not confound the current_phase_name assertion below.
+    const phasesDir = path.join(cwd, '.planning', 'phases');
+    fs.mkdirSync(path.join(phasesDir, '01-first-phase'), { recursive: true });
+    fs.mkdirSync(path.join(phasesDir, '02-second-phase'), { recursive: true });
+    fs.mkdirSync(path.join(phasesDir, '03-third-phase'), { recursive: true });
+    fs.writeFileSync(path.join(phasesDir, '01-first-phase', '1-01-SUMMARY.md'), '---\nphase: 1\nplan: 01\nstatus: complete\n---\n# s\n');
+    fs.writeFileSync(path.join(phasesDir, '01-first-phase', '1-01-PLAN.md'), '---\nphase: 1\nplan: 01\n---\n# p\n');
+    fs.writeFileSync(path.join(phasesDir, '02-second-phase', '2-01-PLAN.md'), '---\nphase: 2\nplan: 01\n---\n# p\n');
+    fs.writeFileSync(path.join(phasesDir, '03-third-phase', '3-01-PLAN.md'), '---\nphase: 3\nplan: 01\n---\n# p\n');
+
+    const result = runGsdTools(['state', 'complete-phase', '1'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const statePath = path.join(cwd, '.planning', 'STATE.md');
+    const written = fs.readFileSync(statePath, 'utf-8');
+    const fm = frontmatterLib.extractFrontmatter(written);
+    assert.strictEqual(
+      fm.current_phase_name,
+      'Real Curated Name',
+      `current_phase_name must survive complete-phase, not be deleted from frontmatter entirely — got ${JSON.stringify(fm.current_phase_name)}`,
+    );
+  });
+
+  // THIS TEST MUST FAIL BEFORE THE #3836 FIX: `cmdStateJson`'s hand-maintained
+  // preserve-when-unchanged field list omits `last_activity_desc` (declared
+  // preserve-when-unchanged in FIELD_CLASSIFICATION and wired on the write
+  // path per #3258), so a stale body-prose "Last Activity Description:" line
+  // beats a fresher curated frontmatter value on every `state json` read.
+  test('stateJsonPreservesCuratedLastActivityDescOverStaleBodyProse', (t) => {
+    const cwd = createTempDir('gsd-3836-state-json-');
+    t.after(() => cleanup(cwd));
+    const planningDir = path.join(cwd, '.planning');
+    fs.mkdirSync(planningDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(planningDir, 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## v1.0 Demo Milestone',
+        '',
+        '### Phase 1: First Phase',
+        '**Goal:** demo',
+        '',
+        '### Phase 2: Second Phase Real Name',
+        '**Goal:** demo',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(planningDir, 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'milestone: v1.0',
+        'milestone_name: Demo Milestone',
+        'current_phase: 2',
+        'current_phase_name: Second Phase Real Name',
+        'current_plan: 1',
+        'status: executing',
+        'stopped_at: "Phase 2 plan 1 in flight"',
+        'last_updated: "2026-08-25T00:00:00.000Z"',
+        'last_activity: "2026-08-25"',
+        'last_activity_desc: "FRESH CURATED DESCRIPTION"',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Current Position',
+        '',
+        '**Phase:** 2 — Second Phase Real Name',
+        '**Current Plan:** 1',
+        '**Status:** executing',
+        '',
+        '## Session',
+        '',
+        '**Stopped At:** Phase 2 plan 1 in flight',
+        '**Last Activity:** 2026-08-25',
+        '',
+        '## Session Continuity Archive',
+        '',
+        '**Last Activity Description:** STALE ARCHIVED DESCRIPTION FROM 2025',
+        '',
+      ].join('\n'),
+    );
+
+    const before = fs.readFileSync(path.join(planningDir, 'STATE.md'), 'utf-8');
+    const result = runGsdTools(['state', 'json'], cwd);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const after = fs.readFileSync(path.join(planningDir, 'STATE.md'), 'utf-8');
+    assert.strictEqual(after, before, '`state json` is read-only and must not mutate STATE.md');
+
+    const parsed = JSON.parse(result.output);
+    assert.strictEqual(
+      parsed.last_activity_desc,
+      'FRESH CURATED DESCRIPTION',
+      `last_activity_desc must report the curated frontmatter value, not the stale archived body prose — got ${JSON.stringify(parsed.last_activity_desc)}`,
+    );
   });
 });
