@@ -2248,16 +2248,51 @@ const DEFERRED_BULLET_MARKERS: BulletMarkers = {
 const THEMATIC_BREAK_RE = /^[ \t]*([-*+_])(?:[ \t]*\1){2,}[ \t]*$/;
 
 /**
+ * The deferred grammar's line view for fence classification: the SAME lines,
+ * with leading whitespace removed (#3702 round 4, M2).
+ *
+ * `scanFencedBlocks` is CommonMark, and CommonMark caps a fence delimiter's
+ * indent at three spaces — a fourth makes it an indented code block instead.
+ * The deferred grammar deliberately opted out of that cliff everywhere else:
+ * an entry opener is `[ \t]*`-indented and `THEMATIC_BREAK_RE` is
+ * `^[ \t]*`. Leaving the fence rule at CommonMark's cap while items and
+ * breaks are unbounded is not a conservative choice, it is an inconsistent
+ * one, and it is REACHED BY ORDINARY DOCUMENTS: a fenced block written under a
+ * nested bullet sits at four spaces, so its `status: resolved` line resolved
+ * the entry containing it. That is the #3702 silent-resolution defect class in
+ * a new place — driven, at indents 4, 5, 8 and a leading tab, before this fix.
+ *
+ * Still NO second fence dialect (the rule `blankIndentedFenceDelimiters`
+ * states): the classification is done by `scanFencedBlocks`, the one exported
+ * CommonMark state machine, over a de-indented view. Run lengths, backtick
+ * vs tilde, closer-must-match-and-not-trail, info-string rules and the
+ * unterminated-at-EOF case are all still that engine's answers, not
+ * re-derived here. Indent is the only dimension this hides from it, and it is
+ * the exact dimension the deferred grammar has already declared it does not
+ * measure. Index alignment is 1:1 by construction — `map` preserves length —
+ * so every line index the engine returns still addresses the original line.
+ *
+ * Scope: the deferred grammar only. Both marker-parameterised call sites gate
+ * on `markers.blockStructure`, which the `## Gaps` set does not set, so Gaps
+ * reaches an empty set and is untouched by this — the same opt-out
+ * `indentWidth` documents for the indent half.
+ */
+function deindentedForFences(lines: string[]): string[] {
+  return lines.map((line) => line.replace(/^[ \t]+/, ''));
+}
+
+/**
  * Indices (into `lines`) of every line that sits inside a fenced code block,
  * delimiters included — by the sectionizer's own fence state machine, so a
  * `~~~` fence, an indented fence and an unterminated fence (runs to the end)
- * are classified exactly as `stripFencedCode` would (#3702 round 2, M2).
+ * are classified exactly as `stripFencedCode` would (#3702 round 2, M2), at
+ * ANY indent (round 4, M2 — see `deindentedForFences`).
  * #3702's wild records carry reproduction blocks; `+`-prefixed diff lines and
  * `1.`-numbered steps are their normal content, not entries.
  */
 function fencedLineSet(lines: string[]): Set<number> {
   const fenced = new Set<number>();
-  for (const block of scanFencedBlocks(lines)) {
+  for (const block of scanFencedBlocks(deindentedForFences(lines))) {
     const last = block.closeLineIdx === -1 ? lines.length - 1 : block.closeLineIdx;
     for (let i = block.openLineIdx; i <= last; i++) fenced.add(i);
   }
@@ -2314,9 +2349,15 @@ function indentOf(line: string): number {
   return col;
 }
 
-/** Line indices of fence OPENING delimiters — a fence at indent d ends the runs at d and deeper. */
+/**
+ * Line indices of fence OPENING delimiters — a fence at indent d ends the runs
+ * at d and deeper. Reads the same de-indented view as `fencedLineSet` (round 4,
+ * M2): a delimiter the gate treats as a fence must also end the run it sits in,
+ * or a deep fence would hide its contents from the field reader while leaving
+ * the list-run memory believing the run continued through it.
+ */
 function fenceOpenerLines(lines: string[]): Set<number> {
-  return new Set(scanFencedBlocks(lines).map((block) => block.openLineIdx));
+  return new Set(scanFencedBlocks(deindentedForFences(lines)).map((block) => block.openLineIdx));
 }
 
 /** A line classified as a list-item opener by `matchListOpener`. */

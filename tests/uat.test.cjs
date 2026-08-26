@@ -2774,6 +2774,114 @@ describe('#3702 round 4: ONE end-of-file CRLF algorithm, adopted from #3773 with
   });
 });
 
+describe('#3702 round 4: the fence gate is indent-unbounded, like the rest of the grammar (M2)', () => {
+  // `scanFencedBlocks` is CommonMark, which caps a fence delimiter's indent at
+  // three spaces. This grammar opted out of that cliff for entry openers
+  // (`[ \t]*`) and thematic breaks (`^[ \t]*`) but not for fences, so a fence
+  // at four spaces was not a fence to the gate and a `status: resolved` inside
+  // it RESOLVED the entry containing it. That is reached by ordinary
+  // documents, not exotic ones: a fenced block written under a nested bullet
+  // sits at four spaces. Driven before the fix at indents 4, 5, 8 and a
+  // leading tab — all four silently resolved.
+  //
+  // `gsd-core/references/executor-examples.md` states flatly that "nothing
+  // inside a fenced code block is an entry or a field". These pin that claim
+  // instead of quietly bounding it.
+  const H = '## Deferred Items\n\n';
+  const fencedStatusDoc = (pad, delim = '```') =>
+    `${H}- alpha\n${pad}${delim}text\n${pad}status: resolved\n${pad}${delim}\n`;
+
+  for (const [label, pad] of [
+    ['0 spaces', ''], ['1 space', ' '], ['2 spaces', '  '], ['3 spaces (CommonMark cap)', '   '],
+    ['4 spaces (past the cap)', '    '], ['5 spaces', '     '], ['8 spaces', '        '],
+    ['a leading tab', '\t'],
+  ]) {
+    test(`a fenced "status: resolved" at ${label} does not resolve the entry`, () => {
+      const items = parseDeferredItemsWithStatus(fencedStatusDoc(pad));
+      assert.strictEqual(items.length, 1, `${label}: expected exactly one entry`);
+      assert.notStrictEqual(String(items[0].status || '').toLowerCase(), 'resolved',
+        `${label}: the fenced status line must not resolve the entry`);
+    });
+  }
+
+  test('the same rule holds for tilde fences past the cap', () => {
+    const items = parseDeferredItemsWithStatus(fencedStatusDoc('     ', '~~~'));
+    assert.strictEqual(items.length, 1);
+    assert.notStrictEqual(String(items[0].status || '').toLowerCase(), 'resolved');
+  });
+
+  test('an entry-shaped line inside a deep fence is content, not an entry', () => {
+    // The other half of the doc's claim: not an entry EITHER. #3702's wild
+    // records carry reproduction blocks whose `- ` and `1. ` lines are prose.
+    const doc = `${H}- alpha\n      \`\`\`diff\n      - not an entry\n      1. also not an entry\n      \`\`\`\n- beta\n`;
+    const names = parseDeferredItems(doc).map((i) => i.name);
+    assert.ok(names.some((n) => n.startsWith('alpha')), `alpha missing: ${JSON.stringify(names)}`);
+    assert.ok(names.includes('beta'), `beta missing: ${JSON.stringify(names)}`);
+    assert.ok(!names.includes('not an entry'), `fenced content became an entry: ${JSON.stringify(names)}`);
+    assert.ok(!names.includes('also not an entry'), `fenced content became an entry: ${JSON.stringify(names)}`);
+  });
+
+  test('an UNTERMINATED deep fence runs to end-of-file, exactly as CommonMark says', () => {
+    // Indent is the only dimension hidden from the engine; the unterminated
+    // case is still its answer, not a re-derivation.
+    const doc = `${H}- alpha\n        \`\`\`text\n        status: resolved\n`;
+    const items = parseDeferredItemsWithStatus(doc);
+    assert.strictEqual(items.length, 1);
+    assert.notStrictEqual(String(items[0].status || '').toLowerCase(), 'resolved');
+  });
+
+  test('a deep fence still CLOSES: fields after it are read again', () => {
+    // The gate must not swallow the rest of the entry. If the closer at the
+    // same deep indent were not recognised, everything after it would stay
+    // fenced to EOF and the real status line would be invisible.
+    const doc = `${H}- alpha\n    \`\`\`text\n    status: resolved\n    \`\`\`\n  status: acknowledged\n`;
+    const items = parseDeferredItemsWithStatus(doc);
+    assert.strictEqual(items.length, 1);
+    assert.strictEqual(String(items[0].status).toLowerCase(), 'acknowledged',
+      'the post-fence status line must still be read');
+  });
+
+  test('acknowledge agrees with the reader about a deep fence', () => {
+    // Reader and writer share one classifier; a fence the reader honours must
+    // be one the writer refuses to rewrite into. Otherwise acknowledge writes
+    // inside the code block and reports ok.
+    const doc = `${H}- alpha\n      \`\`\`text\n      status: pending\n      \`\`\`\n`;
+    const ack = acknowledgeDeferredItem(doc, parseDeferredItemsWithStatus(doc)[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.ok(ack.content.includes('      status: pending'),
+      'the fenced line must be left exactly as written');
+    assert.strictEqual(String(parseDeferredItemsWithStatus(ack.content)[0].status).toLowerCase(), 'acknowledged',
+      'the entry must read back acknowledged through an inserted line, not a rewritten fenced one');
+  });
+
+  test('GUARD: `## Gaps` is untouched — it opts out of block structure entirely', () => {
+    // Both marker-parameterised call sites gate on `markers.blockStructure`,
+    // which the Gaps set does not set, so Gaps reaches an EMPTY fenced set and
+    // this change cannot reach it. Pinned rather than asserted: a future
+    // "consistency" edit that dropped that gate would silently move Gaps, and
+    // this PR's central claim is that Gaps keeps its `next` behaviour.
+    //
+    // The observable form of "no fence gate": Gaps folds the fenced lines into
+    // the entry's NAME rather than hiding them, and does so identically at an
+    // indent inside CommonMark's cap and one past it. If the deferred gate
+    // ever leaked into Gaps, the deep form would start differing from the
+    // shallow one.
+    const deep = '## Gaps\n\n- alpha\n    ```text\n    status: open\n    ```\n';
+    const shallow = '## Gaps\n\n- alpha\n  ```text\n  status: open\n  ```\n';
+    assert.deepStrictEqual(parseUatItems(deep), parseUatItems(shallow),
+      'Gaps must read a fence at 4 spaces exactly as it reads one at 2');
+    assert.deepStrictEqual(parseUatItems(deep), [
+      { name: 'alpha ```text status: open ```', result: 'open', category: 'unknown' },
+    ], 'Gaps folds fenced lines into the entry name — no fence gate at any indent');
+
+    // And the entry-shaped twin: a `- ` line inside a deep fence is still not
+    // a separate Gaps entry, because Gaps never split on it to begin with.
+    const entryShaped = '## Gaps\n\n- alpha\n    ```diff\n    - fenced line\n    ```\n- beta\n';
+    assert.deepStrictEqual(parseUatItems(entryShaped).map((i) => i.name),
+      ['alpha ```diff - fenced line ```', 'beta']);
+  });
+});
+
 describe('#3702 round 3: heading-path reader/namer inputs (m7, m8)', () => {
   test('a bullet whose CONTENT is a fence opener does not suppress the entry\'s fields', () => {
     // m7: the fence re-scan used to run on already-marker-stripped lines, so
