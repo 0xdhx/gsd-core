@@ -2882,6 +2882,202 @@ describe('#3702 round 4: the fence gate is indent-unbounded, like the rest of th
   });
 });
 
+describe('#3702 round 4: the minors (m1, m2, m3, m5)', () => {
+  const H = '## Deferred Items\n\n';
+  const names = (doc) => parseDeferredItems(doc).map((i) => i.name);
+
+  // ── m1: the ordinal digit cap needs the limit-1 case ──────────────────────
+  // RULESET.TESTS.boundary-coverage asks for N ∈ {limit-1, limit, limit+1}.
+  // The limit (`999999999.`) and limit+1 (`1234567890.`) were already pinned;
+  // limit-1 was the missing third. It is not a formality: an off-by-one in the
+  // `\d{1,9}` bound shows up at eight digits, not at nine.
+  test('m1: an EIGHT-digit ordinal (limit-1) is a marker', () => {
+    assert.deepStrictEqual(names(`${H}1. a\n12345678. b\n`), ['a', 'b']);
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('12345678. x'), true);
+  });
+
+  test('m1: the three boundary points read consistently through the marker set', () => {
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('12345678. x'), true, 'limit-1');
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('999999999. x'), true, 'limit');
+    assert.strictEqual(DEFERRED_BULLET_MARKERS.open.test('1234567890. x'), false, 'limit+1');
+  });
+
+  // ── m2: the hand-rolled CommonMark copies, checked against CommonMark ─────
+  // `THEMATIC_BREAK_RE` and the tab-expanding indent counter are fresh
+  // implementations of rules CommonMark already specifies, and this repo has
+  // no sectionizer helper for either to be compared against. So the parity
+  // assertion is against the SPEC, with the two deliberate divergences named
+  // rather than left for a later reader to discover and "fix" back.
+  test('m2: THEMATIC_BREAK_RE agrees with CommonMark on `-`, `*` and `_`', () => {
+    const isBreak = (line) => {
+      const doc = `${H}- alpha\n${line}\n- beta\n`;
+      // A separator closes the list, so `beta` opens a NEW list rather than
+      // continuing alpha's. If the line is not a break, it is swallowed as
+      // alpha's continuation text.
+      return names(doc).length === 2 && names(doc)[0] === 'alpha';
+    };
+    // `-- -` belongs in the YES list: CommonMark asks for three or more
+    // matching characters "each followed optionally by any number of spaces or
+    // tabs", so the spacing between them is free. It was in the NO list on the
+    // first cut of this test and the parser was right, not the fixture.
+    for (const yes of ['---', '***', '___', '- - -', '* * *', '_ _ _', '-----', '   ---', '-- -']) {
+      assert.strictEqual(isBreak(yes), true, `CommonMark thematic break not recognised: ${JSON.stringify(yes)}`);
+    }
+    for (const no of ['--', '**', '__', '- -', 'a---']) {
+      assert.strictEqual(isBreak(no), false, `not a CommonMark thematic break, but treated as one: ${JSON.stringify(no)}`);
+    }
+  });
+
+  test('m2: the two DELIBERATE divergences from CommonMark are pinned, not accidental', () => {
+    const isBreak = (line) => {
+      const doc = `${H}- alpha\n${line}\n- beta\n`;
+      return names(doc).length === 2 && names(doc)[0] === 'alpha';
+    };
+    // (1) `+` is NOT a CommonMark thematic-break character. It is one here,
+    // because `+` IS a list marker in this grammar, so `+ + +` would otherwise
+    // open a phantom entry named `+ +` — the same reason `* * *` is a break
+    // rather than an entry named `* *`.
+    assert.strictEqual(isBreak('+ + +'), true,
+      '`+ + +` must be a separator here even though CommonMark says otherwise');
+    // (2) Indent is UNBOUNDED. CommonMark stops recognising a thematic break at
+    // four spaces (it becomes indented code); this grammar reads entries and
+    // breaks at any indent, so the break must follow the entries.
+    assert.strictEqual(isBreak('       ---'), true, 'a 7-space break must still close the list');
+    assert.strictEqual(isBreak('\t---'), true, 'a tab-indented break must still close the list');
+  });
+
+  test('m2: the indent counter expands tabs to CommonMark 4-column stops', () => {
+    // Not directly exported, so it is measured through its observable effect:
+    // a continuation line must land at or past its opener's indent column. A
+    // tab counted as ONE column instead of expanding to the next stop of four
+    // puts a 3-space continuation "outside" a tab-indented bullet.
+    const tabOpener = `${H}\t- alpha\n\t  status: acknowledged\n`;
+    assert.deepStrictEqual(
+      parseDeferredItemsWithStatus(tabOpener).map((i) => i.status),
+      ['acknowledged'],
+      'a tab-indented entry must read its own tab-indented field',
+    );
+    // A 4-space opener and a tab opener occupy the same column, so the same
+    // continuation depth works for both.
+    const spaceOpener = `${H}    - alpha\n      status: acknowledged\n`;
+    assert.deepStrictEqual(
+      parseDeferredItemsWithStatus(spaceOpener).map((i) => i.status),
+      ['acknowledged'],
+    );
+  });
+
+  // ── m3: the result union is declared twice; check it BEHAVIOURALLY ────────
+  // `src/audit.cts` carries a hand-written structural view of `uat.cjs`,
+  // including its own copy of the result union. That decoupling is deliberate
+  // (the CLI does not take a type dependency on the module it `require()`s),
+  // so the fix is not to delete one copy but to make drift observable: every
+  // status the writer can actually PRODUCE is driven here, so a status added
+  // to one union and not the other shows up as a fixture with no counterpart
+  // rather than as a silent fall-through to the write.
+  //
+  // Four of these had no assertion anywhere in the suite before this test.
+  test('m3: every reachable acknowledge status is driven from a fixture', () => {
+    const reached = new Map();
+    const drive = (label, doc, target) => {
+      const r = acknowledgeDeferredItem(doc, target);
+      reached.set(r.status, label);
+      return r;
+    };
+
+    drive('ok', `${H}- alpha\n`, 'alpha');
+    drive('not_found', `${H}- alpha\n`, 'no such entry');
+    drive('ambiguous', `${H}- alpha\n- alpha\n`, 'alpha');
+    const resolvedDoc = `${H}- alpha\n  status: resolved\n`;
+    drive('already_resolved', resolvedDoc, parseDeferredItemsWithStatus(resolvedDoc)[0].name);
+    const headingDoc = `${H}### Entry one\n\n- **Status:** open\n`;
+    drive('unsupported_heading_shape', headingDoc, parseDeferredItemsWithStatus(headingDoc)[0].name);
+
+    assert.deepStrictEqual(
+      [...reached.keys()].sort(),
+      ['already_resolved', 'ambiguous', 'not_found', 'ok', 'unsupported_heading_shape'],
+      'a reachable status stopped being reachable, or a new one appeared',
+    );
+
+    // `match_verification_failed` is the sixth member and is NOT driven here.
+    // It is a defensive re-verify of the matched span against the target text,
+    // computed by an independent code path, and no fixture reaches it — the
+    // same position `rewrite_not_readable` was in before round 4 removed it.
+    // Stated rather than quietly omitted: if this union is ever pruned to what
+    // tests reach, that member is the one to weigh, and the answer is the same
+    // one round 4 gave for the other — an assertion nothing can drive is a
+    // specification nothing holds.
+  });
+
+  test('m3: each reachable status produces a DISTINCT outcome, so a merge of two would show', () => {
+    const doc = `${H}- alpha\n`;
+    const ok = acknowledgeDeferredItem(doc, 'alpha');
+    const notFound = acknowledgeDeferredItem(doc, 'nope');
+    assert.notStrictEqual(ok.content, doc, 'ok must change the content');
+    assert.strictEqual(notFound.content, doc, 'a refusal must return the content untouched');
+    // Every non-ok status returns the ORIGINAL content: that is the property
+    // the CLI relies on when it refuses rather than writes.
+    for (const [label, d, t] of [
+      ['ambiguous', `${H}- alpha\n- alpha\n`, 'alpha'],
+      ['not_found', doc, 'nope'],
+    ]) {
+      const r = acknowledgeDeferredItem(d, t);
+      assert.strictEqual(r.content, d, `${label}: refusal must not mutate content`);
+    }
+  });
+
+  // ── m5: DECLINED, with the measurement that refutes it ───────────────────
+  // The review is right that `markers.open`'s `(\s*)` indent group and the
+  // `/^[ \t]*/` reader disagree about `\f`, `\v` and NBSP. Its prescribed fix
+  // — "narrow to `([ \t]*)`" — was implemented, measured, and REVERTED,
+  // because the disagreement is not currently doing any harm and the narrowing
+  // is.
+  //
+  // Driven, both directions:
+  //   indent    as shipped                               narrowed to [ \t]*
+  //   \f        entry, status open, ack ok, reads back    NO ENTRY
+  //   \v        entry, status open, ack ok, reads back    NO ENTRY
+  //   NBSP      entry, status open, ack ok, reads back    NO ENTRY
+  //
+  // The whole round-trip already works for these: the entry surfaces, its
+  // field parses, `acknowledgeDeferredItem` returns ok and the result reads
+  // back acknowledged. Narrowing turns three working shapes into three
+  // SILENTLY DROPPED ones — which is the #3702 defect class itself, and the
+  // opposite of the fail-safe rule this file states ("never silently drop a
+  // possibly-open item"). A latent inconsistency in the safe direction is not
+  // worth trading for a live regression in the unsafe one.
+  //
+  // Pinned here so the prescription cannot be re-applied without failing a
+  // test that explains why. If the inconsistency is ever to be closed, the
+  // direction is to make the READERS agree with the opener — `indentOf` counts
+  // non-tab whitespace as a column instead of terminating on it — not to make
+  // the opener reject lines it currently accepts.
+  for (const [label, indent] of [['a form feed', '\f'], ['a vertical tab', '\v'], ['an NBSP', '\u00a0']]) {
+    test(`m5: an entry indented with ${label} still round-trips (narrowing would drop it)`, () => {
+      const doc = `${H}${indent}- alpha\n  status: open\n`;
+      const items = parseDeferredItemsWithStatus(doc);
+      assert.strictEqual(items.length, 1, `${label}: the entry must surface`);
+      assert.strictEqual(items[0].status, 'open', `${label}: its field must parse`);
+      const ack = acknowledgeDeferredItem(doc, items[0].name);
+      assert.strictEqual(ack.status, 'ok', `${label}: it must be acknowledgeable`);
+      assert.strictEqual(
+        String(parseDeferredItemsWithStatus(ack.content)[0].status).toLowerCase(),
+        'acknowledged',
+        `${label}: and the acknowledgement must read back`,
+      );
+    });
+  }
+
+  test('m5 GUARD: `## Gaps` and the deferred set read exotic indent IDENTICALLY today', () => {
+    // The two sets differing here is what a narrowing would introduce. Both
+    // use `\s*` now, so a form-feed-indented bullet is an item on both paths.
+    // If a later edit narrows only one, this fails.
+    const gaps = parseUatItems('## Gaps\n\n\f- alpha\n').map((i) => i.name);
+    const deferred = parseDeferredItems('## Deferred Items\n\n\f- alpha\n').map((i) => i.name);
+    assert.deepStrictEqual(gaps, ['alpha'], 'Gaps must read a form-feed-indented bullet');
+    assert.deepStrictEqual(deferred, ['alpha'], 'the deferred set must read it too');
+  });
+});
+
 describe('#3702 round 3: heading-path reader/namer inputs (m7, m8)', () => {
   test('a bullet whose CONTENT is a fence opener does not suppress the entry\'s fields', () => {
     // m7: the fence re-scan used to run on already-marker-stripped lines, so

@@ -77,12 +77,18 @@ The file has no template — write it by hand, as a Markdown list under a
 - One entry per top-level list item. `-`, `*` and `+` all count, and so does a
   dot-terminated ordered marker (`1.`) when the list actually starts at `1.` —
   a sentence that merely opens with a number (`2026. was a bad year`) is prose,
-  not an item. `1)` is not a marker here.
+  not an item. `1)` is not a marker here, and neither is an ordinal past nine
+  digits (`999999999.` counts, `1234567890.` does not).
 - Continuation lines indent beneath their entry. Fields go on those lines:
-  `status: resolved`, or the bolded `**Status:** resolved` convention — the key
-  is matched case-insensitively when bolded.
+  `status: resolved`, or the bolded `**Status:** resolved` convention. **The
+  BARE key is lower-case only** — write `Status: resolved` without the bold and
+  the field is not read, so the entry stays open with no warning. Bold it or
+  lower-case it. The bolded form matches the key case-insensitively, and the
+  VALUE is case-insensitive in both forms.
 - A `* * *` or `- - -` separator closes the list rather than opening an entry,
-  and nothing inside a fenced code block is an entry or a field.
+  and nothing inside a fenced code block is an entry or a field — at any indent,
+  including one deeper than CommonMark's three-space cap, which is what a fence
+  written under a nested bullet looks like.
 
 An entry is RESOLVED only if it carries an explicit `status: resolved`. Anything
 else — including an entry with no `status:` at all — stays open and will surface
