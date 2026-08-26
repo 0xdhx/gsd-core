@@ -12467,6 +12467,84 @@ describe('#3697 round 3: the two warning channels', () => {
     });
   }
 
+  // Every dash takes the STRICT shape, whatever its codepoint. `PREFIX-\d+
+  // <dash> \d+` is also a date and a sub-numbered ID, and that ambiguity is a
+  // property of the shape rather than of which key was pressed. #3697-4 pins
+  // the ASCII date annotation silent; these pin its seven typographic twins to
+  // the same verdict. Two of them — U+2013 and U+2014 — warned BEFORE this PR,
+  // so this arm fixes a pre-existing inconsistency as well as the one an
+  // earlier round-3 commit briefly introduced for the other five.
+  const ALL_DASHES = [
+    ['ASCII hyphen-minus', '-'],
+    ['U+2010 hyphen', '‐'],
+    ['U+2011 non-breaking hyphen', '‑'],
+    ['U+2012 figure dash', '‒'],
+    ['U+2013 en dash', '–'],
+    ['U+2014 em dash', '—'],
+    ['U+2015 horizontal bar', '―'],
+    ['U+2212 minus sign', '−'],
+  ];
+
+  for (const [label, d] of ALL_DASHES) {
+    test(`#3697-13 (${label}): a date-shaped annotation must stay silent`, () => {
+      const line = `RANGE-01 (target FY-2026${d}08)`;
+      assert.strictEqual(
+        analyzeRequirementsLine(line).warn,
+        false,
+        `#3697-13 (${label}): ${JSON.stringify(line)} is a date annotation, not a range`,
+      );
+      // The sub-numbered-ID reading of the same shape, beside a selected ID.
+      const sub = `RANGE-01, API-2${d}01`;
+      assert.strictEqual(
+        analyzeRequirementsLine(sub).warn,
+        false,
+        `#3697-13 (${label}): ${JSON.stringify(sub)} is a sub-numbered ID, not a range`,
+      );
+    });
+
+    test(`#3697-13b (${label}): a tight range with a FULL ID on both sides must still warn`, () => {
+      const line = `RANGE-01${d}RANGE-05`;
+      assert.strictEqual(
+        analyzeRequirementsLine(line).rangeTokens.length,
+        1,
+        `#3697-13b (${label}): ${JSON.stringify(line)} is unambiguously a range`,
+      );
+    });
+  }
+
+  test('#3697-13c: the LOOSE operators keep their numeric endpoint', () => {
+    // `..`, `…` and the word operators have no date or sub-number reading
+    // between two numbers, so the strict shape would cost them coverage for
+    // nothing. They are deliberately not moved.
+    for (const line of ['RANGE-01…05', 'RANGE-01..05', 'RANGE-01through05']) {
+      assert.strictEqual(
+        analyzeRequirementsLine(line).rangeTokens.length,
+        1,
+        `#3697-13c: ${JSON.stringify(line)} must still read as a tight range`,
+      );
+    }
+  });
+
+  test('#3697-13d: the accepted false negative is now symmetric across dashes', () => {
+    // `RANGE-01, RANGE-02-05` is silent in the shipped design — the strict
+    // shape accepts that, deliberately, for the dash people actually type.
+    // Every other dash now accepts it identically; the inconsistency, not the
+    // gap, is what round 3 removed. A BARE `RANGE-02<dash>05` still warns,
+    // because it selects nothing and R3 catches it.
+    for (const [label, d] of ALL_DASHES) {
+      assert.strictEqual(
+        analyzeRequirementsLine(`RANGE-01, RANGE-02${d}05`).warn,
+        false,
+        `#3697-13d (${label}): mixed-list numeric endpoint is the accepted false negative`,
+      );
+      assert.strictEqual(
+        analyzeRequirementsLine(`RANGE-02${d}05`).warn,
+        true,
+        `#3697-13d (${label}): a bare zero-selection line must still warn via R3`,
+      );
+    }
+  });
+
   test('#3697-12: the ASCII-hyphen strict shape is unchanged by the dash widening', () => {
     // `LETTERS-\d+-\d+` is also a date and a sub-numbered ID, which is why the
     // bare-hyphen tight arm demands a full ID on both sides. Widening the

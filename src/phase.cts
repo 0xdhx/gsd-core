@@ -2501,15 +2501,30 @@ type RequirementsLineAnalysis = {
 // spelling: `→`, `~`, `..=`, `..<`, `until`, and `up to` (two tokens, so it
 // cannot be one operator token at all). Those stay out deliberately: each is a
 // symbol or word with an independent non-range use between two IDs, which is
-// the over-warning class #2334 cost three rounds. The Unicode dashes carry no
-// such collision — they are not the REQ-ID separator (that is ASCII `-`), so
-// they belong in the NOHYPHEN arm beside `—` and `–`, never in the strict arm.
+// the over-warning class #2334 cost three rounds. The Unicode dashes DO carry
+// the ASCII hyphen's date/sub-number collision — an earlier round-3 commit
+// claimed they did not, and was wrong — so they take the strict arm with it;
+// see the rule below.
 const REQ_RANGE_DASHES = '\\u2010\\u2011\\u2012\\u2013\\u2014\\u2015\\u2212';
+// EVERY DASH IS STRICT — one rule, whatever the codepoint. `PREFIX-\d+ <dash>
+// \d+` is also a date (`FY-2026-08`) and a sub-numbered ID (`API-2-01`), and
+// that ambiguity is a property of the SHAPE, not of which dash key was pressed.
+// The design already chose strictness for ASCII `-` on exactly this trade: a
+// bare-hyphen tight range must carry a full ID on BOTH sides. Until round 3 the
+// other dashes sat in the loose arm, so `RANGE-01 (target FY-2026<en-dash>08)`
+// warned while its all-ASCII twin — pinned silent by #3697-4 — did not. That
+// inconsistency predates this PR for U+2013/U+2014; round 3 briefly widened it
+// to five more codepoints before this commit closed it for all seven.
+// The cost is symmetric and already accepted: `RANGE-01, RANGE-02<dash>05`
+// goes silent, exactly as `RANGE-01, RANGE-02-05` already does today. A bare
+// `RANGE-02<dash>05` still warns — it selects nothing, so R3 catches it.
+// LOOSE stays loose: `..`, `…` and the word operators have no date or
+// sub-number reading between two numbers, so they keep the numeric endpoint.
 const REQ_RANGE_OP = `(?:\\.{2,}|\\u2026|[${REQ_RANGE_DASHES}]|-|to|thru|through)`;
-const REQ_RANGE_OP_NOHYPHEN = `(?:\\.{2,}|\\u2026|[${REQ_RANGE_DASHES}]|to|thru|through)`;
+const REQ_RANGE_OP_LOOSE = `(?:\\.{2,}|\\u2026|to|thru|through)`;
 const REQ_RANGE_OP_SYMBOL = `(?:\\.{2,}|\\u2026|[${REQ_RANGE_DASHES}]|-)`;
 const REQ_RANGE_TOKEN_RE = new RegExp(
-  `^([A-Z][A-Z0-9]*)-(?:\\d+)\\s*(?:${REQ_RANGE_OP_NOHYPHEN}\\s*(?:\\1-)?|-\\s*\\1-)\\d+$`,
+  `^([A-Z][A-Z0-9]*)-(?:\\d+)\\s*(?:${REQ_RANGE_OP_LOOSE}\\s*(?:\\1-)?|[-${REQ_RANGE_DASHES}]\\s*\\1-)\\d+$`,
   'i',
 );
 const REQ_PURE_RANGE_OP_RE = new RegExp(`^${REQ_RANGE_OP}$`, 'i');
