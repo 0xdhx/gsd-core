@@ -21,8 +21,6 @@ const {
   parseUatItems,
   DEFERRED_MARKER_ALT,
   DEFERRED_BULLET_MARKERS,
-  DEFERRED_STATUS_FIELD_RE,
-  DEFERRED_STATUS_REWRITE_RE,
 } = require('../gsd-core/bin/lib/uat.cjs');
 const { iterateBullets } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
 
@@ -1801,7 +1799,6 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × mar
           const surfacedIds = new Set(items.map((it) => idOf(it.name)));
 
           const expectedUnresolved = entries.filter((e) => !e.resolved);
-          const expectedResolved = entries.filter((e) => e.resolved);
 
           // Total surfaced count equals the count of non-resolved entries.
           assert.strictEqual(items.length, expectedUnresolved.length, where);
@@ -1812,7 +1809,6 @@ describe('#2287 parseDeferredItems: property (status: resolved fail-safe) × mar
           for (const [i, e] of entries.entries()) {
             assert.strictEqual(surfacedIds.has(i), !e.resolved, `${where}: ${e.resolved ? 'resolved entry must never surface' : 'unresolved entry must surface'}: ${e.text}`);
           }
-          void expectedResolved;
 
           // Headless: the surfaced NAME is the entry text with the marker gone,
           // whichever marker it was (the name is what acknowledge matches on).
@@ -2534,6 +2530,112 @@ describe('#3702 round 2: CRLF on the heading path and in the acknowledge writer'
   });
 });
 
+describe('#3702 round 3: detect/strip symmetry on the acknowledge path (B1, B2)', () => {
+  // The round-3 blocker. Round 2 widened the WRITER's status-line finder to
+  // the deferred marker set while the reader still de-bulleted line 0 only, so
+  // a nested `  * status:` was selectable by the writer and invisible to the
+  // reader: acknowledge rewrote it, returned `ok`, and the item stayed
+  // outstanding on every later audit. Measured against a `next` build, `*`,
+  // `+` and `1.` all resolved on base and stopped resolving at round 2's head
+  // — a regression, not a gap in new behaviour.
+  for (const marker of ['-', '*', '+', '1.']) {
+    test(`a nested "${marker} status:" line acknowledges and READS BACK`, () => {
+      const doc = `## Deferred Items\n\n- alpha thing\n  ${marker} status: pending\n`;
+      const items = parseDeferredItemsWithStatus(doc);
+      assert.strictEqual(items.length, 1);
+      const got = acknowledgeDeferredItem(doc, items[0].name);
+      assert.strictEqual(got.status, 'ok', `${marker}: acknowledge reported`);
+      assert.notStrictEqual(got.content, doc, `${marker}: content actually changed`);
+      const after = parseDeferredItemsWithStatus(got.content);
+      assert.strictEqual(
+        after[0].status, 'acknowledged',
+        `${marker}: the entry must read back as acknowledged — reporting ok over a line the reader skips is the defect`,
+      );
+    });
+  }
+
+  // The hyphen row above is NOT a widened marker: it was already broken on
+  // `next`, for the same reason. One classifier cannot be right for three
+  // markers and wrong for the fourth, so it is fixed here rather than left as
+  // a pre-existing defect found while working.
+  test('a bare capitalised "Status:" resolves rather than reporting a write nothing reads', () => {
+    // The reader stores a bare key case-sensitively, so `Status:` is not
+    // `status:`. The writer must therefore NOT select it — it falls to the
+    // insert branch, which writes a line the reader does read.
+    const doc = '## Deferred Items\n\n- alpha\n  Status: pending\n';
+    const items = parseDeferredItemsWithStatus(doc);
+    const got = acknowledgeDeferredItem(doc, items[0].name);
+    assert.strictEqual(got.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(got.content)[0].status, 'acknowledged');
+  });
+
+  test('CONTROL: a bolded line-0 key keeps its ** wrapper and spelling through the rewrite', () => {
+    // Held before this round too — it is a control on the NEW offset-based
+    // rewrite, not a regression test for a reported defect. The rewrite
+    // replaces the VALUE at the offset the classifier reported, so the key is
+    // untouched by construction; a key-matching regex would have to reproduce
+    // the wrapper to preserve it, which is the thing that could regress.
+    const doc = '## Deferred Items\n\n- **Status:** pending alpha\n';
+    const items = parseDeferredItemsWithStatus(doc);
+    const got = acknowledgeDeferredItem(doc, items[0].name);
+    assert.strictEqual(got.status, 'ok');
+    assert.match(got.content, /- \*\*Status:\*\* acknowledged/);
+  });
+
+  test('acknowledge is idempotent across a re-read', () => {
+    // The failure this guards is the one the defect actually produced: the
+    // item resurfaces, gets acknowledged again, and never settles.
+    const doc = '## Deferred Items\n\n- alpha\n  * status: pending\n';
+    const first = acknowledgeDeferredItem(doc, parseDeferredItemsWithStatus(doc)[0].name);
+    const reread = parseDeferredItemsWithStatus(first.content);
+    assert.strictEqual(reread[0].status, 'acknowledged');
+    const second = acknowledgeDeferredItem(first.content, reread[0].name);
+    assert.strictEqual(second.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(second.content)[0].status, 'acknowledged');
+  });
+});
+
+describe('#3702 round 3: heading-path reader/namer inputs (m7, m8)', () => {
+  test('a bullet whose CONTENT is a fence opener does not suppress the entry\'s fields', () => {
+    // m7: the fence re-scan used to run on already-marker-stripped lines, so
+    // `- ```sh` — an ordinary bullet to the splitter — stripped to a fence
+    // opener that existed in no other pass, and the `**Status:** resolved`
+    // after it was suppressed as fence content. A RESOLVED entry resurfaced.
+    const doc = '## Deferred Items\n\n### Entry\n\n- ```sh\n- **Status:** resolved\n- ```\n';
+    // The status field must be READ (the round-2 fence suppression is for a
+    // fence the SPLITTER saw, which this is not) ...
+    assert.strictEqual(parseDeferredItemsWithStatus(doc)[0].status, 'resolved');
+    // ... and a resolved entry must therefore not surface as outstanding.
+    assert.deepStrictEqual(parseDeferredItems(doc), []);
+  });
+
+  test('a heading that begins with a list marker keeps it in the entry name', () => {
+    // m8: line 0 of a heading entry is the heading TEXT, not a bullet.
+    // Stripping a marker off it silently renamed the entry — and the name is
+    // the key acknowledge matches on.
+    for (const [heading, expected] of [
+      ['### 1. Race in the writer', '1. Race in the writer'],
+      ['### * starred title', '* starred title'],
+      ['### Race in the writer', 'Race in the writer'],
+    ]) {
+      const doc = `## Deferred Items\n\n${heading}\n\n- **What:** x\n`;
+      const items = parseDeferredItemsWithStatus(doc);
+      assert.strictEqual(items.length, 1, heading);
+      assert.ok(items[0].name.startsWith(expected), `${heading} -> ${items[0].name}`);
+    }
+  });
+
+  test('CONTROL: a body bullet keeps its marker in the entry name', () => {
+    // Held before this round too — a control on the opener-flag threading, not
+    // a reported defect. The flags say which lines CARRY a marker, but only
+    // line 0's is part of the entry's identity; wiring the flags into the namer
+    // wholesale strips the body lines too, which is a rename of the key
+    // acknowledge matches on. This pins that it did not happen.
+    const doc = '## Deferred Items\n\n### Entry\n\n- **What:** x\n';
+    assert.strictEqual(parseDeferredItemsWithStatus(doc)[0].name, 'Entry  - **What:** x');
+  });
+});
+
 describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
   test('every deferred-items marker regex derives from the one alternation source', () => {
     // Structural, not behavioural: the four regexes embed the SAME source
@@ -2541,18 +2643,30 @@ describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
     for (const [name, re] of [
       ['open', DEFERRED_BULLET_MARKERS.open],
       ['strip', DEFERRED_BULLET_MARKERS.strip],
-      ['status finder', DEFERRED_STATUS_FIELD_RE],
-      ['status rewrite', DEFERRED_STATUS_REWRITE_RE],
     ]) {
       assert.ok(re.source.includes(DEFERRED_MARKER_ALT), `${name}: ${re.source}`);
     }
   });
 
-  test('the entry opener and the status-line shapes agree on every marker', () => {
-    for (const m of ['-', '*', '+', '1.', '12.', '999999999.']) {
+  // #3702 round 3 (M6): the structural assertion above is kept for the two
+  // SPLITTER regexes, which really are two copies of one alternation. It is no
+  // longer asked to stand in for the writer/reader agreement — it never could.
+  // Sharing a source string says nothing about whether the line the writer
+  // selects is a line the reader reads, which is precisely the asymmetry that
+  // shipped. The replacement is BEHAVIOURAL and drives the real seam.
+  test('every marker that OPENS an entry also resolves it through acknowledge', () => {
+    for (const m of ['-', '*', '+', '1.']) {
       assert.ok(DEFERRED_BULLET_MARKERS.open.test(`${m} x`), `open: ${m}`);
-      assert.ok(DEFERRED_STATUS_FIELD_RE.test(`${m} status: x`), `finder: ${m}`);
-      assert.strictEqual(`${m} status: x`.replace(DEFERRED_STATUS_REWRITE_RE, '$1$2$3ok'), `${m} status: ok`, `rewrite: ${m}`);
+      const doc = `## Deferred Items\n\n${m} alpha\n  status: pending\n`;
+      const items = parseDeferredItemsWithStatus(doc);
+      assert.strictEqual(items.length, 1, `entry surfaced: ${m}`);
+      const got = acknowledgeDeferredItem(doc, items[0].name);
+      assert.strictEqual(got.status, 'ok', `ack ok: ${m}`);
+      const after = parseDeferredItemsWithStatus(got.content);
+      assert.strictEqual(
+        after[0].status, 'acknowledged',
+        `${m}: acknowledge must be READ BACK, not merely written — a status line the reader skips leaves the item outstanding forever`,
+      );
     }
   });
 
