@@ -2567,6 +2567,17 @@ const REQ_GLUED_RANGE_TRAIL_RE = new RegExp(`^([A-Z][A-Z0-9]*-\\d+)${REQ_RANGE_O
 const REQ_ID_SUBSTRING_RE = /[A-Z][A-Z0-9]*-\d+/i;
 const REQ_ID_SHAPE_RE = /^[A-Z][A-Z0-9]*-\d+$/i;
 const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
+// `LETTERS-\d+-\d+` — a date (`FY-2026-08`) or a sub-numbered ID (`API-2-01`).
+// REQ_RANGE_TOKEN_RE's strict-dash arm exists precisely to keep this shape
+// silent, because nothing at token level can tell the three readings apart.
+// Round 4 review Minor 2: the skipped-text rider re-reported it through the
+// side door — `REQ_ID_SUBSTRING_RE` is unanchored, so `FY-2026-08` matches as
+// `FY-2026` and landed in `unselectedIdShaped`. Whenever any OTHER rule fired
+// on a line carrying a date annotation, the warning then told the author to
+// "check whether any of it is a requirement" about a date. Not a false
+// warning — the line was warning anyway — but false CONTENT, and it is the
+// #2334 voice.
+const REQ_DATE_LIKE_RE = /^[A-Z][A-Z0-9]*-\d+-\d+$/i;
 
 // The token-length cap. It bounds REQ_ID_SUBSTRING_RE, the one UNANCHORED
 // regex here, which backtracks quadratically on a pathological token. Round 3
@@ -2940,7 +2951,13 @@ function formatRequirementsLineWarning(
       t.toUpperCase(),
     ),
   );
-  const skippedNames = analysis.unselectedIdShaped.filter((t) => !alreadyNamed.has(t.toUpperCase()));
+  // Filtered at the MESSAGE, not in the analysis: `unselectedIdShaped` stays a
+  // faithful record of what the selector skipped (it is documented as a fact
+  // that never routes), while the user-facing clause declines to assert
+  // requirement-ness about a shape the design has already ruled unadjudicable.
+  const skippedNames = analysis.unselectedIdShaped.filter(
+    (t) => !alreadyNamed.has(t.toUpperCase()) && !REQ_DATE_LIKE_RE.test(t),
+  );
   const skipped =
     skippedNames.length > 0
       ? ` ID-shaped text on the line that was NOT selected: ${skippedNames.join(', ')}` +

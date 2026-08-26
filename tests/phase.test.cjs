@@ -12051,10 +12051,19 @@ describe('issue #3697: phase complete must warn when the Requirements line under
       const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
       const parsed = JSON.parse(output);
       const warnings = parsed.warnings || [];
-      assert.deepStrictEqual(
-        warnings.filter((w) => REQ_LINE_MISPARSE_RE.test(w)), [],
+      // Round 4 review Minor 1: this asserted only that the ASSERTIVE channel
+      // stayed silent, so a regression routing the line into the AMBIGUOUS
+      // channel would have passed. Whole-channel silence is not available here
+      // — the pre-existing ghost-ID warning legitimately fires on the
+      // unregistered `TORANGE-05` — so the precise assertion is that NO
+      // Requirements-line warning of ANY kind was emitted. The machine code
+      // added in this round is what makes that statable at all.
+      assert.strictEqual(
+        parsed.requirements_line_warning, undefined,
         `#3697-4b FAILED: "RANGE-01, TORANGE-05" is a comma list of two valid IDs and must not ` +
-        `produce a misparse warning, got: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        `produce a Requirements-line warning in ANY channel, got kind ` +
+        `${JSON.stringify(parsed.requirements_line_warning)} / ${JSON.stringify(warnings)}\n` +
+        `Full output: ${output}`,
       );
     },
   );
@@ -12403,6 +12412,57 @@ describe('issue #3697: phase complete must warn when the Requirements line under
       );
     },
   );
+
+  // ==========================================================================
+  // #3697-18 — the skipped-text rider must not re-report a date (Minor 2).
+  //
+  // `REQ_ID_SUBSTRING_RE` is unanchored, so `FY-2026-08` matches as `FY-2026`
+  // and lands in `unselectedIdShaped`. REQ_RANGE_TOKEN_RE's entire strict-dash
+  // arm exists to keep exactly that shape silent — and #3697-4 pins
+  // `RANGE-01 (target FY-2026-08)` as producing no warning at all. But whenever
+  // some OTHER rule fired on a line that also carried a date annotation, the
+  // rider told the author to "check whether any of it is a requirement" about
+  // a date. Not a false warning; false CONTENT, in the #2334 voice.
+  // ==========================================================================
+  for (const [label18, line18] of [
+    ['dotted range + date', 'RANGE-01 .. RANGE-05 (target FY-2026-08)'],
+    ['ellipsis range + bare date', 'RANGE-01 … RANGE-05 due FY-2026-08'],
+    ['sub-numbered ID beside a range', 'RANGE-01 .. RANGE-05 (see API-2-01)'],
+  ]) {
+    test(
+      `#3697-18 (date-like rider, ${label18}): the line warns, but not ABOUT the date`,
+      () => {
+        const a = analyzeRequirementsLine(line18);
+        const w = reqLineText(formatRequirementsLineWarning('1', line18, a));
+        assert.ok(w, `#3697-18 (${label18}): the range rule fired, so the line still warns`);
+        assert.doesNotMatch(
+          w,
+          /ID-shaped text on the line that was NOT selected/i,
+          `#3697-18 FAILED (${label18}): the only unselected ID-shaped token is a date/sub-numbered ` +
+          `shape the design deliberately refuses to adjudicate, so the rider must not speak: ${w}`,
+        );
+        // The FACT is still recorded — the suppression is at the message, not
+        // in the analysis, so nothing is hidden from a consumer that wants it.
+        assert.ok(
+          a.unselectedIdShaped.length > 0,
+          `#3697-18 (${label18}): the analysis must still record the skipped token as a fact`,
+        );
+      },
+    );
+  }
+
+  // The other half, or the fix above would be a silencer rather than a filter:
+  // a genuinely unselected REQ-ID must still be named.
+  test('#3697-18b (genuine skip still named): a dropped REQ-ID is not suppressed by the date filter', () => {
+    const line = 'REQ-01, (REQ-02), REQ-03 — REQ-05';
+    const a = analyzeRequirementsLine(line);
+    const w = reqLineText(formatRequirementsLineWarning('1', line, a));
+    assert.match(
+      w,
+      /ID-shaped text on the line that was NOT selected: REQ-02/i,
+      `#3697-18b FAILED: REQ-02 is a real skipped ID and must still be named: ${w}`,
+    );
+  });
 
   // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
   // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
