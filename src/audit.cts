@@ -144,7 +144,7 @@ interface UatDeferredModule {
 /** Result of `UatDeferredModule.acknowledgeDeferredItem`. */
 interface AcknowledgeDeferredItemResult {
   content: string;
-  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed';
+  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed' | 'rewrite_not_readable';
 }
 
 /**
@@ -1568,6 +1568,12 @@ function cmdAuditAcknowledge(cwd: string, args: string[], raw: boolean): void {
       }
       if (result.status === 'match_verification_failed') {
         ioError(`internal error: matched span for --text "${text as string}" did not re-verify before write — refused rather than risk writing the wrong entry`);
+      }
+      if (result.status === 'rewrite_not_readable') {
+        // The writer produced a status line the reader does not read back
+        // (#3702 round 3). Refusing is the whole point: the alternative is a
+        // reported success over an item that stays outstanding forever.
+        ioError(`internal error: the acknowledged status line for --text "${text as string}" does not read back as acknowledged — refused rather than report a suppression that would not hold`);
       }
       platformWriteSync(safeFilePath, result.content);
       output({ acknowledged: true, category, phase, file, text }, raw, 'true');

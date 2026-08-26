@@ -856,7 +856,7 @@ function parseGapsTableItems(sectionBody: string): UatItem[] {
  * surfaced.
  *
  * #3457: when the section body contains headings, entries are delimited by
- * LEAF headings (see `splitDeferredHeadingEntries`) rather than by bullets —
+ * LEAF headings (see `splitDeferredHeadingEntriesDetailed`) rather than by bullets —
  * the executor convention writes one deferred item as a heading followed by
  * sibling `- **Field:** …` bullets, which the bullet-only split mis-counted as
  * one item PER BULLET. A body with no headings keeps the original
@@ -889,20 +889,27 @@ function parseDeferredItemsWithStatus(content: string): Array<{ name: string; st
   // does for the headless/Gaps shape, where a later `- ` line is a nested
   // sub-list, not a field).
   const headingEntries = splitDeferredHeadingEntriesDetailed(sectionBody);
+  // The opener flags are HANDED DOWN rather than pre-applied (#3702 round 3,
+  // m7/m8). Marker-stripping the lines here and passing the result meant the
+  // reader's fence scan ran over text the splitter never saw, and the namer
+  // stripped a marker off the heading TEXT. Both consumers now take the raw
+  // lines plus the splitter's own per-line verdict — a rejected ordinal
+  // ("3. status: resolved" as prose) still keeps its `3. ` and yields no field,
+  // because that verdict is what carries the rejection.
   const entries = headingEntries !== null
     ? headingEntries.map((entry) => ({
       lines: entry.lines,
-      // Strip ONLY the lines that opened a list item — a rejected ordinal
-      // ("3. status: resolved" as prose) keeps its `3. ` and yields no field.
-      fields: extractGapEntryFields(entry.lines.map((l, i) => (entry.opener[i] ? stripLeadingBulletMarker(l) : l)), DEFERRED_BULLET_MARKERS),
+      opener: entry.opener,
+      fields: extractGapEntryFields(entry.lines, DEFERRED_BULLET_MARKERS, entry.opener),
     }))
     : splitGapsEntries(sectionBody, DEFERRED_BULLET_MARKERS).map((entryLines) => ({
       lines: entryLines,
+      opener: undefined,
       fields: extractGapEntryFields(entryLines, DEFERRED_BULLET_MARKERS),
     }));
 
-  for (const { lines: entryLines, fields } of entries) {
-    const text = rawGapEntryText(entryLines, DEFERRED_BULLET_MARKERS);
+  for (const { lines: entryLines, opener, fields } of entries) {
+    const text = rawGapEntryText(entryLines, DEFERRED_BULLET_MARKERS, opener);
     if (!text) continue;
 
     items.push({ name: text, status: fields.status || '' });
@@ -939,7 +946,7 @@ function parseDeferredItems(content: string): UatItem[] {
 /** Result of `acknowledgeDeferredItem`. */
 interface AcknowledgeDeferredItemResult {
   content: string;
-  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed';
+  status: 'ok' | 'not_found' | 'ambiguous' | 'unsupported_heading_shape' | 'already_resolved' | 'match_verification_failed' | 'rewrite_not_readable';
 }
 
 /**
@@ -958,7 +965,7 @@ interface AcknowledgeDeferredItemResult {
  *
  * Deliberately refuses (`unsupported_heading_shape`) rather than guess when
  * the section uses the heading-delimited (#3457) entry shape: reliably
- * mapping a `splitDeferredHeadingEntries` entry back to its EXACT source line
+ * mapping a `splitDeferredHeadingEntriesDetailed` entry back to its EXACT source line
  * span is not safely derivable without re-deriving that function's
  * leaf/container walk against a document that may also mix in headless
  * (`splitGapsEntries`-derived) entries between headings — attempting it risks
@@ -1010,7 +1017,7 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   );
   const sectionBody = deferredSection ? deferredSection.body : content;
 
-  if (splitDeferredHeadingEntries(sectionBody) !== null) {
+  if (splitDeferredHeadingEntriesDetailed(sectionBody) !== null) {
     return { content, status: 'unsupported_heading_shape' };
   }
 
@@ -1046,55 +1053,100 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   }
 
   const matchIndexInContent = sectionOffset + start;
-  // #3702: the optional entry-opening marker is the widened deferred set,
-  // derived from the same source as the entry splitter's (see
-  // `DEFERRED_MARKER_ALT`). A bolded `**Status:**` still parses — the `*`
-  // alternative requires trailing whitespace, which `**` does not supply, so
-  // the optional group declines and the bolded-key alternative matches.
-  const statusLineIdx = matchedLines.findIndex((rawLine) => DEFERRED_STATUS_FIELD_RE.test(rawLine.replace(/\r$/, '')));
-
-  // The rewrite below and the indent probe both run on a CR-STRIPPED copy of
-  // their line (#3702 round 2, M4 / m2). Pre-existing on `next`: the FINDER
-  // above tests a stripped copy, but the rewrite ran on the raw line with a
-  // `$`-anchored `.*` — which cannot consume `\r` — so `replace` returned its
-  // input unchanged, `newMatchedLines` was identical, and the writer reported
-  // `ok` over byte-identical content. `cmdAuditAcknowledge` then announced a
-  // suppression that never happened and the item resurfaced on every audit.
+  // Locate the status line with the READER'S OWN classifier, never a
+  // writer-side regex (#3702 round 3, B1/B3 — the shape is #3773's,
+  // parameterised here by the widened marker set per the round-3 review's
+  // prescribed end state). The only line worth rewriting in place is one the
+  // reader will read back as `fields.status`.
   //
-  // No CRLF-preservation branch here (WARNING 1, #3458 follow-up review):
-  // every write goes through `platformWriteSync` → `normalizeContent`, which
-  // for a `.md` path unconditionally runs `_normalizeMd` — whole-file
-  // `\r\n` → `\n`, plus blank-line normalization around headings/lists — on
-  // EVERY write, not just this one. That is this codebase's single,
-  // deliberate OS-facing I/O seam (`shell-command-projection.cts`), applied
-  // uniformly to every `.md` writer; carving out one exception here would
-  // fight it rather than follow it, for a guarantee (byte-identical CRLF on
-  // disk) the seam already makes impossible. A marker write on a CRLF
-  // `deferred-items.md` normalizes the WHOLE file to LF, same as any other
-  // `.md` write in this codebase — expected, not a regression to guard
-  // against. A source line that still carries a trailing `\r` (read from an
-  // on-disk CRLF document before normalization) is CR-stripped before the
-  // rewrite and the replacement does not reproduce it — dropped here,
-  // consistent with the eventual whole-file normalization. (Until #3702
-  // round 2 this comment claimed `.*$` consumed the `\r`; it does not — `.`
-  // never matches `\r` — and that was M4.)
+  // What this closes: round 2 widened the writer's finder to the deferred
+  // marker set while `extractGapEntryFields` still read a marker only on line
+  // 0. A nested `  * status: pending` was therefore SELECTED by the writer and
+  // invisible to the reader — acknowledge rewrote it, returned `ok`, and the
+  // item stayed outstanding forever. Measured against a `next` build: `*`, `+`
+  // and `1.` all resolved on base and stopped resolving here, so it was a
+  // regression, not a gap in new behaviour. The hyphen form of the same shape
+  // (`  - status:`) was already broken on `next`; it is fixed here too, since
+  // one classifier cannot be right for three markers and wrong for the fourth.
+  //
+  // A line the reader skips now falls through to the INSERT branch, which
+  // writes a line the reader does read — the fail-safe direction. That covers
+  // a bare capitalised `Status:` as well: the reader stores it under `Status`,
+  // not `status`, so it is not selected, and the insert resolves the entry
+  // instead of rewriting a line nothing reads.
+  const statusLineIdx = matchedLines.findIndex(
+    (rawLine, idx) => parseGapEntryFieldLine(rawLine, DEFERRED_BULLET_MARKERS, idx === 0)?.key === 'status',
+  );
+
+  // Per-line CRLF preservation is the honest in-memory contract. The lines
+  // here are RAW — `audit acknowledge` hands this function the `readFileSync`
+  // content of an on-disk `deferred-items.md`, and `_normalizeMd` runs only on
+  // WRITE — so on a CRLF document every line but the span's last still carries
+  // its `\r`. The write path's whole-file normalization still decides what
+  // reaches disk; this function does not duplicate that decision, and it no
+  // longer silently drops the `\r` either. (Round 2's comment here argued the
+  // opposite contract. It is withdrawn: #3773 documents per-line preservation
+  // in this same function, and two opposite contracts in one function was a
+  // round-3 blocker in its own right.)
   let newMatchedLines: string[];
   if (statusLineIdx === -1) {
     const bulletIndentMatch = matchedLines[0].replace(/\r$/, '').match(DEFERRED_BULLET_MARKERS.strip);
-    const continuationIndent = ' '.repeat((bulletIndentMatch ? bulletIndentMatch[1].length : 0) + 2);
+    // The entry's own indent CHARACTERS, never a count of them — a tab counted
+    // as one column and re-emitted as one space puts a 3-space continuation
+    // under a tab-indented bullet. Identical output for all-space indents.
+    const continuationIndent = `${bulletIndentMatch ? bulletIndentMatch[1] : ''}  `;
+    // The new line goes right after line 0, so line 0 stops being the span's
+    // last line. Under CRLF the span's last line is the one WITHOUT a `\r`
+    // (the file's own `\r\n` follows the span), so the ending is read from the
+    // entry's OWN boundary and never sniffed from the whole document — a
+    // mixed-ending file must keep its LF opener. At end-of-file there is no
+    // following separator, so the boundary immediately PRECEDING the entry is
+    // the remaining local evidence; an entry at offset 0 has neither and stays
+    // LF rather than inventing an ending from nothing.
+    const line0HadCr = matchedLines[0].endsWith('\r');
+    const spanEnd = matchIndexInContent + (end - start);
+    const crlf = matchedLines.length > 1
+      ? line0HadCr
+      : content.startsWith('\r\n', spanEnd)
+        || (spanEnd >= content.length && content.endsWith('\r\n', matchIndexInContent));
     newMatchedLines = [
-      matchedLines[0],
-      `${continuationIndent}status: acknowledged`,
+      crlf ? `${matchedLines[0].replace(/\r$/, '')}\r` : matchedLines[0],
+      `${continuationIndent}status: acknowledged${line0HadCr ? '\r' : ''}`,
       ...matchedLines.slice(1),
     ];
   } else {
-    const original = matchedLines[statusLineIdx].replace(/\r$/, '');
-    const replaced = original.replace(
-      DEFERRED_STATUS_REWRITE_RE,
-      (_m, indent: string, key: string, ws: string) => `${indent}${key}${ws}acknowledged`,
-    );
+    // Rewrite at the offset the CLASSIFIER reported, rather than through a
+    // second regex of the writer's own. This is what makes the selection and
+    // the rewrite structurally incapable of disagreeing: a status line the
+    // classifier can select is one whose value offset it has already
+    // computed, so there is no shape it selects and then fails to rewrite.
+    // (A widened classifier over a hyphen-only rewrite regex is exactly that
+    // failure — it would select `* status: open` and hand back the line
+    // untouched.) The key's own spelling and any `**bold**` wrapper survive
+    // because only the value is replaced.
+    const raw = matchedLines[statusLineIdx];
+    const cr = raw.endsWith('\r') ? '\r' : '';
+    const line = raw.slice(0, raw.length - cr.length);
+    const field = parseGapEntryFieldLine(line, DEFERRED_BULLET_MARKERS, statusLineIdx === 0)!;
+    const prefix = line.slice(0, field.valueStart);
+    // `status:acknowledged` reads back fine, but a bare colon with no
+    // separator is not what this file's convention looks like; supply one only
+    // when the source had none.
+    const sep = /[ \t]$/.test(prefix) ? '' : ' ';
     newMatchedLines = matchedLines.slice();
-    newMatchedLines[statusLineIdx] = replaced;
+    newMatchedLines[statusLineIdx] = `${prefix}${sep}acknowledged${cr}`;
+  }
+
+  // Read the result back through the READER before reporting `ok` (#3773's
+  // floor, adopted here). Every defect this function has shipped had the same
+  // shape — `ok`, and nothing the reader could see. The classifier-derived
+  // rewrite above makes that unreachable by construction today; this is the
+  // fail-loud floor under the NEXT divergence, so that it costs a refused
+  // command rather than an item that stays outstanding forever while claiming
+  // to have been acknowledged.
+  const readBack = extractGapEntryFields(newMatchedLines, DEFERRED_BULLET_MARKERS);
+  if ((readBack.status || '').toLowerCase() !== 'acknowledged') {
+    return { content, status: 'rewrite_not_readable' };
   }
 
   const newContent = content.slice(0, matchIndexInContent) + newMatchedLines.join('\n') + content.slice(matchIndexInContent + (end - start));
@@ -1163,8 +1215,10 @@ const HYPHEN_BULLET_MARKERS: BulletMarkers = {
  * marker.
  *
  * `DEFERRED_MARKER_ALT` is THE source every deferred-items marker regex is
- * built from (#3702 round 2, M3) — the splitter's `open`/`strip` pair here
- * and `acknowledgeDeferredItem`'s two status-line shapes below. CommonMark
+ * built from (#3702 round 2, M3). Since round 3 that is the splitter's
+ * `open`/`strip` pair here and nothing else: `acknowledgeDeferredItem`'s two
+ * status-line shapes used to be derived from it too, and are now deleted in
+ * favour of the reader's classifier. CommonMark
  * §5.2: bullet markers `-`, `*`, `+`; an ordered marker is 1-9 digits and a
  * `.` (round-1's `\d+` was uncapped). The marker is followed by a space or a
  * tab — `[ \t]`, where round 1 wrote `\s`, which also accepted `\r`.
@@ -1180,17 +1234,15 @@ const DEFERRED_BULLET_MARKERS: BulletMarkers = {
   blockStructure: true,
 };
 
-/**
- * `acknowledgeDeferredItem`'s two status-line shapes — the finder and the
- * rewrite — derived from `DEFERRED_MARKER_ALT` like the splitter's regexes
- * above, so the marker set an entry may OPEN with and the marker set a status
- * line may CARRY cannot drift apart. Round 1 of #3702 carried both as inline
- * literals; the doc comment on `BulletMarkers` said the interface existed so
- * a detection site and its strip site could not drift, and two sites drifted
- * out of it in the same diff.
- */
-const DEFERRED_STATUS_FIELD_RE = new RegExp(`^\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?(\\*+status:\\*+|status:)`, 'i');
-const DEFERRED_STATUS_REWRITE_RE = new RegExp(`^(\\s*(?:${DEFERRED_MARKER_ALT}[ \\t]+)?)(\\*+status:\\*+|status:)(\\s*).*$`, 'i');
+// `acknowledgeDeferredItem` carries NO status-line regex of its own (#3702
+// round 3, B1/B3). It used to hold two — a finder and a rewrite — derived
+// from `DEFERRED_MARKER_ALT` so the two WRITER shapes could not drift from
+// each other. That kept the wrong pair in step: the finder's peer is the
+// READER, and widening detection without widening the read is what made a
+// nested `  * status:` line selectable by the writer and invisible to
+// `extractGapEntryFields`. Both are gone; the writer now locates its line
+// through `parseGapEntryFieldLine`, the reader's own classifier, and rewrites
+// at the offset that classifier reports. See `parseGapEntryFieldLine`.
 
 /**
  * CommonMark §4.1 thematic break: up to 3 spaces of indent, then three or
@@ -1321,21 +1373,6 @@ function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boo
 }
 
 /**
- * Strip one leading bullet marker (#3457; marker set widened by #3702).
- * Heading-delimited deferred entries carry their fields as sibling bullets;
- * `extractGapEntryFields` only de-bullets line 0 (Gaps-protective — there, a
- * later `- ` line is a nested sub-list), so the deferred heading path
- * de-bullets every line itself before field extraction. Non-bullet lines pass
- * through untouched.
- *
- * Deferred-only by construction — every caller is on the deferred path — so it
- * takes the widened set directly rather than a parameter.
- */
-function stripLeadingBulletMarker(line: string): string {
-  return line.replace(DEFERRED_BULLET_MARKERS.strip, '$2');
-}
-
-/**
  * Split a deferred-items section body into entries delimited by LEAF headings
  * (#3457). Returns `null` when the body contains no heading at all — the
  * caller then falls back to `splitGapsEntries`, keeping headless
@@ -1369,11 +1406,6 @@ function stripLeadingBulletMarker(line: string): string {
  * `splitGapsEntries` — headless parity, so loose bullets before a later
  * heading group (the mixed shape) stay one item each.
  */
-function splitDeferredHeadingEntries(sectionBody: string): string[][] | null {
-  const detailed = splitDeferredHeadingEntriesDetailed(sectionBody);
-  return detailed === null ? null : detailed.map((entry) => entry.lines);
-}
-
 /** A heading-path entry with, per line, whether that line was an ACCEPTED list opener. */
 interface DeferredHeadingEntry {
   lines: string[];
@@ -1382,7 +1414,7 @@ interface DeferredHeadingEntry {
 }
 
 /**
- * `splitDeferredHeadingEntries` with the per-line opener flags the deferred
+ * The heading-delimited split, carrying the per-line opener flags the deferred
  * field-extraction path needs (#3702 round 2, round review): the heading path
  * strips the marker off EVERY body line before field extraction (#3457), and a
  * line whose ordinal `matchListOpener` REJECTED must not be stripped — or
@@ -1723,7 +1755,7 @@ function splitGapsEntries(
  * Sibling of `splitGapsEntries` (F1, #3458 follow-up review) that ADDITIVELY
  * carries each entry's character span — every existing `splitGapsEntries`
  * caller (`parseGapsItems`, `parseDeferredItemsWithStatus`,
- * `splitDeferredHeadingEntries`'s `flushPending`) is unaffected and keeps
+ * `splitDeferredHeadingEntriesDetailed`'s `flushPending`) is unaffected and keeps
  * using the plain `lines`-only shape. `acknowledgeDeferredItem` is the one
  * caller that needs a span: it used to select an entry via `splitGapsEntries`
  * and then RE-FIND that entry's location with a fresh regex search over
@@ -1771,58 +1803,133 @@ function splitGapsEntriesWithSpans(
 function extractGapEntryFields(
   entryLines: string[],
   markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+  openerFlags?: boolean[],
 ): Record<string, string> {
   const fields: Record<string, string> = {};
-  const fieldLineRe = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
-  const boldedKeyRe = /^\*+([A-Za-z_][A-Za-z0-9_-]*):\*+/;
   // A fenced line is content, not a field (#3702 round 2, round review): the
   // splitters already keep fence lines from OPENING an entry, and a
   // `status: resolved` quoted inside a code block must not resolve one either.
   // An entry is a contiguous slice and a fence never spans two entries (the
   // opener of the next entry would be fence content), so scanning the entry's
   // own lines classifies exactly what the splitter classified.
+  //
+  // RAW lines, and that is the fix for #3702 round 3, m7. The heading path
+  // used to marker-strip its lines BEFORE calling this function, so the scan
+  // below ran over text the splitter never saw: `- ```sh` is an ordinary
+  // bullet to the splitter, but strips to ```` ```sh ````, which opens a
+  // fence here that exists in no other pass. A `**Status:** resolved` line
+  // after it was then suppressed as fence content and its resolved entry
+  // resurfaced as open. The stripping now happens INSIDE this function, after
+  // the fence scan, driven by the splitter's own per-line opener verdict.
   const fenced = markers.blockStructure ? fencedLineSet(entryLines) : new Set<number>();
 
   entryLines.forEach((rawLine, idx) => {
     if (fenced.has(idx)) return;
-    const line = rawLine.replace(/\r$/, '');
-    // Strip ONLY the entry-opening bullet marker (idx 0); a bullet marker on
-    // a later line belongs to a nested sub-list and is handled by
-    // `splitGapsEntries` already folding it in — it is not itself a field
-    // line unless it independently matches `key: value` after stripping.
-    const bulletStripped = line.match(markers.strip);
-    const content = (idx === 0 && bulletStripped ? bulletStripped[2] : line.trim())
-      .replace(boldedKeyRe, (_m, key: string) => `${key.toLowerCase()}:`);
-
-    const m = fieldLineRe.exec(content);
-    if (!m) return;
-    const key = m[1];
-    let value = m[2].trim();
-    if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
-      value = value.slice(1, -1);
-    }
-    if (!(key in fields)) fields[key] = value;
+    const field = parseGapEntryFieldLine(rawLine, markers, stripsMarkerAt(idx, openerFlags));
+    if (!field) return;
+    if (!(field.key in fields)) fields[field.key] = field.value;
   });
 
   return fields;
 }
 
 /**
+ * Which lines of an entry carry an entry-opening marker to be stripped before
+ * the line is read as a field.
+ *
+ * Without flags — the headless and `## Gaps` shapes — that is line 0 alone: a
+ * marker on a later line belongs to a nested sub-list (`splitGapsEntries`
+ * already folded it in) and is not a field line unless it independently
+ * matches `key: value` after a plain trim.
+ *
+ * With flags — the heading shape — it is whichever lines the SPLITTER accepted
+ * as list openers, because there every body line may be a sibling bullet
+ * carrying a field (#3457) while line 0 is the heading TEXT and carries no
+ * marker at all. Reading the splitter's verdict rather than re-deriving it is
+ * what keeps a rejected ordinal (`3. status: resolved` as prose) from being
+ * stripped into a field.
+ */
+function stripsMarkerAt(idx: number, openerFlags?: boolean[]): boolean {
+  return openerFlags ? openerFlags[idx] === true : idx === 0;
+}
+
+/**
+ * The ONE place an entry line is classified as a `key: value` field line.
+ * `extractGapEntryFields` reads through it, and `acknowledgeDeferredItem`
+ * locates the line it will rewrite through it.
+ *
+ * Sharing the classifier is what makes the writer structurally unable to
+ * select a line the reader will not read back (#3702 round 3, B1; the shape
+ * is #3773's, parameterised here by `markers` per the round-3 review's
+ * prescribed end state). The writer used to carry its own marker-widened
+ * status regex, so a nested `  * status: pending` was selectable by the
+ * writer and invisible to this reader: acknowledge rewrote it in place,
+ * returned `ok`, and the item stayed outstanding forever. A single classifier
+ * has no second copy to drift from.
+ *
+ * `valueStart` is the offset, in the CR-stripped line, at which the VALUE
+ * begins — so a rewrite can replace the value without a second regex of its
+ * own. The bolded-key unwrap below is a PREFIX rewrite, so the tail of the
+ * rewritten content is byte-identical to the tail of the original and the
+ * offset maps back directly.
+ *
+ * Returns `null` for a non-field line.
+ */
+function parseGapEntryFieldLine(
+  rawLine: string,
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+  stripMarker = true,
+): { key: string; value: string; valueStart: number } | null {
+  const fieldLineRe = /^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*)$/;
+  const boldedKeyRe = /^\*+([A-Za-z_][A-Za-z0-9_-]*):\*+/;
+
+  const line = rawLine.replace(/\r$/, '');
+  const bulletStripped = stripMarker ? line.match(markers.strip) : null;
+  const bare = bulletStripped ? bulletStripped[2] : line.trim();
+  // Where `bare` begins in `line`. The two branches differ: the marker strip's
+  // group 2 runs to end-of-line, so it is a plain suffix; `trim()` also cuts
+  // the tail, so its offset is the LEADING run alone. Computing one from the
+  // other's shape under-counts by the trailing whitespace.
+  const headLen = bulletStripped ? line.length - bare.length : line.length - line.trimStart().length;
+  const content = bare.replace(boldedKeyRe, (_m, key: string) => `${key.toLowerCase()}:`);
+
+  const m = fieldLineRe.exec(content);
+  if (!m) return null;
+  let value = m[2].trim();
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    value = value.slice(1, -1);
+  }
+  return { key: m[1], value, valueStart: headLen + (bare.length - m[2].length) };
+}
+
+/**
  * Fallback display text for a Gaps entry with no parseable `truth:` field.
  *
- * `markers` selects which opening marker is stripped off line 0 (#3702) —
- * hyphen-only by default, the widened set for deferred-items callers, so a
- * `*`-opened entry renders the same name its hyphen twin would. That name is
- * the key `acknowledgeDeferredItem` matches on, so the two MUST use the same
- * set: rendering `* alpha` where the parse surfaced `alpha` would make the
- * entry un-acknowledgeable.
+ * `markers` selects which opening marker is stripped (#3702) — hyphen-only by
+ * default, the widened set for deferred-items callers, so a `*`-opened entry
+ * renders the same name its hyphen twin would. That name is the key
+ * `acknowledgeDeferredItem` matches on, so the two MUST use the same set:
+ * rendering `* alpha` where the parse surfaced `alpha` would make the entry
+ * un-acknowledgeable.
+ *
+ * `openerFlags` decides WHICH lines are stripped, and on the heading shape
+ * line 0 is not one of them (#3702 round 3, m8). There line 0 is the heading
+ * TEXT, so an unconditional strip renamed `### 1. Race in the writer` to
+ * `Race in the writer` and `### * starred title` to `starred title` — both
+ * silent renames of the very key acknowledge matches on, and both a change
+ * from this parser's behaviour on `next`.
  */
 function rawGapEntryText(
   entryLines: string[],
   markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+  openerFlags?: boolean[],
 ): string {
   return entryLines
-    .map((l, i) => (i === 0 ? l.replace(markers.strip, '$2') : l.trim()))
+    // Line 0 ONLY, and only if the splitter accepted it as an opener. The
+    // opener flags say which lines carry a marker; the entry's NAME is a
+    // different question, and stripping a body line's marker out of it changes
+    // the key `acknowledgeDeferredItem` matches on.
+    .map((l, i) => (i === 0 && stripsMarkerAt(0, openerFlags) ? l.replace(markers.strip, '$2') : l.trim()))
     .join(' ')
     .trim();
 }
@@ -2046,8 +2153,12 @@ export = {
   parseDeferredItemsWithStatus,
   acknowledgeDeferredItem,
   // #3702 round 2 (M3): exposed for the marker-grammar parity test only.
+  // Narrowed in round 3 (M6): the two status-line regexes are gone from the
+  // module, so nothing exports them, and the parity test they were widened for
+  // could not reach the defect it was meant to guard anyway — it asserted the
+  // four WRITER regexes shared a source string, which is true of a detect/read
+  // asymmetry too. The pair below is what the behavioural parity test against
+  // `iterateBullets` actually reads.
   DEFERRED_MARKER_ALT,
   DEFERRED_BULLET_MARKERS,
-  DEFERRED_STATUS_FIELD_RE,
-  DEFERRED_STATUS_REWRITE_RE,
 };
