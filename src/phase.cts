@@ -2478,6 +2478,22 @@ type RequirementsLineAnalysis = {
    * said they warned.
    */
   zeroSelectionInert: boolean;
+  /**
+   * R4 — REQ-IDs the SELECTOR dropped because a delimiter was glued to them.
+   *
+   * `REQ-01; REQ-02` selects only `REQ-02`: the selector splits on `[,\s]+`,
+   * so `REQ-01;` keeps its semicolon and fails the anchored ID shape. This is
+   * #3697's own half-success failure mode — `requirements_updated: true` with
+   * a silently unmarked requirement — reached by one wrong delimiter.
+   *
+   * Round 4 review called this indistinguishable from a parenthesised
+   * citation, because `(ADR-7)` also shaves to a bare ID. At the RAW token
+   * level they are not: `REQ-01;` is shaved of a trailing DELIMITER,
+   * `ADR-7)` of a citation wrapper. This rule keys on that shave class and
+   * requires the token to sit outside any parenthetical, which is what keeps
+   * `(see ADR-7: section 3)` silent.
+   */
+  delimiterDroppedIds: string[];
   /** Tokens past the scan cap that could carry an ID — reported, never dropped. */
   oversizedTokens: string[];
   /** ID-shaped tokens the selector did not take. Reported as a fact; never routes. */
@@ -2559,6 +2575,68 @@ const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
 // the same cap now, so the claim is enforced rather than asserted. No real
 // REQ-ID-carrying token approaches this bound.
 const REQ_TOKEN_SCAN_LIMIT = 2048;
+
+// R4 — a full ID with a trailing statement delimiter glued to it. ANCHORED on
+// both ends, so it is linear and needs no cap of its own beyond the token
+// length guard its caller applies.
+const REQ_DELIMITER_DROPPED_RE = /^([A-Z][A-Z0-9]*-\d+)[;:]+$/i;
+
+/**
+ * CENSUS (round 4): the domain is "separators an author writes between two
+ * REQ-IDs INSTEAD of a comma" — distinct from the range-operator domain
+ * censused above, and it had no census at all before this round. Swept 26
+ * spellings against the shipped selector: `, ` `; ` `;` `: ` ` | ` `|` ` / `
+ * `/` ` + ` `+` ` & ` `&` ` and ` TAB two-space ` • ` ` · ` ` , ` `,,` ` ; `
+ * `؛` `；` `，` ` \ ` ` > ` and the bare forms of each.
+ *
+ * Reached, i.e. producing a SILENT under-selection: exactly two — `; ` and
+ * `: `. Every other spelling either selects both IDs (whitespace survives the
+ * split) or selects none and already warns through R3/R3b (the glued forms
+ * fuse both IDs into one unselectable token). The round-4 review hand-listed
+ * the semicolon; the colon is the sibling that sweep found, and it fails
+ * identically.
+ *
+ * NOT reached, and stated rather than fixed: a delimiter glued to an ID
+ * INSIDE a parenthetical (`(see ADR-7: section 3)`). Those are citations, not
+ * requirements, and reporting them is the #2334 over-warning class — so the
+ * parenthetical test below is the rule's boundary, not an optimisation.
+ */
+function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: number): string[] {
+  const line = String(rawLine).replace(/<!--[\s\S]*?-->/g, ' ');
+  const hits: string[] = [];
+  let depth = 0;
+  let cur = '';
+  let curDepth = 0;
+  const flush = (): void => {
+    if (cur && cur.length <= cap && curDepth === 0) {
+      const m = REQ_DELIMITER_DROPPED_RE.exec(cur);
+      if (m && !selected.has(m[1].toUpperCase())) hits.push(m[1]);
+    }
+    cur = '';
+  };
+  for (const ch of line) {
+    if (ch === '(') {
+      if (!cur) curDepth = depth;
+      depth += 1;
+      cur += ch;
+      continue;
+    }
+    if (ch === ')') {
+      cur += ch;
+      depth = depth > 0 ? depth - 1 : 0;
+      continue;
+    }
+    if (/[,\s]/.test(ch)) {
+      flush();
+      curDepth = depth;
+      continue;
+    }
+    if (!cur) curDepth = depth;
+    cur += ch;
+  }
+  flush();
+  return [...new Set(hits)];
+}
 
 /** Endpoints imply a dropped interior only on an AGREEING prefix and a gap > 1. */
 function reqEndpointsImplyInterior(a: string, b: string): boolean {
@@ -2739,11 +2817,18 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   const unselectedIdShaped = tokens.filter(
     (t) => short(t) && REQ_ID_SUBSTRING_RE.test(t) && !selected.has(t.toUpperCase()),
   );
+  // R4 runs on the RAW line, not on `tokens`: the shave that makes `REQ-01;`
+  // look like a clean `REQ-01` is exactly the evidence this rule needs, so it
+  // has to see the character the tokenizer removed.
+  const delimiterDroppedIds = reqDelimiterDroppedIds(rawLine, selected, REQ_TOKEN_SCAN_LIMIT);
   const rangeReadingOnly =
     hasSpacedRange &&
     rangeTokens.length === 0 &&
     !hasGluedRangeFragment &&
     inertIdShaped.length === 0 &&
+    // R4 is a DEMONSTRATED drop, so the ambiguous voice — whose whole claim is
+    // that nothing was dropped — must not speak for a line carrying one.
+    delimiterDroppedIds.length === 0 &&
     spacedRangePairs.every(([a, b]) => selected.has(a.toUpperCase()) && selected.has(b.toUpperCase()));
 
   // Named rather than inlined into the return literal (round 3 review Minor 3):
@@ -2758,6 +2843,7 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     hasGluedRangeFragment ||
     inertIdShaped.length > 0 ||
     zeroSelectionInert ||
+    delimiterDroppedIds.length > 0 ||
     oversizedTokens.length > 0;
 
   return {
@@ -2771,6 +2857,7 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     placeholderLed,
     spacedRangePairs,
     rangeReadingOnly,
+    delimiterDroppedIds,
     oversizedTokens,
     unselectedIdShaped,
     warn,
@@ -2818,7 +2905,9 @@ function formatRequirementsLineWarning(
   // Names only what the rule-specific clauses did NOT already name, so the
   // assertive voice can carry it too without repeating itself.
   const alreadyNamed = new Set(
-    [...analysis.rangeTokens, ...analysis.inertIdShaped].map((t) => t.toUpperCase()),
+    [...analysis.rangeTokens, ...analysis.inertIdShaped, ...analysis.delimiterDroppedIds].map((t) =>
+      t.toUpperCase(),
+    ),
   );
   const skippedNames = analysis.unselectedIdShaped.filter((t) => !alreadyNamed.has(t.toUpperCase()));
   const skipped =
@@ -2826,6 +2915,16 @@ function formatRequirementsLineWarning(
       ? ` ID-shaped text on the line that was NOT selected: ${skippedNames.join(', ')}` +
         ` (parentheses are not stripped, unlike square brackets) — check whether any of it is a` +
         ` requirement.`
+      : '';
+  // R4's clause. Named separately from the generic skipped-text rider because
+  // this one is not a "check whether any of it is a requirement" hedge — the
+  // token IS an ID, the selector demonstrably did not take it, and the cause
+  // is nameable.
+  const delimiterDropped =
+    analysis.delimiterDroppedIds.length > 0
+      ? ` ${analysis.delimiterDroppedIds.join(', ')} ${analysis.delimiterDroppedIds.length === 1 ? 'was' : 'were'}` +
+        ` NOT selected: a \`;\` or \`:\` is glued to the ID, and the line is split on commas and` +
+        ` whitespace only. Separate every requirement with a comma.`
       : '';
   const oversized =
     analysis.oversizedTokens.length > 0
@@ -2849,6 +2948,7 @@ function formatRequirementsLineWarning(
       `the line selected: ${analysis.citedReqIds.join(', ')}. If a range was intended, rewrite it ` +
       `naming every requirement explicitly (e.g. \`REQ-01, REQ-02, REQ-03\`); if that separator is ` +
       `an annotation rather than a range, it selected nothing to expand and needs no change.` +
+      delimiterDropped +
       skipped +
       oversized
     );
@@ -2901,6 +3001,7 @@ function formatRequirementsLineWarning(
         : ` ID-shaped text that was not selected: ${unparsed.join(', ')}.`
       : '') +
     advice +
+    delimiterDropped +
     skipped +
     oversized
   );

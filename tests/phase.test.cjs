@@ -12161,6 +12161,90 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     },
   );
 
+  // ==========================================================================
+  // #3697-15 — AC-1a: a REQ-ID the selector dropped to a glued delimiter.
+  //
+  // `RANGE-01; RANGE-02` selects only RANGE-02 and marks only RANGE-02, with
+  // `requirements_updated: true` — #3697's own half-success failure mode,
+  // reached by one wrong delimiter, and silent before this rule.
+  //
+  // Round 4 review rated this Major rather than Blocker on the ground that it
+  // is indistinguishable from a parenthesised citation (`(ADR-7)` shaves to a
+  // bare ID too). At the RAW token level it is distinguishable: the shave
+  // class differs, and -15b pins the citation half.
+  // ==========================================================================
+  for (const [label15, line15, expectTicked15, expectNamed15] of [
+    ['semicolon', 'RANGE-01; RANGE-02', ['RANGE-02'], ['RANGE-01']],
+    ['colon', 'RANGE-01: RANGE-02', ['RANGE-02'], ['RANGE-01']],
+    // Every dropped ID is named, not just the first — the chain is what
+    // catches a clause that reports only one and reads as complete.
+    ['semicolon chain', 'RANGE-01; RANGE-02; RANGE-03', ['RANGE-03'], ['RANGE-01', 'RANGE-02']],
+    // The drop can be the LAST id as easily as the first.
+    ['trailing colon', 'RANGE-01, RANGE-02:', ['RANGE-01'], ['RANGE-02']],
+  ]) {
+    test(
+      `#3697-15 (delimiter-dropped ID, ${label15}): an ID the selector dropped to a glued ` +
+      '`;`/`:` must warn and be named — selection is UNCHANGED',
+      (t) => {
+        const tmpDir = build3697RangeFixture(line15);
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.ok(
+          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-15 FAILED (${label15}): ${JSON.stringify(line15)} silently drops an ID, so it ` +
+          `must warn. Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
+        );
+        // Naming the dropped ID is the whole point — a warning that says
+        // "something was dropped" without saying WHAT is not actionable.
+        const expectedClause15 =
+          `${expectNamed15.join(', ')} ${expectNamed15.length === 1 ? 'was' : 'were'} NOT selected`;
+        assert.ok(
+          warnings.some((w) => w.includes(expectedClause15)),
+          `#3697-15 FAILED (${label15}): the warning must name EVERY dropped ID — expected the ` +
+          `clause ${JSON.stringify(expectedClause15)}, got: ${JSON.stringify(warnings)}`,
+        );
+        // The selector is untouched by this PR — the rule warns, it never
+        // widens what gets marked.
+        const reqContent = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+        assert.deepStrictEqual(
+          tickedReqIds(reqContent), expectTicked15,
+          `#3697-15 FAILED (${label15}): exactly ${JSON.stringify(expectTicked15)} must be ticked — ` +
+          `the warning must not change the selection.\nREQUIREMENTS.md:\n${reqContent}`,
+        );
+      },
+    );
+  }
+
+  // The rule's boundary, and the reason it is safe to ship. A delimiter glued
+  // to an ID-shaped token INSIDE a parenthetical is a citation, not a dropped
+  // requirement, and reporting it is the #2334 over-warning class. Whole
+  // channel, because there is nothing on these lines to warn about at all.
+  for (const [label15b, line15b] of [
+    ['colon in citation', 'RANGE-01, RANGE-02 (see ADR-7: section 3)'],
+    ['semicolon in citation', 'RANGE-01, RANGE-02 (see ADR-7; also ADR-9)'],
+    ['nested colon note', 'RANGE-01, RANGE-02 (blocked: ADR-7: sec 3)'],
+  ]) {
+    test(
+      `#3697-15b (citation boundary, ${label15b}): a delimiter inside a parenthetical is a ` +
+      'citation, not a dropped requirement',
+      (t) => {
+        const tmpDir = build3697RangeFixture(line15b);
+        t.after(() => cleanup(tmpDir));
+        const { output } = runVerifiedPhaseComplete(['phase', 'complete', '1'], tmpDir);
+        const parsed = JSON.parse(output);
+        const warnings = parsed.warnings || [];
+        assert.deepStrictEqual(
+          warnings, [],
+          `#3697-15b FAILED (${label15b}): ${JSON.stringify(line15b)} is a correctly-parsed comma ` +
+          `list carrying a citation and must produce NO warning, got: ${JSON.stringify(warnings)}\n` +
+          `Full output: ${output}`,
+        );
+      },
+    );
+  }
+
   // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
   // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
   // only the well-formed side. The glued-fragment rule must warn, and the
