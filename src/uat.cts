@@ -1069,14 +1069,15 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   // (`  - status:`) was already broken on `next`; it is fixed here too, since
   // one classifier cannot be right for three markers and wrong for the fourth.
   //
-  // A line the reader skips now falls through to the INSERT branch, which
-  // writes a line the reader does read — the fail-safe direction. That covers
-  // a bare capitalised `Status:` as well: the reader stores it under `Status`,
-  // not `status`, so it is not selected, and the insert resolves the entry
-  // instead of rewriting a line nothing reads.
-  const statusLineIdx = matchedLines.findIndex(
-    (rawLine, idx) => parseGapEntryFieldLine(rawLine, DEFERRED_BULLET_MARKERS, idx === 0)?.key === 'status',
-  );
+  // A line the reader skips falls through to the INSERT branch, which writes a
+  // line the reader does read — the fail-safe direction. That covers a bare
+  // capitalised `Status:` (the reader stores it under `Status`, not `status`)
+  // and a `status:` line inside a fenced block, both of which the writer must
+  // NOT rewrite in place. Selecting either one produced an entry that could not
+  // be acknowledged at all; that is why the selection goes through
+  // `entryFieldLines` rather than the classifier directly.
+  const statusLineIdx = entryFieldLines(matchedLines, DEFERRED_BULLET_MARKERS)
+    .findIndex((field) => field?.key === 'status');
 
   // Per-line CRLF preservation is the honest in-memory contract. The lines
   // here are RAW — `audit acknowledge` hands this function the `readFileSync`
@@ -1139,11 +1140,12 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
 
   // Read the result back through the READER before reporting `ok` (#3773's
   // floor, adopted here). Every defect this function has shipped had the same
-  // shape — `ok`, and nothing the reader could see. The classifier-derived
-  // rewrite above makes that unreachable by construction today; this is the
-  // fail-loud floor under the NEXT divergence, so that it costs a refused
-  // command rather than an item that stays outstanding forever while claiming
-  // to have been acknowledged.
+  // shape — `ok`, and nothing the reader could see. It costs a refused command
+  // rather than an item that stays outstanding forever while claiming to have
+  // been acknowledged. Do NOT describe it as unreachable: this round shipped a
+  // reachable path to it for one review cycle (a fenced `status:` line, when
+  // the fence gate lived only on the reader's side), and an invariant asserted
+  // in a comment is exactly what that claim was.
   const readBack = extractGapEntryFields(newMatchedLines, DEFERRED_BULLET_MARKERS);
   if ((readBack.status || '').toLowerCase() !== 'acknowledged') {
     return { content, status: 'rewrite_not_readable' };
@@ -1821,16 +1823,40 @@ function extractGapEntryFields(
   // after it was then suppressed as fence content and its resolved entry
   // resurfaced as open. The stripping now happens INSIDE this function, after
   // the fence scan, driven by the splitter's own per-line opener verdict.
-  const fenced = markers.blockStructure ? fencedLineSet(entryLines) : new Set<number>();
-
-  entryLines.forEach((rawLine, idx) => {
-    if (fenced.has(idx)) return;
-    const field = parseGapEntryFieldLine(rawLine, markers, stripsMarkerAt(idx, openerFlags));
+  entryFieldLines(entryLines, markers, openerFlags).forEach((field) => {
     if (!field) return;
     if (!(field.key in fields)) fields[field.key] = field.value;
   });
 
   return fields;
+}
+
+/**
+ * Per line of an entry, the field it declares — or `null` where it declares
+ * none, INCLUDING because it is fenced.
+ *
+ * This is the seam, and it exists because `parseGapEntryFieldLine` alone was
+ * not it (#3702 round 3, pre-push review). The reader applied the fence gate
+ * before classifying and the acknowledge writer did not, so a `status:` line
+ * inside a fenced block was selected by the writer and skipped by the reader:
+ * the write produced a line nothing reads, the read-back guard refused it, and
+ * the entry became impossible to acknowledge at all — `audit acknowledge`
+ * surfaced an internal error and `complete-milestone` halted on it. That shape
+ * acknowledged cleanly on `next`, so it was a regression introduced by the fix
+ * for the nested-marker one, and the claim "the writer cannot select a line the
+ * reader will not read back" was false while the fence gate lived on one side.
+ *
+ * Both sides call this now, so the claim is structural rather than asserted.
+ */
+function entryFieldLines(
+  entryLines: string[],
+  markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
+  openerFlags?: boolean[],
+): ({ key: string; value: string; valueStart: number } | null)[] {
+  const fenced = markers.blockStructure ? fencedLineSet(entryLines) : new Set<number>();
+  return entryLines.map((rawLine, idx) => (
+    fenced.has(idx) ? null : parseGapEntryFieldLine(rawLine, markers, stripsMarkerAt(idx, openerFlags))
+  ));
 }
 
 /**

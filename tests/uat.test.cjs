@@ -2569,6 +2569,25 @@ describe('#3702 round 3: detect/strip symmetry on the acknowledge path (B1, B2)'
     assert.strictEqual(parseDeferredItemsWithStatus(got.content)[0].status, 'acknowledged');
   });
 
+  test('a fenced "status:" line does not make the entry un-acknowledgeable', () => {
+    // Found by the pre-push review, and a regression THIS round introduced:
+    // the reader applied the fence gate before classifying and the writer did
+    // not, so the writer selected a fenced `status:` line the reader skips.
+    // The read-back guard then refused the write and the entry could not be
+    // acknowledged at all — `audit acknowledge` raised an internal error and
+    // `complete-milestone` halted. It acknowledged cleanly on `next`.
+    const F = '`'.repeat(3);
+    const doc = `## Deferred Items\n\n- alpha\n  ${F}\n  status: pending\n  ${F}\n`;
+    const items = parseDeferredItemsWithStatus(doc);
+    assert.strictEqual(items.length, 1);
+    const got = acknowledgeDeferredItem(doc, items[0].name);
+    assert.strictEqual(got.status, 'ok', 'a fenced status line must not refuse the write');
+    assert.strictEqual(
+      parseDeferredItemsWithStatus(got.content)[0].status, 'acknowledged',
+      'the insert branch must write a line the reader reads, rather than rewriting one it skips',
+    );
+  });
+
   test('CONTROL: a bolded line-0 key keeps its ** wrapper and spelling through the rewrite', () => {
     // Held before this round too — it is a control on the NEW offset-based
     // rewrite, not a regression test for a reported defect. The rewrite
@@ -2638,8 +2657,9 @@ describe('#3702 round 3: heading-path reader/namer inputs (m7, m8)', () => {
 
 describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
   test('every deferred-items marker regex derives from the one alternation source', () => {
-    // Structural, not behavioural: the four regexes embed the SAME source
-    // string, so a marker added to one cannot be absent from another.
+    // Structural, not behavioural: both splitter regexes embed the SAME
+    // source string, so a marker added to one cannot be absent from the other.
+    // Round 2 ran this over four regexes; the two writer-side ones are gone.
     for (const [name, re] of [
       ['open', DEFERRED_BULLET_MARKERS.open],
       ['strip', DEFERRED_BULLET_MARKERS.strip],
@@ -2657,7 +2677,10 @@ describe('#3702 round 2: marker-grammar parity (M3, N1, N2)', () => {
   test('every marker that OPENS an entry also resolves it through acknowledge', () => {
     for (const m of ['-', '*', '+', '1.']) {
       assert.ok(DEFERRED_BULLET_MARKERS.open.test(`${m} x`), `open: ${m}`);
-      const doc = `## Deferred Items\n\n${m} alpha\n  status: pending\n`;
+      // The marker goes on BOTH the opener and the nested status line. Round
+      // 2's structural test could not reach B1; a replacement that only marks
+      // the opener cannot either — it is green on the defective build.
+      const doc = `## Deferred Items\n\n${m} alpha\n  ${m} status: pending\n`;
       const items = parseDeferredItemsWithStatus(doc);
       assert.strictEqual(items.length, 1, `entry surfaced: ${m}`);
       const got = acknowledgeDeferredItem(doc, items[0].name);
