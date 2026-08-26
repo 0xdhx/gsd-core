@@ -316,11 +316,18 @@ neither blocks completion:
 - *"could not be parsed as a comma-separated REQ-ID list"* — ID-shaped text on
   the line was **not** selected. Something was demonstrably dropped; the line
   needs fixing.
-- *"contains what reads as a range between two cited REQ-IDs"* — every ID on the
-  line **was** selected, and a separator between two of them could equally be a
-  range or an annotation. The command cannot tell these apart, so it states both
-  readings rather than asserting a failure that may not have happened. If the
-  separator is an annotation, the line is already correct.
+- *"contains what reads as a range between two cited REQ-IDs"* — the separator
+  is the only thing in question: a separator between two cited IDs could equally
+  be a range or an annotation, and the command cannot tell them apart, so it
+  states both readings rather than asserting a failure that may not have
+  happened. It speaks about the **separator**, not about the whole line.
+
+Either voice may add a factual note naming **ID-shaped text on the line that was
+not selected**. Brackets and parentheses are not stripped, so `(REQ-02)` is not
+marked — and the command cannot tell that from `(ADR-7)`, which is a citation
+and correctly ignored. It names what it skipped and leaves the judgement to you.
+A token longer than 2,048 characters is not classified at all; the warning says
+so explicitly rather than treating unclassified as clean.
 
 ---
 

@@ -2464,6 +2464,10 @@ type RequirementsLineAnalysis = {
   hasGluedRangeFragment: boolean;
   /** R3 — zero selection on a non-placeholder line, with ID-shaped residue. */
   inertIdShaped: string[];
+  /** Tokens past the scan cap that could carry an ID — reported, never dropped. */
+  oversizedTokens: string[];
+  /** ID-shaped tokens the selector did not take. Reported as a fact; never routes. */
+  unselectedIdShaped: string[];
   /** The line leads with `TBD` / `None`. */
   placeholderLed: boolean;
   /** R2's hits, as `[left, right]` endpoint pairs, so the channel below can ask
@@ -2591,7 +2595,13 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     const left = tokens[i - 1] ?? '';
     const right = tokens[i + 1] ?? '';
     if (
+      // EVERY participant is capped, not just the operator. Capping the operator
+      // alone left `<2049-char ID> .. <2049-char ID>` running REQ_ID_SHAPE_RE and
+      // BigInt over both neighbours unbounded — the cap read as uniform and was
+      // not (found by the round's pre-push review).
       short(t) &&
+      short(left) &&
+      short(right) &&
       REQ_PURE_RANGE_OP_RE.test(t) &&
       i > 0 &&
       i < tokens.length - 1 &&
@@ -2609,13 +2619,17 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // keeps the word operators, because a valid ID must end in digits, so
   // `REQ-01through` can only be a glued typo.
   const hasGluedRangeFragment = tokens.some((t, i) => {
+    // Neighbours capped for the same reason as R2 above.
     if (!short(t)) return false;
+    const before = tokens[i - 1] ?? '';
+    const after = tokens[i + 1] ?? '';
     const lead = REQ_GLUED_RANGE_LEAD_RE.exec(t);
     if (
       lead &&
       i > 0 &&
-      REQ_ID_SHAPE_RE.test(tokens[i - 1] ?? '') &&
-      reqEndpointsImplyInterior(tokens[i - 1], lead[1])
+      short(before) &&
+      REQ_ID_SHAPE_RE.test(before) &&
+      reqEndpointsImplyInterior(before, lead[1])
     ) {
       return true;
     }
@@ -2623,8 +2637,9 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     return Boolean(
       trail &&
         i < tokens.length - 1 &&
-        REQ_ID_SHAPE_RE.test(tokens[i + 1] ?? '') &&
-        reqEndpointsImplyInterior(trail[1], tokens[i + 1]),
+        short(after) &&
+        REQ_ID_SHAPE_RE.test(after) &&
+        reqEndpointsImplyInterior(trail[1], after),
     );
   });
   const leadToken = (tokens[0] ?? '').toUpperCase();
@@ -2651,7 +2666,26 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // ambiguous only when its OWN endpoints were selected: the detector shaves
   // brackets and the selector does not, so R2 can fire on a `(RANGE-02)` that
   // was never selected — a real drop, and the assertive channel is right there.
+  // A token past the cap is NOT classified — and must therefore not be
+  // silently discarded. Round 3's first cut of the uniform cap did exactly
+  // that: a 2049-char range token warned before the round and went silent
+  // after it, which is #3697's own defect introduced by the fix for a nit
+  // (found by the round's pre-push review). The cap bounds the WORK, not the
+  // warning — so an over-cap token that could carry an ID is reported as
+  // unclassified. The test is `includes('-')`, a linear scan, never the
+  // unanchored regex the cap exists to keep off these tokens.
+  const oversizedTokens = tokens.filter((t) => !short(t) && t.includes('-'));
+
+  // ID-shaped tokens the selector did not take, ANYWHERE on the line. This is
+  // reported as a fact, never used to pick the channel: `(ADR-7)` and
+  // `(REQ-02)` are indistinguishable by shape, so routing on it would put the
+  // false "could not be parsed" claim back on a line carrying a citation.
+  // Naming them lets the author see what the tokenizer skipped without the
+  // warning asserting a verdict it cannot support in either direction.
   const selected = new Set(citedReqIds.map((id) => id.toUpperCase()));
+  const unselectedIdShaped = tokens.filter(
+    (t) => short(t) && REQ_ID_SUBSTRING_RE.test(t) && !selected.has(t.toUpperCase()),
+  );
   const rangeReadingOnly =
     hasSpacedRange &&
     rangeTokens.length === 0 &&
@@ -2669,8 +2703,14 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     placeholderLed,
     spacedRangePairs,
     rangeReadingOnly,
+    oversizedTokens,
+    unselectedIdShaped,
     warn:
-      rangeTokens.length > 0 || hasSpacedRange || hasGluedRangeFragment || inertIdShaped.length > 0,
+      rangeTokens.length > 0 ||
+      hasSpacedRange ||
+      hasGluedRangeFragment ||
+      inertIdShaped.length > 0 ||
+      oversizedTokens.length > 0,
   };
 }
 
@@ -2707,15 +2747,57 @@ function formatRequirementsLineWarning(
   const rangeRuleFired =
     analysis.rangeTokens.length > 0 || analysis.hasSpacedRange || analysis.hasGluedRangeFragment;
 
+  // Tokens the selector skipped, stated as a fact in EITHER channel. `(ADR-7)`
+  // and `(REQ-02)` are the same shape, so no rule can say which one matters —
+  // but the author can, and only if the warning tells them. Round 3's first
+  // cut instead let this drive the channel, which put the false "could not be
+  // parsed" claim back on a line carrying a citation.
+  const skipped =
+    analysis.unselectedIdShaped.length > 0
+      ? ` ID-shaped text on the line that was NOT selected: ${analysis.unselectedIdShaped.join(', ')}` +
+        ` (brackets and parentheses are not stripped) — check whether any of it is a requirement.`
+      : '';
+  const oversized =
+    analysis.oversizedTokens.length > 0
+      ? ` One or more tokens exceed the ${REQ_TOKEN_SCAN_LIMIT}-character scan limit and were NOT` +
+        ` classified, so this line may carry more than is reported here.`
+      : '';
+
   if (analysis.rangeReadingOnly) {
-    // AMBIGUOUS channel — nothing was dropped; a range READING is what is at
-    // stake, not a parse failure.
+    // AMBIGUOUS channel — the RANGE reading is what is at stake, not a parse
+    // failure: every endpoint the range rule fired on was selected.
+    //
+    // What this voice must NOT do is claim the whole LINE is correct. It has
+    // no basis for that: an unrelated `(REQ-02)` elsewhere on the line is
+    // dropped by the selector and invisible to every rule, so "nothing needs
+    // to change" is an affirmative false statement on exactly the input the
+    // rule-scoped discriminator was built to reach. It speaks about the
+    // SEPARATOR, and defers the rest to the skipped-text clause above.
     return (
       `ROADMAP Phase ${phaseNum} **Requirements** line (\`${shown}\`) contains what reads as a range ` +
-      `between two cited REQ-IDs. Range forms are not expanded, so only the IDs written on the line ` +
-      `were selected: ${analysis.citedReqIds.join(', ')}. If a range was intended, rewrite it naming ` +
-      `every requirement explicitly (e.g. \`REQ-01, REQ-02, REQ-03\`); if the separator is an ` +
-      `annotation rather than a range, the line is already correct and nothing needs to change.`
+      `between two cited REQ-IDs. Range forms are not expanded, so no interior IDs were selected; ` +
+      `the line selected: ${analysis.citedReqIds.join(', ')}. If a range was intended, rewrite it ` +
+      `naming every requirement explicitly (e.g. \`REQ-01, REQ-02, REQ-03\`); if that separator is ` +
+      `an annotation rather than a range, it selected nothing to expand and needs no change.` +
+      skipped +
+      oversized
+    );
+  }
+
+  if (
+    analysis.oversizedTokens.length > 0 &&
+    analysis.rangeTokens.length === 0 &&
+    !analysis.hasSpacedRange &&
+    !analysis.hasGluedRangeFragment &&
+    analysis.inertIdShaped.length === 0
+  ) {
+    // OVER-CAP channel — no rule could run, so no rule may be diagnosed. Say
+    // exactly that: the line was not classified, rather than not a problem.
+    return (
+      `ROADMAP Phase ${phaseNum} **Requirements** line (\`${shown.slice(0, 200)}…\`) could not be ` +
+      `checked: one or more tokens exceed the ${REQ_TOKEN_SCAN_LIMIT}-character scan limit, so the ` +
+      `REQ-ID selection on this line is unverified. Rewrite it as a comma-separated list ` +
+      `(e.g. \`REQ-01, REQ-02, REQ-03\`).`
     );
   }
 
@@ -2748,7 +2830,8 @@ function formatRequirementsLineWarning(
         ? ` Unparsed text: ${unparsed.join(', ')}.`
         : ` ID-shaped text that was not selected: ${unparsed.join(', ')}.`
       : '') +
-    advice
+    advice +
+    oversized
   );
 }
 

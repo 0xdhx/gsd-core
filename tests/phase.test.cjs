@@ -12171,6 +12171,10 @@ describe('#3697 round 3: Requirements-line detector — properties (RULESET.TEST
   test(
     '#3697-P2 (completeness): a same-prefix pair separated by a spaced range operator, with an ' +
     'interior between them, ALWAYS warns',
+    // NOT a bug-finder: every operator below was already in the pre-round
+    // operator set, so this property holds against the pre-round code too. An
+    // earlier round-3 commit claimed otherwise; the review refuted it. It is a
+    // regression guard over the spaced-range rule, which is what it is worth.
     () => {
       const ops = ['..', '...', '…', '—', '–', '-', 'to', 'thru', 'through'];
       fc.assert(
@@ -12253,12 +12257,47 @@ describe('#3697 round 3: Requirements-line detector — properties (RULESET.TEST
   test(
     '#3697-P5 (containment): every selected ID is REQ-ID-shaped and appears verbatim in the line',
     () => {
+      // The first cut of this property drew from a bare `fc.string()` and was
+      // VACUOUS — measured over 500 samples it produced max length 10 and ZERO
+      // inputs containing a REQ-ID, so the loop body never executed a single
+      // assertion. Found by the round's pre-push review. The generator now
+      // interleaves real IDs with noise, and the property ASSERTS that it saw
+      // some: a containment property that never contains anything is a green
+      // test measuring nothing.
+      let sawIds = 0;
       fc.assert(
-        fc.property(fc.string({ maxLength: 300 }), (s) => {
-          for (const id of analyzeRequirementsLine(s).citedReqIds) {
-            assert.match(id, /^[A-Z][A-Z0-9]*-\d+$/i, `#3697-P5: ${JSON.stringify(id)} is not ID-shaped`);
-            assert.ok(s.includes(id), `#3697-P5: ${JSON.stringify(id)} is not present in the input`);
-          }
+        fc.property(
+          fc.array(fc.oneof(reqId, fc.constantFrom('(', ')', '[', ']', ',', '—', '..', 'to', 'TBD', 'None', 'per', 'ADR-7')), {
+            minLength: 1,
+            maxLength: 12,
+          }),
+          (parts) => {
+            const line = parts.join(' ');
+            const cited = analyzeRequirementsLine(line).citedReqIds;
+            if (cited.length > 0) sawIds += 1;
+            for (const id of cited) {
+              assert.match(id, /^[A-Z][A-Z0-9]*-\d+$/i, `#3697-P5: ${JSON.stringify(id)} is not ID-shaped`);
+              assert.ok(line.includes(id), `#3697-P5: ${JSON.stringify(id)} is not present in the input`);
+            }
+          },
+        ),
+        { numRuns: 500 },
+      );
+      assert.ok(sawIds > 50, `#3697-P5 is VACUOUS: only ${sawIds}/500 generated lines selected any ID`);
+    },
+  );
+
+  test(
+    '#3697-P6 (totality over arbitrary text): the detector never throws on free-form input',
+    () => {
+      // What the old P5 generator was actually covering. Kept as its own
+      // property, honestly labelled, rather than left masquerading as
+      // containment coverage.
+      fc.assert(
+        fc.property(fc.string({ maxLength: 300, size: 'max' }), (str) => {
+          const a = analyzeRequirementsLine(str);
+          assert.strictEqual(typeof a.warn, 'boolean');
+          formatRequirementsLineWarning('1', str, a);
         }),
         { numRuns: 500 },
       );
@@ -12280,7 +12319,12 @@ describe('#3697 round 3: the 2048-char token scan cap (RULESET.TESTS.boundary-co
     return `RANGE-${'0'.repeat(digits - 1)}1${suffix}`;
   };
 
-  for (const [label, n, expectWarn] of [
+  // `expectClassified` is the PREDICATE's verdict, which is what the cap
+  // governs. `warn` is deliberately NOT the boundary variable: past the cap the
+  // token is unclassified, and unclassified is reported, never treated as
+  // clean — asserting `warn === false` at limit+1 is precisely the silent
+  // regression the round's pre-push review refuted (CLAIM 2).
+  for (const [label, n, expectClassified] of [
     ['limit-1 (2047)', 2047, true],
     ['limit (2048)', 2048, true],
     ['limit+1 (2049)', 2049, false],
@@ -12292,10 +12336,17 @@ describe('#3697 round 3: the 2048-char token scan cap (RULESET.TESTS.boundary-co
       assert.deepStrictEqual(a.citedReqIds, [], '#3697-B1: the padded token is not itself an ID');
       assert.strictEqual(
         a.inertIdShaped.length > 0,
-        expectWarn,
-        `#3697-B1 (${label}): inertIdShaped membership must be ${expectWarn} at length ${n}`,
+        expectClassified,
+        `#3697-B1 (${label}): inertIdShaped membership must be ${expectClassified} at length ${n}`,
       );
-      assert.strictEqual(a.warn, expectWarn, `#3697-B1 (${label}): warn must be ${expectWarn}`);
+      assert.strictEqual(
+        a.oversizedTokens.length > 0,
+        !expectClassified,
+        `#3697-B1 (${label}): past the cap the token must be recorded as unclassified`,
+      );
+      // Warns at every length — below the cap because a rule classified it,
+      // above it because "not classified" is itself reportable.
+      assert.strictEqual(a.warn, true, `#3697-B1 (${label}): unclassified is not clean`);
     });
 
     test(`#3697-B2 (${label}): the ANCHORED range-token scan takes the SAME cap (round-3 Nit 6)`, () => {
@@ -12304,10 +12355,15 @@ describe('#3697 round 3: the 2048-char token scan cap (RULESET.TESTS.boundary-co
       const a = analyzeRequirementsLine(tok);
       assert.strictEqual(
         a.rangeTokens.length > 0,
-        expectWarn,
-        `#3697-B2 (${label}): rangeTokens membership must be ${expectWarn} at length ${n}`,
+        expectClassified,
+        `#3697-B2 (${label}): rangeTokens membership must be ${expectClassified} at length ${n}`,
       );
-      assert.strictEqual(a.warn, expectWarn, `#3697-B2 (${label}): warn must be ${expectWarn}`);
+      assert.strictEqual(
+        a.oversizedTokens.length > 0,
+        !expectClassified,
+        `#3697-B2 (${label}): past the cap the token must be recorded as unclassified`,
+      );
+      assert.strictEqual(a.warn, true, `#3697-B2 (${label}): unclassified is not clean`);
     });
   }
 });
@@ -12354,7 +12410,14 @@ describe('#3697 round 3: the two warning channels', () => {
         // resolve the ambiguity, and a warning that hides half of it is the
         // over-warning wearing better manners.
         assert.match(w, /annotation rather than a range/i, `#3697-9 (${label}): ${w}`);
-        assert.match(w, /nothing needs to change/i, `#3697-9 (${label}): ${w}`);
+        assert.match(w, /needs no change/i, `#3697-9 (${label}): ${w}`);
+        // The soft voice speaks about the SEPARATOR, never about the whole
+        // line: it has no basis for the latter (see #3697-9d).
+        assert.doesNotMatch(
+          w,
+          /the line is already correct/i,
+          `#3697-9 (${label}): the soft voice must not claim the whole line is correct: ${w}`,
+        );
       },
     );
   }
@@ -12395,6 +12458,61 @@ describe('#3697 round 3: the two warning channels', () => {
       assert.match(w, REQ_LINE_MISPARSE_RE, `#3697-9c: wrong channel: ${w}`);
     },
   );
+
+  test(
+    '#3697-9d (dropped ID elsewhere on the line): the soft voice must not claim the LINE is ' +
+    'correct, and must name what the selector skipped',
+    () => {
+      // The pre-push review's CLAIM 1 counterexample. `(REQ-02)` survives the
+      // selector's bracket strip and no rule fires on it, so the channel is
+      // still the soft one — correctly, because `(ADR-7)` is the same shape and
+      // routing on it puts the false misparse claim back on a citation. What
+      // was wrong was the soft voice ASSERTING "the line is already correct and
+      // nothing needs to change" over a line that dropped a requirement.
+      const line = 'REQ-01, (REQ-02), REQ-03 — REQ-05';
+      const a = analyzeRequirementsLine(line);
+      assert.deepStrictEqual(a.citedReqIds, ['REQ-01', 'REQ-03', 'REQ-05'], '#3697-9d: REQ-02 is dropped');
+      assert.strictEqual(a.rangeReadingOnly, true, '#3697-9d: R2 alone fired, on selected endpoints');
+      assert.deepStrictEqual(a.unselectedIdShaped, ['REQ-02'], '#3697-9d: the skip is recorded as a fact');
+      const w = formatRequirementsLineWarning('1', line, a);
+      assert.doesNotMatch(w, /the line is already correct/i, `#3697-9d: ${w}`);
+      assert.match(w, /ID-shaped text on the line that was NOT selected: REQ-02/i, `#3697-9d: ${w}`);
+      assert.match(w, /check whether any of it is a requirement/i, `#3697-9d: ${w}`);
+    },
+  );
+
+  test(
+    '#3697-9e (over-cap token): a token past the scan limit is reported as UNCLASSIFIED, never ' +
+    'silently dropped',
+    () => {
+      // The review's CLAIM 2. Round 3's first cut of the uniform cap made a
+      // 2049-char range token silent — it warned before the round. The cap
+      // bounds the WORK; it must not bound the warning.
+      const suffix = '..RANGE-05';
+      const big = `RANGE-${'0'.repeat(2049 - 'RANGE-'.length - suffix.length - 1)}1${suffix}`;
+      assert.strictEqual(big.length, 2049, `#3697-9e fixture is ${big.length} chars, expected 2049`);
+      const a = analyzeRequirementsLine(big);
+      assert.strictEqual(a.rangeTokens.length, 0, '#3697-9e: past the cap, no predicate classifies it');
+      assert.deepStrictEqual(a.oversizedTokens, [big], '#3697-9e: but it IS recorded as unclassified');
+      assert.strictEqual(a.warn, true, '#3697-9e: and the line still warns');
+      const w = formatRequirementsLineWarning('1', big, a);
+      assert.match(w, /could not be checked/i, `#3697-9e: ${w}`);
+      assert.match(w, /2048-character scan limit/i, `#3697-9e: ${w}`);
+      assert.match(w, /unverified/i, `#3697-9e: ${w}`);
+    },
+  );
+
+  test('#3697-9f (cap uniformity): R2 and the glued rule cap their NEIGHBOURS, not just the operator', () => {
+    // The review's MISSED finding. Capping the operator alone left
+    // `<2049-char ID> .. <2049-char ID>` running REQ_ID_SHAPE_RE and BigInt
+    // over both neighbours unbounded — the cap read as uniform and was not.
+    const bigId = `RANGE-${'0'.repeat(2049 - 'RANGE-'.length - 1)}1`;
+    assert.strictEqual(bigId.length, 2049, `#3697-9f fixture is ${bigId.length} chars, expected 2049`);
+    const a = analyzeRequirementsLine(`${bigId} .. ${bigId}`);
+    assert.strictEqual(a.hasSpacedRange, false, '#3697-9f: an over-cap endpoint must not be classified');
+    // Still not silent — the over-cap tokens are reported.
+    assert.strictEqual(a.warn, true, '#3697-9f: unclassified is not clean');
+  });
 
   // ── Minor 4 ────────────────────────────────────────────────────────────────
   // A zero-selection non-placeholder line MUST warn — #3697's own acceptance
