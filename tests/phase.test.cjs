@@ -11788,6 +11788,12 @@ describe('issue #2334: ghost-REQ-ID classification must probe write surfaces, no
 // ─────────────────────────────────────────────────────────────────────────────
 
 const REQ_LINE_MISPARSE_RE = /could not be parsed as a comma-separated REQ-ID list/i;
+// The AMBIGUOUS channel, added in round 3. A spaced separator between two
+// selected, interior-implying REQ-IDs cannot be told from a range by any
+// token-level rule, and every ID on such a line IS selected — so the warning
+// discloses both readings instead of asserting a parse failure that did not
+// happen. See `formatRequirementsLineWarning` in src/phase.cts.
+const REQ_LINE_RANGE_READING_RE = /contains what reads as a range between two cited REQ-IDs/i;
 
 function build3697RangeFixture(roadmapRequirementsLine) {
   return build2334GhostSurfaceFixture({
@@ -11831,7 +11837,7 @@ describe('issue #3697: phase complete must warn when the Requirements line under
         const parsed = JSON.parse(output);
         const warnings = parsed.warnings || [];
         assert.ok(
-          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          warnings.some((w) => REQ_LINE_RANGE_READING_RE.test(w)),
           `#3697-1 FAILED (${label}): a spaced range marks ONLY its endpoints, so it must warn. ` +
           `Got warnings: ${JSON.stringify(warnings)}\nFull output: ${output}`,
         );
@@ -11841,9 +11847,20 @@ describe('issue #3697: phase complete must warn when the Requirements line under
         );
         // The warning must name what WAS selected, so the author can see the gap.
         assert.ok(
-          warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w) && /RANGE-01/.test(w) && /RANGE-05/.test(w)),
+          warnings.some(
+            (w) => REQ_LINE_RANGE_READING_RE.test(w) && /RANGE-01/.test(w) && /RANGE-05/.test(w),
+          ),
           `#3697-1 FAILED (${label}): the warning must name the IDs actually selected ` +
           `(RANGE-01, RANGE-05), got: ${JSON.stringify(warnings)}`,
+        );
+        // Round 3 (review finding Major 3): nothing on this line was dropped —
+        // both endpoints were selected — so the warning must NOT assert that
+        // the line failed to parse. It offers the range reading and the
+        // annotation reading and lets the author choose.
+        assert.ok(
+          !warnings.some((w) => REQ_LINE_MISPARSE_RE.test(w)),
+          `#3697-1 FAILED (${label}): a spaced range drops nothing the tokenizer could have taken, ` +
+          `so the misparse channel must stay silent, got: ${JSON.stringify(warnings)}`,
         );
         // Behavior guard: this is a warning, NOT range support. Exactly the two
         // endpoints stay ticked; the interior IDs are still not expanded.
@@ -12081,6 +12098,94 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   }
 });
 
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+const {
+  analyzeRequirementsLine,
+  formatRequirementsLineWarning,
+} = require('../gsd-core/bin/lib/phase.cjs');
+
+describe('#3697 round 3: the two warning channels', () => {
+  // ── Major 3 ────────────────────────────────────────────────────────────────
+  // An annotation separator between two NON-ADJACENT same-prefix IDs is
+  // textually identical to a range, and no token-level rule separates them.
+  // Before round 3 the detector resolved that ambiguity by assertion: it told
+  // the author the line "could not be parsed" and to rewrite it, on a line
+  // where every ID present HAD been selected and nothing had been dropped.
+  // Going silent instead is not available — the range reading is equally live,
+  // and silence is the #3697 defect itself. So the ambiguity is disclosed.
+  for (const [label, line, expectSelected] of [
+    ['em-dash', 'RANGE-01, RANGE-02 — RANGE-05 deferred', ['RANGE-01', 'RANGE-02', 'RANGE-05']],
+    ['hyphen', 'RANGE-01, RANGE-02 - RANGE-05 deferred', ['RANGE-01', 'RANGE-02', 'RANGE-05']],
+    ['bare range', 'RANGE-01 … RANGE-05', ['RANGE-01', 'RANGE-05']],
+  ]) {
+    test(
+      `#3697-9 (${label}): a spaced separator warns through the AMBIGUOUS channel and must NOT ` +
+      'claim the line failed to parse',
+      () => {
+        const a = analyzeRequirementsLine(line);
+        assert.deepStrictEqual(
+          a.citedReqIds,
+          expectSelected,
+          `#3697-9 (${label}): every ID written on the line must still be selected`,
+        );
+        assert.deepStrictEqual(
+          a.droppedIdShaped,
+          [],
+          `#3697-9 (${label}): nothing ID-shaped was dropped — that is why this channel exists`,
+        );
+        const w = formatRequirementsLineWarning('1', line, a);
+        assert.ok(w, `#3697-9 (${label}): the range reading is live, so the line must still warn`);
+        assert.match(w, REQ_LINE_RANGE_READING_RE, `#3697-9 (${label}): wrong channel: ${w}`);
+        assert.doesNotMatch(
+          w,
+          REQ_LINE_MISPARSE_RE,
+          `#3697-9 (${label}): nothing was dropped, so the warning must not assert a parse failure: ${w}`,
+        );
+        // Both readings must be offered — the author is the only one who can
+        // resolve the ambiguity, and a warning that hides half of it is the
+        // over-warning wearing better manners.
+        assert.match(w, /annotation rather than a range/i, `#3697-9 (${label}): ${w}`);
+        assert.match(w, /nothing needs to change/i, `#3697-9 (${label}): ${w}`);
+      },
+    );
+  }
+
+  // ── Minor 4 ────────────────────────────────────────────────────────────────
+  // A zero-selection non-placeholder line MUST warn — #3697's own acceptance
+  // criterion says so in as many words. What was wrong is that it reported an
+  // ADR citation as "Unparsed text", i.e. as requirement content it had failed
+  // to read. Name what the residue actually is, and name the escape hatch.
+  for (const [label, line] of [
+    ['Deferred (see ADR-7)', 'Deferred (see ADR-7)'],
+    ['N/A with citation', 'N/A (tracked in ADR-12)'],
+  ]) {
+    test(
+      `#3697-10 (${label}): a zero-selection line still warns, but names ID-shaped TEXT rather ` +
+      'than missed requirements, and points at the placeholder escape',
+      () => {
+        const a = analyzeRequirementsLine(line);
+        assert.deepStrictEqual(a.citedReqIds, [], `#3697-10 (${label}): nothing is selected here`);
+        const w = formatRequirementsLineWarning('1', line, a);
+        assert.ok(w, `#3697-10 (${label}): a non-empty non-placeholder line selecting zero must warn`);
+        assert.match(w, /ID-shaped text that was not selected/i, `#3697-10 (${label}): ${w}`);
+        assert.doesNotMatch(
+          w,
+          /Unparsed text/i,
+          `#3697-10 (${label}): the citation is not unparsed requirement content: ${w}`,
+        );
+        assert.doesNotMatch(
+          w,
+          /Range forms are not expanded/i,
+          `#3697-10 (${label}): no range rule fired, so no range may be diagnosed: ${w}`,
+        );
+        assert.match(w, /write `TBD` or `None`/i, `#3697-10 (${label}): ${w}`);
+      },
+    );
+  }
+
+});
 
 // ─── #2572: phase-SUMMARY artifact↔disk advisory at phase completion ─────────
 //

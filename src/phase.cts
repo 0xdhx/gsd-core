@@ -2663,6 +2663,18 @@ function formatRequirementsLineWarning(
   const rangeRuleFired =
     analysis.rangeTokens.length > 0 || analysis.hasSpacedRange || analysis.hasGluedRangeFragment;
 
+  if (analysis.droppedIdShaped.length === 0) {
+    // AMBIGUOUS channel — nothing was dropped; a range READING is what is at
+    // stake, not a parse failure.
+    return (
+      `ROADMAP Phase ${phaseNum} **Requirements** line (\`${shown}\`) contains what reads as a range ` +
+      `between two cited REQ-IDs. Range forms are not expanded, so only the IDs written on the line ` +
+      `were selected: ${analysis.citedReqIds.join(', ')}. If a range was intended, rewrite it naming ` +
+      `every requirement explicitly (e.g. \`REQ-01, REQ-02, REQ-03\`); if the separator is an ` +
+      `annotation rather than a range, the line is already correct and nothing needs to change.`
+    );
+  }
+
   // ASSERTIVE channel — ID-shaped content was demonstrably not selected.
   // Deliberately says "selected", NOT "marked complete": a range whose
   // endpoints are themselves unregistered selects them and marks nothing, and a
@@ -2680,14 +2692,19 @@ function formatRequirementsLineWarning(
   // reported `ADR-7` as missed requirement content when it is a citation). Name
   // what it is, and name the placeholder escape the author actually has.
   const advice = rangeRuleFired
-    ? ' Range forms are not expanded; rewrite the line naming every requirement explicitly '
-    : ' Rewrite the line naming every requirement explicitly ';
+    ? ' Range forms are not expanded; rewrite the line naming every requirement explicitly ' +
+      '(e.g. `REQ-01, REQ-02, REQ-03`).'
+    : ' If these are requirements, name them explicitly (e.g. `REQ-01, REQ-02, REQ-03`); if the line ' +
+      'is deliberately empty, write `TBD` or `None` — any other wording selects nothing and warns.';
   return (
     `ROADMAP Phase ${phaseNum} **Requirements** line could not be parsed as a comma-separated REQ-ID list ` +
     `(\`${shown}\`) - ${selectedDesc}.` +
-    (unparsed.length > 0 ? ` Unparsed text: ${unparsed.join(', ')}.` : '') +
-    advice +
-    '(e.g. `REQ-01, REQ-02, REQ-03`).'
+    (unparsed.length > 0
+      ? rangeRuleFired
+        ? ` Unparsed text: ${unparsed.join(', ')}.`
+        : ` ID-shaped text that was not selected: ${unparsed.join(', ')}.`
+      : '') +
+    advice
   );
 }
 
