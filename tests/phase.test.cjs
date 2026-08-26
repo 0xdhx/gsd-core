@@ -12101,10 +12101,170 @@ describe('issue #3697: phase complete must warn when the Requirements line under
 
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #3697 round 3 — unit + property coverage of the EXTRACTED detector.
+//
+// The end-to-end block above drives the CLI, one subprocess per case. That is
+// the right shape for wiring, and the wrong shape for the two rules round 3's
+// review blocked on: `RULESET.TESTS.property-based-testing` wants a fast-check
+// property over a parsing module (100+ runs), and
+// `RULESET.TESTS.boundary-coverage.fixtures` wants limit-1 / limit / limit+1 on
+// the 2048-char token cap. Both are expressible only against a callable
+// surface, which is why `analyzeRequirementsLine` was extracted from
+// `cmdPhaseComplete` in the same round.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const fc = require('fast-check');
 const {
   analyzeRequirementsLine,
   formatRequirementsLineWarning,
 } = require('../gsd-core/bin/lib/phase.cjs');
+
+// The two channel regexes are declared once, module scope, above.
+
+describe('#3697 round 3: Requirements-line detector — properties (RULESET.TESTS.property-based-testing)', () => {
+  // fc arbitraries for a well-formed REQ-ID. The shape is the selector's own:
+  // `[A-Z][A-Z0-9]*-\d+`. Word range operators are excluded from the prefix
+  // alphabet nowhere — deliberately: `TORANGE-05` IS a valid ID, and property
+  // (a) asserting silence over it is what pins the #3697-4b behaviour
+  // generatively rather than at one hand-picked example.
+  const reqPrefix = fc
+    .tuple(
+      fc.constantFrom(...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.split('')),
+      // fast-check v4 removed `fc.stringOf`; build the tail from an array so
+      // the alphabet stays pinned to the selector's own `[A-Z0-9]` class.
+      fc
+        .array(fc.constantFrom(...'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'.split('')), {
+          minLength: 0,
+          maxLength: 6,
+        })
+        .map((cs) => cs.join('')),
+    )
+    .map(([head, tail]) => head + tail);
+  const reqNum = fc.integer({ min: 0, max: 9999 });
+  const reqId = fc.tuple(reqPrefix, reqNum).map(([p, n]) => `${p}-${n}`);
+
+  test(
+    '#3697-P1 (soundness of silence): a canonical comma list of well-formed REQ-IDs NEVER warns, ' +
+    'and selects exactly the IDs it lists',
+    () => {
+      fc.assert(
+        fc.property(fc.array(reqId, { minLength: 1, maxLength: 8 }), (ids) => {
+          const line = ids.join(', ');
+          const a = analyzeRequirementsLine(line);
+          // Domain invariant (boundary containment): the selected set IS the
+          // written set — no over-selection (#2334) and no under-selection
+          // (#3697) on the canonical form, whatever IDs it carries.
+          assert.deepStrictEqual(a.citedReqIds, ids);
+          assert.strictEqual(
+            a.warn,
+            false,
+            `#3697-P1: canonical list ${JSON.stringify(line)} must not warn; got ${JSON.stringify(
+              formatRequirementsLineWarning('1', line, a),
+            )}`,
+          );
+        }),
+        { numRuns: 300 },
+      );
+    },
+  );
+
+  test(
+    '#3697-P2 (completeness): a same-prefix pair separated by a spaced range operator, with an ' +
+    'interior between them, ALWAYS warns',
+    () => {
+      const ops = ['..', '...', '…', '—', '–', '-', 'to', 'thru', 'through'];
+      fc.assert(
+        fc.property(
+          reqPrefix,
+          fc.integer({ min: 0, max: 400 }),
+          fc.integer({ min: 2, max: 400 }),
+          fc.constantFrom(...ops),
+          (prefix, lo, delta, op) => {
+            const line = `${prefix}-${lo} ${op} ${prefix}-${lo + delta}`;
+            const a = analyzeRequirementsLine(line);
+            assert.strictEqual(
+              a.warn,
+              true,
+              `#3697-P2: ${JSON.stringify(line)} implies a dropped interior and must warn`,
+            );
+          },
+        ),
+        { numRuns: 300 },
+      );
+    },
+  );
+
+  test(
+    '#3697-P3 (the #2334 invariant): an ADJACENT same-prefix pair around a separator can drop ' +
+    'nothing, so it never warns however it is annotated',
+    () => {
+      const ops = ['-', '—', '–', '..'];
+      fc.assert(
+        fc.property(
+          reqPrefix,
+          fc.integer({ min: 0, max: 4000 }),
+          fc.integer({ min: 0, max: 1 }),
+          fc.constantFrom(...ops),
+          fc.constantFrom('deferred', 'blocked', 'per ADR-7', 'see notes', ''),
+          (prefix, lo, delta, op, tail) => {
+            const line = `${prefix}-${lo}, ${prefix}-${lo} ${op} ${prefix}-${lo + delta}${
+              tail ? ' ' + tail : ''
+            }`;
+            const a = analyzeRequirementsLine(line);
+            assert.strictEqual(
+              a.warn,
+              false,
+              `#3697-P3: ${JSON.stringify(line)} has no interior to drop and must stay silent; got ` +
+                JSON.stringify(formatRequirementsLineWarning('1', line, a)),
+            );
+          },
+        ),
+        { numRuns: 300 },
+      );
+    },
+  );
+
+  test(
+    '#3697-P4 (totality + idempotency): the detector is total over arbitrary input and returns ' +
+    'the same analysis every time',
+    () => {
+      fc.assert(
+        fc.property(fc.string({ maxLength: 300 }), (s) => {
+          const a = analyzeRequirementsLine(s);
+          const b = analyzeRequirementsLine(s);
+          assert.strictEqual(typeof a.warn, 'boolean');
+          assert.ok(Array.isArray(a.citedReqIds) && Array.isArray(a.tokens));
+          assert.deepStrictEqual(a, b, '#3697-P4: analysis must be deterministic');
+          const w = formatRequirementsLineWarning('1', s, a);
+          // The formatter and the analysis must agree on whether there is
+          // anything to say — a warn with no text, or text with no warn, is a
+          // channel that can go silent or noisy on its own.
+          assert.strictEqual(
+            w === null,
+            a.warn === false,
+            `#3697-P4: warn=${a.warn} but message=${JSON.stringify(w)} for ${JSON.stringify(s)}`,
+          );
+        }),
+        { numRuns: 500 },
+      );
+    },
+  );
+
+  test(
+    '#3697-P5 (containment): every selected ID is REQ-ID-shaped and appears verbatim in the line',
+    () => {
+      fc.assert(
+        fc.property(fc.string({ maxLength: 300 }), (s) => {
+          for (const id of analyzeRequirementsLine(s).citedReqIds) {
+            assert.match(id, /^[A-Z][A-Z0-9]*-\d+$/i, `#3697-P5: ${JSON.stringify(id)} is not ID-shaped`);
+            assert.ok(s.includes(id), `#3697-P5: ${JSON.stringify(id)} is not present in the input`);
+          }
+        }),
+        { numRuns: 500 },
+      );
+    },
+  );
+});
 
 describe('#3697 round 3: the 2048-char token scan cap (RULESET.TESTS.boundary-coverage)', () => {
   // `REQ_TOKEN_SCAN_LIMIT` is a hard cap with NO reserve or safety constant
