@@ -310,8 +310,18 @@ the placeholder vocabulary; any other wording (`Deferred`, `N/A`, `Pending`)
 selects no REQ-IDs and warns, because from the command's side it is
 indistinguishable from a line that was meant to cite requirements and failed to.
 
-**What warns, and in which of the two voices.** Both go to `warnings[]` and
-neither blocks completion:
+**Dash spellings need a full ID on both sides.** `REQ-01-REQ-05` reads as a
+range; `REQ-01-05` does not, and neither does any of its typographic variants
+(en dash, em dash, minus sign, and the rest). The reason is that
+`PREFIX-<digits><dash><digits>` is also a date (`FY-2026-08`) and a sub-numbered
+ID (`API-2-01`), so warning on it would be noise on lines that are perfectly
+correct. `..`, `…`, `to`, `thru` and `through` have no such reading and do
+accept a bare numeric endpoint (`REQ-01..05`). The cost is that
+`REQ-01, REQ-02-05` is not reported; a bare `REQ-02-05` still is, because it
+selects nothing.
+
+**What warns, and in which of the three voices.** All go to `warnings[]` and
+none blocks completion:
 
 - *"could not be parsed as a comma-separated REQ-ID list"* — ID-shaped text on
   the line was **not** selected. Something was demonstrably dropped; the line
@@ -322,12 +332,14 @@ neither blocks completion:
   states both readings rather than asserting a failure that may not have
   happened. It speaks about the **separator**, not about the whole line.
 
-Either voice may add a factual note naming **ID-shaped text on the line that was
-not selected**. Brackets and parentheses are not stripped, so `(REQ-02)` is not
+Either of those two voices may add a factual note naming **ID-shaped text on the
+line that was not selected**. Brackets and parentheses are not stripped, so `(REQ-02)` is not
 marked — and the command cannot tell that from `(ADR-7)`, which is a citation
 and correctly ignored. It names what it skipped and leaves the judgement to you.
-A token longer than 2,048 characters is not classified at all; the warning says
-so explicitly rather than treating unclassified as clean.
+The third voice is for input the command could not examine: *"could not be
+checked ... the REQ-ID selection on this line is unverified"*. A token longer
+than 2,048 characters is not classified at all — the scan is bounded — and the
+warning says so explicitly rather than treating unclassified as clean.
 
 ---
 
