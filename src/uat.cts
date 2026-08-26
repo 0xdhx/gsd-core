@@ -1860,6 +1860,48 @@ function parseDeferredItems(content: string): UatItem[] {
     }));
 }
 
+/**
+ * The line ending for an entry that ends the FILE, where the entry is a single
+ * line and therefore carries no terminator of its own to copy. No entry-local
+ * evidence exists here — the separator before the entry terminates the
+ * PREVIOUS line, not this one — so this asks the weaker question that CAN be
+ * answered: does anything before the entry, within the scope the caller passes,
+ * contradict CRLF? Uniform CRLF across that scope is the one case where
+ * appending a `\r\n` cannot make the file more irregular. It fails CLOSED:
+ * any bare `\n` in scope, or no scope at all, yields LF.
+ *
+ * Adopted from #3773 (`crlfAtEof`), whose four counterexamples fixed the scope
+ * and are ported alongside it. Every simpler choice is refuted by a named test:
+ * the separator immediately PRECEDING the entry propagates an isolated CRLF
+ * into an LF-dominant list, because it terminates the previous line rather than
+ * this one — that is the algorithm this PR shipped through round 3 and it is
+ * withdrawn here. The whole DOCUMENT rejects CRLF over an unrelated bare `\n`
+ * elsewhere, inside a fenced block say. The deferred-items SECTION body is
+ * right when a heading delimits one, and becomes the whole document when it
+ * does not.
+ *
+ * Scope, therefore: the section body when `## Deferred Items` delimits one (its
+ * own preamble belongs to that section), else the entry-list region, where only
+ * the entries can be trusted.
+ *
+ * WITH ONE CORRECTION to #3773, which is its B4. The entry-list region goes
+ * EMPTY exactly when the list is undelimited AND holds a single entry, since
+ * the region runs from the first entry's start to the insertion point and those
+ * coincide. `crlfAtEof('')` is `false`, so a bare `\n` was inserted into a CRLF
+ * document — `'preamble\r\n\r\n- alpha'` gained one — which is the very defect
+ * the fallback exists to close, and it breaks the fix's own uniform-CRLF
+ * invariant. When the preferred region is empty the caller widens to everything
+ * preceding the insertion point rather than asserting LF from no evidence. That
+ * can only ever loosen a scope that was carrying zero information, and the
+ * predicate stays fail-closed over the wider one, so a contradicting bare `\n`
+ * still yields LF. An entry at offset 0 of an undelimited document has no
+ * evidence under either scope and stays LF, rather than inventing an ending
+ * from nothing.
+ */
+function crlfAtEof(before: string): boolean {
+  return before.length > 0 && !/(^|[^\r])\n/.test(before);
+}
+
 // ─── acknowledgeDeferredItem ───────────────────────────────────────────────────
 
 /** Result of `acknowledgeDeferredItem`. */
@@ -2024,11 +2066,21 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
     // the remaining local evidence; an entry at offset 0 has neither and stays
     // LF rather than inventing an ending from nothing.
     const line0HadCr = matchedLines[0].endsWith('\r');
+    // A single-line entry's line 0 IS the span's last line, so its own
+    // terminator sits OUTSIDE the span and the separator FOLLOWING the span is
+    // the evidence. At end-of-file there is no such separator, and reading its
+    // absence as "not CRLF" is what joined a CRLF entry to its inserted line
+    // with a bare `\n`. `crlfAtEof` answers the weaker question that remains,
+    // over the entry's own SECTION when one is delimited and the entry list
+    // alone when none is — widening to everything before the insertion point
+    // only where that region is empty, which is #3773's B4. See its doc comment.
     const spanEnd = matchIndexInContent + (end - start);
+    const eofScope = sectionBody.slice(deferredSection ? 0 : entries[0].start, start)
+      || sectionBody.slice(0, start);
     const crlf = matchedLines.length > 1
       ? line0HadCr
       : content.startsWith('\r\n', spanEnd)
-        || (spanEnd >= content.length && content.endsWith('\r\n', matchIndexInContent));
+        || (spanEnd >= content.length && crlfAtEof(eofScope));
     newMatchedLines = [
       crlf ? `${matchedLines[0].replace(/\r$/, '')}\r` : matchedLines[0],
       `${continuationIndent}status: acknowledged${line0HadCr ? '\r' : ''}`,

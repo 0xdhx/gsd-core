@@ -2615,6 +2615,165 @@ describe('#3702 round 3: detect/strip symmetry on the acknowledge path (B1, B2)'
   });
 });
 
+describe('#3702 round 4: ONE end-of-file CRLF algorithm, adopted from #3773 with its B4 closed (M1)', () => {
+  // Two open PRs shipped two different answers to "what line ending does an
+  // entry that ENDS THE FILE get?", and the maintainer's round-4 ruling was
+  // that the disagreement "needs one answer, not two". Neither shipped answer
+  // was that one. Measured, on builds of both heads, over the fixtures below:
+  //
+  //   case                                     #3739 r3   #3773   here
+  //   undelimited single entry, CRLF preamble    pass      FAIL    pass
+  //   LF-dominant list, one stray CRLF at EOF    FAIL      pass    pass
+  //   (the other five)                           pass      pass    pass
+  //
+  // #3739's `content.endsWith('\r\n', matchIndexInContent)` reads the
+  // terminator of the PREVIOUS line, so it propagated an isolated CRLF into an
+  // LF-dominant list. #3773's `crlfAtEof` asks the right question but over a
+  // scope that goes EMPTY for an undelimited single-entry list, so it inserted
+  // a bare `\n` into a CRLF document — its own B4, and a violation of the
+  // uniform-CRLF invariant the fix exists to hold. What lands here is
+  // `crlfAtEof`'s semantics over a scope that widens instead of going empty.
+  //
+  // Every fixture below is a counterexample that killed a simpler algorithm,
+  // four of them ported from #3773 along with the function. They are not
+  // decoration: drop any one and a refuted algorithm passes again.
+  const endings = (text) => (text.match(/\r?\n/g) || []).map((b) => (b === '\r\n' ? 'CRLF' : 'LF'));
+  const assertUniformCrlf = (text) => {
+    assert.ok(!/[^\r]\n/.test(text) && !/^\n/.test(text), `mixed line endings: ${JSON.stringify(text)}`);
+  };
+
+  test('B4: an UNDELIMITED single-entry list at EOF inserts CRLF, not a bare LF', () => {
+    // #3773's B4, the defect this PR must not inherit while absorbing that PR.
+    // With no `## Deferred Items` heading and exactly ONE entry, the entry-list
+    // region runs from the first entry's start to the insertion point — and
+    // those are the same offset, so the region is empty and `crlfAtEof('')` is
+    // `false` by its own `before.length > 0` guard. The scope widens to
+    // everything before the insertion point rather than asserting LF from no
+    // evidence at all.
+    const content = 'preamble\r\n\r\n- alpha';
+    const ack = acknowledgeDeferredItem(content, 'alpha');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, 'preamble\r\n\r\n- alpha\r\n  status: acknowledged');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+    assertUniformCrlf(ack.content);
+  });
+
+  test('B4 control: the same shape under LF stays LF', () => {
+    const content = 'preamble\n\n- alpha';
+    const ack = acknowledgeDeferredItem(content, 'alpha');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, 'preamble\n\n- alpha\n  status: acknowledged');
+  });
+
+  test('an LF-dominant document with ONE stray CRLF: the EOF entry does not inherit it', () => {
+    // Ported from #3773, and the fixture that refutes THIS PR's round-3
+    // algorithm. `delta`'s CRLF terminates DELTA, not the unterminated `beta`
+    // after it, so copying the preceding separator propagates an isolated CRLF
+    // into an otherwise-LF file — strictly worse than the bare `\n` it
+    // replaced. Only a scope with no contradicting bare `\n` may assert CRLF.
+    const content = '## Deferred Items\n\n- alpha\n- gamma\n- delta\r\n- beta';
+    const ack = acknowledgeDeferredItem(content, 'beta');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(parseDeferredItemsWithStatus(ack.content)[3].status, 'acknowledged');
+    assert.strictEqual(ack.content, '## Deferred Items\n\n- alpha\n- gamma\n- delta\r\n- beta\n  status: acknowledged');
+    assert.deepStrictEqual(endings(ack.content), ['LF', 'LF', 'LF', 'LF', 'CRLF', 'LF'],
+      'the inserted break must not duplicate the unrelated CRLF above it');
+  });
+
+  test('a DELIMITED single-entry list still has evidence: the section preamble is in scope', () => {
+    // Ported from #3773. The scope must not shrink to the entry list alone; a
+    // delimited section's own preamble belongs to that section and counts.
+    const content = '## Deferred Items\r\n\r\n- alpha thing';
+    const ack = acknowledgeDeferredItem(content, 'alpha thing');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha thing\r\n  status: acknowledged');
+    assertUniformCrlf(ack.content);
+    const lf = '## Deferred Items\n\n- alpha thing';
+    assert.strictEqual(
+      acknowledgeDeferredItem(lf, 'alpha thing').content,
+      '## Deferred Items\n\n- alpha thing\n  status: acknowledged',
+    );
+  });
+
+  test('a bare LF OUTSIDE the deferred section does not veto the CRLF insert', () => {
+    // Ported from #3773, and the fixture that rules out scanning the whole
+    // DOCUMENT: an unrelated bare LF inside a fenced block in another section
+    // would reject CRLF and drop an isolated LF into an otherwise-CRLF list.
+    const content = '# Notes\r\n\r\n```text\r\nfirst\nsecond\r\n```\r\n\r\n'
+      + '## Deferred Items\r\n\r\n- alpha\r\n- beta';
+    const ack = acknowledgeDeferredItem(content, 'beta');
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /- beta\r\n {2}status: acknowledged$/);
+    const section = ack.content.slice(ack.content.indexOf('## Deferred Items'));
+    assert.ok(!/(^|[^\r])\n/.test(section), `bare LF in the deferred section: ${JSON.stringify(section)}`);
+    assert.ok(ack.content.includes('first\nsecond'), 'the unrelated bare LF must not be rewritten');
+  });
+
+  test('an UNDELIMITED list with entries reads only the entry list, not the preamble', () => {
+    // Ported from #3773, and the fixture that rules out the SECTION as the
+    // scope: with no heading the section body IS the whole document, so a
+    // section-scoped scan silently becomes the whole-document scan the case
+    // above already refuted. The preamble is consulted ONLY when the entry
+    // list is empty (the B4 case) — here it is not, so the fence's bare LF is
+    // out of scope and must not veto.
+    const content = '```text\r\nfirst\nsecond\r\n```\r\n\r\n- alpha\r\n- beta';
+    const ack = acknowledgeDeferredItem(content, 'beta');
+    assert.strictEqual(ack.status, 'ok');
+    assert.match(ack.content, /- beta\r\n {2}status: acknowledged$/);
+    assert.ok(ack.content.includes('first\nsecond'), 'the unrelated bare LF must not be rewritten');
+  });
+
+  test('no evidence under EITHER scope: an entry at offset 0 stays LF', () => {
+    // The widened scope terminates rather than recursing outward forever. A
+    // document that is exactly one unterminated entry has no line ending
+    // anywhere; LF is the floor, not an invented CRLF.
+    const ack = acknowledgeDeferredItem('- alpha', 'alpha');
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '- alpha\n  status: acknowledged');
+  });
+
+  test('mixed-ending document: the insert branch reads the ENTRY\'s ending, not the file\'s', () => {
+    // Ported from #3773. M1 asks for the mixed-ending fixture this PR lacked:
+    // every CRLF test it shipped used UNIFORM CRLF, so the motivating case
+    // could not fail. A CRLF heading over an LF entry — the opener's own `\n`
+    // must survive, and a document-wide sniff would rewrite it.
+    const content = '## Deferred Items\r\n\r\n- alpha\n  reason: x\n';
+    const ack = acknowledgeDeferredItem(content, parseDeferredItemsWithStatus(content)[0].name);
+    assert.strictEqual(ack.status, 'ok');
+    assert.strictEqual(ack.content, '## Deferred Items\r\n\r\n- alpha\n  status: acknowledged\n  reason: x\n');
+    // The single-line twin: a CRLF entry whose only evidence is the separator
+    // that FOLLOWS it, inside an otherwise-LF document.
+    const single = '## Deferred Items\n\n- alpha\r\n';
+    assert.strictEqual(
+      acknowledgeDeferredItem(single, parseDeferredItemsWithStatus(single)[0].name).content,
+      '## Deferred Items\n\n- alpha\r\n  status: acknowledged\r\n',
+    );
+  });
+
+  test('the widened EOF grammar carries the CRLF rule for every marker', () => {
+    // The EOF fixtures above are all hyphen-shaped because they were inherited
+    // from a hyphen-only PR. This PR's whole subject is the widened marker set,
+    // so the EOF rule has to hold across it or the two changes are only
+    // accidentally compatible.
+    for (const marker of ['-', '*', '+', '1.']) {
+      const content = `preamble\r\n\r\n${marker} alpha`;
+      const ack = acknowledgeDeferredItem(content, 'alpha');
+      assert.strictEqual(ack.status, 'ok', `marker ${JSON.stringify(marker)}`);
+      assert.strictEqual(ack.content, `preamble\r\n\r\n${marker} alpha\r\n  status: acknowledged`,
+        `marker ${JSON.stringify(marker)}: EOF insert must be CRLF`);
+      assertUniformCrlf(ack.content);
+    }
+  });
+
+  test('acknowledging twice at EOF is idempotent', () => {
+    const first = acknowledgeDeferredItem('preamble\r\n\r\n- alpha', 'alpha');
+    const again = acknowledgeDeferredItem(first.content, parseDeferredItemsWithStatus(first.content)[0].name);
+    assert.strictEqual(again.status, 'ok');
+    assert.strictEqual(again.content, first.content, 'a second acknowledge must not append a second line ending');
+    assert.deepStrictEqual(endings(again.content), ['CRLF', 'CRLF', 'CRLF']);
+  });
+});
+
 describe('#3702 round 3: heading-path reader/namer inputs (m7, m8)', () => {
   test('a bullet whose CONTENT is a fence opener does not suppress the entry\'s fields', () => {
     // m7: the fence re-scan used to run on already-marker-stripped lines, so
