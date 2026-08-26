@@ -12336,10 +12336,11 @@ describe('#3697 round 3: the two warning channels', () => {
           expectSelected,
           `#3697-9 (${label}): every ID written on the line must still be selected`,
         );
-        assert.deepStrictEqual(
-          a.droppedIdShaped,
-          [],
-          `#3697-9 (${label}): nothing ID-shaped was dropped — that is why this channel exists`,
+        assert.strictEqual(
+          a.rangeReadingOnly,
+          true,
+          `#3697-9 (${label}): only the spaced-range rule fired and both endpoints were selected — ` +
+          'that is why this channel exists',
         );
         const w = formatRequirementsLineWarning('1', line, a);
         assert.ok(w, `#3697-9 (${label}): the range reading is live, so the line must still warn`);
@@ -12357,6 +12358,43 @@ describe('#3697 round 3: the two warning channels', () => {
       },
     );
   }
+
+  // The channel discriminator must be RULE-SCOPED, not line-global. Both of
+  // these were misrouted by the first cut of the Major 3 fix, and the first is
+  // the damaging direction: it puts the false "could not be parsed" claim back
+  // on a correct line, which is the finding itself returning through a side
+  // door.
+  test(
+    '#3697-9b (unrelated parenthetical citation): a citation elsewhere on the line must not flip ' +
+    'the channel back to a misparse claim',
+    () => {
+      const line = 'RANGE-01, RANGE-02 — RANGE-05 deferred per (ADR-7)';
+      const a = analyzeRequirementsLine(line);
+      // `(ADR-7)` survives the selector's bracket strip and so is not selected —
+      // but #3697-4 already pins a parenthetical citation as NOT unparsed
+      // residue, and no rule fires on it. Only the rules that fired may speak.
+      assert.strictEqual(a.rangeReadingOnly, true, '#3697-9b: R2 alone fired, on selected endpoints');
+      const w = formatRequirementsLineWarning('1', line, a);
+      assert.match(w, REQ_LINE_RANGE_READING_RE, `#3697-9b: wrong channel: ${w}`);
+      assert.doesNotMatch(w, REQ_LINE_MISPARSE_RE, `#3697-9b: ${w}`);
+    },
+  );
+
+  test(
+    '#3697-9c (unselected endpoint): a spaced range whose own endpoint was never selected IS a ' +
+    'drop, and takes the assertive channel',
+    () => {
+      const line = 'RANGE-01 (RANGE-02) — RANGE-05';
+      const a = analyzeRequirementsLine(line);
+      // The detector shaves brackets and the selector does not, so R2 fires on
+      // a `RANGE-02` that was never selected. That is a genuine under-selection.
+      assert.deepStrictEqual(a.citedReqIds, ['RANGE-01', 'RANGE-05'], '#3697-9c: RANGE-02 is not selected');
+      assert.strictEqual(a.hasSpacedRange, true, '#3697-9c: R2 still fires');
+      assert.strictEqual(a.rangeReadingOnly, false, '#3697-9c: an unselected endpoint is a drop');
+      const w = formatRequirementsLineWarning('1', line, a);
+      assert.match(w, REQ_LINE_MISPARSE_RE, `#3697-9c: wrong channel: ${w}`);
+    },
+  );
 
   // ── Minor 4 ────────────────────────────────────────────────────────────────
   // A zero-selection non-placeholder line MUST warn — #3697's own acceptance

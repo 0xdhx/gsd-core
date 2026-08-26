@@ -2466,13 +2466,26 @@ type RequirementsLineAnalysis = {
   inertIdShaped: string[];
   /** The line leads with `TBD` / `None`. */
   placeholderLed: boolean;
+  /** R2's hits, as `[left, right]` endpoint pairs, so the channel below can ask
+   *  about the endpoints the rule actually fired on. */
+  spacedRangePairs: Array<[string, string]>;
   /**
-   * Tokens carrying ID-shaped text that the selector did NOT select. This is
-   * the round-3 discriminator (review finding Major 3): when it is EMPTY, every
-   * ID on the line was selected and nothing was demonstrably dropped, so the
-   * line did not fail to parse and the warning must not claim it did.
+   * The round-3 channel discriminator (review finding Major 3). True when the
+   * ONLY thing to report is a range *reading*: R2 fired, no other rule did, and
+   * every endpoint R2 fired on was actually selected. Nothing was dropped, so
+   * the line did not fail to parse and the warning must not claim it did.
+   *
+   * This is deliberately RULE-SCOPED rather than line-global. A line-global
+   * "was anything ID-shaped left unselected?" test reads correctly on the
+   * motivating example and misroutes as soon as the line carries an unrelated
+   * parenthesised citation: `RANGE-01, RANGE-02 — RANGE-05 deferred per
+   * (ADR-7)` has `(ADR-7)` outside the selector's bracket strip, so a global
+   * test calls it a drop and sends the line back to the assertive channel —
+   * reinstating exactly the false "could not be parsed" claim Major 3 is
+   * about, and contradicting #3697-4, which pins a parenthetical citation as
+   * NOT unparsed residue. Only the rules that fired may speak.
    */
-  droppedIdShaped: string[];
+  rangeReadingOnly: boolean;
   /** Any rule fired — the line warrants a warning. */
   warn: boolean;
 };
@@ -2558,16 +2571,23 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // past the bound is not classified at all rather than classified expensively.
   const short = (t: string): boolean => t.length <= REQ_TOKEN_SCAN_LIMIT;
   const rangeTokens = tokens.filter((t) => short(t) && REQ_RANGE_TOKEN_RE.test(t));
-  const hasSpacedRange = tokens.some(
-    (t, i) =>
+  const spacedRangePairs: Array<[string, string]> = [];
+  tokens.forEach((t, i) => {
+    const left = tokens[i - 1] ?? '';
+    const right = tokens[i + 1] ?? '';
+    if (
       short(t) &&
       REQ_PURE_RANGE_OP_RE.test(t) &&
       i > 0 &&
       i < tokens.length - 1 &&
-      REQ_ID_SHAPE_RE.test(tokens[i - 1] ?? '') &&
-      REQ_ID_SHAPE_RE.test(tokens[i + 1] ?? '') &&
-      reqEndpointsImplyInterior(tokens[i - 1], tokens[i + 1]),
-  );
+      REQ_ID_SHAPE_RE.test(left) &&
+      REQ_ID_SHAPE_RE.test(right) &&
+      reqEndpointsImplyInterior(left, right)
+    ) {
+      spacedRangePairs.push([left, right]);
+    }
+  });
+  const hasSpacedRange = spacedRangePairs.length > 0;
   // A half-spaced range splits at the tokenizer, so R1's own `\s*` never sees
   // it. SYMBOL operators only on the LEAD arm: a word operator glued to an ID
   // is an ID — `TORANGE-05` is a valid prefix-agnostic REQ-ID. The TRAIL arm
@@ -2610,13 +2630,19 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
       ? tokens.filter((t) => short(t) && t.includes('-') && REQ_ID_SUBSTRING_RE.test(t))
       : [];
 
-  // Tokens bearing ID-shaped text that the selector did not take. A tight range
-  // (`RANGE-01..RANGE-05`), a glued fragment (`-RANGE-05`) and R3 residue all
-  // land here; a SPACED range's endpoints do not, because both were selected.
+  // R2 is the ONLY ambiguous rule — a tight range, a glued fragment and R3
+  // residue each implicate ID-shaped text the selector demonstrably did not
+  // take, so any of them means the line really did fail to parse. R2 is
+  // ambiguous only when its OWN endpoints were selected: the detector shaves
+  // brackets and the selector does not, so R2 can fire on a `(RANGE-02)` that
+  // was never selected — a real drop, and the assertive channel is right there.
   const selected = new Set(citedReqIds.map((id) => id.toUpperCase()));
-  const droppedIdShaped = tokens.filter(
-    (t) => short(t) && REQ_ID_SUBSTRING_RE.test(t) && !selected.has(t.toUpperCase()),
-  );
+  const rangeReadingOnly =
+    hasSpacedRange &&
+    rangeTokens.length === 0 &&
+    !hasGluedRangeFragment &&
+    inertIdShaped.length === 0 &&
+    spacedRangePairs.every(([a, b]) => selected.has(a.toUpperCase()) && selected.has(b.toUpperCase()));
 
   return {
     citedReqIds,
@@ -2626,7 +2652,8 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     hasGluedRangeFragment,
     inertIdShaped,
     placeholderLed,
-    droppedIdShaped,
+    spacedRangePairs,
+    rangeReadingOnly,
     warn:
       rangeTokens.length > 0 || hasSpacedRange || hasGluedRangeFragment || inertIdShaped.length > 0,
   };
@@ -2648,12 +2675,12 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
  * staying quiet on it re-opens the exact silent under-selection #3697 is about.
  * So the ambiguity is DISCLOSED rather than decided —
  *
- *   * `droppedIdShaped` non-empty → something ID-shaped was demonstrably NOT
- *     selected (a tight range, a glued fragment, inert residue). The line did
+ *   * any rule other than R2 fired, or R2 fired on an endpoint that was not
+ *     selected → something ID-shaped was demonstrably NOT taken. The line did
  *     fail to parse; say so plainly, as before.
- *   * `droppedIdShaped` empty → only the spaced-operator rule fired and every
- *     ID on the line was selected. State both readings and let the author pick;
- *     never claim a parse failure that did not occur.
+ *   * R2 alone fired and both its endpoints were selected → nothing was
+ *     dropped. State both readings and let the author pick; never claim a parse
+ *     failure that did not occur.
  */
 function formatRequirementsLineWarning(
   phaseNum: string,
@@ -2665,7 +2692,7 @@ function formatRequirementsLineWarning(
   const rangeRuleFired =
     analysis.rangeTokens.length > 0 || analysis.hasSpacedRange || analysis.hasGluedRangeFragment;
 
-  if (analysis.droppedIdShaped.length === 0) {
+  if (analysis.rangeReadingOnly) {
     // AMBIGUOUS channel — nothing was dropped; a range READING is what is at
     // stake, not a parse failure.
     return (
