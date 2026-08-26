@@ -5491,6 +5491,124 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
   });
 });
 
+// #3859: the empty-diff probe must answer the question `git commit -- <paths>`
+// asks. `git diff` is porcelain and honours user configuration the commit does
+// not, so an unpinned probe lets a caller's config decide whether the guard
+// fires — and every arm below was driven against git 2.54 by confirming that
+// `git commit -- <path>` records exactly the change the unpinned probe reports
+// as absent.
+describe('#3859: the empty-diff probe is pinned against diff-only configuration', () => {
+  const { createTempGitProject } = require('./helpers.cjs');
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempGitProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  function commitFiles(rel) {
+    const result = runGsdTools('commit "m" --files ' + rel, tmpDir);
+    const payload = (result.output && result.output.trim()) ? result.output : result.error;
+    return JSON.parse(payload);
+  }
+
+  // A submodule whose recorded gitlink is AHEAD of what the superproject has
+  // committed — i.e. `git commit -- <sub>` has something real to record.
+  function bumpedSubmodule() {
+    const subSrc = path.join(tmpDir, '..', path.basename(tmpDir) + '-sub');
+    fs.mkdirSync(subSrc, { recursive: true });
+    gitOrThrow(['init', '-q', '.'], { cwd: subSrc });
+    gitOrThrow(['config', 'user.email', 't@t'], { cwd: subSrc });
+    gitOrThrow(['config', 'user.name', 't'], { cwd: subSrc });
+    fs.writeFileSync(path.join(subSrc, 'f.txt'), 'v1\n');
+    gitOrThrow(['add', 'f.txt'], { cwd: subSrc });
+    gitOrThrow(['commit', '-m', 'v1'], { cwd: subSrc });
+
+    gitOrThrow(['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', subSrc, 'sub'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'add submodule'], { cwd: tmpDir });
+
+    fs.writeFileSync(path.join(subSrc, 'f.txt'), 'v2\n');
+    gitOrThrow(['add', 'f.txt'], { cwd: subSrc });
+    gitOrThrow(['commit', '-m', 'v2'], { cwd: subSrc });
+    gitOrThrow(['-c', 'protocol.file.allow=always', 'submodule', 'update', '--remote', '--', 'sub'], { cwd: tmpDir });
+    return { subSrc };
+  }
+
+  // `diff.ignoreSubmodules=all` is local config; `.gitmodules` `ignore = all` is
+  // CHECKED IN and so arrives with a clone, needing no local setting at all —
+  // which makes it the stronger of the two vectors, and the one a reviewer
+  // reading only `diff.ignoreSubmodules` would not reach.
+  for (const vector of ['diff.ignoreSubmodules', '.gitmodules ignore']) {
+    test(`a submodule bump is not reported as nothing_to_commit under ${vector}=all`, () => {
+      const { subSrc } = bumpedSubmodule();
+      if (vector === 'diff.ignoreSubmodules') {
+        gitOrThrow(['config', 'diff.ignoreSubmodules', 'all'], { cwd: tmpDir });
+      } else {
+        gitOrThrow(['config', '-f', '.gitmodules', 'submodule.sub.ignore', 'all'], { cwd: tmpDir });
+        gitOrThrow(['add', '--', '.gitmodules'], { cwd: tmpDir });
+        gitOrThrow(['commit', '-m', 'gitmodules ignore=all'], { cwd: tmpDir });
+      }
+
+      const before = gitOrThrow(['rev-parse', 'HEAD:sub'], { cwd: tmpDir }).trim();
+      const output = commitFiles('sub');
+
+      assert.notStrictEqual(output.reason, 'nothing_to_commit',
+        'the gitlink moved and `git commit -- sub` records it, so the probe must not say there is nothing');
+      assert.strictEqual(output.committed, true);
+      assert.notStrictEqual(
+        gitOrThrow(['rev-parse', 'HEAD:sub'], { cwd: tmpDir }).trim(), before,
+        'the recorded gitlink must actually advance');
+      fs.rmSync(subSrc, { recursive: true, force: true });
+    });
+  }
+
+  // The other direction, and the reason the pin is `=dirty` rather than `=none`.
+  // A partial commit of a submodule path records the GITLINK, which moves only
+  // when the submodule's HEAD does — so a merely dirty submodule WORKTREE would
+  // land nothing. Under `--ignore-submodules=none` the probe reports a
+  // difference there and sends an empty call back to `git commit`, which is the
+  // #3776 misreport re-entered from the other side. Pinned so a later widening
+  // to `=none` cannot pass.
+  test('a dirty submodule worktree with an unchanged gitlink still reports nothing_to_commit', () => {
+    const { subSrc } = bumpedSubmodule();
+    gitOrThrow(['add', '--', 'sub'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'bump sub'], { cwd: tmpDir });
+    fs.appendFileSync(path.join(tmpDir, 'sub', 'f.txt'), 'dirty\n');
+
+    assert.strictEqual(commitFiles('sub').reason, 'nothing_to_commit',
+      'nothing would land, so nothing_to_commit is the correct answer, not a misreport');
+    fs.rmSync(subSrc, { recursive: true, force: true });
+  });
+
+  // No submodule involved. A textconv driver maps two different blobs to the
+  // same text, so `git diff --quiet HEAD` reports no difference while
+  // `git commit -- <path>` records the new blob.
+  test('a change hidden by a textconv driver is not reported as nothing_to_commit', () => {
+    const rel = path.posix.join('.planning', 'binaryish.md');
+    fs.writeFileSync(path.join(tmpDir, rel), 'A\n');
+    fs.writeFileSync(path.join(tmpDir, '.gitattributes'), 'binaryish.md diff=flat\n');
+    gitOrThrow(['add', '--', rel, '.gitattributes'], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'seed'], { cwd: tmpDir });
+    // A textconv that collapses every input to one constant. `#` swallows the
+    // filename git appends, so the driver ignores its argument entirely.
+    gitOrThrow(['config', 'diff.flat.textconv', 'echo CONSTANT #'], { cwd: tmpDir });
+
+    fs.writeFileSync(path.join(tmpDir, rel), 'B\n');
+    const output = commitFiles(rel);
+
+    assert.notStrictEqual(output.reason, 'nothing_to_commit',
+      'the blob changed and the commit would record it — textconv only changes how the DIFF renders');
+    assert.strictEqual(output.committed, true);
+    assert.strictEqual(
+      gitOrThrow(['show', 'HEAD:' + rel], { cwd: tmpDir }), 'B\n',
+      'the new content must actually be recorded');
+  });
+});
+
+
 describe('#2279: map-codebase date stamp instructions overwrite existing dates', () => {
   const REPO_ROOT = path.join(__dirname, '..');
 

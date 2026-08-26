@@ -1876,13 +1876,40 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   //  - `!partialCommitRefused`: see above — deciding "nothing to commit" from a
   //    pathspec git will not honour would abandon an in-progress merge, so those
   //    states keep their pre-existing behaviour untouched.
+  //  - the probe is pinned against user configuration that would make `git diff`
+  //    answer a DIFFERENT question than `git commit -- <paths>` asks. `git diff`
+  //    is porcelain and honours settings the commit does not, so without these
+  //    flags a caller's config decides whether the guard fires. Driven against
+  //    git 2.54, each with the paired `git commit -- <path>` confirmed to record
+  //    the change the probe reported as absent:
+  //      `diff.ignoreSubmodules=all`   -> a gitlink bump is invisible to the probe
+  //      `.gitmodules` `ignore = all`  -> the same, and it needs NO local config:
+  //                                       it is checked in, so it arrives with a
+  //                                       clone
+  //      `diff=<driver>` + `textconv`  -> two different blobs converge to one
+  //                                       text, so the probe sees no change at
+  //                                       all; no submodule involved
+  //    `--ignore-submodules=dirty` rather than `=none`, because `dirty` is what
+  //    a partial commit of a submodule path actually means: it records the
+  //    GITLINK, and the gitlink moves only when the submodule's HEAD does. Under
+  //    `=none` a merely dirty submodule WORKTREE reports a difference the commit
+  //    would not record, sending an empty call back to `git commit` — the #3776
+  //    misreport, re-entered from the other side. `dirty` still overrides both
+  //    `diff.ignoreSubmodules` and a checked-in `.gitmodules` `ignore`, so the
+  //    gitlink vectors above stay closed (driven: rc 1 under every one of them).
+  //    `--no-ext-diff` is deliberately absent: `--quiet` short-circuits ahead of
+  //    an external diff driver, so an external `diff.<driver>.command` cannot
+  //    invert the probe (driven: rc 1 with and without the flag).
   // Any other non-zero exit from the probe (a genuine git error, or an unborn
   // HEAD) leaves the guard shut and falls through to the commit — failing toward
   // today's path rather than manufacturing a no-op.
   const nothingToCommit = guardApplies
     && (stagedPaths.length === 0
       || (!partialCommitRefused
-        && execGit(['diff', '--quiet', 'HEAD', '--', ...stagedPaths], { cwd }).exitCode === 0));
+        && execGit(
+          ['diff', '--quiet', '--ignore-submodules=dirty', '--no-textconv', 'HEAD', '--', ...stagedPaths],
+          { cwd },
+        ).exitCode === 0));
   if (nothingToCommit) {
     const result = { committed: false, hash: null, reason: 'nothing_to_commit' };
     output(result, raw, 'nothing');
