@@ -12306,6 +12306,104 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     },
   );
 
+  // ==========================================================================
+  // #3697-17 — PARITY PIN against the SECOND parser of the same ROADMAP value.
+  //
+  // CLAUDE.md, KNOWN DEFECTS & ANTI-PATTERNS: "Generative Fix Divergence: when
+  // sharing constants/arrays/parsers between parallel surfaces, add a parity
+  // assertion test that fails if they diverge." Round 4 review Major 2.
+  //
+  // `normalizePhaseReqIds` (src/gap-checker.cts) parses the SAME
+  // `**Requirements:**` value — its own docblock says callers "may pass the
+  // roadmap value through verbatim". The two parsers do NOT agree today, and
+  // this PR does not make them agree: `phase complete` writes a ledger, gap
+  // analysis reports coverage, and unifying them would change what
+  // `phase complete` MARKS, which is the one invariant this PR holds fixed.
+  //
+  // So this is the pin, not the fix: every axis of disagreement is asserted
+  // explicitly, in BOTH directions, so drift on either side fails here rather
+  // than silently widening. The consequence is already user-visible — see
+  // -17b — and the pin is what makes it a known quantity instead of a slow
+  // leak.
+  // ==========================================================================
+  const { normalizePhaseReqIds } = require('../gsd-core/bin/lib/gap-checker.cjs');
+  const phaseSelects = (line) => analyzeRequirementsLine(line).citedReqIds;
+
+  for (const [axis, line17, expectPhase, expectGap, why] of [
+    [
+      'ranges',
+      'RANGE-01..RANGE-05',
+      [],
+      ['RANGE-01', 'RANGE-02', 'RANGE-03', 'RANGE-04', 'RANGE-05'],
+      'DELIBERATE: #3697 explicitly declines range expansion ("I am not asking for range syntax ' +
+      'to be supported"); gap analysis expanded ranges under #1269. This PR warns on the shape ' +
+      'rather than adopting it.',
+    ],
+    [
+      'placeholder vocabulary',
+      'None (per ADR-7)',
+      [],
+      ['ADR-7'],
+      'DIVERGENT: phase complete reads the LEAD token, so a declared-empty line citing its ' +
+      'rationale is empty. gap-checker strips parentheses first, so the whole value is no longer ' +
+      'the bare placeholder and the citation survives its ID-shape filter as a requirement.',
+    ],
+    [
+      'parentheses',
+      '(REQ-02)',
+      [],
+      ['REQ-02'],
+      'DIVERGENT: the selector strips square brackets only; gap-checker strips quotes, brackets ' +
+      'AND parentheses.',
+    ],
+    [
+      'ID shape',
+      'REQ-01a',
+      [],
+      ['REQ-01a'],
+      'DIVERGENT: the selector requires the token to END in digits; PHASE_REQ_ID_SHAPE_RE is ' +
+      'wider and admits a trailing suffix.',
+    ],
+    [
+      'the canonical form',
+      'REQ-01, REQ-02',
+      ['REQ-01', 'REQ-02'],
+      ['REQ-01', 'REQ-02'],
+      'AGREEMENT: on the shipped template form the two parsers agree exactly, which is what ' +
+      'makes the divergences above a boundary rather than chaos.',
+    ],
+  ]) {
+    test(`#3697-17 (parser parity, ${axis}): the divergence is pinned in both directions`, () => {
+      assert.deepStrictEqual(
+        phaseSelects(line17), expectPhase,
+        `#3697-17 FAILED (${axis}): phase complete's selection drifted for ${JSON.stringify(line17)}.\n${why}`,
+      );
+      assert.deepStrictEqual(
+        normalizePhaseReqIds(line17), expectGap,
+        `#3697-17 FAILED (${axis}): gap-checker's normalization drifted for ${JSON.stringify(line17)}.\n${why}`,
+      );
+    });
+  }
+
+  // The consequence, made concrete. This is what the divergence COSTS a user,
+  // and it is the reason the pin above is worth its cost: on one line, two
+  // commands report contradictory scopes, and this PR is what makes the
+  // contradiction visible by finally giving `phase complete` a voice.
+  test(
+    '#3697-17b (user-visible contradiction): a range line reports five requirements to gap ' +
+    'analysis and zero to phase complete',
+    () => {
+      const line = 'RANGE-01..RANGE-05';
+      const a = analyzeRequirementsLine(line);
+      assert.deepStrictEqual(a.citedReqIds, [], '#3697-17b: phase complete selects nothing');
+      assert.strictEqual(a.warn, true, '#3697-17b: and now says so, rather than failing silently');
+      assert.strictEqual(
+        normalizePhaseReqIds(line).length, 5,
+        '#3697-17b: while gap analysis reports five requirements in scope for the same line',
+      );
+    },
+  );
+
   // A HALF-SPACED range splits at the tokenizer before R1's own `\s*` can see
   // it: `RANGE-01 -RANGE-05` tokenizes as `RANGE-01`, `-RANGE-05` and selects
   // only the well-formed side. The glued-fragment rule must warn, and the
