@@ -69,6 +69,34 @@
 - MAYBE → Rule 4 (ask the user)
 - NO → Out of scope (log to deferred-items.md)
 
+### Writing `deferred-items.md`
+
+The file has no template — write it by hand, as a Markdown list under a
+`## Deferred Items` heading. What counts as one entry:
+
+- One entry per top-level list item. `-`, `*` and `+` all count, and so does a
+  dot-terminated ordered marker (`1.`) when the list actually starts at `1.` —
+  a sentence that merely opens with a number (`2026. was a bad year`) is prose,
+  not an item. `1)` is not a marker here.
+- Continuation lines indent beneath their entry. Fields go on those lines:
+  `status: resolved`, or the bolded `**Status:** resolved` convention — the key
+  is matched case-insensitively when bolded.
+- A `* * *` or `- - -` separator closes the list rather than opening an entry,
+  and nothing inside a fenced code block is an entry or a field.
+
+An entry is RESOLVED only if it carries an explicit `status: resolved`. Anything
+else — including an entry with no `status:` at all — stays open and will surface
+in `audit-open`, `audit-uat` and `complete-milestone`. That is deliberate: the
+scanner never silently drops a possibly-open item.
+
+```markdown
+## Deferred Items
+
+- Retry budget is hardcoded at 3
+  status: open
+  **What:** `fetchWithRetry` ignores the configured budget.
+```
+
 ## Checkpoint Examples
 
 ### Good checkpoint placement
