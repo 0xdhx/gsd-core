@@ -322,25 +322,37 @@ stays silent, so the shipped template's own `<!-- ... -->` does not warn.
 split on commas and whitespace only, and nothing else is stripped, so anything
 attached to an ID takes the ID with it. `REQ-01; REQ-02` marks **only**
 `REQ-02`; so do `REQ-01 ;REQ-02`, `**REQ-01;** REQ-02` and an ID carrying a
-stray invisible character. The delimiter has to be **touching** the ID once
-markdown styling is set aside — `**REQ-01**; REQ-02` and
-`see **REQ-7**; next topic` read as sentence punctuation, not as a list, and
-are reported only as skipped text. Markdown emphasis on its own
-(`**REQ-01**, REQ-02`) is treated the same way: it does defeat the selector,
-but styling is not evidence that a separator was meant. That is the quietest way to lose a requirement here —
-the command reports `requirements_updated: true` either way — so the dropped ID
-is named in the warning.
+stray invisible character. Those are the cases the warning names — it reports
+the dropped ID, because this is the quietest way to lose a requirement here
+(the command reports `requirements_updated: true` either way).
 
-**What that warning cannot tell you**, stated so you do not read its silence as
-a clean bill: a dropped ID is only reported when its prefix matches one that
-*was* selected on the same line. `REQ-01, REQ-02: login` is reported;
-`REQ-01, FOO-02: x` is not. The reason is that a citation is textually
-identical to a dropped requirement — `REQ-01, see ADR-7: section 3` carries
-`ADR-7:` in exactly the shape `REQ-01;` has — and prefix agreement is the only
-thing that separates them without guessing at prose. Anything inside
-parentheses is left alone for the same reason: `(see ADR-7: section 3)` is a
-citation. The trade is deliberate: a rare shape goes unreported rather than a
-common one being reported wrongly.
+**What the warning does NOT reach.** Stated so its silence is not read as a
+clean bill, and enumerated rather than summarised, because each of these is a
+requirement that goes missing without a word. The check fires only when the
+thing touching the ID is a `;`, a `:`, or an invisible character:
+
+- **Markdown styling on its own is silent.** `**REQ-01**, REQ-02` drops
+  `REQ-01` and says nothing at all. Styling is not evidence that a separator
+  was meant. `**REQ-01**; REQ-02` is silent for the same reason — the `**`
+  sits between the ID and the `;`, so nothing is touching the ID.
+- **Any other attached punctuation is silent.** `REQ-01/ REQ-02`,
+  `REQ-01| REQ-02`, `REQ-01. REQ-02`, `REQ-01+ REQ-02`, `REQ-01> REQ-02` and
+  their full-width and non-ASCII equivalents (`；`, `，`, `؛`) each mark only
+  `REQ-02`. Only `;` and `:` are in the set. Widening it is a live option —
+  say the word — but each past widening of this check first fired on a
+  citation, so it is not done blind.
+- **A dropped ID whose prefix matches nothing selected is silent.**
+  `REQ-01, REQ-02: login` is reported; `REQ-01, FOO-02: x` is not. A citation
+  is textually identical to a dropped requirement — `REQ-01, see ADR-7:
+  section 3` carries `ADR-7:` in exactly the shape `REQ-01;` has — and prefix
+  agreement is the only thing that separates them without guessing at prose.
+  Anything inside matched parentheses is left alone for the same reason:
+  `(see ADR-7: section 3)` is a citation.
+
+The prefix gate is not complete in the other direction either: a citation that
+*shares* a selected prefix — `REQ-01, see REQ-7: sec 3` — does warn, naming
+`REQ-7` as dropped. Nothing at the token level separates that from a real
+drop.
 
 **Dash spellings need a full ID on both sides.** `REQ-01-REQ-05` reads as a
 range; `REQ-01-05` does not, and neither does any of its typographic variants

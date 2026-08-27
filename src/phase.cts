@@ -3075,9 +3075,9 @@ function formatRequirementsLineWarning(
   const delimiterDropped =
     analysis.delimiterDroppedIds.length > 0
       ? ` ${analysis.delimiterDroppedIds.join(', ')} ${analysis.delimiterDroppedIds.length === 1 ? 'was' : 'were'}` +
-        ` NOT selected: something is attached to the ID — a \`;\` or \`:\`, markdown emphasis, or an` +
-        ` invisible character — and the line is split on commas and whitespace only. Write each` +
-        ` requirement as a bare ID separated by a comma.`
+        ` NOT selected: a \`;\` or \`:\` is glued to the ID, or it carries an invisible character, and` +
+        ` the line is split on commas and whitespace only. Write each requirement as a bare ID` +
+        ` separated by a comma.`
       : '';
   const oversized =
     analysis.oversizedTokens.length > 0
@@ -3114,7 +3114,15 @@ function formatRequirementsLineWarning(
     analysis.rangeTokens.length === 0 &&
     !analysis.hasSpacedRange &&
     !analysis.hasGluedRangeFragment &&
-    analysis.inertIdShaped.length === 0
+    analysis.inertIdShaped.length === 0 &&
+    // R4 is a DEMONSTRATED drop, and this voice's whole claim is that NOTHING
+    // could be checked. Both cannot be true at once: `REQ-01, REQ-02: <over-cap
+    // token>` names REQ-02 in `delimiterDroppedIds` and then reported
+    // `req-line-unverified`, whose message never mentions it — the concrete,
+    // actionable finding masked by the token beside it. Same exclusion, same
+    // reason, as `rangeReadingOnly` above. The assertive channel already
+    // appends the over-cap rider, so routing there loses nothing about the cap.
+    analysis.delimiterDroppedIds.length === 0
   ) {
     // OVER-CAP channel — no rule could run, so no rule may be diagnosed. Say
     // exactly that: the line was not classified, rather than not a problem.

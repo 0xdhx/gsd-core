@@ -12683,6 +12683,75 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     );
   });
 
+  // Round 5 body claim-audit, MISSED item 1. A DEMONSTRATED R4 drop and an
+  // over-cap token on the same line: the over-cap voice's whole claim is that
+  // nothing could be checked, which is false the moment R4 has named an id.
+  // Before the fix `REQ-01, REQ-02: <2049 chars>` reported req-line-unverified
+  // and never mentioned REQ-02 — the actionable finding masked by the token
+  // beside it. Same exclusion, same reason, as rangeReadingOnly's.
+  test('#3697-19l (over-cap beside a drop): a demonstrated drop outranks the unverified voice', () => {
+    // 2049 = the 2048 cap + 1, written as a literal and asserted, in the same
+    // style as the #3697-B1/-B2 boundary fixtures below.
+    const overCap = 'x'.repeat(2049);
+    assert.strictEqual(overCap.length, 2049, '#3697-19l fixture must be one past the cap');
+    const line = `REQ-01, REQ-02: ${overCap}`;
+    const a = analyzeRequirementsLine(line);
+    assert.deepStrictEqual(a.delimiterDroppedIds, ['REQ-02'], '#3697-19l: R4 does name the drop');
+    assert.ok(a.oversizedTokens.length > 0, '#3697-19l: and the over-cap token is present');
+    const w = formatRequirementsLineWarning('1', line, a);
+    assert.strictEqual(
+      reqLineCode(w), REQ_LINE_WARNING_CODE.misparse,
+      '#3697-19l: a line with a demonstrated drop is a misparse, not an unverified line',
+    );
+    assert.match(
+      reqLineText(w), /is glued to the ID/,
+      '#3697-19l: and the drop diagnosis must survive — it is the only actionable part',
+    );
+    assert.match(
+      reqLineText(w), /exceed the 2048-character scan limit/,
+      '#3697-19l: while the over-cap disclosure is still carried, not traded away',
+    );
+  });
+
+  // DECLARED BLIND SPOTS, pinned so the docs and the code cannot drift apart
+  // again — that drift IS the round 4 blocker. R4's trigger is a glued `;`/`:`
+  // or an embedded invisible. Styling is TOLERATED around an id, never a
+  // trigger on its own, so every line below silently drops an id. Each is
+  // documented as silent in the CLI tools reference; if one of these ever
+  // starts warning, that document is wrong and this test says so first.
+  for (const [label19m, line19m, expectSel19m] of [
+    ['bold', 'REQ-01, **REQ-02**', ['REQ-01']],
+    ['quotes', 'REQ-01, "REQ-02"', ['REQ-01']],
+    ['backticks', 'REQ-01, `REQ-02`', ['REQ-01']],
+    ['underscore', 'REQ-01, _REQ-02_', ['REQ-01']],
+    // The `**` sits BETWEEN the id and the `;`, so nothing is touching the id.
+    ['styling between id and delimiter', 'REQ-01, **REQ-02**;', ['REQ-01']],
+  ]) {
+    test(`#3697-19m (declared blind spot, styling-only ${label19m}): silent, and documented as silent`, () => {
+      const a = analyzeRequirementsLine(line19m);
+      assert.deepStrictEqual(a.citedReqIds, expectSel19m, `#3697-19m (${label19m}): the id really is dropped`);
+      assert.deepStrictEqual(a.delimiterDroppedIds, [], `#3697-19m (${label19m}): R4 does not claim it`);
+      assert.strictEqual(a.warn, false, `#3697-19m (${label19m}): and the line is silent`);
+    });
+  }
+
+  // The other half of the same boundary: only `;` and `:` are in the set. A
+  // 26-spelling separator sweep that found ONLY those two was symmetric-only
+  // and therefore biased — one-sided attachment drops silently for every other
+  // punctuation. Pinned as the documented cost, not asserted as coverage.
+  for (const sep19n of ['/', '|', '&', '+', '.', '>', '\\', '；', '，', '؛']) {
+    test(`#3697-19n (declared blind spot, one-sided "${sep19n}"): silent, and documented as silent`, () => {
+      const line19n = `REQ-01${sep19n} REQ-02`;
+      const a = analyzeRequirementsLine(line19n);
+      assert.deepStrictEqual(
+        a.citedReqIds, ['REQ-02'],
+        `#3697-19n ("${sep19n}"): REQ-01 really is dropped by the selector`,
+      );
+      assert.deepStrictEqual(a.delimiterDroppedIds, [], `#3697-19n ("${sep19n}"): R4 does not reach it`);
+      assert.strictEqual(a.warn, false, `#3697-19n ("${sep19n}"): and the line is silent`);
+    });
+  }
+
   // The grammar tolerances the documentation was corrected to state. These are
   // pre-existing selector behaviour, not new; the round 4 pre-push review
   // caught the DOCS asserting a stricter rule than the code enforces.
