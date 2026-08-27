@@ -2577,13 +2577,18 @@ const REQ_ID_PARTS_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
 // "check whether any of it is a requirement" about a date. Not a false
 // warning — the line was warning anyway — but false CONTENT, and it is the
 // #2334 voice.
-// The YEAR segment is what makes this a date rather than a requirement.
-// `API-2-01` is a LEGAL requirement id — gap-checker's parseRequirements
-// accepts it from REQUIREMENTS.md — so the round 4 pre-push review was right
-// that a `\d+-\d+` filter suppresses a rider naming a genuinely dropped
-// requirement. Four digits in the middle segment is a date and is not a
-// requirement number anyone writes.
-const REQ_DATE_LIKE_RE = /^[A-Z][A-Z0-9]*-\d{4}-\d{1,2}$/i;
+// `PREFIX-<digits>-<digits>` — the shape the strict-dash range rule refuses to
+// act on because it is equally a date (`FY-2026-08`) and a sub-numbered id
+// (`API-2-01`). NO regex separates those: `API-2026-08` is a legal requirement
+// id and `FY-26-08` is a date, and both filters that tried scored a miss in
+// each direction under the pre-push review's continuation.
+//
+// So the rider stops adjudicating and starts DISCLOSING. Round 4 Minor 2's
+// real complaint was that the rider told the author to check whether a DATE
+// was a requirement; the fix is to name the ambiguity rather than to guess at
+// it — which is the same thing the two warning voices already do about a
+// range separator.
+const REQ_AMBIGUOUS_NUMERIC_RE = /^[A-Z][A-Z0-9]*(?:-\d+){2,}$/i;
 
 // The token-length cap. It bounds REQ_ID_SUBSTRING_RE, the one UNANCHORED
 // regex here, which backtracks quadratically on a pathological token. Round 3
@@ -2627,7 +2632,34 @@ type ReqLineWarning = { code: ReqLineWarningCode; message: string };
 // R4 — a full ID with a trailing statement delimiter glued to it. ANCHORED on
 // both ends, so it is linear and needs no cap of its own beyond the token
 // length guard its caller applies.
-const REQ_DELIMITER_DROPPED_RE = /^([A-Z][A-Z0-9]*-\d+)[;:]+$/i;
+// Zero-width, bidi-control, joiner and variation-selector codepoints. INVISIBLE
+// to the author, and the pre-push review's continuation drove the consequence
+// from both sides: a line of only these warned with nothing on screen to
+// explain it, AND stripping them wholesale from the detector made
+// `REQ-01<ZWSP>, REQ-02` go SILENT while the selector really did drop REQ-01 —
+// #3697's own defect, introduced by the fix for its mirror image. So they are
+// never stripped from the line: they are DECORATION on a token (R4 below) and
+// absence-of-content for the empty test (visibleContent), which are two
+// different questions about the same character.
+const REQ_INVISIBLE_RE = /[\u00AD\u200B-\u200F\u2060-\u2064\u2066-\u2069\uFE0F\uFEFF]/g;
+// The wrappers R4 shaves. Emphasis, quotes and backticks, because the SELECTOR
+// shaves none of them — `**REQ-01**` is genuinely not selected and is a real,
+// silent drop.
+//
+// PARENTHESES ARE DELIBERATELY ABSENT, and this is load-bearing. A parenthesis
+// is this rule's citation MARKER, not decoration to shave: `(REQ-02)` and
+// `(ADR-7)` are the same shape and the rule declines both. Including them here
+// made `REQ-01, (REQ-02), REQ-03 — REQ-05` report a glued delimiter that was
+// never there, and broke #3697-9d's channel routing with it — caught by the
+// suite immediately after the widening.
+const REQ_WRAPPER_RE = /^["'`*_~“”‘’]+|["'`*_~“”‘’]+$/g;
+const REQ_GLUED_DELIMITER_RE = /^[;:]+|[;:]+$/g;
+const REQ_ID_ANCHORED_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
+
+/** A token carries no VISIBLE content when nothing but invisibles remains. */
+function reqHasVisibleContent(token: string): boolean {
+  return token.replace(REQ_INVISIBLE_RE, '').length > 0;
+}
 
 /**
  * CENSUS (round 4): the domain is "separators an author writes between two
@@ -2644,31 +2676,44 @@ const REQ_DELIMITER_DROPPED_RE = /^([A-Z][A-Z0-9]*-\d+)[;:]+$/i;
  * the semicolon; the colon is the sibling that sweep found, and it fails
  * identically.
  *
- * NOT reached, and stated rather than fixed — TWO members, both citations:
- *   - a delimiter glued to an ID inside a parenthetical, `(see ADR-7: sec 3)`;
- *   - a BARE citation whose prefix appears nowhere among the SELECTED ids,
- *     `REQ-01, see ADR-7: section 3`. The parenthetical test does not reach
- *     this one, and it is textually identical to a real drop — `ADR-7:` and
- *     `REQ-01;` are the same shave class. Same-prefix agreement is what
- *     separates them, and it is the module's own idiom rather than a new
- *     heuristic (reqEndpointsImplyInterior already requires an agreeing
- *     prefix for the same reason).
- * The cost of that gate, stated: a genuinely dropped id whose prefix appears
- * on no selected id — `REQ-01, FOO-02: x` where FOO-02 is real — stays
- * silent. That is the deliberate trade, the same one the strict-dash rule
- * takes: an under-report on a rare shape, over an over-report on a common
- * one. Both NOT-reached members were found by the round's own pre-push
- * adversarial review, driving inputs this rule's author had not probed.
+ * The DECORATION set is deliberately wider than a glued delimiter, because a
+ * trailing-only rule missed four shapes the pre-push review's continuation
+ * drove in one pass: `REQ-01 ;REQ-02`, `REQ-01 :REQ-02`, `**REQ-01;** REQ-02`
+ * and the backticked form — plus `**REQ-01**, REQ-02`, where emphasis alone
+ * defeats the selector, and an embedded INVISIBLE, which is the same defect in
+ * its least detectable form. One class, one rule; patching them individually is
+ * how the list stays short and wrong.
+ *
+ * NOT reached, stated rather than fixed, and the second member is WIDER than
+ * this comment first claimed:
+ *   - anything inside a parenthetical. A parenthesis is this rule's citation
+ *     MARKER, never decoration to shave — `(REQ-02)` and `(ADR-7)` are the
+ *     same shape and the rule declines both.
+ *   - a decorated id whose prefix is on NO selected id: `REQ-01, FOO-02: x`
+ *     stays silent even when FOO-02 is real. Prefix agreement is what
+ *     separates a drop from a bare citation — `REQ-01, see ADR-7: section 3`
+ *     carries `ADR-7:` in exactly `REQ-01;`'s shape — and it is the module's
+ *     own idiom, not a new heuristic (reqEndpointsImplyInterior already
+ *     requires an agreeing prefix). The gate is NOT complete: a citation that
+ *     DOES share a selected prefix (`ADR-01, see ADR-7: sec 3`) still fires,
+ *     and nothing at token level separates that from a real drop. Saying so is
+ *     the honest position; a prose heuristic on "see" is exactly the free-text
+ *     detector this module exists to avoid.
+ * The trade, plainly: an under-report on a rare shape over an over-report on a
+ * common one — the same call the strict-dash rule makes.
  */
 function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: number): string[] {
   // Square brackets are stripped exactly as the SELECTOR strips them, because
   // `[REQ-01, REQ-02]` is the documented form — round 4 pre-push review found
   // `[REQ-01; REQ-02]` silently dropping REQ-01 with no warning at all, which
   // is this rule failing on the very shape the template recommends.
+  // Square brackets only. Invisibles are NOT stripped here — they are the
+  // DECORATION this rule detects, and removing them at line level makes the
+  // `bare !== cur` test below false, which is exactly how `REQ-01<ZWSP>,
+  // REQ-02` went silent under the first cut of this fix.
   const line = String(rawLine)
     .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/[[\]]/g, '')
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '');
+    .replace(/[[\]]/g, '');
   // The prefixes actually SELECTED on this line. A dropped token must agree
   // with one of them, and that is what separates a delimiter typo from a
   // citation: `REQ-01, see ADR-7: section 3` carries `ADR-7:` — same shave
@@ -2688,10 +2733,22 @@ function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: num
   let curDepth = 0;
   const flush = (): void => {
     if (cur && cur.length <= cap && curDepth === 0) {
-      const m = REQ_DELIMITER_DROPPED_RE.exec(cur);
-      if (m && !selected.has(m[1].toUpperCase())) {
-        const parts = REQ_ID_PARTS_RE.exec(m[1]);
-        if (parts && selectedPrefixes.has(parts[1].toUpperCase())) hits.push(m[1]);
+      // Shave DECORATION — invisibles, the wrapper set the detector already
+      // shaves, and a glued `;`/`:` at EITHER end. The continuation review
+      // drove all four of the shapes a trailing-only regex missed:
+      // `REQ-01 ;REQ-02`, `REQ-01 :REQ-02`, `**REQ-01;** REQ-02` and the
+      // backticked form. They are one class, so they take one rule.
+      const bare = cur
+        .replace(REQ_INVISIBLE_RE, '')
+        .replace(REQ_WRAPPER_RE, '')
+        .replace(REQ_GLUED_DELIMITER_RE, '');
+      // `bare !== cur` is what keeps this a DECORATION rule. An undecorated
+      // ID the selector skipped is a different question — `unselectedIdShaped`
+      // records it as a fact, and routing on it was rejected because
+      // `(ADR-7)` and `(REQ-02)` are the same shape.
+      const parts = bare !== cur ? REQ_ID_ANCHORED_RE.exec(bare) : null;
+      if (parts && !selected.has(bare.toUpperCase()) && selectedPrefixes.has(parts[1].toUpperCase())) {
+        hits.push(bare);
       }
     }
     cur = '';
@@ -2747,13 +2804,6 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // range operator (`REQ-01.. REQ-05`), not sentence punctuation — keep it.
   const tokens = line
     .replace(/<!--[\s\S]*?-->/g, ' ')
-    // Zero-width and format characters are INVISIBLE, so a line carrying only
-    // them reads as empty to the author while carrying a token to the parser.
-    // Round 4 pre-push review: a lone U+200B warned, and no author could have
-    // seen why. Stripped rather than treated as a delimiter — they can also sit
-    // inside an otherwise valid token, where splitting on them would fabricate
-    // two fragments out of one ID.
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
     .split(/[,\s]+/)
     .map((t) => {
       const trimmed = t.trim();
@@ -2849,7 +2899,8 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // strips `<!-- ... -->` before splitting, so `<!-- fill in -->` yields no
   // tokens and cannot reach this rule. Every other zero-selection,
   // non-placeholder line warns.
-  const zeroSelectionInert = citedReqIds.length === 0 && !placeholderLed && tokens.length > 0;
+  const zeroSelectionInert =
+    citedReqIds.length === 0 && !placeholderLed && tokens.some(reqHasVisibleContent);
 
   // R2 is the ONLY ambiguous rule — a tight range, a glued fragment and R3
   // residue each implicate ID-shaped text the selector demonstrably did not
@@ -2998,18 +3049,20 @@ function formatRequirementsLineWarning(
       t.toUpperCase(),
     ),
   );
-  // Filtered at the MESSAGE, not in the analysis: `unselectedIdShaped` stays a
-  // faithful record of what the selector skipped (it is documented as a fact
-  // that never routes), while the user-facing clause declines to assert
-  // requirement-ness about a shape the design has already ruled unadjudicable.
-  const skippedNames = analysis.unselectedIdShaped.filter(
-    (t) => !alreadyNamed.has(t.toUpperCase()) && !REQ_DATE_LIKE_RE.test(t),
-  );
+  const skippedNames = analysis.unselectedIdShaped.filter((t) => !alreadyNamed.has(t.toUpperCase()));
+  // Named, then qualified. The `PREFIX-N-N` shape is the one the range rules
+  // deliberately decline to act on, so the rider says WHY it might not be a
+  // requirement instead of silently deciding it is not.
+  const ambiguousNamed = skippedNames.filter((t) => REQ_AMBIGUOUS_NUMERIC_RE.test(t));
   const skipped =
     skippedNames.length > 0
       ? ` ID-shaped text on the line that was NOT selected: ${skippedNames.join(', ')}` +
         ` (parentheses are not stripped, unlike square brackets) — check whether any of it is a` +
-        ` requirement.`
+        ` requirement.` +
+        (ambiguousNamed.length > 0
+          ? ` ${ambiguousNamed.join(', ')} may equally be a date or a sub-numbered id, which is` +
+            ` why the range rules do not act on that shape.`
+          : '')
       : '';
   // R4's clause. Named separately from the generic skipped-text rider because
   // this one is not a "check whether any of it is a requirement" hedge — the
@@ -3018,8 +3071,9 @@ function formatRequirementsLineWarning(
   const delimiterDropped =
     analysis.delimiterDroppedIds.length > 0
       ? ` ${analysis.delimiterDroppedIds.join(', ')} ${analysis.delimiterDroppedIds.length === 1 ? 'was' : 'were'}` +
-        ` NOT selected: a \`;\` or \`:\` is glued to the ID, and the line is split on commas and` +
-        ` whitespace only. Separate every requirement with a comma.`
+        ` NOT selected: something is attached to the ID — a \`;\` or \`:\`, markdown emphasis, or an` +
+        ` invisible character — and the line is split on commas and whitespace only. Write each` +
+        ` requirement as a bare ID separated by a comma.`
       : '';
   const oversized =
     analysis.oversizedTokens.length > 0

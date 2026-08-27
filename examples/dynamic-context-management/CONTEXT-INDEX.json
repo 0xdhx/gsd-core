@@ -232,7 +232,7 @@
     {
       "id": "PHASE.REQ-LINE.SEAM.census-domains",
       "klass": "PHASE",
-      "value": "TWO open domains, each censused in-source with its NOT-reached consequence: range-operator spellings (reached: ..+, seven Unicode dashes plus ASCII -, …, to/thru/through; not reached: →, ~, ..=, ..<, until, up to) and comma-SUBSTITUTE separators (26 swept; exactly ;  and :  produce a silent under-selection, now R4; every other spelling selects both IDs or already warns); R4's own NOT-reached set is TWO citation shapes — a delimiter inside a parenthetical, and a bare citation whose prefix is on no selected id — bought at the cost of a dropped id with an unshared prefix staying silent",
+      "value": "TWO open domains, each censused in-source with its NOT-reached consequence: range-operator spellings (reached: ..+, seven Unicode dashes plus ASCII -, …, to/thru/through; not reached: →, ~, ..=, ..<, until, up to) and comma-SUBSTITUTE separators (26 swept; exactly ;  and :  produce a silent under-selection, now R4; every other spelling selects both IDs or already warns); R4's own NOT-reached set is anything inside a parenthetical plus any decorated id whose prefix is on NO selected id (REQ-01, FOO-02: x stays silent even when FOO-02 is real); the prefix gate is NOT complete — a citation SHARING a selected prefix (ADR-01, see ADR-7: sec 3) still fires and nothing at token level separates it from a real drop",
       "line": 708
     },
     {
@@ -256,13 +256,13 @@
     {
       "id": "PHASE.REQ-LINE.SEAM.placeholder",
       "klass": "PHASE",
-      "value": "TBD/NONE as the LEAD token only; that gate — not the ID-shape gate — is what holds the whole #2334/#2339 negative space silent under R3b (measured: 15 of 15 fixtures held by non-zero selection or placeholderLed, 0 by ID shape)",
+      "value": "TBD/NONE as the LEAD token only, and R3b's non-empty test keys on VISIBLE content (a line of only zero-width/bidi/variation-selector codepoints is empty; an invisible INSIDE a token is decoration and R4 reports the drop); that gate — not the ID-shape gate — is what holds the whole #2334/#2339 negative space silent under R3b (measured: 15 of 15 fixtures held by non-zero selection or placeholderLed, 0 by ID shape)",
       "line": 707
     },
     {
       "id": "PHASE.REQ-LINE.SEAM.rules",
       "klass": "PHASE",
-      "value": "R1 whole-token range | R2 spaced operator between two selected interior-implying endpoints | R2' operator glued to one endpoint | R3 zero selection with ID-shaped residue | R3b zero selection on any non-placeholder non-empty line (#3697 AC-1b/AC-4) | R4 an ID the selector dropped to a glued ;/: outside any parenthetical AND sharing a prefix with a SELECTED id (square brackets stripped as the selector strips them) | over-cap unclassified; warn is their disjunction, named rather than inlined in the return literal",
+      "value": "R1 whole-token range | R2 spaced operator between two selected interior-implying endpoints | R2' operator glued to one endpoint | R3 zero selection with ID-shaped residue | R3b zero selection on any non-placeholder non-empty line (#3697 AC-1b/AC-4) | R4 an ID the selector dropped to DECORATION — a glued ;/: at either end, markdown emphasis, quotes/backticks, or an embedded invisible — outside any parenthetical AND sharing a prefix with a SELECTED id (square brackets stripped as the selector strips them; parentheses deliberately NOT, they are the citation marker) | over-cap unclassified; warn is their disjunction, named rather than inlined in the return literal",
       "line": 704
     },
     {

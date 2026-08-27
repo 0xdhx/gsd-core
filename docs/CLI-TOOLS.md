@@ -318,12 +318,24 @@ indistinguishable from a line that was meant to cite requirements and failed
 to. A line whose only content is an HTML comment is not "other wording" and
 stays silent, so the shipped template's own `<!-- ... -->` does not warn.
 
-**Separate every requirement with a comma.** The line is split on commas and
-whitespace only, so a `;` or `:` glued to an ID takes the ID with it:
-`REQ-01; REQ-02` marks **only** `REQ-02`. That is the quietest way to lose a
-requirement here — the command reports `requirements_updated: true` either way —
-so it is called out by name in the warning. A delimiter inside parentheses is
-left alone: `(see ADR-7: section 3)` is a citation, not a dropped requirement.
+**Write each requirement as a bare ID, separated by a comma.** The line is
+split on commas and whitespace only, and nothing else is stripped, so anything
+attached to an ID takes the ID with it. `REQ-01; REQ-02` marks **only**
+`REQ-02`; so do `REQ-01 ;REQ-02`, `**REQ-01**, REQ-02` and an ID carrying a
+stray invisible character. That is the quietest way to lose a requirement here —
+the command reports `requirements_updated: true` either way — so the dropped ID
+is named in the warning.
+
+**What that warning cannot tell you**, stated so you do not read its silence as
+a clean bill: a dropped ID is only reported when its prefix matches one that
+*was* selected on the same line. `REQ-01, REQ-02: login` is reported;
+`REQ-01, FOO-02: x` is not. The reason is that a citation is textually
+identical to a dropped requirement — `REQ-01, see ADR-7: section 3` carries
+`ADR-7:` in exactly the shape `REQ-01;` has — and prefix agreement is the only
+thing that separates them without guessing at prose. Anything inside
+parentheses is left alone for the same reason: `(see ADR-7: section 3)` is a
+citation. The trade is deliberate: a rare shape goes unreported rather than a
+common one being reported wrongly.
 
 **Dash spellings need a full ID on both sides.** `REQ-01-REQ-05` reads as a
 range; `REQ-01-05` does not, and neither does any of its typographic variants
@@ -338,9 +350,13 @@ selects nothing.
 **What warns, and in which of the three voices.** All go to `warnings[]` and
 none blocks completion:
 
-- *"could not be parsed as a comma-separated REQ-ID list"* — ID-shaped text on
-  the line was **not** selected. Something was demonstrably dropped; the line
-  needs fixing.
+- *"could not be parsed as a comma-separated REQ-ID list"* — the line did not
+  yield the requirements it appears to name. That covers two cases, and the
+  message says which one it is: ID-shaped text on the line was **not**
+  selected, so something was demonstrably dropped; **or** the line selected
+  nothing at all while not being a `TBD`/`None` placeholder, in which case
+  there may be no ID-shaped text on it whatsoever (`Deferred` takes this
+  voice). Either way nothing was marked and the line needs fixing.
 - *"contains what reads as a range between two cited REQ-IDs"* — the separator
   is the only thing in question: a separator between two cited IDs could equally
   be a range or an annotation, and the command cannot tell them apart, so it
@@ -358,10 +374,13 @@ Either of those two voices may add a factual note naming **ID-shaped text on the
 line that was not selected**. Square brackets *are* stripped — `[REQ-01, REQ-02]`
 is the documented form — but parentheses are not, so `(REQ-02)` is not marked.
 The command cannot tell that from `(ADR-7)`, which is a citation and correctly
-ignored, so it names what it skipped and leaves the judgement to you. It stays
-quiet about `PREFIX-<digits>-<digits>` there — the date and sub-numbered shapes
-the dash rule above already declines to adjudicate — rather than asking you to
-check whether a date is a requirement.
+ignored, so it names what it skipped and leaves the judgement to you. Where the
+skipped text is `PREFIX-<digits>-<digits>` — the shape the dash rule above
+declines to adjudicate, because `FY-2026-08` is a date and `API-2-01` is a
+legal requirement id and no rule separates them — it is still named, with that
+ambiguity stated alongside it. Naming it and saying why it is ambiguous beats
+both alternatives: filtering it hides a real dropped requirement, and reporting
+it bare asks you to check whether a date is a requirement.
 The third voice is for input the command could not examine: *"could not be
 checked ... the REQ-ID selection on this line is unverified"*. Range detection
 is bounded at 2,048 characters per token, so a longer token is not classified —

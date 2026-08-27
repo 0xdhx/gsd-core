@@ -12417,58 +12417,62 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   );
 
   // ==========================================================================
-  // #3697-18 — the skipped-text rider must not re-report a date (Minor 2).
+  // #3697-18 — the skipped-text rider must not tell the author to check
+  // whether a DATE is a requirement (round 4 review Minor 2).
   //
-  // `REQ_ID_SUBSTRING_RE` is unanchored, so `FY-2026-08` matches as `FY-2026`
-  // and lands in `unselectedIdShaped`. REQ_RANGE_TOKEN_RE's entire strict-dash
-  // arm exists to keep exactly that shape silent — and #3697-4 pins
-  // `RANGE-01 (target FY-2026-08)` as producing no warning at all. But whenever
-  // some OTHER rule fired on a line that also carried a date annotation, the
-  // rider told the author to "check whether any of it is a requirement" about
-  // a date. Not a false warning; false CONTENT, in the #2334 voice.
+  // This round first answered it with a FILTER, and the pre-push review's
+  // continuation broke that in both directions: `API-2-01` is a legal
+  // requirement id (gap-checker's parseRequirements accepts it) so the filter
+  // hid a real drop, while `FY-26-08` and `FY-2026-08-15` leaked through. No
+  // regex separates a date from a sub-numbered id — they are the same shape,
+  // which is exactly why the strict-dash range rule refuses to act on it.
+  //
+  // So the rider DISCLOSES instead of adjudicating: it names the token and
+  // says why it may not be a requirement. Same move the two warning voices
+  // already make about an ambiguous separator.
   // ==========================================================================
-  for (const [label18, line18] of [
-    ['dotted range + date', 'RANGE-01 .. RANGE-05 (target FY-2026-08)'],
-    ['ellipsis range + bare date', 'RANGE-01 … RANGE-05 due FY-2026-08'],
-    // A sub-numbered id (`API-2-01`) was listed here in this round's first cut
-    // and has been REMOVED, because its premise was refuted rather than
-    // because the test was inconvenient: `API-2-01` is a LEGAL requirement id
-    // — gap-checker's parseRequirements accepts it from REQUIREMENTS.md — so
-    // suppressing it hid a genuinely dropped requirement. Only a date shape is
-    // filtered now, and #3697-19e pins both halves of that boundary.
+  for (const [label18, line18, expectNamed18] of [
+    ['date beside a dotted range', 'RANGE-01 .. RANGE-05 (target FY-2026-08)', 'FY-2026-08'],
+    ['multi-segment date', 'RANGE-01 .. RANGE-05 (target FY-2026-08-15)', 'FY-2026-08-15'],
+    ['short-year date', 'RANGE-01 … RANGE-05 due FY-26-08', 'FY-26-08'],
+    ['sub-numbered requirement', 'RANGE-01 .. RANGE-05, API-2-01', 'API-2-01'],
+    ['four-digit sub-number', 'RANGE-01 .. RANGE-05, API-2026-08', 'API-2026-08'],
   ]) {
     test(
-      `#3697-18 (date-like rider, ${label18}): the line warns, but not ABOUT the date`,
+      `#3697-18 (ambiguous numeric shape, ${label18}): named, and qualified rather than adjudicated`,
       () => {
         const a = analyzeRequirementsLine(line18);
         const w = reqLineText(formatRequirementsLineWarning('1', line18, a));
-        assert.ok(w, `#3697-18 (${label18}): the range rule fired, so the line still warns`);
-        assert.doesNotMatch(
-          w,
-          /ID-shaped text on the line that was NOT selected/i,
-          `#3697-18 FAILED (${label18}): the only unselected ID-shaped token is a date/sub-numbered ` +
-          `shape the design deliberately refuses to adjudicate, so the rider must not speak: ${w}`,
-        );
-        // The FACT is still recorded — the suppression is at the message, not
-        // in the analysis, so nothing is hidden from a consumer that wants it.
+        assert.ok(w, `#3697-18 (${label18}): the range rule fired, so the line warns`);
+        // NAMED — suppressing it hid a genuinely dropped requirement.
         assert.ok(
-          a.unselectedIdShaped.length > 0,
-          `#3697-18 (${label18}): the analysis must still record the skipped token as a fact`,
+          w.includes(expectNamed18),
+          `#3697-18 FAILED (${label18}): ${expectNamed18} must be named — a filter here hid a real ` +
+          `dropped requirement: ${w}`,
+        );
+        // QUALIFIED — the author is told why it may not be a requirement,
+        // instead of the warning deciding for them in either direction.
+        assert.match(
+          w,
+          /may equally be a date or a sub-numbered id/i,
+          `#3697-18 FAILED (${label18}): the shape is undecidable and the rider must say so: ${w}`,
         );
       },
     );
   }
 
-  // The other half, or the fix above would be a silencer rather than a filter:
-  // a genuinely unselected REQ-ID must still be named.
-  test('#3697-18b (genuine skip still named): a dropped REQ-ID is not suppressed by the date filter', () => {
+  // The other half: an UNAMBIGUOUS dropped id is named with no hedge attached.
+  test('#3697-18b (unambiguous skip): a plain dropped REQ-ID is named without the date caveat', () => {
     const line = 'REQ-01, (REQ-02), REQ-03 — REQ-05';
     const a = analyzeRequirementsLine(line);
     const w = reqLineText(formatRequirementsLineWarning('1', line, a));
     assert.match(
-      w,
-      /ID-shaped text on the line that was NOT selected: REQ-02/i,
-      `#3697-18b FAILED: REQ-02 is a real skipped ID and must still be named: ${w}`,
+      w, /ID-shaped text on the line that was NOT selected: REQ-02/i,
+      `#3697-18b FAILED: REQ-02 is a real skipped ID and must be named: ${w}`,
+    );
+    assert.doesNotMatch(
+      w, /may equally be a date/i,
+      `#3697-18b FAILED: REQ-02 is not the ambiguous shape and must carry no caveat: ${w}`,
     );
   });
 
@@ -12489,6 +12493,12 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['two zero-width spaces', '\u200B\u200B'],
     ['word joiner', '\u2060'],
     ['BOM', '\uFEFF'],
+    // All four below were driven by the pre-push review's continuation against
+    // a strip set that covered only the first four.
+    ['soft hyphen', '\u00AD'],
+    ['left-to-right mark', '\u200E'],
+    ['left-to-right isolate', '\u2066'],
+    ['variation selector 16', '\uFE0F'],
   ]) {
     test(`#3697-19 (invisible content, ${label19}): a line the author cannot see is not content`, () => {
       const a = analyzeRequirementsLine(line19);
@@ -12502,17 +12512,36 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   // A zero-width character INSIDE an otherwise valid line must be stripped, not
   // treated as a delimiter: splitting on it would fabricate two fragments from
   // one ID and invent a drop that never happened.
-  test('#3697-19b (embedded zero-width): a stray invisible inside an ID is stripped, not split on', () => {
-    const a = analyzeRequirementsLine('REQ-01\u200B, REQ-02');
-    assert.deepStrictEqual(
-      a.citedReqIds, ['REQ-02'],
-      '#3697-19b: selection is unchanged by this round — the invisible still breaks REQ-01 for the SELECTOR',
-    );
-    assert.deepStrictEqual(
-      a.delimiterDroppedIds, [],
-      '#3697-19b: and R4 must not invent a delimiter drop out of an invisible character',
-    );
-  });
+  // An invisible INSIDE a token breaks it for the SELECTOR, so the id is
+  // genuinely not marked — #3697's own defect, in its most undetectable form.
+  //
+  // The first cut of this fix stripped invisibles from the detector wholesale
+  // and made exactly this case go SILENT, and the test written for it asserted
+  // the tokens and the empty R4 result while never asserting `warn` — it
+  // DOCUMENTED the bug instead of catching it. That omission was the pre-push
+  // review's `MISSED:` finding. The assertion below is the one that was absent.
+  for (const [label19b, line19b] of [
+    ['zero-width space', 'REQ-01\u200B, REQ-02'],
+    ['soft hyphen', 'REQ-01\u00AD, REQ-02'],
+    ['zero-width joiner', 'REQ-01\u200D, REQ-02'],
+  ]) {
+    test(`#3697-19b (embedded invisible, ${label19b}): an unmarkable id must never be silent`, () => {
+      const a = analyzeRequirementsLine(line19b);
+      assert.deepStrictEqual(
+        a.citedReqIds, ['REQ-02'],
+        `#3697-19b (${label19b}): the selector really does drop REQ-01 — selection is unchanged by this round`,
+      );
+      assert.strictEqual(
+        a.warn, true,
+        `#3697-19b FAILED (${label19b}): an id dropped to an INVISIBLE character is the least ` +
+        `detectable form of #3697's own defect and must not stay silent`,
+      );
+      assert.deepStrictEqual(
+        a.delimiterDroppedIds, ['REQ-01'],
+        `#3697-19b (${label19b}): and it must be NAMED — the author cannot see the character`,
+      );
+    });
+  }
 
   // (2) R4's false positive. A BARE citation carrying a colon is the same shave
   // class as a real delimiter drop, and the parenthetical test does not reach
@@ -12538,6 +12567,16 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   for (const [label19d, line19d, expectDropped19] of [
     ['bracketed semicolon', '[REQ-01; REQ-02]', ['REQ-01']],
     ['bracketed colon', '[REQ-01, REQ-02: login]', ['REQ-02']],
+    // A trailing-only regex missed every one of these; they are one class
+    // (decoration on a token the selector then could not take), so they take
+    // one rule rather than four patches.
+    ['leading semicolon', 'REQ-01 ;REQ-02', ['REQ-02']],
+    ['leading colon', 'REQ-01 :REQ-02', ['REQ-02']],
+    ['bold-wrapped', '**REQ-01;** REQ-02', ['REQ-01']],
+    ['backtick-wrapped', '`REQ-01;` REQ-02', ['REQ-01']],
+    // No delimiter at all — markdown emphasis alone defeats the selector, so
+    // the id is genuinely unmarked and this is the same defect class.
+    ['emphasis only', '**REQ-01**, REQ-02', ['REQ-01']],
   ]) {
     test(`#3697-19d (bracket form, ${label19d}): the documented spelling must not defeat R4`, () => {
       const a = analyzeRequirementsLine(line19d);
@@ -12553,21 +12592,6 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   // (4) The rider filter suppressed a REGISTERED requirement. `API-2-01` is a
   // legal requirement id — gap-checker's own parseRequirements accepts it — so
   // only a DATE shape (four-digit year segment) may be filtered.
-  test('#3697-19e (rider filter scope): a sub-numbered requirement is named, a date is not', () => {
-    const withReq = analyzeRequirementsLine('RANGE-01 .. RANGE-05, API-2-01');
-    const wReq = reqLineText(formatRequirementsLineWarning('1', 'RANGE-01 .. RANGE-05, API-2-01', withReq));
-    assert.match(
-      wReq, /ID-shaped text on the line that was NOT selected: API-2-01/i,
-      `#3697-19e FAILED: API-2-01 is a legal requirement id and must be named: ${wReq}`,
-    );
-    const withDate = analyzeRequirementsLine('RANGE-01 .. RANGE-05 (target FY-2026-08)');
-    const wDate = reqLineText(formatRequirementsLineWarning('1', 'RANGE-01 .. RANGE-05 (target FY-2026-08)', withDate));
-    assert.doesNotMatch(
-      wDate, /ID-shaped text on the line that was NOT selected/i,
-      `#3697-19e FAILED: a four-digit year segment is a date, not a requirement: ${wDate}`,
-    );
-  });
-
   // The residual the same-prefix gate BUYS its safety with, pinned so it is a
   // known quantity rather than a surprise. A genuinely dropped id whose prefix
   // appears on no selected id stays silent — the same trade the strict-dash
