@@ -2662,17 +2662,30 @@ const REQ_DELIMITED_ID_RE = /^[;:]*([A-Z][A-Z0-9]*-\d+)[;:]*$/i;
 /**
  * CENSUS (round 4): the domain is "separators an author writes between two
  * REQ-IDs INSTEAD of a comma" — distinct from the range-operator domain
- * censused above, and it had no census at all before this round. Swept 26
- * spellings against the shipped selector: `, ` `; ` `;` `: ` ` | ` `|` ` / `
- * `/` ` + ` `+` ` & ` `&` ` and ` TAB two-space ` • ` ` · ` ` , ` `,,` ` ; `
- * `؛` `；` `，` ` \ ` ` > ` and the bare forms of each.
+ * censused above, and it had no census at all before this round.
  *
- * Reached, i.e. producing a SILENT under-selection: exactly two — `; ` and
- * `: `. Every other spelling either selects both IDs (whitespace survives the
- * split) or selects none and already warns through R3/R3b (the glued forms
- * fuse both IDs into one unselectable token). The round-4 review hand-listed
- * the semicolon; the colon is the sibling that sweep found, and it fails
- * identically.
+ * ROUND 4'S CENSUS WAS WRONG, AND THE WAY IT WAS WRONG IS THE LESSON. It swept
+ * 26 spellings and concluded "exactly two — `; ` and `: `". It reached that
+ * answer because it swept the ONE-SIDED form (`REQ-01; REQ-02`) for the
+ * semicolon and colon, and only the BARE and SYMMETRIC forms (`|`, ` | `) for
+ * every other separator. Different members of the domain were tested in
+ * different shapes, so the conclusion could not have come out any other way.
+ *
+ * Re-swept round 5, fully crossed: 21 separators x {bare, trailing-space,
+ * leading-space, both-spaces} = 84 combinations, driven through the built
+ * artifact. 26 select both IDs, 24 under-select and already warn, and
+ * 34 UNDER-SELECT SILENTLY. All 34 are the same shape — a separator glued to
+ * exactly ONE of the two IDs, e.g. `REQ-01/ REQ-02` or `REQ-01 /REQ-02` — for
+ * every punctuation except `,` (the real delimiter) and `;` / `:` (R4).
+ * Measured silent: | / + & \ > . ! ? • · ؛ ； ， － ~ and the word operators
+ * `and` / `plus` in trailing-space form.
+ *
+ * So the honest statement is that R4 covers TWO CHARACTERS of a domain that is
+ * wide open, not that the domain has two members. The round-4 review
+ * hand-listed the semicolon; the colon is its sibling and fails identically;
+ * everything else in that list is disclosed here and NOT caught. Widening the
+ * delimiter class is a small change and deliberately not made at the end of a
+ * round: three successive cuts of this rule fired on a citation.
  *
  * THE GATE IS ADJACENCY, and it is the part to read. Styling is stripped, then
  * the delimiter must be touching the id: `REQ-01;`, `;REQ-02`, `**REQ-01;**`
@@ -2682,11 +2695,12 @@ const REQ_DELIMITED_ID_RE = /^[;:]*([A-Z][A-Z0-9]*-\d+)[;:]*$/i;
  * qualifies without an adjacency test, because nobody types one on purpose, so
  * it is corruption rather than intent.
  *
- * Everything else — markdown styling on its own — is left to the skipped-text
- * rider, which names the id without asserting a drop, the same treatment
- * `(REQ-02)` gets. Three successive cuts of this rule fired on a citation, and
- * each time the fix was a narrower definition of EVIDENCE rather than a longer
- * list of shapes.
+ * Markdown styling on its own is NOT a trigger and NOT reported. It reaches
+ * the skipped-text rider, which names the id without asserting a drop — but a
+ * rider only exists inside a MESSAGE, and a message only exists when some rule
+ * set `warn`. On a line where nothing else fires, `REQ-01, **REQ-02**` is
+ * wholly silent. Saying it is "left to the rider" reads as coverage and is
+ * not; #3697-19m pins the silence so this comment cannot drift back.
  *
  * NOT reached, stated rather than fixed, and the second member is WIDER than
  * this comment first claimed:

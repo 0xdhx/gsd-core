@@ -12735,21 +12735,32 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     });
   }
 
-  // The other half of the same boundary: only `;` and `:` are in the set. A
-  // 26-spelling separator sweep that found ONLY those two was symmetric-only
-  // and therefore biased — one-sided attachment drops silently for every other
-  // punctuation. Pinned as the documented cost, not asserted as coverage.
+  // The other half of the same boundary: only `;` and `:` are in the set.
+  // Round 4's separator census concluded "exactly those two" because it swept
+  // the ONE-SIDED form for `;`/`:` and only the bare and symmetric forms for
+  // every other separator — different members tested in different shapes, so
+  // the answer was forced. A fully crossed re-sweep (21 separators x 4
+  // spellings = 84) found 34 silent under-selections, every one of them a
+  // separator glued to exactly ONE of the two ids. Pinned here as the
+  // documented COST, never asserted as coverage.
   for (const sep19n of ['/', '|', '&', '+', '.', '>', '\\', '；', '，', '؛']) {
-    test(`#3697-19n (declared blind spot, one-sided "${sep19n}"): silent, and documented as silent`, () => {
-      const line19n = `REQ-01${sep19n} REQ-02`;
-      const a = analyzeRequirementsLine(line19n);
-      assert.deepStrictEqual(
-        a.citedReqIds, ['REQ-02'],
-        `#3697-19n ("${sep19n}"): REQ-01 really is dropped by the selector`,
-      );
-      assert.deepStrictEqual(a.delimiterDroppedIds, [], `#3697-19n ("${sep19n}"): R4 does not reach it`);
-      assert.strictEqual(a.warn, false, `#3697-19n ("${sep19n}"): and the line is silent`);
-    });
+    for (const [dir19n, line19n, keep19n] of [
+      ['trailing', `REQ-01${sep19n} REQ-02`, 'REQ-02'],
+      ['leading', `REQ-01 ${sep19n}REQ-02`, 'REQ-01'],
+    ]) {
+      test(`#3697-19n (declared blind spot, ${dir19n} "${sep19n}"): silent, and documented as silent`, () => {
+        const a = analyzeRequirementsLine(line19n);
+        assert.deepStrictEqual(
+          a.citedReqIds, [keep19n],
+          `#3697-19n (${dir19n} "${sep19n}"): exactly one id survives the selector`,
+        );
+        assert.deepStrictEqual(
+          a.delimiterDroppedIds, [],
+          `#3697-19n (${dir19n} "${sep19n}"): R4 does not reach it`,
+        );
+        assert.strictEqual(a.warn, false, `#3697-19n (${dir19n} "${sep19n}"): and the line is silent`);
+      });
+    }
   }
 
   // The grammar tolerances the documentation was corrected to state. These are

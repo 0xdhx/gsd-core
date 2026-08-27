@@ -338,9 +338,12 @@ thing touching the ID is a `;`, a `:`, or an invisible character:
 - **Any other attached punctuation is silent.** `REQ-01/ REQ-02`,
   `REQ-01| REQ-02`, `REQ-01. REQ-02`, `REQ-01+ REQ-02`, `REQ-01> REQ-02` and
   their full-width and non-ASCII equivalents (`；`, `，`, `؛`) each mark only
-  `REQ-02`. Only `;` and `:` are in the set. Widening it is a live option —
-  say the word — but each past widening of this check first fired on a
-  citation, so it is not done blind.
+  `REQ-02`. A fully crossed sweep — 21 separators against bare, leading-space,
+  trailing-space and both-spaces spellings, 84 combinations — found **34**
+  silent under-selections, every one of them a separator glued to exactly one
+  of the two IDs. Only `;` and `:` are in the set. Widening it is a live
+  option — say the word — but each past widening of this check first fired on
+  a citation, so it is not done blind.
 - **A dropped ID whose prefix matches nothing selected is silent.**
   `REQ-01, REQ-02: login` is reported; `REQ-01, FOO-02: x` is not. A citation
   is textually identical to a dropped requirement — `REQ-01, see ADR-7:
