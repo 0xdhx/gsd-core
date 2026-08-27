@@ -12574,9 +12574,9 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['leading colon', 'REQ-01 :REQ-02', ['REQ-02']],
     ['bold-wrapped', '**REQ-01;** REQ-02', ['REQ-01']],
     ['backtick-wrapped', '`REQ-01;` REQ-02', ['REQ-01']],
-    // No delimiter at all — markdown emphasis alone defeats the selector, so
-    // the id is genuinely unmarked and this is the same defect class.
-    ['emphasis only', '**REQ-01**, REQ-02', ['REQ-01']],
+    // Delimiter OUTSIDE the wrapper — the shave has to reach a stable point,
+    // and a single pass leaves `**REQ-01**;` un-shaved.
+    ['delimiter outside the wrapper', '**REQ-01**; REQ-02', ['REQ-01']],
   ]) {
     test(`#3697-19d (bracket form, ${label19d}): the documented spelling must not defeat R4`, () => {
       const a = analyzeRequirementsLine(line19d);
@@ -12596,6 +12596,74 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   // known quantity rather than a surprise. A genuinely dropped id whose prefix
   // appears on no selected id stays silent — the same trade the strict-dash
   // rule takes: under-report a rare shape rather than over-report a common one.
+  // EMPHASIS ALONE IS NOT EVIDENCE, and this pins the boundary in both
+  // directions. An earlier cut of this round fired on any wrapper, which made
+  // `REQ-01, see **REQ-7** for context` warn about a citation — the #2334
+  // class again. Nothing separates that from `**REQ-01**, REQ-02` meaning to
+  // list one, so R4 requires the positive signal: a glued `;`/`:` (a list
+  // separator was intended) or an invisible (the token is corrupted; no author
+  // types one on purpose). Markdown styling is authorial and is left to the
+  // skipped-text rider, which names the id without asserting a drop.
+  for (const [label19h, line19h] of [
+    ['emphasised citation', 'REQ-01, see **REQ-7** for context'],
+    ['backticked citation', 'REQ-01, see `REQ-7` for context'],
+    ['emphasis with no delimiter', '**REQ-01**, REQ-02'],
+  ]) {
+    test(`#3697-19h (styling is not evidence, ${label19h}): a wrapper alone must not fire R4`, () => {
+      const a = analyzeRequirementsLine(line19h);
+      assert.deepStrictEqual(
+        a.delimiterDroppedIds, [],
+        `#3697-19h FAILED (${label19h}): markdown styling carries no list-separator intent, so ` +
+        `claiming a drop here is the #2334 over-warning class`,
+      );
+    });
+  }
+
+  // An invisible attached to the range OPERATOR, not to an id. The regression
+  // tests covered invisibles inside ids and not this, and that gap is exactly
+  // what let a fix for one direction break the other — the pre-push review's
+  // own MISSED finding.
+  for (const [label19i, line19i] of [
+    ['invisible around a dotted operator', 'REQ-01 \u200B..\u200B REQ-05'],
+    ['invisible before a glued dash', 'REQ-01 \u200B-REQ-05'],
+  ]) {
+    test(`#3697-19i (invisible on the operator, ${label19i}): the operator is still an operator`, () => {
+      assert.strictEqual(
+        analyzeRequirementsLine(line19i).warn, true,
+        `#3697-19i FAILED (${label19i}): an invisible beside the range operator must not hide it`,
+      );
+    });
+  }
+
+  // An UNBALANCED parenthesis is a typo, not a citation, and must not confer
+  // citation immunity on the rest of the line. A running-depth counter let one
+  // stay open to end-of-line and swallow every real drop after it.
+  for (const [label19j, line19j, expectDropped19j] of [
+    ['unclosed open paren', 'REQ-01, (note REQ-02; REQ-03', ['REQ-02']],
+    ['stray close paren', 'REQ-01, REQ-02; REQ-03)', ['REQ-02']],
+  ]) {
+    test(`#3697-19j (unbalanced parens, ${label19j}): only a MATCHED span is a citation`, () => {
+      const a = analyzeRequirementsLine(line19j);
+      assert.deepStrictEqual(
+        a.delimiterDroppedIds, expectDropped19j,
+        `#3697-19j FAILED (${label19j}): an unmatched paren must not swallow the rest of the line`,
+      );
+    });
+  }
+
+  // And the matched forms still are citations.
+  for (const [label19k, line19k] of [
+    ['matched span', 'REQ-01, (see ADR-7: sec 3)'],
+    ['nested matched spans', 'RANGE-01, RANGE-02 (see (ADR-7), then ADR-8)'],
+  ]) {
+    test(`#3697-19k (matched parens, ${label19k}): a real citation is still immune`, () => {
+      assert.deepStrictEqual(
+        analyzeRequirementsLine(line19k).delimiterDroppedIds, [],
+        `#3697-19k FAILED (${label19k}): a matched parenthetical is a citation`,
+      );
+    });
+  }
+
   test('#3697-19f (declared blind spot): a dropped id with an unshared prefix stays silent', () => {
     const a = analyzeRequirementsLine('REQ-01, FOO-02: x');
     assert.deepStrictEqual(a.citedReqIds, ['REQ-01'], '#3697-19f: FOO-02 really is dropped');

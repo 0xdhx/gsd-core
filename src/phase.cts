@@ -2656,10 +2656,7 @@ const REQ_WRAPPER_RE = /^["'`*_~“”‘’]+|["'`*_~“”‘’]+$/g;
 const REQ_GLUED_DELIMITER_RE = /^[;:]+|[;:]+$/g;
 const REQ_ID_ANCHORED_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
 
-/** A token carries no VISIBLE content when nothing but invisibles remains. */
-function reqHasVisibleContent(token: string): boolean {
-  return token.replace(REQ_INVISIBLE_RE, '').length > 0;
-}
+
 
 /**
  * CENSUS (round 4): the domain is "separators an author writes between two
@@ -2676,13 +2673,17 @@ function reqHasVisibleContent(token: string): boolean {
  * the semicolon; the colon is the sibling that sweep found, and it fails
  * identically.
  *
- * The DECORATION set is deliberately wider than a glued delimiter, because a
- * trailing-only rule missed four shapes the pre-push review's continuation
- * drove in one pass: `REQ-01 ;REQ-02`, `REQ-01 :REQ-02`, `**REQ-01;** REQ-02`
- * and the backticked form — plus `**REQ-01**, REQ-02`, where emphasis alone
- * defeats the selector, and an embedded INVISIBLE, which is the same defect in
- * its least detectable form. One class, one rule; patching them individually is
- * how the list stays short and wrong.
+ * The DECORATION set is wider than a trailing delimiter — `REQ-01 ;REQ-02`,
+ * `REQ-01 :REQ-02`, `**REQ-01;** REQ-02`, `**REQ-01**; REQ-02`, the backticked
+ * forms, and an embedded INVISIBLE — but it is GATED, and the gate is the part
+ * to read. Shaving alone is not enough: the token must have carried a glued
+ * `;`/`:` (a list separator was intended) or an invisible (the token is
+ * corrupted; nobody types one on purpose). MARKDOWN STYLING ON ITS OWN DOES
+ * NOT QUALIFY — `REQ-01, see **REQ-7** for context` cites a requirement and
+ * `**REQ-01**, REQ-02` may mean to list one, nothing separates them, and an
+ * earlier cut of this round fired on both. Emphasis is left to the
+ * skipped-text rider, which names the id without asserting a drop — the same
+ * treatment `(REQ-02)` gets.
  *
  * NOT reached, stated rather than fixed, and the second member is WIDER than
  * this comment first claimed:
@@ -2728,7 +2729,19 @@ function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: num
     if (m) selectedPrefixes.add(m[1].toUpperCase());
   }
   const hits: string[] = [];
-  let depth = 0;
+  // Precompute the MATCHED parenthetical spans. Tracking a running depth let an
+  // unbalanced `(` stay open to end-of-line and swallow every real drop after
+  // it — `REQ-01, (note REQ-02; REQ-03` reported nothing. An unmatched paren is
+  // a typo, not a citation, so it must not confer citation immunity.
+  const inParen = new Array<boolean>(line.length).fill(false);
+  const openStack: number[] = [];
+  for (let i = 0; i < line.length; i += 1) {
+    if (line[i] === '(') openStack.push(i);
+    else if (line[i] === ')' && openStack.length > 0) {
+      const open = openStack.pop() as number;
+      for (let j = open; j <= i; j += 1) inParen[j] = true;
+    }
+  }
   let cur = '';
   let curDepth = 0;
   const flush = (): void => {
@@ -2738,10 +2751,32 @@ function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: num
       // drove all four of the shapes a trailing-only regex missed:
       // `REQ-01 ;REQ-02`, `REQ-01 :REQ-02`, `**REQ-01;** REQ-02` and the
       // backticked form. They are one class, so they take one rule.
-      const bare = cur
-        .replace(REQ_INVISIBLE_RE, '')
-        .replace(REQ_WRAPPER_RE, '')
-        .replace(REQ_GLUED_DELIMITER_RE, '');
+      // Shave to a stable point: `**REQ-01**;` needs the delimiter gone before
+      // the trailing wrapper is reachable, and one pass leaves it un-shaved.
+      let bare = cur;
+      for (let pass = 0; pass < 4; pass += 1) {
+        const next = bare
+          .replace(REQ_INVISIBLE_RE, '')
+          .replace(REQ_WRAPPER_RE, '')
+          .replace(REQ_GLUED_DELIMITER_RE, '');
+        if (next === bare) break;
+        bare = next;
+      }
+      // EMPHASIS ALONE IS NOT EVIDENCE. `REQ-01, see **REQ-7** for context`
+      // cites a requirement; `**REQ-01**, REQ-02` may mean to list one. Nothing
+      // separates them, so this rule requires the positive signal that a list
+      // separator was INTENDED (a glued `;`/`:`) or that the token is
+      // CORRUPTED (an invisible, which no author types on purpose). Markdown
+      // emphasis on its own leaves the id to the skipped-text rider, which
+      // names it as a fact without asserting a drop — the same treatment
+      // `(REQ-02)` gets, and for the same reason.
+      const hadDelimiter = /[;:]/.test(cur);
+      const hadInvisible = REQ_INVISIBLE_RE.test(cur);
+      REQ_INVISIBLE_RE.lastIndex = 0;   // /g + .test() is stateful
+      if (!hadDelimiter && !hadInvisible) {
+        cur = '';
+        return;
+      }
       // `bare !== cur` is what keeps this a DECORATION rule. An undecorated
       // ID the selector skipped is a different question — `unselectedIdShaped`
       // records it as a fact, and routing on it was rejected because
@@ -2753,24 +2788,14 @@ function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: num
     }
     cur = '';
   };
-  for (const ch of line) {
-    if (ch === '(') {
-      if (!cur) curDepth = depth;
-      depth += 1;
-      cur += ch;
-      continue;
-    }
-    if (ch === ')') {
-      cur += ch;
-      depth = depth > 0 ? depth - 1 : 0;
-      continue;
-    }
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i];
     if (/[,\s]/.test(ch)) {
       flush();
-      curDepth = depth;
       continue;
     }
-    if (!cur) curDepth = depth;
+    if (!cur) curDepth = inParen[i] ? 1 : 0;
+    if (inParen[i]) curDepth = 1;
     cur += ch;
   }
   flush();
@@ -2804,6 +2829,14 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // range operator (`REQ-01.. REQ-05`), not sentence punctuation — keep it.
   const tokens = line
     .replace(/<!--[\s\S]*?-->/g, ' ')
+    // Invisibles are removed HERE, for the classification rules — an operator
+    // spelled `<ZWSP>..<ZWSP>` is still the range operator, and a line of only
+    // invisibles yields no tokens at all. R4 works on the RAW line and does
+    // NOT strip them, because there they are the evidence of a dropped id.
+    // Removing them in both places is what made `REQ-01<ZWSP>, REQ-02` silent;
+    // removing them in neither is what made `REQ-01 <ZWSP>..<ZWSP> REQ-05`
+    // silent. The two questions have two different answers.
+    .replace(REQ_INVISIBLE_RE, '')
     .split(/[,\s]+/)
     .map((t) => {
       const trimmed = t.trim();
@@ -2899,8 +2932,7 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // strips `<!-- ... -->` before splitting, so `<!-- fill in -->` yields no
   // tokens and cannot reach this rule. Every other zero-selection,
   // non-placeholder line warns.
-  const zeroSelectionInert =
-    citedReqIds.length === 0 && !placeholderLed && tokens.some(reqHasVisibleContent);
+  const zeroSelectionInert = citedReqIds.length === 0 && !placeholderLed && tokens.length > 0;
 
   // R2 is the ONLY ambiguous rule — a tight range, a glued fragment and R3
   // residue each implicate ID-shaped text the selector demonstrably did not
