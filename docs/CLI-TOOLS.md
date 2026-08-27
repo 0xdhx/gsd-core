@@ -322,9 +322,12 @@ stays silent, so the shipped template's own `<!-- ... -->` does not warn.
 split on commas and whitespace only, and nothing else is stripped, so anything
 attached to an ID takes the ID with it. `REQ-01; REQ-02` marks **only**
 `REQ-02`; so do `REQ-01 ;REQ-02`, `**REQ-01;** REQ-02` and an ID carrying a
-stray invisible character. Markdown emphasis on its own (`**REQ-01**, REQ-02`)
-also defeats the selector, but is reported only as skipped text rather than as
-a dropped requirement — styling is not evidence that a separator was meant. That is the quietest way to lose a requirement here —
+stray invisible character. The delimiter has to be **touching** the ID once
+markdown styling is set aside — `**REQ-01**; REQ-02` and
+`see **REQ-7**; next topic` read as sentence punctuation, not as a list, and
+are reported only as skipped text. Markdown emphasis on its own
+(`**REQ-01**, REQ-02`) is treated the same way: it does defeat the selector,
+but styling is not evidence that a separator was meant. That is the quietest way to lose a requirement here —
 the command reports `requirements_updated: true` either way — so the dropped ID
 is named in the warning.
 

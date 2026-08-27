@@ -12574,9 +12574,6 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['leading colon', 'REQ-01 :REQ-02', ['REQ-02']],
     ['bold-wrapped', '**REQ-01;** REQ-02', ['REQ-01']],
     ['backtick-wrapped', '`REQ-01;` REQ-02', ['REQ-01']],
-    // Delimiter OUTSIDE the wrapper — the shave has to reach a stable point,
-    // and a single pass leaves `**REQ-01**;` un-shaved.
-    ['delimiter outside the wrapper', '**REQ-01**; REQ-02', ['REQ-01']],
   ]) {
     test(`#3697-19d (bracket form, ${label19d}): the documented spelling must not defeat R4`, () => {
       const a = analyzeRequirementsLine(line19d);
@@ -12608,6 +12605,12 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     ['emphasised citation', 'REQ-01, see **REQ-7** for context'],
     ['backticked citation', 'REQ-01, see `REQ-7` for context'],
     ['emphasis with no delimiter', '**REQ-01**, REQ-02'],
+    // The delimiter's POSITION is the rule. Outside the styling it is sentence
+    // punctuation, and an earlier cut of this round fired on exactly this —
+    // `see **REQ-7**; next topic` was reported as a dropped requirement.
+    ['punctuated emphasised citation', 'REQ-01, see **REQ-7**; next topic'],
+    ['punctuated backticked citation', 'REQ-01, see `REQ-7`; next'],
+    ['delimiter outside the wrapper', '**REQ-01**; REQ-02'],
   ]) {
     test(`#3697-19h (styling is not evidence, ${label19h}): a wrapper alone must not fire R4`, () => {
       const a = analyzeRequirementsLine(line19h);
@@ -12641,6 +12644,13 @@ describe('issue #3697: phase complete must warn when the Requirements line under
   for (const [label19j, line19j, expectDropped19j] of [
     ['unclosed open paren', 'REQ-01, (note REQ-02; REQ-03', ['REQ-02']],
     ['stray close paren', 'REQ-01, REQ-02; REQ-03)', ['REQ-02']],
+    // A matched span sharing a whitespace token with an id OUTSIDE it. The
+    // first cut promoted the whole token to immune because it CONTAINED a
+    // matched character, so the drop next to the citation went silent — the
+    // pre-push review's last MISSED finding, which named exactly the control
+    // these two rows add.
+    ['citation glued after the drop', 'REQ-01, REQ-02;(note) REQ-03', ['REQ-02']],
+    ['citation glued before the drop', 'REQ-01, (note)REQ-02; REQ-03', ['REQ-02']],
   ]) {
     test(`#3697-19j (unbalanced parens, ${label19j}): only a MATCHED span is a citation`, () => {
       const a = analyzeRequirementsLine(line19j);

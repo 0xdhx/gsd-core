@@ -2653,8 +2653,9 @@ const REQ_INVISIBLE_RE = /[\u00AD\u200B-\u200F\u2060-\u2064\u2066-\u2069\uFE0F\u
 // never there, and broke #3697-9d's channel routing with it — caught by the
 // suite immediately after the widening.
 const REQ_WRAPPER_RE = /^["'`*_~“”‘’]+|["'`*_~“”‘’]+$/g;
-const REQ_GLUED_DELIMITER_RE = /^[;:]+|[;:]+$/g;
-const REQ_ID_ANCHORED_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
+// An id with a list delimiter glued to EITHER end, once styling is removed.
+// The capture is the bare id; a match means the delimiter was ADJACENT to it.
+const REQ_DELIMITED_ID_RE = /^[;:]*([A-Z][A-Z0-9]*-\d+)[;:]*$/i;
 
 
 
@@ -2673,17 +2674,19 @@ const REQ_ID_ANCHORED_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
  * the semicolon; the colon is the sibling that sweep found, and it fails
  * identically.
  *
- * The DECORATION set is wider than a trailing delimiter — `REQ-01 ;REQ-02`,
- * `REQ-01 :REQ-02`, `**REQ-01;** REQ-02`, `**REQ-01**; REQ-02`, the backticked
- * forms, and an embedded INVISIBLE — but it is GATED, and the gate is the part
- * to read. Shaving alone is not enough: the token must have carried a glued
- * `;`/`:` (a list separator was intended) or an invisible (the token is
- * corrupted; nobody types one on purpose). MARKDOWN STYLING ON ITS OWN DOES
- * NOT QUALIFY — `REQ-01, see **REQ-7** for context` cites a requirement and
- * `**REQ-01**, REQ-02` may mean to list one, nothing separates them, and an
- * earlier cut of this round fired on both. Emphasis is left to the
- * skipped-text rider, which names the id without asserting a drop — the same
- * treatment `(REQ-02)` gets.
+ * THE GATE IS ADJACENCY, and it is the part to read. Styling is stripped, then
+ * the delimiter must be touching the id: `REQ-01;`, `;REQ-02`, `**REQ-01;**`
+ * and the backticked form all qualify. `**REQ-01**;` does NOT — outside the
+ * styling a `;` is sentence punctuation, which is why `REQ-01, see **REQ-7**;
+ * next topic` is a citation and not a drop. An INVISIBLE anywhere in the token
+ * qualifies without an adjacency test, because nobody types one on purpose, so
+ * it is corruption rather than intent.
+ *
+ * Everything else — markdown styling on its own — is left to the skipped-text
+ * rider, which names the id without asserting a drop, the same treatment
+ * `(REQ-02)` gets. Three successive cuts of this rule fired on a citation, and
+ * each time the fix was a narrower definition of EVIDENCE rather than a longer
+ * list of shapes.
  *
  * NOT reached, stated rather than fixed, and the second member is WIDER than
  * this comment first claimed:
@@ -2704,101 +2707,70 @@ const REQ_ID_ANCHORED_RE = /^([A-Z][A-Z0-9]*)-(\d+)$/i;
  * common one — the same call the strict-dash rule makes.
  */
 function reqDelimiterDroppedIds(rawLine: string, selected: Set<string>, cap: number): string[] {
-  // Square brackets are stripped exactly as the SELECTOR strips them, because
-  // `[REQ-01, REQ-02]` is the documented form — round 4 pre-push review found
-  // `[REQ-01; REQ-02]` silently dropping REQ-01 with no warning at all, which
-  // is this rule failing on the very shape the template recommends.
-  // Square brackets only. Invisibles are NOT stripped here — they are the
-  // DECORATION this rule detects, and removing them at line level makes the
-  // `bare !== cur` test below false, which is exactly how `REQ-01<ZWSP>,
-  // REQ-02` went silent under the first cut of this fix.
-  const line = String(rawLine)
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/[[\]]/g, '');
-  // The prefixes actually SELECTED on this line. A dropped token must agree
-  // with one of them, and that is what separates a delimiter typo from a
-  // citation: `REQ-01, see ADR-7: section 3` carries `ADR-7:` — same shave
-  // class as `REQ-01;`, and the parenthetical test does not reach it because
-  // the citation is bare. Round 4 pre-push review drove exactly that false
-  // positive, which is the #2334 over-warning class arriving through the rule
-  // added to close a different hole. Same-prefix agreement is the module's own
-  // existing idiom (see reqEndpointsImplyInterior), not a new heuristic.
+  // MATCHED parenthetical spans are removed OUTRIGHT, not tracked as a depth.
+  //
+  // Two bugs died here. A running depth counter let an unbalanced `(` stay open
+  // to end-of-line and swallow every real drop after it. Promoting a whole
+  // token to immune because it CONTAINED a matched character then leaked the
+  // other way: `REQ-01, REQ-02;(note) REQ-03` is one whitespace token, so the
+  // parenthetical conferred immunity on the `REQ-02;` sitting outside it.
+  // Deleting the span states what is actually meant — for this rule a citation
+  // is not on the line — while an UNMATCHED paren is a typo and confers
+  // nothing.
+  //
+  // Square brackets go too, exactly as the SELECTOR strips them: `[REQ-01;
+  // REQ-02]` is the documented form and was silently dropping REQ-01.
+  //
+  // INVISIBLES STAY. They are the evidence this rule reads; the tokenizer
+  // strips them for the classification rules, and the two sites answer two
+  // different questions about the same character.
+  const chars = [...String(rawLine).replace(/<!--[\s\S]*?-->/g, ' ')];
+  const openStack: number[] = [];
+  for (let i = 0; i < chars.length; i += 1) {
+    if (chars[i] === '(') openStack.push(i);
+    else if (chars[i] === ')' && openStack.length > 0) {
+      const open = openStack.pop() as number;
+      for (let j = open; j <= i; j += 1) chars[j] = ' ';
+    }
+  }
+  const line = chars.join('').replace(/[[\]]/g, '');
+
+  // The prefixes actually SELECTED on this line. A dropped id must agree with
+  // one of them — that is what separates a delimiter typo from a citation,
+  // since `REQ-01, see ADR-7: sec 3` carries `ADR-7:` in exactly `REQ-01;`'s
+  // shape. Same-prefix agreement is the module's own idiom, not a new
+  // heuristic (see reqEndpointsImplyInterior).
   const selectedPrefixes = new Set<string>();
   for (const id of selected) {
     const m = REQ_ID_PARTS_RE.exec(id);
     if (m) selectedPrefixes.add(m[1].toUpperCase());
   }
+
   const hits: string[] = [];
-  // Precompute the MATCHED parenthetical spans. Tracking a running depth let an
-  // unbalanced `(` stay open to end-of-line and swallow every real drop after
-  // it — `REQ-01, (note REQ-02; REQ-03` reported nothing. An unmatched paren is
-  // a typo, not a citation, so it must not confer citation immunity.
-  const inParen = new Array<boolean>(line.length).fill(false);
-  const openStack: number[] = [];
-  for (let i = 0; i < line.length; i += 1) {
-    if (line[i] === '(') openStack.push(i);
-    else if (line[i] === ')' && openStack.length > 0) {
-      const open = openStack.pop() as number;
-      for (let j = open; j <= i; j += 1) inParen[j] = true;
-    }
+  for (const raw of line.split(/[,\s]+/)) {
+    if (!raw || raw.length > cap) continue;
+    // Strip STYLING only. What survives is the id plus whatever was glued
+    // directly to it.
+    const core = raw.replace(REQ_INVISIBLE_RE, '').replace(REQ_WRAPPER_RE, '');
+    const m = REQ_DELIMITED_ID_RE.exec(core);
+    if (!m) continue;
+    const bare = m[1];
+    // ADJACENCY IS THE WHOLE RULE. A `;`/`:` touching the id is a list
+    // separator someone meant; the same character OUTSIDE the styling is
+    // sentence punctuation — `see **REQ-7**; next topic` cites a requirement
+    // while `**REQ-01;** REQ-02` fails to list one, and only the delimiter's
+    // POSITION separates them. An INVISIBLE needs no adjacency test: nobody
+    // types one on purpose, so anywhere in the token it is corruption rather
+    // than intent.
+    const hadAdjacentDelimiter = core !== bare;
+    REQ_INVISIBLE_RE.lastIndex = 0;
+    const hadInvisible = REQ_INVISIBLE_RE.test(raw);
+    REQ_INVISIBLE_RE.lastIndex = 0;
+    if (!hadAdjacentDelimiter && !hadInvisible) continue;
+    if (selected.has(bare.toUpperCase())) continue;
+    const parts = REQ_ID_PARTS_RE.exec(bare);
+    if (parts && selectedPrefixes.has(parts[1].toUpperCase())) hits.push(bare);
   }
-  let cur = '';
-  let curDepth = 0;
-  const flush = (): void => {
-    if (cur && cur.length <= cap && curDepth === 0) {
-      // Shave DECORATION — invisibles, the wrapper set the detector already
-      // shaves, and a glued `;`/`:` at EITHER end. The continuation review
-      // drove all four of the shapes a trailing-only regex missed:
-      // `REQ-01 ;REQ-02`, `REQ-01 :REQ-02`, `**REQ-01;** REQ-02` and the
-      // backticked form. They are one class, so they take one rule.
-      // Shave to a stable point: `**REQ-01**;` needs the delimiter gone before
-      // the trailing wrapper is reachable, and one pass leaves it un-shaved.
-      let bare = cur;
-      for (let pass = 0; pass < 4; pass += 1) {
-        const next = bare
-          .replace(REQ_INVISIBLE_RE, '')
-          .replace(REQ_WRAPPER_RE, '')
-          .replace(REQ_GLUED_DELIMITER_RE, '');
-        if (next === bare) break;
-        bare = next;
-      }
-      // EMPHASIS ALONE IS NOT EVIDENCE. `REQ-01, see **REQ-7** for context`
-      // cites a requirement; `**REQ-01**, REQ-02` may mean to list one. Nothing
-      // separates them, so this rule requires the positive signal that a list
-      // separator was INTENDED (a glued `;`/`:`) or that the token is
-      // CORRUPTED (an invisible, which no author types on purpose). Markdown
-      // emphasis on its own leaves the id to the skipped-text rider, which
-      // names it as a fact without asserting a drop — the same treatment
-      // `(REQ-02)` gets, and for the same reason.
-      const hadDelimiter = /[;:]/.test(cur);
-      const hadInvisible = REQ_INVISIBLE_RE.test(cur);
-      REQ_INVISIBLE_RE.lastIndex = 0;   // /g + .test() is stateful
-      if (!hadDelimiter && !hadInvisible) {
-        cur = '';
-        return;
-      }
-      // `bare !== cur` is what keeps this a DECORATION rule. An undecorated
-      // ID the selector skipped is a different question — `unselectedIdShaped`
-      // records it as a fact, and routing on it was rejected because
-      // `(ADR-7)` and `(REQ-02)` are the same shape.
-      const parts = bare !== cur ? REQ_ID_ANCHORED_RE.exec(bare) : null;
-      if (parts && !selected.has(bare.toUpperCase()) && selectedPrefixes.has(parts[1].toUpperCase())) {
-        hits.push(bare);
-      }
-    }
-    cur = '';
-  };
-  for (let i = 0; i < line.length; i += 1) {
-    const ch = line[i];
-    if (/[,\s]/.test(ch)) {
-      flush();
-      continue;
-    }
-    if (!cur) curDepth = inParen[i] ? 1 : 0;
-    if (inParen[i]) curDepth = 1;
-    cur += ch;
-  }
-  flush();
   return [...new Set(hits)];
 }
 
