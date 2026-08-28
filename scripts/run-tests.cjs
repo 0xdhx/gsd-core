@@ -35,9 +35,9 @@
 // See docs/TESTING-SUITES.md for full grouping policy.
 'use strict';
 
-const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync } = require('fs');
+const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } = require('fs');
 const { join, basename } = require('path');
-const { tmpdir, devNull } = require('os');
+const { tmpdir } = require('os');
 const { execFileSync } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
 const {
@@ -1079,11 +1079,24 @@ function main() {
   // (GSD_RUN_TESTS_EVENTS_FILE, set per-chunk below in execFileSync's `env`),
   // which does NOT count toward the Windows 32,767-char argv ceiling — only
   // this fixed sink destination does.
+  //
+  // The ndjson reporter yields nothing and ignores its own destination — the
+  // durable write path is GSD_RUN_TESTS_EVENTS_FILE above — but Node still
+  // opens this destination as a real fs.WriteStream and fsyncs it on close,
+  // so it MUST be a regular file. os.devNull (a character device on every
+  // platform) fails that fsync with EINVAL, crashing every chunk, not just
+  // the timeout path (confirmed live: 43/43 chunk failures, "EINVAL: invalid
+  // argument, fsync" on WriteStream close). Do not re-point this at devNull —
+  // it is the ONE destination flavor this feature cannot use. Pre-created
+  // once, alongside eventsDir, so it stays empty and its path length is
+  // identical across every chunk (see FIXED_OVERHEAD below).
+  const reporterSinkPath = join(eventsDir, 'reporter-sink.txt');
+  writeFileSync(reporterSinkPath, '');
   const reporterArgs = [
     `--test-reporter=${humanReporter}`,
     '--test-reporter-destination=stdout',
     `--test-reporter=${reporterModulePath}`,
-    `--test-reporter-destination=${devNull}`,
+    `--test-reporter-destination=${reporterSinkPath}`,
   ];
   const reporterOverhead = reporterArgs.reduce((sum, a) => sum + a.length + 1, 0);
 

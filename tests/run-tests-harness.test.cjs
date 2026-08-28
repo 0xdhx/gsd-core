@@ -852,6 +852,31 @@ test('noop', () => {});
       );
     });
 
+    // T5 (regression): the human reporter's --test-reporter-destination
+    // pairing must be a regular file, not os.devNull. devNull is a character
+    // device; Node opens the reporter destination as an fs.WriteStream and
+    // fsyncs it on close, and fsync on a character device fails with EINVAL
+    // — surfaced as "Emitted 'error' event on WriteStream instance" /
+    // "EINVAL: invalid argument, fsync", which crashed EVERY chunk on the
+    // real remote run this regresses (43/43 failures), not only the timeout
+    // path. The argv construction lives entirely inside main() with no
+    // exported seam to unit-test directly (see NOTES), so this asserts the
+    // closest real, externally-observable consequence: a normal successful
+    // run must not surface that error text, and must still complete and
+    // exit 0 — both of which a reintroduced devNull destination would break
+    // on any platform where fsync(devNull) actually returns EINVAL (this
+    // suite's own bench platform, historically).
+    test('a successful run never surfaces the devNull fsync/EINVAL reporter crash', () => {
+      seed(tmpDir, ['a.test.cjs']);
+      const r = runHarness(tmpDir, []);
+      assert.strictEqual(r.status, 0, `expected a clean pass; STDERR:\n${r.stderr}`);
+      assert.doesNotMatch(
+        r.stderr,
+        /EINVAL|invalid argument, fsync|WriteStream instance/i,
+        `expected no reporter-destination fsync crash; STDERR:\n${r.stderr}`,
+      );
+    });
+
     // T1: on a chunk timeout, the diagnostic must NAME the file that was
     // still executing — not merely list every file the chunk contained (the
     // pre-instrumentation behavior). A test that hangs INSIDE its own body
