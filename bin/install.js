@@ -776,6 +776,7 @@ function _runtimeAdapter(runtime) {
   }
 }
 const {
+  acquireInstallMigrationLock,
   applyInstallerMigrationPlan,
   discoverInstallerMigrations,
   MANIFEST_SCHEMA_VERSION,
@@ -1483,10 +1484,18 @@ function readSettings(settingsPath) {
 }
 
 /**
- * Write settings.json with proper formatting
+ * Write settings.json with proper formatting.
+ *
+ * Atomic (temp+rename) because hosts discard the ENTIRE settings file on any
+ * parse failure, so a truncated write costs the user every hook, permission,
+ * and statusline they have — not just GSD's entries. This is the sole writer
+ * of that surface for six runtimes.
+ *
+ * `atomicWriteFileSync` is declared further down this file; it is dereferenced
+ * at call time, after module evaluation, so the ordering is safe.
  */
 function writeSettings(settingsPath, settings) {
-  fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+  atomicWriteFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
 }
 
 // #2875 Part 2 (J8): model-override resolution (readGsdGlobalModelOverrides /
@@ -6921,29 +6930,50 @@ function writeNonClaudeDefaults(runtime) {
   if (_hostBehaviors(runtime).nativeModelAliases || process.env.GSD_TEST_MODE) return;
   const gsdDir = path.join(os.homedir(), '.gsd');
   const defaultsPath = path.join(gsdDir, 'defaults.json');
+  let releaseLock = null;
   try {
     fs.mkdirSync(gsdDir, { recursive: true });
+    // defaults.json is machine-global — every runtime and project on the box
+    // reads it. Serialize the read-modify-write so two concurrent installs
+    // cannot lose each other's key, and apply both mutations in ONE atomic
+    // write so a crash cannot leave the file truncated (the read path swallows
+    // parse errors and treats a corrupt file as absent, which would silently
+    // degrade model resolution everywhere until repaired by hand).
+    releaseLock = acquireInstallMigrationLock(gsdDir);
     let defaults = {};
     try { defaults = JSON.parse(fs.readFileSync(defaultsPath, 'utf8')); } catch { /* new file */ }
     if (defaults === null || typeof defaults !== 'object' || Array.isArray(defaults)) {
       defaults = {};
     }
+    const applied = [];
     // Three-valued domain: false/absent → aliases; true → full IDs; "omit" → ''.
     const existing = defaults.resolve_model_ids;
     const shouldDefaultToOmit = existing !== true && existing !== 'omit';
     if (shouldDefaultToOmit) {
       defaults.resolve_model_ids = 'omit';
-      fs.writeFileSync(defaultsPath, JSON.stringify(defaults, null, 2) + '\n');
-      console.log(`  ${green}✓${reset} Set resolve_model_ids: "omit" in ~/.gsd/defaults.json`);
+      applied.push(`Set resolve_model_ids: "omit" in ~/.gsd/defaults.json`);
     }
     // #2395: persist runtime for non-Claude runtimes.
     if (defaults.runtime === undefined || defaults.runtime === null || defaults.runtime === '') {
       defaults.runtime = runtime;
-      fs.writeFileSync(defaultsPath, JSON.stringify(defaults, null, 2) + '\n');
-      console.log(`  ${green}✓${reset} Set runtime: "${runtime}" in ~/.gsd/defaults.json`);
+      applied.push(`Set runtime: "${runtime}" in ~/.gsd/defaults.json`);
+    }
+    if (applied.length > 0) {
+      atomicWriteFileSync(defaultsPath, JSON.stringify(defaults, null, 2) + '\n', 'utf8');
+      for (const message of applied) console.log(`  ${green}✓${reset} ${message}`);
     }
   } catch (e) {
     console.log(`  ${yellow}⚠${reset} Could not write ~/.gsd/defaults.json: ${e.message}`);
+  } finally {
+    if (releaseLock) {
+      try {
+        releaseLock();
+      } catch (releaseError) {
+        // A leaked lock blocks the next install, so surface it rather than
+        // swallowing; the stale-lock reaper clears it once this pid exits.
+        console.log(`  ${yellow}⚠${reset} Could not release the ~/.gsd install lock: ${releaseError.message}`);
+      }
+    }
   }
 }
 
@@ -12484,9 +12514,19 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
       );
       const hasGsdStatusline = sharedRaw.statusLine && sharedRaw.statusLine.command &&
         isManagedHookCommand(sharedRaw.statusLine.command, { surface: 'settings-json' });
-      if (hasGsdHooks || hasGsdStatusline) {
+      const needsMigration = hasGsdHooks || hasGsdStatusline;
+      // readSettings returns null ONLY for an unparseable file — its documented
+      // "preserve existing, don't touch" signal. Stand the WHOLE migration down
+      // in that case: skipping just the local merge while still stripping the
+      // shared file below would destroy the GSD entries outright instead of
+      // relocating them. Leaving both files untouched lets the migration retry
+      // once the user repairs the local file.
+      const localRaw = needsMigration ? readSettings(settingsPath) : null;
+      if (needsMigration && localRaw === null) {
+        console.log('  ' + yellow + 'i' + reset + '  Skipping #338 migration — ' + settingsFileName +
+          ' could not be parsed. Your existing settings are preserved.');
+      } else if (needsMigration) {
         // Merge GSD entries into settings.local.json
-        const localRaw = readSettings(settingsPath) || {};
         if (hasGsdStatusline && !localRaw.statusLine) {
           localRaw.statusLine = sharedRaw.statusLine;
         }
@@ -12546,7 +12586,10 @@ function install(isGlobal, runtime = DEFAULT_RUNTIME, options = {}) {
   if (rawSettings === null) {
     console.log('  ' + yellow + 'i' + reset + '  Skipping settings.local.json configuration — file could not be parsed (comments or malformed JSON). Your existing settings are preserved.');
     persistActiveProfileMarker();
-    return;
+    // Callers index this result by `runtime` (installAllRuntimes' statusline
+    // lookup), so every early exit must return the full shape — a bare return
+    // crashes the install rather than skipping one file.
+    return { settingsPath: null, settings: null, statuslineCommand: null, updateBannerCommand: null, runtime, configDir: targetDir };
   }
   const settings = validateHookFields(cleanupOrphanedHooks(rawSettings));
   // #3002 CR / #3662: rewrite legacy `node .../gsd-*.js` command strings (pre-
@@ -13724,7 +13767,10 @@ function installAllRuntimes(runtimes, isGlobal, isInteractive) {
     });
   };
 
-  if (primaryStatuslineResult) {
+  // `settings` is null on every early exit (unparseable file, skipped runtime),
+  // and handleStatusline dereferences it — an install that declined to touch a
+  // settings file has no statusline to prompt about, so fall through.
+  if (primaryStatuslineResult && primaryStatuslineResult.settings) {
     handleStatusline(primaryStatuslineResult.settings, isInteractive, continueAfterStatusline);
   } else if (canInstallBanner) {
     // No statusline-capable runtime, but at least one runtime can host the
@@ -13882,6 +13928,8 @@ module.exports = {
     cleanupLegacyGsdCc,
     // #1191 — exported so tests exercise the REAL readSettings, not a replica
     readSettings,
+    writeSettings,
+    writeNonClaudeDefaults,
     stripJsonComments,
     copyWithPathReplacement,
   };
