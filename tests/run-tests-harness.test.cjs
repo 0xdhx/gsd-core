@@ -2228,3 +2228,68 @@ describe('chunk packing weights measured cost (#2456)', () => {
     });
   });
 });
+
+// ─── analyzeChunkEvents (#3889 durability fix) ──────────────────────────────
+//
+// scripts/lib/ndjson-reporter.cjs now writes durably (fs.appendFileSync to a
+// GSD_RUN_TESTS_EVENTS_FILE path) instead of yielding strings for Node to
+// pipe through a buffered --test-reporter-destination WriteStream that a
+// SIGKILL can wipe out before it flushes. These tests exercise the READER
+// side (analyzeChunkEvents) directly against a hand-written events file, so
+// they pin the reader's contract independently of whether the writer side
+// managed to flush anything in a given subprocess run.
+const { analyzeChunkEvents } = require('../scripts/run-tests.cjs');
+
+describe('analyzeChunkEvents (#3889)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempDir('gsd-3889-events-');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('a missing events file is reported as an explicit read error, not silently as "no events"', () => {
+    const missingPath = path.join(tmpDir, 'does-not-exist.ndjson');
+    const result = analyzeChunkEvents(missingPath);
+    assert.strictEqual(result.readError, true, 'a missing file must set readError=true');
+    assert.strictEqual(result.sawAnyEvent, false);
+    assert.deepStrictEqual(result.files, []);
+  });
+
+  test('an existing-but-empty events file is distinguished from a missing one (readError=false)', () => {
+    const emptyPath = path.join(tmpDir, 'empty.ndjson');
+    fs.writeFileSync(emptyPath, '', 'utf8');
+    const result = analyzeChunkEvents(emptyPath);
+    assert.strictEqual(result.readError, false, 'an existing empty file must NOT be reported as a read error');
+    assert.strictEqual(result.sawAnyEvent, false);
+    assert.deepStrictEqual(result.files, []);
+  });
+
+  test('a truncated final line does not crash the reader and earlier complete lines are still reported', () => {
+    const truncatedPath = path.join(tmpDir, 'truncated.ndjson');
+    const complete = [
+      JSON.stringify({ type: 'test:start', file: 'a.test.cjs', name: 'first', nesting: 0, testNumber: 1, ts: 1000 }),
+      JSON.stringify({ type: 'test:pass', file: 'a.test.cjs', name: 'first', nesting: 0, testNumber: 1, ts: 1010 }),
+      JSON.stringify({ type: 'test:start', file: 'b.test.cjs', name: 'hangs', nesting: 0, testNumber: 1, ts: 1020 }),
+    ].join('\n');
+    // Simulate a SIGKILL mid-appendFileSync: the trailing line is cut off
+    // partway through a JSON object, exactly as an unbuffered but non-atomic
+    // write can be interrupted.
+    const truncatedTrailer = '\n{"type":"test:start","file":"c.test.cjs","name":"cut off mid-writ';
+    fs.writeFileSync(truncatedPath, complete + truncatedTrailer, 'utf8');
+
+    const result = analyzeChunkEvents(truncatedPath);
+    assert.strictEqual(result.readError, false, 'a readable-but-truncated file must not be a read error');
+    // The complete test:start (b.test.cjs) with no matching pass/fail is
+    // still identified as in-flight despite the unparsable trailing line.
+    assert.deepStrictEqual(result.files, ['b.test.cjs']);
+    // a.test.cjs completed (start+pass), so it must NOT show as in-flight.
+    assert.ok(!result.files.includes('a.test.cjs'));
+    // c.test.cjs never parsed (truncated line), so it cannot appear either.
+    assert.ok(!result.files.includes('c.test.cjs'));
+    assert.strictEqual(result.sawAnyEvent, true, 'the complete lines before the truncation must still count as events');
+  });
+});

@@ -37,7 +37,7 @@
 
 const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync } = require('fs');
 const { join, basename } = require('path');
-const { tmpdir } = require('os');
+const { tmpdir, devNull } = require('os');
 const { execFileSync } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
 const {
@@ -701,7 +701,13 @@ function analyzeChunkEvents(eventsPath) {
   try {
     raw = readFileSync(eventsPath, 'utf8');
   } catch {
-    return { files: [], staleMs: null, sawAnyEvent: false };
+    // The events file never existed — either GSD_RUN_TESTS_EVENTS_FILE never
+    // resolved to a writable path, or the child was killed before the ndjson
+    // reporter's very first appendFileSync. Distinct from "file exists but
+    // has zero parseable events" (readError=false, sawAnyEvent=false) so the
+    // diagnostic below can say explicitly WHICH of the two happened, rather
+    // than silently collapsing both into "no in-flight file identified".
+    return { files: [], staleMs: null, sawAnyEvent: false, readError: true };
   }
   const inFlight = new Map();
   let lastTs = null;
@@ -728,6 +734,7 @@ function analyzeChunkEvents(eventsPath) {
     files,
     staleMs: lastTs !== null ? Date.now() - lastTs : null,
     sawAnyEvent: lastTs !== null,
+    readError: false,
   };
 }
 
@@ -1030,31 +1037,55 @@ function main() {
 
   // #3889: a second, machine-readable reporter runs ALONGSIDE the normal
   // human one so a chunk timeout can name the file that was in flight (see
-  // scripts/lib/ndjson-reporter.cjs for the full contract writeup and
-  // its Node-docs citation). Passing --test-reporter at all replaces node's
-  // implicit default reporter entirely, so the human reporter must also be
-  // named explicitly, reproducing node's own default selection (spec on a
-  // TTY, tap otherwise) so visible stdout output is unchanged.
+  // scripts/lib/ndjson-reporter.cjs for the full contract writeup, its
+  // Node-docs citation, and — load-bearing — why it writes via
+  // `fs.appendFileSync` to a path passed through GSD_RUN_TESTS_EVENTS_FILE
+  // instead of yielding strings for Node to pipe through
+  // `--test-reporter-destination`: that destination is backed by an
+  // `fs.WriteStream`, which BUFFERS, and execFileSync's timeout SIGKILLs the
+  // child — uncatchable, zero chance to flush — so a yield-based reporter can
+  // lose every event still sitting in the stream's buffer, which is exactly
+  // the case this feature exists to diagnose (confirmed live: chunk killed at
+  // 2006ms produced a timer-based "killed after 2006ms" line — which lives in
+  // this parent process — but zero usable in-flight-file events from the
+  // reporter, which lives in the child and never flushed). Passing
+  // --test-reporter at all replaces node's implicit default reporter
+  // entirely, so the human reporter must also be named explicitly,
+  // reproducing node's own default selection (spec on a TTY, tap otherwise)
+  // so visible stdout output is unchanged.
+  //
+  // Node's documented multi-reporter contract requires EVERY --test-reporter
+  // to be paired with its own --test-reporter-destination, even though the
+  // ndjson reporter yields nothing and ignores its own destination — so the
+  // pairing still needs a sink argument. Pointed at the OS null device (a
+  // FIXED-length constant, unlike the old per-chunk events path) rather than
+  // a real file: it stays empty by design, since the durable write path is
+  // now the env var below, not this destination.
   //
   // One tmp dir for the whole run (not per-chunk) to avoid mkdtemp churn;
-  // each chunk gets its own destination file inside it so a diagnostic read
-  // never race with, or is polluted by, another chunk's events. Deleted on
-  // the success path; kept only long enough to read back on a timeout.
+  // each chunk gets its own events file inside it so a diagnostic read never
+  // races with, or is polluted by, another chunk's events. Deleted on the
+  // success path; kept only long enough to read back on a timeout.
   const eventsDir = mkdtempSync(join(tmpdir(), 'gsd-run-tests-events-'));
   const reporterModulePath = join(__dirname, 'lib', 'ndjson-reporter.cjs');
   const humanReporter = process.stdout.isTTY ? 'spec' : 'tap';
-  // Chunk index zero-padded to a fixed width: the destination path's length
-  // (and therefore FIXED_OVERHEAD below, computed once before chunking) must
-  // not depend on which chunk is running. 3 digits covers up to 999 chunks —
-  // this suite chunks into the tens, never close to that ceiling.
+  // Chunk index zero-padded to a fixed width so the events path's length is
+  // stable across chunks (kept for readability/debuggability; it no longer
+  // feeds FIXED_OVERHEAD since the path now travels via env, not argv). 3
+  // digits covers up to 999 chunks — this suite chunks into the tens, never
+  // close to that ceiling.
   const eventsPathFor = (i) => join(eventsDir, `chunk-${String(i).padStart(3, '0')}.ndjson`);
-  const reporterArgsFor = (i) => [
+  // Fixed argv for every chunk: the events path moved to the environment
+  // (GSD_RUN_TESTS_EVENTS_FILE, set per-chunk below in execFileSync's `env`),
+  // which does NOT count toward the Windows 32,767-char argv ceiling — only
+  // this fixed sink destination does.
+  const reporterArgs = [
     `--test-reporter=${humanReporter}`,
     '--test-reporter-destination=stdout',
     `--test-reporter=${reporterModulePath}`,
-    `--test-reporter-destination=${eventsPathFor(i)}`,
+    `--test-reporter-destination=${devNull}`,
   ];
-  const reporterOverhead = reporterArgsFor(0).reduce((sum, a) => sum + a.length + 1, 0);
+  const reporterOverhead = reporterArgs.reduce((sum, a) => sum + a.length + 1, 0);
 
   const FIXED_OVERHEAD = process.execPath.length + '--test'.length + concurrency.length + (forceExit ? '--test-force-exit'.length + 1 : 0) + reporterOverhead + 8;
   const chunks = packChunks(selected, {
@@ -1119,12 +1150,12 @@ function main() {
           '--test',
           ...(forceExit ? ['--test-force-exit'] : []),
           concurrency,
-          ...reporterArgsFor(i),
+          ...reporterArgs,
           ...chunks[i],
         ],
         {
           stdio: 'inherit',
-          env: { ...process.env },
+          env: { ...process.env, GSD_RUN_TESTS_EVENTS_FILE: chunkEventsPath },
           timeout: chunkTimeoutMs,
         },
       );
@@ -1155,7 +1186,7 @@ function main() {
         // this parent never saw the child's own stdout, so it cannot know
         // otherwise). Falls back to "no file identified" rather than
         // throwing when the reporter file is missing/empty/truncated.
-        const { files: inFlightFiles, staleMs, sawAnyEvent } = analyzeChunkEvents(chunkEventsPath);
+        const { files: inFlightFiles, staleMs, sawAnyEvent, readError } = analyzeChunkEvents(chunkEventsPath);
         const inFlightMsg = inFlightFiles.length > 0
           ? `In flight when killed (test:start with no matching pass/fail): ` +
             `${inFlightFiles.map((f) => basename(f)).join(', ')} — last reporter event was ` +
@@ -1167,9 +1198,15 @@ function main() {
               `event was ${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this ` +
               `diagnostic); suspect a leaked handle outside any single test, or an ` +
               `after-tests hook.`
-            : `No reporter events were recorded before the kill — the companion reporter file ` +
-              `never received a test:start, so even the first file in this chunk may not have ` +
-              `begun executing (process/spawn startup stall, not a test hang).`;
+            : readError
+              ? `NO EVENTS COULD BE READ for this chunk — the companion reporter's events file ` +
+                `(GSD_RUN_TESTS_EVENTS_FILE) does not exist at all, so the child was killed ` +
+                `before the reporter wrote even one event (process/spawn startup stall, not a ` +
+                `test hang). This diagnostic could not identify an in-flight file.`
+              : `No reporter events were recorded before the kill — the companion reporter's ` +
+                `events file exists but is empty/unparseable, so even the first file in this ` +
+                `chunk may not have begun executing (process/spawn startup stall, not a test ` +
+                `hang). This diagnostic could not identify an in-flight file.`;
 
         const table = loadTestTimings(process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH);
         const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table).join('\n');
@@ -1264,6 +1301,7 @@ module.exports = {
   loadTestTimings,
   makeFileWeigher,
   packChunks,
+  analyzeChunkEvents,
   DEFAULT_TIMINGS_PATH,
   // Exported so callers (tests/ci-test-scope.test.cjs) can assert the
   // suite-token resolution contract in-process rather than through a timed
