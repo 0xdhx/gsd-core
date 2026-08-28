@@ -685,11 +685,22 @@ function selectExplicitFiles(allFiles, filesValue, filesFrom) {
 }
 
 // #3889: reads back the ndjson companion reporter's destination file for one
-// chunk and reduces it to "which file(s) were in flight" — a `test:start`
-// with no matching `test:pass`/`test:fail` in the same file. Matched by
-// (file, nesting, testNumber) when testNumber is present (assigned once at
-// start and echoed on completion, per node:test), falling back to
-// (file, name) for older/odd event shapes.
+// chunk and reduces it to "which file(s) were in flight" — a `test:dequeue`
+// with no matching `test:pass`/`test:fail` FOR THE SAME FILE. `test:dequeue`
+// is emitted by the RUNNER the moment it begins a spawned test-file child,
+// independent of whether anything inside that file ever completes — it is
+// the correct "in flight" signal precisely BECAUSE a hang never completes.
+// `test:start`/`test:pass`/`test:fail` are per-SUBTEST events that node:test
+// only surfaces to the parent once the child reports that subtest, which
+// happens on completion — a subtest that hangs forever inside `new
+// Promise(() => {})` never reports `test:start` either, so those three event
+// types alone can NEVER see a genuine hang (this was the root cause of the
+// feature never working: the three original event types are precisely the
+// ones a hang guarantees are never emitted). `test:start` is still tracked
+// here as a SECONDARY in-flight signal (a file can legitimately produce
+// both), never as the primary one. Tracked per FILE, not per (file, nesting,
+// testNumber) — dequeue/enqueue are file-level events with no subtest
+// identity, so file is the only key both event families share.
 //
 // Tolerant of a destination file that is missing (reporter never flushed
 // anything before the kill) or whose last line is truncated mid-write (the
@@ -708,12 +719,23 @@ function analyzeChunkEvents(eventsPath) {
     // FIRST action, before any test can run, so its absence pins the failure
     // to reporter load/resolution, not to the tests). Distinct from "file
     // exists but only the init marker was written" (readError=false,
-    // sawInitMarker=true, sawAnyEvent=false) so the diagnostic below can say
+    // sawInitMarker=true, anyDequeued=false) so the diagnostic below can say
     // explicitly WHICH of the two happened, rather than silently collapsing
     // both into "no in-flight file identified".
-    return { files: [], staleMs: null, sawAnyEvent: false, sawInitMarker: false, readError: true };
+    return {
+      files: [],
+      staleMs: null,
+      sawAnyEvent: false,
+      sawInitMarker: false,
+      anyDequeued: false,
+      readError: true,
+    };
   }
-  const inFlight = new Map();
+  // Map preserves insertion order; re-`set`ting an existing key moves it to
+  // the END, so iterating this map's keys yields "most recently
+  // dequeued/started" LAST — reversed below to report most-recent-first.
+  const dequeuedAt = new Map(); // file -> last dequeue/start ts seen
+  const terminated = new Set(); // files with an observed test:pass/test:fail
   let lastTs = null;
   let sawInitMarker = false;
   let sawAnyEvent = false;
@@ -731,21 +753,25 @@ function analyzeChunkEvents(eventsPath) {
       continue; // not a test event — never tracked in inFlight, never proof a test ran
     }
     sawAnyEvent = true;
-    const key = evt.testNumber !== undefined
-      ? `${evt.file}::${evt.nesting}::${evt.testNumber}`
-      : `${evt.file}::${evt.name}`;
-    if (evt.type === 'test:start') {
-      inFlight.set(key, evt.file);
-    } else {
-      inFlight.delete(key);
+    if (!evt.file) continue; // defensive: every recorded type carries `file`
+    if (evt.type === 'test:dequeue' || evt.type === 'test:start') {
+      dequeuedAt.delete(evt.file); // move to most-recent position
+      dequeuedAt.set(evt.file, evt.ts);
+      terminated.delete(evt.file); // a re-dequeue (retry) puts it back in flight
+    } else if (evt.type === 'test:pass' || evt.type === 'test:fail') {
+      terminated.add(evt.file);
     }
+    // test:enqueue is intentionally NOT a start signal here: "enqueued" means
+    // "queued to run", not "running" — test:dequeue is the runner actually
+    // picking the file up, which is the moment that matters for "in flight".
   }
-  const files = [...new Set([...inFlight.values()].filter(Boolean))];
+  const files = [...dequeuedAt.keys()].filter((f) => !terminated.has(f)).reverse();
   return {
     files,
     staleMs: lastTs !== null ? Date.now() - lastTs : null,
     sawAnyEvent,
     sawInitMarker,
+    anyDequeued: dequeuedAt.size > 0,
     readError: false,
   };
 }
@@ -1222,16 +1248,23 @@ function main() {
         // this parent never saw the child's own stdout, so it cannot know
         // otherwise). Falls back to "no file identified" rather than
         // throwing when the reporter file is missing/empty/truncated.
-        const { files: inFlightFiles, staleMs, sawAnyEvent, sawInitMarker, readError } = analyzeChunkEvents(chunkEventsPath);
+        const {
+          files: inFlightFiles,
+          staleMs,
+          sawInitMarker,
+          anyDequeued,
+          readError,
+        } = analyzeChunkEvents(chunkEventsPath);
         const inFlightMsg = inFlightFiles.length > 0
-          ? `In flight when killed (test:start with no matching pass/fail): ` +
+          ? `In flight when killed (test:dequeue with no matching pass/fail): ` +
             `${inFlightFiles.map((f) => basename(f)).join(', ')} — last reporter event was ` +
             `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this diagnostic ` +
             `(small = output kept flowing until the kill = slow; large = it stopped early = hang).`
-          : sawAnyEvent
-            ? `No file was in flight when killed — every started test in this chunk already ` +
-              `completed, so the CHILD PROCESS itself hung after its last test (last reporter ` +
-              `event was ${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this ` +
+          : anyDequeued
+            ? `No file was in flight when killed — every file the runner dequeued in this ` +
+              `chunk already terminated (test:pass/test:fail seen for each), so the CHILD ` +
+              `PROCESS itself hung after its last test finished (last reporter event was ` +
+              `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this ` +
               `diagnostic); suspect a leaked handle outside any single test, or an ` +
               `after-tests hook.`
             : readError
@@ -1243,13 +1276,16 @@ function main() {
                 `reporter function was ever invoked (process/spawn startup stall). This ` +
                 `diagnostic could not identify an in-flight file.`
               : sawInitMarker
-                ? `THE REPORTER LOADED BUT RECORDED NO TEST EVENTS — the events file contains ` +
-                  `only the reporter's own \`reporter:init\` marker, so the reporter module ` +
-                  `was invoked and ran, but no \`test:start\` for any file in this chunk ` +
-                  `reached it before the kill. Two possible causes, NOT distinguished by this ` +
-                  `diagnostic: node --test itself stalled before dispatching any test file, or ` +
-                  `the first file in this chunk hung/stalled before its first test began. This ` +
-                  `diagnostic could not identify an in-flight file.`
+                ? `THE REPORTER LOADED BUT THE RUNNER NEVER DEQUEUED A SINGLE FILE — the events ` +
+                  `file contains only the reporter's own \`reporter:init\` marker (and possibly ` +
+                  `\`test:enqueue\` events with no matching \`test:dequeue\`), so the reporter ` +
+                  `module was invoked and ran, but node's test runner never began executing any ` +
+                  `file in this chunk before the kill. This is a genuinely surprising state — ` +
+                  `\`test:dequeue\` fires the instant the runner starts a file, independent of ` +
+                  `whether anything inside it ever completes. Two possible causes, NOT ` +
+                  `distinguished by this diagnostic: node --test itself stalled before ` +
+                  `dispatching any test file, or process/spawn startup stalled. This diagnostic ` +
+                  `could not identify an in-flight file.`
                 : `No reporter events were recorded before the kill — the companion reporter's ` +
                   `events file exists but is empty/unparseable (no \`reporter:init\` marker and ` +
                   `no test events), so even the reporter's first appendFileSync may not have ` +

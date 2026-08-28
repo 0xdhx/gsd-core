@@ -951,6 +951,50 @@ test('hangs forever', () => new Promise(() => {}));
       }
     });
 
+    // Regression (#3889 root cause): a hang inside a test body NEVER produces
+    // a `test:start`/`test:pass`/`test:fail` for that subtest (node:test only
+    // surfaces those to the parent once the child reports completion), so
+    // those three event types alone can never see a hang. `test:enqueue` and
+    // `test:dequeue` are emitted by the RUNNER as it queues/begins a file,
+    // independent of completion — this pins that the reporter now records
+    // both, verbatim, for exactly the "enqueue then dequeue, then nothing"
+    // shape a real hang produces.
+    test('the reporter records test:enqueue and test:dequeue for the hang shape (enqueue, dequeue, nothing else)', async () => {
+      const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+      const eventsFile = path.join(tmpDir, 'ndjson-reporter-hang-shape.ndjson');
+      const savedEventsFile = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+      try {
+        async function* hangShapeEvents() {
+          yield { type: 'test:enqueue', data: { file: 'hangs.test.cjs', name: 'hangs.test.cjs', nesting: 0 } };
+          yield { type: 'test:dequeue', data: { file: 'hangs.test.cjs', name: 'hangs.test.cjs', nesting: 0 } };
+          // Never yields test:start/test:pass/test:fail — this IS the hang.
+        }
+        const result = await reporter(hangShapeEvents());
+        assert.strictEqual(result ?? null, null);
+        const rawContent = fs.readFileSync(eventsFile, 'utf8');
+        const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
+        assert.strictEqual(
+          lines.length,
+          3,
+          `expected exactly 3 NDJSON lines (init marker + enqueue + dequeue); got:\n${lines.join('\n')}`,
+        );
+        const [init, enqueue, dequeue] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(init.type, 'reporter:init');
+        assert.strictEqual(enqueue.type, 'test:enqueue');
+        assert.strictEqual(enqueue.file, 'hangs.test.cjs');
+        assert.strictEqual(dequeue.type, 'test:dequeue');
+        assert.strictEqual(dequeue.file, 'hangs.test.cjs');
+      } finally {
+        if (savedEventsFile === undefined) {
+          delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+        } else {
+          process.env.GSD_RUN_TESTS_EVENTS_FILE = savedEventsFile;
+        }
+        cleanup(eventsFile);
+      }
+    });
+
     // #3889: the init marker is the reporter's FIRST action, written before
     // the `for await` loop even begins — so it must land even when the
     // source event stream yields ZERO events (e.g. the child is killed
@@ -2401,5 +2445,68 @@ describe('analyzeChunkEvents (#3889)', () => {
     // c.test.cjs never parsed (truncated line), so it cannot appear either.
     assert.ok(!result.files.includes('c.test.cjs'));
     assert.strictEqual(result.sawAnyEvent, true, 'the complete lines before the truncation must still count as events');
+  });
+
+  // Regression (#3889 root cause): test:start/test:pass/test:fail are the
+  // exact three event types a genuine hang guarantees are never emitted —
+  // node:test only surfaces a subtest event to the parent once the child
+  // reports it, which happens on completion. test:dequeue is the RUNNER's
+  // own "began this file" signal and fires independent of completion; these
+  // four cases pin analyzeChunkEvents' dequeue-based in-flight rule directly
+  // against the synthetic event shapes a real hang, and a real finish, produce.
+  test('a dequeued file with no terminal event is reported as in flight', () => {
+    const eventsPath = path.join(tmpDir, 'dequeue-only.ndjson');
+    const lines = [
+      JSON.stringify({ type: 'reporter:init', ts: 900 }),
+      JSON.stringify({ type: 'test:enqueue', file: 'a.test.cjs', ts: 1000 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'a.test.cjs', ts: 1010 }),
+    ].join('\n');
+    fs.writeFileSync(eventsPath, lines, 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, ['a.test.cjs']);
+    assert.strictEqual(result.anyDequeued, true);
+    assert.strictEqual(result.sawInitMarker, true);
+  });
+
+  test('a dequeued file that also terminates reports nothing in flight (all files finished)', () => {
+    const eventsPath = path.join(tmpDir, 'dequeue-then-pass.ndjson');
+    const lines = [
+      JSON.stringify({ type: 'reporter:init', ts: 900 }),
+      JSON.stringify({ type: 'test:enqueue', file: 'a.test.cjs', ts: 1000 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'a.test.cjs', ts: 1010 }),
+      JSON.stringify({ type: 'test:pass', file: 'a.test.cjs', ts: 1020 }),
+    ].join('\n');
+    fs.writeFileSync(eventsPath, lines, 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, [], 'a terminated file must not show as in flight');
+    assert.strictEqual(result.anyDequeued, true, 'the file WAS dequeued — "all files finished" is a distinct state from "nothing ran"');
+  });
+
+  test('one terminated file followed by a second dequeued-but-unterminated file reports only the second', () => {
+    const eventsPath = path.join(tmpDir, 'two-files.ndjson');
+    const lines = [
+      JSON.stringify({ type: 'reporter:init', ts: 900 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'a.test.cjs', ts: 1000 }),
+      JSON.stringify({ type: 'test:pass', file: 'a.test.cjs', ts: 1010 }),
+      JSON.stringify({ type: 'test:dequeue', file: 'b.test.cjs', ts: 1020 }),
+    ].join('\n');
+    fs.writeFileSync(eventsPath, lines, 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, ['b.test.cjs']);
+    assert.ok(!result.files.includes('a.test.cjs'));
+  });
+
+  test('an init marker with no dequeue at all is distinguished (anyDequeued=false) from "all finished"', () => {
+    const eventsPath = path.join(tmpDir, 'init-only.ndjson');
+    fs.writeFileSync(eventsPath, JSON.stringify({ type: 'reporter:init', ts: 900 }), 'utf8');
+
+    const result = analyzeChunkEvents(eventsPath);
+    assert.deepStrictEqual(result.files, []);
+    assert.strictEqual(result.anyDequeued, false);
+    assert.strictEqual(result.sawInitMarker, true);
+    assert.strictEqual(result.sawAnyEvent, false);
   });
 });

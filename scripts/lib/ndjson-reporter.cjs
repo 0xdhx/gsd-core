@@ -11,7 +11,7 @@
 // Node's documented multi-reporter pairing) and appends one JSON object per
 // line to a path supplied via the GSD_RUN_TESTS_EVENTS_FILE env var. On a
 // timeout, run-tests.cjs reads that file back to name the file(s) still
-// in flight (a `test:start` with no matching `test:pass`/`test:fail`).
+// in flight (a `test:dequeue` with no matching `test:pass`/`test:fail`).
 //
 // Durability, not `--test-reporter-destination` (#3889 root cause): a
 // reporter that YIELDS strings has them piped by Node into a
@@ -49,12 +49,22 @@
 // repo's `engines.node` requires >=24.0.0 (package.json), where both
 // contracts have been stable since Node 20.
 //
-// Kept intentionally tiny: only the three event types run-tests.cjs needs to
-// pair start/completion are handled; everything else (diagnostics, plans,
-// coverage) is ignored so a truncated events file (the process is SIGKILLed
-// mid-`appendFileSync` on timeout — an individual write is unbuffered but
-// not atomic, so the OS can still interleave a partial write with the kill)
-// never leaves more than one dangling unparsable trailing line.
+// Kept intentionally tiny: only the five event types run-tests.cjs needs are
+// handled — `test:enqueue`/`test:dequeue` (emitted by the RUNNER as it queues
+// and begins each spawned test-file child, independent of whether anything
+// inside that file ever completes) plus `test:start`/`test:pass`/`test:fail`
+// (emitted per-subtest, once the child reports it). `test:dequeue` is the
+// event that actually means "in flight": a subtest inside a file that hangs
+// forever never reaches `test:start`/`test:pass`/`test:fail` at all, because
+// node:test only surfaces those to the parent once the child COMPLETES that
+// test — a hang, by definition, never completes. Recording `test:dequeue`
+// closes that gap: it fires the moment the runner begins the file, so a
+// killed hang still leaves a durable "this file was running" record.
+// Everything else (diagnostics, plans, coverage) is ignored so a truncated
+// events file (the process is SIGKILLed mid-`appendFileSync` on timeout — an
+// individual write is unbuffered but not atomic, so the OS can still
+// interleave a partial write with the kill) never leaves more than one
+// dangling unparsable trailing line.
 module.exports = async function ndjsonEventReporter(source) {
   const eventsPath = process.env.GSD_RUN_TESTS_EVENTS_FILE;
   // #3889: an init marker, written as this reporter's FIRST action — before
@@ -77,6 +87,8 @@ module.exports = async function ndjsonEventReporter(source) {
   for await (const event of source) {
     if (!eventsPath) continue; // no destination configured — nothing to record
     if (
+      event.type === 'test:enqueue' ||
+      event.type === 'test:dequeue' ||
       event.type === 'test:start' ||
       event.type === 'test:pass' ||
       event.type === 'test:fail'
