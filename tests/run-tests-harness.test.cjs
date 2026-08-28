@@ -814,6 +814,95 @@ test('noop', () => {});
       );
     });
   });
+
+  describe('chunk-timeout instrumentation (#3889)', () => {
+    // T2: per-chunk elapsed timing appears on the normal SUCCESS path, not
+    // only when something goes wrong — this is what makes "which chunk is
+    // drifting toward the cap" readable across ordinary green runs.
+    test('a successful chunk prints its elapsed time', () => {
+      seed(tmpDir, ['a.test.cjs']);
+      const r = runHarness(tmpDir, []);
+      assert.strictEqual(r.status, 0, `expected a clean pass; STDERR:\n${r.stderr}`);
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 1\/1 completed in \d+ms/,
+        `expected a per-chunk completion timing line; STDERR:\n${r.stderr}`,
+      );
+    });
+
+    // T3: the ndjson companion reporter's destination file is a temp
+    // artifact of the instrumentation, not a product output — it must not
+    // survive a successful run. Assert against the OS temp root's own
+    // "gsd-run-tests-events-*" prefix (scripts/run-tests.cjs's mkdtemp
+    // prefix) rather than any run-tests-owned directory, since that IS the
+    // leak surface being guarded.
+    test('the ndjson reporter temp dir is cleaned up after a successful run', () => {
+      seed(tmpDir, ['a.test.cjs']);
+      const before = fs.readdirSync(require('os').tmpdir())
+        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+      const r = runHarness(tmpDir, []);
+      assert.strictEqual(r.status, 0, `expected a clean pass; STDERR:\n${r.stderr}`);
+      const after = fs.readdirSync(require('os').tmpdir())
+        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+      assert.deepStrictEqual(
+        after,
+        before,
+        `expected no leaked gsd-run-tests-events-* temp dir after a successful run; ` +
+          `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+      );
+    });
+
+    // T1: on a chunk timeout, the diagnostic must NAME the file that was
+    // still executing — not merely list every file the chunk contained (the
+    // pre-instrumentation behavior). A test that hangs INSIDE its own body
+    // (never resolving) keeps its test:start event unmatched by any
+    // test:pass/test:fail in the ndjson companion reporter's output, which
+    // is exactly the signal the diagnostic reads back on timeout.
+    const HANGS_FOREVER_BODY = `'use strict';
+const { test } = require('node:test');
+test('hangs forever', () => new Promise(() => {}));
+`;
+    test('a chunk timeout names the file that was in flight when killed', () => {
+      fs.writeFileSync(path.join(tmpDir, 'hangs.test.cjs'), HANGS_FOREVER_BODY, 'utf8');
+      const r = runHarness(tmpDir, [], {
+        RUN_TESTS_NO_FORCE_EXIT: '1',
+        RUN_TESTS_CHUNK_TIMEOUT_MS: '2000',
+      });
+      assert.notStrictEqual(
+        r.status,
+        0,
+        `expected non-zero exit from a timed-out chunk; got status=${r.status}\nSTDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /In flight when killed.*hangs\.test\.cjs/s,
+        `expected the diagnostic to NAME the in-flight file, not just list the chunk; STDERR:\n${r.stderr}`,
+      );
+    });
+
+    // T4: the pre-existing timeout / abort / force-exit behavior (#1051)
+    // still holds with the reporter instrumentation wired in — the new
+    // --test-reporter flags must not change detection, the abort-on-timeout
+    // control flow, or the exit code.
+    test('existing timeout diagnostic and abort behavior are unchanged', () => {
+      fs.writeFileSync(path.join(tmpDir, 'hangs.test.cjs'), HANGS_FOREVER_BODY, 'utf8');
+      const r = runHarness(tmpDir, [], {
+        RUN_TESTS_NO_FORCE_EXIT: '1',
+        RUN_TESTS_CHUNK_TIMEOUT_MS: '2000',
+      });
+      assert.notStrictEqual(r.status, 0, `expected non-zero exit; STDERR:\n${r.stderr}`);
+      assert.match(
+        r.stderr,
+        /exceeded the per-chunk timeout/,
+        `expected the original timeout diagnostic wording to survive; STDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 1\/1 was killed after \d+ms/,
+        `expected the new killed/elapsed line; STDERR:\n${r.stderr}`,
+      );
+    });
+  });
 });
 
 // Pure partition contract for the shard selector (#1212). Imported directly
