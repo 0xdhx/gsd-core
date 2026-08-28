@@ -34,13 +34,20 @@
 // Contract targeted: Node's "Custom reporters" contract
 // (https://nodejs.org/api/test.html#custom-reporters) — a reporter module's
 // default export is a function receiving the test runner's event stream (an
-// AsyncIterable of `{ type, data }` objects) and returning an iterable (sync
-// or async) of the reporter's output. This one intentionally emits no output
-// (see the durability note above) — a plain `async function` that returns an
-// empty array satisfies the contract without an `async function*` generator
-// that would otherwise never `yield` (require-yield). This repo's
-// `engines.node` requires >=24.0.0 (package.json), where this contract has
-// been stable since Node 20.
+// AsyncIterable of `{ type, data }` objects). Node feeds that function to
+// `stream.compose` as the stream's "body". When the body is an async
+// FUNCTION (not an `async function*` generator), `stream.compose`'s own
+// contract (https://nodejs.org/api/stream.html#streamcomposestreams)
+// requires it to return nully (undefined/null) — returning anything else,
+// including an array, throws `ERR_INVALID_RETURN_VALUE` ("Expected nully to
+// be returned from the 'body' function but got an instance of Array")
+// exactly once the promise resolves. Verified directly against
+// `stream.compose` in this repo's Node: calling it with a body that
+// `return`s `[]` reproduces that same TypeError. A generator form
+// (`async function*`) is the one that yields an iterable; the plain
+// `async function` form used here is the one that must return nully. This
+// repo's `engines.node` requires >=24.0.0 (package.json), where both
+// contracts have been stable since Node 20.
 //
 // Kept intentionally tiny: only the three event types run-tests.cjs needs to
 // pair start/completion are handled; everything else (diagnostics, plans,
@@ -74,8 +81,10 @@ module.exports = async function ndjsonEventReporter(source) {
       }
     }
   }
-  // Intentionally empty: this reporter is a pure side-effecting sink (see the
-  // durability note above), never a source of reporter OUTPUT. Node still
-  // requires the exported function to return an iterable.
-  return [];
+  // Falls through to an implicit `return undefined` (nully): this reporter is
+  // a pure side-effecting sink (see the durability note above), never a
+  // source of reporter OUTPUT, and `stream.compose` requires its async
+  // FUNCTION body to return nully — returning an iterable (e.g. `[]`) here
+  // raises `ERR_INVALID_RETURN_VALUE` (observed live: this exact `return []`
+  // crashed every chunk on the real remote run this regresses).
 };

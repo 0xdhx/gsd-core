@@ -24,6 +24,7 @@ const path = require('path');
 const { runNode } = require('./helpers/process-seam.cjs');
 const { toLegacyResult } = require('./helpers/git-fixture.cjs');
 const { createTempDir, cleanup, CONFIG_LOCATION_ENV_KEYS } = require('./helpers.cjs');
+const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 
 const HARNESS = path.join(__dirname, '..', 'scripts', 'run-tests.cjs');
 
@@ -903,6 +904,50 @@ test('hangs forever', () => new Promise(() => {}));
         /In flight when killed.*hangs\.test\.cjs/s,
         `expected the diagnostic to NAME the in-flight file, not just list the chunk; STDERR:\n${r.stderr}`,
       );
+    });
+
+    // Regression (#3889 recurrence): the reporter module itself, called
+    // directly with no subprocess, must return nully — this is the exact
+    // contract violation (`return []`) that crashed every chunk on the real
+    // remote run this file regresses ("Expected nully to be returned from
+    // the 'body' function but got an instance of Array", thrown by
+    // node:stream's `compose` when its async-function body returns an
+    // iterable instead of undefined/null). Also pins the NDJSON side effect:
+    // only the two handled event types are appended, verbatim, one per line.
+    test('the reporter returns nully and appends only the handled event types as NDJSON', async () => {
+      const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+      const eventsFile = path.join(tmpDir, 'ndjson-reporter-events.ndjson');
+      const savedEventsFile = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+      try {
+        async function* fakeEvents() {
+          yield { type: 'test:start', data: { file: 'a.test.cjs', name: 't', nesting: 0, testNumber: 1 } };
+          yield { type: 'test:diagnostic', data: { message: 'ignored' } };
+          yield { type: 'test:pass', data: { file: 'a.test.cjs', name: 't', nesting: 0, testNumber: 1 } };
+        }
+        const result = await reporter(fakeEvents());
+        assert.strictEqual(
+          result ?? null,
+          null,
+          `expected the reporter to return nully (undefined/null) per stream.compose's ` +
+            `async-function body contract; got ${JSON.stringify(result)}`,
+        );
+        const rawContent = fs.readFileSync(eventsFile, 'utf8');
+        const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
+        assert.strictEqual(lines.length, 2, `expected exactly 2 NDJSON lines; got:\n${lines.join('\n')}`);
+        const [start, pass] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(start.type, 'test:start');
+        assert.strictEqual(start.file, 'a.test.cjs');
+        assert.strictEqual(pass.type, 'test:pass');
+        assert.strictEqual(pass.file, 'a.test.cjs');
+      } finally {
+        if (savedEventsFile === undefined) {
+          delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+        } else {
+          process.env.GSD_RUN_TESTS_EVENTS_FILE = savedEventsFile;
+        }
+        cleanup(eventsFile);
+      }
     });
 
     // T4: the pre-existing timeout / abort / force-exit behavior (#1051)
