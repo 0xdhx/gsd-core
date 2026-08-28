@@ -1027,6 +1027,126 @@ describe('#3045 CORE REDESIGN — dispatch-isolation records as an unconditional
     assert.equal(readSentinelRaw(dir).isolation, 'harness-worktree');
   });
 
+  // #3963 — the opt-out read must see the value config-get sees. Under
+  // GSD_WORKSTREAM, config-get merges the ROOT config into the workstream
+  // config (#2714 inheritance); the resolver's raw single-file read saw only
+  // the workstream file, so a root-level use_worktrees=false was invisible
+  // and the #3737 clobber resurfaced on every workstream-scoped run.
+  test('#3963: root use_worktrees=false is inherited under GSD_WORKSTREAM', (t) => {
+    const dir = createTempProject('gsd-3963-ws-');
+    t.after(() => cleanup(dir));
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'config.json'),
+      JSON.stringify({ runtime: 'claude', workflow: { use_worktrees: false } }),
+    );
+    fs.mkdirSync(path.join(dir, '.planning', 'workstreams', 'alpha'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'workstreams', 'alpha', 'config.json'),
+      JSON.stringify({ model_profile: 'balanced' }),
+    );
+
+    const result = runGsdTools(
+      ['query', 'dispatch-isolation', '--raw'],
+      dir,
+      { GSD_RUNTIME: 'claude', HOME: dir, GSD_WORKSTREAM: 'alpha' },
+    );
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.output.trim(), 'none',
+      '#3963: the root opt-out must be inherited under a workstream, matching config-get');
+    const sentinel = readSentinelRaw(dir);
+    assert.equal(sentinel.isolation, 'none');
+    assert.equal(sentinel.harness_flag, null);
+  });
+
+  test('#3963: the workstream\'s own key wins over the root\'s', (t) => {
+    const dir = createTempProject('gsd-3963-ws2-');
+    t.after(() => cleanup(dir));
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'config.json'),
+      JSON.stringify({ runtime: 'claude', workflow: { use_worktrees: false } }),
+    );
+    fs.mkdirSync(path.join(dir, '.planning', 'workstreams', 'alpha'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.planning', 'workstreams', 'alpha', 'config.json'),
+      JSON.stringify({ workflow: { use_worktrees: true } }),
+    );
+
+    const result = runGsdTools(
+      ['query', 'dispatch-isolation', '--raw'],
+      dir,
+      { GSD_RUNTIME: 'claude', HOME: dir, GSD_WORKSTREAM: 'alpha' },
+    );
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.output.trim(), 'harness-worktree',
+      '#3963: inheritance, not root-override — the workstream\'s own true must win');
+  });
+
+  test('#3963 parity: dispatch-isolation agrees with config-get on the same fixtures', () => {
+    // Generative-fix-divergence guard (#3963 review): the resolver's raw read
+    // and config-get's merged read must answer identically on shared shapes.
+    const cases = [
+      { root: { workflow: { use_worktrees: false } }, ws: { model_profile: 'balanced' } },
+      { root: { workflow: { use_worktrees: false } }, ws: { workflow: { use_worktrees: true } } },
+      { root: { runtime: 'claude' }, ws: { workflow: { use_worktrees: false } } },
+      { root: { runtime: 'claude' }, ws: { runtime: 'claude' } },
+    ];
+    for (const { root, ws } of cases) {
+      const dir = createTempProject('gsd-3963-parity-');
+      try {
+        fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify(root));
+        fs.mkdirSync(path.join(dir, '.planning', 'workstreams', 'alpha'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.planning', 'workstreams', 'alpha', 'config.json'), JSON.stringify(ws));
+        const env = { GSD_RUNTIME: 'claude', HOME: dir, GSD_WORKSTREAM: 'alpha' };
+        // --default true mirrors the schema default so the key-absent shape
+        // answers "true" (not opted out) instead of erroring — the same
+        // effective value the resolver's degrade-to-false produces.
+        const cfg = runGsdTools(['query', 'config-get', 'workflow.use_worktrees', '--raw', '--default', 'true'], dir, env);
+        const iso = runGsdTools(['query', 'dispatch-isolation', '--raw'], dir, env);
+        assert.equal(cfg.success, true, cfg.error);
+        assert.equal(iso.success, true, iso.error);
+        const optedOut = cfg.output.trim() === 'false';
+        assert.equal(iso.output.trim(), optedOut ? 'none' : 'harness-worktree',
+          `#3963 parity: config-get says use_worktrees=${cfg.output.trim()} but dispatch-isolation says ${iso.output.trim()}`);
+      } finally {
+        cleanup(dir);
+      }
+    }
+  });
+
+  test('#3963: no root inheritance under GSD_PROJECT alone (documented contract)', (t) => {
+    const dir = createTempProject('gsd-3963-proj-');
+    t.after(() => cleanup(dir));
+    fs.mkdirSync(path.join(dir, '.planning', 'second-product'), { recursive: true });
+    // Root opted out; the scoped project config omits the key. Under
+    // GSD_PROJECT alone, config-get does NOT inherit root — and neither may
+    // this resolver (the ws-env gate is the boundary).
+    fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify({ workflow: { use_worktrees: false } }));
+    fs.writeFileSync(path.join(dir, '.planning', 'second-product', 'config.json'), JSON.stringify({ runtime: 'claude' }));
+
+    const cfg = runGsdTools(['query', 'config-get', 'workflow.use_worktrees', '--raw', '--default', 'true'], dir,
+      { GSD_RUNTIME: 'claude', HOME: dir, GSD_PROJECT: 'second-product' });
+    const iso = runGsdTools(['query', 'dispatch-isolation', '--raw'], dir,
+      { GSD_RUNTIME: 'claude', HOME: dir, GSD_PROJECT: 'second-product' });
+    assert.equal(cfg.output.trim() === 'false', false,
+      'fixture self-check: config-get must NOT see the root opt-out under GSD_PROJECT alone');
+    assert.equal(iso.output.trim(), 'harness-worktree',
+      '#3963: no root inheritance without the workstream env — parity with config-get');
+  });
+
+  test('#3963: malformed workstream config falls back to the root under the gate', (t) => {
+    const dir = createTempProject('gsd-3963-malformed-');
+    t.after(() => cleanup(dir));
+    fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify({ workflow: { use_worktrees: false } }));
+    fs.mkdirSync(path.join(dir, '.planning', 'workstreams', 'alpha'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'workstreams', 'alpha', 'config.json'), '{ not valid json');
+
+    const iso = runGsdTools(['query', 'dispatch-isolation', '--raw'], dir,
+      { GSD_RUNTIME: 'claude', HOME: dir, GSD_WORKSTREAM: 'alpha' });
+    assert.equal(iso.success, true, iso.error);
+    assert.equal(iso.output.trim(), 'none',
+      '#3963: an unreadable workstream config must degrade to the root view, matching loadConfigResolved branch B');
+  });
+
   test('#3737: end-to-end — an opted-out project records none and the guard ALLOWS the sequential dispatch', (t) => {
     const dir = createTempProject('gsd-3737-optout-');
     t.after(() => cleanup(dir));
