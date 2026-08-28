@@ -1,13 +1,15 @@
 // GENERATED FILE — DO NOT EDIT BY HAND.
 // Source of truth: src/cli-exit.cts. Regenerate with:
-//   node scripts/gen-scripts-cli-exit.cjs --write
-// Byte-compared by `npm run lint:generated-sync` (#3904, ADR-3889 Phase 0).
+//   node scripts/gen-hooks-cli-exit.cjs --write
+// Byte-compared by `npm run lint:generated-sync` (#3911, ADR-3889 Phase 7).
 //
-// Why this copy exists: scripts/ runs straight from the repo checkout and must
-// work on an unbuilt clone — 64+ scripts require this file, including
-// check-env.cjs, which runs before any build. gsd-core/bin/lib/cli-exit.cjs is
-// gitignored tsc output and doubles as the build sentinel, so it cannot be
-// required from here. Hence one source, two emitted locations.
+// Why this copy exists: hooks/ runs straight from a raw, unbuilt clone — a
+// shipped hook must be able to `require('./lib/cli-exit.js')` relative to
+// its own __dirname and terminate through `terminateNow` without depending
+// on any build artifact. gsd-core/bin/lib/cli-exit.cjs is gitignored tsc
+// output and doubles as the build sentinel, so it cannot be required from
+// here. `.js`, not `.cjs`, to match the hooks/lib/*.js convention. Hence one
+// source, three emitted locations (gsd-core/bin/lib, scripts/lib, hooks/lib).
 
 "use strict";
 var __importDefault = (this && this.__importDefault) || function (mod) {
@@ -30,7 +32,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
  */
 const node_fs_1 = __importDefault(require("node:fs"));
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const exitCodeRegistryModule = require("./exit-code-registry.cjs");
+const exitCodeRegistryModule = require("./exit-code-registry.js");
 // Called only as exitCodeRegistryModule.exitCodeFor(...), never destructured:
 // @typescript-eslint/unbound-method flags a bare function-typed property
 // pulled off an object at the point of destructuring, since a detached
