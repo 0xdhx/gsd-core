@@ -57,6 +57,23 @@
 // never leaves more than one dangling unparsable trailing line.
 module.exports = async function ndjsonEventReporter(source) {
   const eventsPath = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+  // #3889: an init marker, written as this reporter's FIRST action — before
+  // the `for await` loop even begins consuming the event stream — so the
+  // events file's mere existence (and its exact contents) can distinguish
+  // "the reporter module never loaded in the child at all" (file absent)
+  // from "it loaded fine but no test:start reached it before the kill"
+  // (file contains only this one line) from "it's working" (file contains
+  // more than this line). Same appendFileSync durability rationale as every
+  // other write in this file: synchronous and unbuffered, so it survives an
+  // uncatchable SIGKILL landing a moment later.
+  if (eventsPath) {
+    try {
+      require('fs').appendFileSync(eventsPath, `${JSON.stringify({ type: 'reporter:init', ts: Date.now() })}\n`);
+    } catch {
+      // Best-effort, same as every other write below — must never crash the
+      // test run this reporter is only observing.
+    }
+  }
   for await (const event of source) {
     if (!eventsPath) continue; // no destination configured — nothing to record
     if (

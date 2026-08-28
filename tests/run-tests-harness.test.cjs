@@ -934,12 +934,52 @@ test('hangs forever', () => new Promise(() => {}));
         );
         const rawContent = fs.readFileSync(eventsFile, 'utf8');
         const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
-        assert.strictEqual(lines.length, 2, `expected exactly 2 NDJSON lines; got:\n${lines.join('\n')}`);
-        const [start, pass] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(lines.length, 3, `expected exactly 3 NDJSON lines (init marker + 2 handled events); got:\n${lines.join('\n')}`);
+        const [init, start, pass] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(init.type, 'reporter:init');
         assert.strictEqual(start.type, 'test:start');
         assert.strictEqual(start.file, 'a.test.cjs');
         assert.strictEqual(pass.type, 'test:pass');
         assert.strictEqual(pass.file, 'a.test.cjs');
+      } finally {
+        if (savedEventsFile === undefined) {
+          delete process.env.GSD_RUN_TESTS_EVENTS_FILE;
+        } else {
+          process.env.GSD_RUN_TESTS_EVENTS_FILE = savedEventsFile;
+        }
+        cleanup(eventsFile);
+      }
+    });
+
+    // #3889: the init marker is the reporter's FIRST action, written before
+    // the `for await` loop even begins — so it must land even when the
+    // source event stream yields ZERO events (e.g. the child is killed
+    // before node:test emits anything). This pins the marker's whole
+    // purpose: its presence alone proves the reporter module loaded and was
+    // invoked, independent of whether any test ever started.
+    test('the reporter writes only the init marker when the source yields zero events', async () => {
+      const reporter = require('../scripts/lib/ndjson-reporter.cjs');
+      const eventsFile = path.join(tmpDir, 'ndjson-reporter-init-only.ndjson');
+      const savedEventsFile = process.env.GSD_RUN_TESTS_EVENTS_FILE;
+      process.env.GSD_RUN_TESTS_EVENTS_FILE = eventsFile;
+      try {
+        async function* emptyEvents() {}
+        const result = await reporter(emptyEvents());
+        assert.strictEqual(
+          result ?? null,
+          null,
+          `expected the reporter to return nully even with zero source events; got ${JSON.stringify(result)}`,
+        );
+        const rawContent = fs.readFileSync(eventsFile, 'utf8');
+        const lines = splitLines(rawContent.trim()).filter((l) => l.length > 0);
+        assert.strictEqual(
+          lines.length,
+          1,
+          `expected exactly 1 NDJSON line (the init marker only); got:\n${lines.join('\n')}`,
+        );
+        const [init] = lines.map((l) => JSON.parse(l));
+        assert.strictEqual(init.type, 'reporter:init');
+        assert.strictEqual(typeof init.ts, 'number');
       } finally {
         if (savedEventsFile === undefined) {
           delete process.env.GSD_RUN_TESTS_EVENTS_FILE;

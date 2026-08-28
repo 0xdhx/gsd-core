@@ -38,6 +38,7 @@
 const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } = require('fs');
 const { join, basename } = require('path');
 const { tmpdir } = require('os');
+const { pathToFileURL } = require('url');
 const { execFileSync } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
 const {
@@ -702,15 +703,20 @@ function analyzeChunkEvents(eventsPath) {
     raw = readFileSync(eventsPath, 'utf8');
   } catch {
     // The events file never existed — either GSD_RUN_TESTS_EVENTS_FILE never
-    // resolved to a writable path, or the child was killed before the ndjson
-    // reporter's very first appendFileSync. Distinct from "file exists but
-    // has zero parseable events" (readError=false, sawAnyEvent=false) so the
-    // diagnostic below can say explicitly WHICH of the two happened, rather
-    // than silently collapsing both into "no in-flight file identified".
-    return { files: [], staleMs: null, sawAnyEvent: false, readError: true };
+    // resolved to a writable path, or the reporter module never loaded in the
+    // child at all (the `reporter:init` marker below is the reporter's very
+    // FIRST action, before any test can run, so its absence pins the failure
+    // to reporter load/resolution, not to the tests). Distinct from "file
+    // exists but only the init marker was written" (readError=false,
+    // sawInitMarker=true, sawAnyEvent=false) so the diagnostic below can say
+    // explicitly WHICH of the two happened, rather than silently collapsing
+    // both into "no in-flight file identified".
+    return { files: [], staleMs: null, sawAnyEvent: false, sawInitMarker: false, readError: true };
   }
   const inFlight = new Map();
   let lastTs = null;
+  let sawInitMarker = false;
+  let sawAnyEvent = false;
   for (const line of raw.split('\n')) {
     if (line.trim() === '') continue;
     let evt;
@@ -720,6 +726,11 @@ function analyzeChunkEvents(eventsPath) {
       continue; // truncated trailing line from a mid-write kill
     }
     if (typeof evt.ts === 'number') lastTs = evt.ts;
+    if (evt.type === 'reporter:init') {
+      sawInitMarker = true;
+      continue; // not a test event — never tracked in inFlight, never proof a test ran
+    }
+    sawAnyEvent = true;
     const key = evt.testNumber !== undefined
       ? `${evt.file}::${evt.nesting}::${evt.testNumber}`
       : `${evt.file}::${evt.name}`;
@@ -733,7 +744,8 @@ function analyzeChunkEvents(eventsPath) {
   return {
     files,
     staleMs: lastTs !== null ? Date.now() - lastTs : null,
-    sawAnyEvent: lastTs !== null,
+    sawAnyEvent,
+    sawInitMarker,
     readError: false,
   };
 }
@@ -1067,7 +1079,18 @@ function main() {
   // races with, or is polluted by, another chunk's events. Deleted on the
   // success path; kept only long enough to read back on a timeout.
   const eventsDir = mkdtempSync(join(tmpdir(), 'gsd-run-tests-events-'));
-  const reporterModulePath = join(__dirname, 'lib', 'ndjson-reporter.cjs');
+  // #3889: Node documents `--test-reporter`'s value as "a string similar to
+  // those used in import() statements" (https://nodejs.org/api/test.html#--test-reporter),
+  // NOT a bare filesystem path — a bare absolute path is not a portable
+  // import specifier (notably on Windows, where `C:\...` is not valid
+  // import()able syntax). Converting through pathToFileURL is the fix that
+  // hardens reporter resolution against a possible root cause of #3889: the
+  // events file never being created at all because the reporter module
+  // itself never loaded in the child. This makes the resulting string
+  // LONGER than the bare path, which is why reporterOverhead/FIXED_OVERHEAD
+  // below are derived from the final reporterArgs strings, not a literal
+  // constant — they must reflect whatever this line actually produces.
+  const reporterModulePath = pathToFileURL(join(__dirname, 'lib', 'ndjson-reporter.cjs')).href;
   const humanReporter = process.stdout.isTTY ? 'spec' : 'tap';
   // Chunk index zero-padded to a fixed width so the events path's length is
   // stable across chunks (kept for readability/debuggability; it no longer
@@ -1199,7 +1222,7 @@ function main() {
         // this parent never saw the child's own stdout, so it cannot know
         // otherwise). Falls back to "no file identified" rather than
         // throwing when the reporter file is missing/empty/truncated.
-        const { files: inFlightFiles, staleMs, sawAnyEvent, readError } = analyzeChunkEvents(chunkEventsPath);
+        const { files: inFlightFiles, staleMs, sawAnyEvent, sawInitMarker, readError } = analyzeChunkEvents(chunkEventsPath);
         const inFlightMsg = inFlightFiles.length > 0
           ? `In flight when killed (test:start with no matching pass/fail): ` +
             `${inFlightFiles.map((f) => basename(f)).join(', ')} — last reporter event was ` +
@@ -1212,14 +1235,25 @@ function main() {
               `diagnostic); suspect a leaked handle outside any single test, or an ` +
               `after-tests hook.`
             : readError
-              ? `NO EVENTS COULD BE READ for this chunk — the companion reporter's events file ` +
-                `(GSD_RUN_TESTS_EVENTS_FILE) does not exist at all, so the child was killed ` +
-                `before the reporter wrote even one event (process/spawn startup stall, not a ` +
-                `test hang). This diagnostic could not identify an in-flight file.`
-              : `No reporter events were recorded before the kill — the companion reporter's ` +
-                `events file exists but is empty/unparseable, so even the first file in this ` +
-                `chunk may not have begun executing (process/spawn startup stall, not a test ` +
-                `hang). This diagnostic could not identify an in-flight file.`;
+              ? `THE EVENTS FILE DOES NOT EXIST for this chunk — not even the reporter's own ` +
+                `\`reporter:init\` marker, which is the reporter module's first action before ` +
+                `it reads a single test event. Two possible causes, NOT distinguished by this ` +
+                `diagnostic: the ndjson reporter module never loaded in the child at all ` +
+                `(--test-reporter resolution failure), or the child was killed before the ` +
+                `reporter function was ever invoked (process/spawn startup stall). This ` +
+                `diagnostic could not identify an in-flight file.`
+              : sawInitMarker
+                ? `THE REPORTER LOADED BUT RECORDED NO TEST EVENTS — the events file contains ` +
+                  `only the reporter's own \`reporter:init\` marker, so the reporter module ` +
+                  `was invoked and ran, but no \`test:start\` for any file in this chunk ` +
+                  `reached it before the kill. Two possible causes, NOT distinguished by this ` +
+                  `diagnostic: node --test itself stalled before dispatching any test file, or ` +
+                  `the first file in this chunk hung/stalled before its first test began. This ` +
+                  `diagnostic could not identify an in-flight file.`
+                : `No reporter events were recorded before the kill — the companion reporter's ` +
+                  `events file exists but is empty/unparseable (no \`reporter:init\` marker and ` +
+                  `no test events), so even the reporter's first appendFileSync may not have ` +
+                  `completed. This diagnostic could not identify an in-flight file.`;
 
         const table = loadTestTimings(process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH);
         const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table).join('\n');
