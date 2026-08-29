@@ -5514,8 +5514,12 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
   // The probe compares the WORKING TREE to HEAD, so an unborn HEAD makes it
   // fatal (rc 128). That must fall through to the commit rather than be read as
   // "nothing to commit" — there is plenty to commit in a repo with no commits.
-  test('an unborn HEAD falls through to the commit rather than reporting nothing_to_commit', () => {
+  test('an unborn HEAD falls through to the commit rather than reporting nothing_to_commit', (t) => {
     const fresh = createTempDir();
+    // REGISTERED teardown, not a trailing statement: `fresh` lives outside
+    // `tmpDir`, so afterEach does not reach it and any failing assertion below
+    // would leak a git repo into the temp root.
+    t.after(() => cleanup(fresh));
     fs.mkdirSync(path.join(fresh, '.planning'), { recursive: true });
     fs.writeFileSync(path.join(fresh, '.planning', 'config.json'), '{}\n');
     fs.writeFileSync(path.join(fresh, '.planning', 'doc.md'), 'first content\n');
@@ -5528,7 +5532,6 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     const output = JSON.parse(payload);
     assert.strictEqual(output.committed, true,
       'the very first commit in a repo must not be swallowed by the empty-diff guard');
-    cleanup(fresh);
   });
 
   // git refuses a partial commit during a cherry-pick exactly as it does during
@@ -5621,10 +5624,21 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
     return JSON.parse(payload);
   }
 
+  // Sub-repos created by `bumpedSubmodule()` are SIBLINGS of `tmpDir`, so the
+  // `afterEach` above does not reach them. Registering them here cleans every
+  // caller at once and — unlike a trailing `cleanup(subSrc)` in each test body
+  // — survives a failing assertion, which would otherwise leak a git repo into
+  // the temp root.
+  const strayRepos = [];
+  afterEach(() => {
+    while (strayRepos.length > 0) cleanup(strayRepos.pop());
+  });
+
   // A submodule whose recorded gitlink is AHEAD of what the superproject has
   // committed — i.e. `git commit -- <sub>` has something real to record.
   function bumpedSubmodule() {
     const subSrc = path.join(tmpDir, '..', path.basename(tmpDir) + '-sub');
+    strayRepos.push(subSrc);
     fs.mkdirSync(subSrc, { recursive: true });
     gitOrThrow(['init', '-q', '.'], { cwd: subSrc });
     gitOrThrow(['config', 'user.email', 't@t'], { cwd: subSrc });
@@ -5640,7 +5654,6 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
     gitOrThrow(['add', 'f.txt'], { cwd: subSrc });
     gitOrThrow(['commit', '-m', 'v2'], { cwd: subSrc });
     gitOrThrow(['-c', 'protocol.file.allow=always', 'submodule', 'update', '--remote', '--', 'sub'], { cwd: tmpDir });
-    return { subSrc };
   }
 
   // `diff.ignoreSubmodules=all` is local config; `.gitmodules` `ignore = all` is
@@ -5649,7 +5662,7 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
   // reading only `diff.ignoreSubmodules` would not reach.
   for (const vector of ['diff.ignoreSubmodules', '.gitmodules ignore']) {
     test(`a submodule bump is not reported as nothing_to_commit under ${vector}=all`, () => {
-      const { subSrc } = bumpedSubmodule();
+      bumpedSubmodule();
       if (vector === 'diff.ignoreSubmodules') {
         gitOrThrow(['config', 'diff.ignoreSubmodules', 'all'], { cwd: tmpDir });
       } else {
@@ -5667,7 +5680,6 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
       assert.notStrictEqual(
         gitOrThrow(['rev-parse', 'HEAD:sub'], { cwd: tmpDir }).trim(), before,
         'the recorded gitlink must actually advance');
-      cleanup(subSrc);
     });
   }
 
@@ -5693,14 +5705,13 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
   // #3776 misreport re-entered from the other side. Pinned so a later widening
   // to `=none` cannot pass.
   test('a dirty submodule worktree with an unchanged gitlink still reports nothing_to_commit', () => {
-    const { subSrc } = bumpedSubmodule();
+    bumpedSubmodule();
     gitOrThrow(['add', '--', 'sub'], { cwd: tmpDir });
     gitOrThrow(['commit', '-m', 'bump sub'], { cwd: tmpDir });
     fs.appendFileSync(path.join(tmpDir, 'sub', 'f.txt'), 'dirty\n');
 
     assert.strictEqual(commitFiles('sub').reason, 'nothing_to_commit',
       'nothing would land, so nothing_to_commit is the correct answer, not a misreport');
-    cleanup(subSrc);
   });
 
   // No submodule involved. A textconv driver maps two different blobs to the
