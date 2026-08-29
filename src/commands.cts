@@ -1903,13 +1903,80 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // Any other non-zero exit from the probe (a genuine git error, or an unborn
   // HEAD) leaves the guard shut and falls through to the commit — failing toward
   // today's path rather than manufacturing a no-op.
+  // THE ONE STATE WHERE `git diff` AND `git commit -- <paths>` GENUINELY DISAGREE.
+  // `--assume-unchanged` tells git to skip the worktree stat for a path, so
+  // `git add` stages nothing and BOTH diff forms report no difference — while
+  // `git commit -- <path>` reads the working tree directly and records it
+  // (driven, git 2.54: probe rc 0, commit rc 0, new content in the tree). Left
+  // to the diff probe alone the guard reports `nothing_to_commit` about content
+  // the caller explicitly named in `--files` and git would have written. #3776
+  // is a purely diagnostic bug — nothing is corrupted and no wrong commit is
+  // made — so suppressing its misreport must not be paid for by dropping named
+  // content. The same rule the timeout routing already follows one block up.
+  //
+  // `git ls-files -v` is the discriminator for the STATE: it tags an
+  // assume-unchanged path with a LOWERCASE letter (`h`), where
+  // `--skip-worktree` is an uppercase `S` and never reaches THIS branch:
+  // `git add` exits 1 under it, so a present-but-modified skip-worktree path
+  // fails closed as `staging_failed` above the guard. (An ABSENT one is skipped
+  // before `git add` runs at all per #2014, and is answered by the
+  // `stagedPaths.length === 0` arm above — correctly, and exactly as it was
+  // pre-fix. Both shapes are pinned.)
+  //
+  // Then ASK GIT, rather than reconstructing its answer. `git commit --dry-run`
+  // is the same decision the real commit makes, and it does not run the
+  // `pre-commit` hook (driven: a rejecting one neither fires nor writes its
+  // marker) — which is what matters, because a firing `pre-commit` is the whole
+  // of #3776. It is NOT hook-free in general: git 2.54 does fire
+  // `post-index-change` here, so a repo using that hook sees it once for the
+  // probe and once for the commit. Stated rather than claimed away; the
+  // narrower claim is the true one. `--porcelain` keeps the output to a couple
+  // of machine-readable lines instead of a full status listing — the rc is
+  // identical either way (driven: 0 would-record / 1 nothing), but the plain
+  // form prints every untracked path, which on a large tree is output this
+  // probe has no use for and `execGit` would have to buffer. rc 0 means the
+  // commit would record something, so the guard must stand aside.
+  //
+  // Reconstructing it was tried and is WRONG in three measured ways, all of
+  // them silent drops of named content. Comparing `git hash-object` against
+  // `HEAD:<path>` misses a mode-only change (`chmod +x` leaves the blob
+  // identical while `git commit -- <path>` records `100755`); it cannot hash a
+  // submodule path at all (`fatal: Unable to hash sub`, while the commit
+  // advances the gitlink); and the path it needs must be parsed out of
+  // `ls-files` output, which `core.quotePath` renders as `"caf\303\251.md"`
+  // by default, so the probe reads a filename that does not exist. Asking git
+  // needs no path parsed and no case enumerated.
+  //
+  // Scoped to this branch on purpose. The diff probe above answers the ordinary
+  // case cheaply and is pinned against the configuration vectors below; the
+  // dry run is the heavier, exact answer, and it runs only when an
+  // assume-unchanged path is actually present.
+  //
+  // The `ls-files` read is an OPTIMISATION, never a gate — so an unreadable one
+  // must not decide anything. It exists only to keep the dry run off the hot
+  // path when no assume-unchanged entry is present; when it cannot answer, the
+  // dry run simply runs, because the dry run needs nothing from it. Both
+  // failing-closed (drop the content) and failing-open (re-enter #3776) are
+  // wrong answers to a question we can just ask directly.
+  const assumeUnchangedWouldRecord = (): boolean => {
+    const listed = execGit(['ls-files', '-v', '--', ...stagedPaths], { cwd });
+    // Only the TAG is read; the path is deliberately never parsed out — see the
+    // `core.quotePath` note above, and the dry run below needs no path anyway.
+    if (listed.exitCode === 0
+      && !listed.stdout.split('\n').some((line) => /^[a-z] /.test(line))) return false;
+    return execGit(
+      ['commit', '--dry-run', '--porcelain', '-m', sanitizedMessage as string, '--', ...stagedPaths],
+      { cwd },
+    ).exitCode === 0;
+  };
   const nothingToCommit = guardApplies
     && (stagedPaths.length === 0
       || (!partialCommitRefused
         && execGit(
           ['diff', '--quiet', '--ignore-submodules=dirty', '--no-textconv', 'HEAD', '--', ...stagedPaths],
           { cwd },
-        ).exitCode === 0));
+        ).exitCode === 0
+        && !assumeUnchangedWouldRecord()));
   if (nothingToCommit) {
     const result = { committed: false, hash: null, reason: 'nothing_to_commit' };
     output(result, raw, 'nothing');

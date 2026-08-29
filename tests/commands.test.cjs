@@ -5386,23 +5386,129 @@ describe('#3776: query commit --files reports an empty diff as nothing_to_commit
     gitOrThrow(['add', '--', shared], { cwd: tmpDir });
   }
 
-  // Documented boundary, not an oversight. `git update-index --assume-unchanged`
-  // tells git to ignore working-tree changes to a path: `git add` then stages
-  // nothing, and BOTH diff forms (`--cached` and `HEAD`) report no difference —
-  // so no diff-based guard can see the change. `git commit -- <path>` is the
-  // odd one out, reading the working tree directly and recording it. Reporting
-  // `nothing_to_commit` is the answer consistent with this function's own
-  // staging step, which honoured the flag one loop earlier. Pinned so the
-  // behaviour is a decision on the record rather than an accident.
-  test('a modified assume-unchanged path reports nothing_to_commit', () => {
+  // The one state where `git diff` and `git commit -- <path>` genuinely
+  // disagree. `--assume-unchanged` makes `git add` stage nothing and BOTH diff
+  // forms (`--cached` and `HEAD`) report no difference, while
+  // `git commit -- <path>` reads the working tree directly and records it. The
+  // pre-#3776 build therefore COMMITTED this, and the guard must not turn a
+  // purely diagnostic fix into a silent drop of content the caller named in
+  // `--files`. Asking `git commit --dry-run` preserves the pre-fix outcome
+  // exactly, because it is the same decision the real commit makes.
+  test('a modified assume-unchanged path is still committed, not swallowed by the guard', () => {
     const rel = commitFixtureFile();
     gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir });
     fs.writeFileSync(path.join(tmpDir, rel), 'hello\nmodified under assume-unchanged\n');
 
     const output = commitFiles(rel);
+    assert.strictEqual(output.committed, true,
+      'git commit -- <path> reads the working tree and records it; the guard must not pre-empt that');
+    assert.strictEqual(
+      gitOrThrow(['show', 'HEAD:' + rel], { cwd: tmpDir }),
+      'hello\nmodified under assume-unchanged\n',
+      'and the content it records must be the working-tree content');
+  });
+
+  // THE OTHER DIRECTION, and the reason the check compares CONTENT rather than
+  // stopping at the `ls-files -v` tag. An unmodified assume-unchanged path has
+  // nothing to record; falling through on the tag alone would hand it to
+  // `git commit`, which — with any unrelated modified file present — prints
+  // `no changes added to commit`, a string the fallback does not match, and
+  // returns `commit_failed`. That is #3776 re-entered from the other side, the
+  // same shape `--ignore-submodules=none` would have re-entered it. Pinned so a
+  // later simplification to a tag-only test cannot pass.
+  test('an UNMODIFIED assume-unchanged path still reports nothing_to_commit, even with unrelated dirt', () => {
+    const rel = commitFixtureFile();
+    const unrelated = path.posix.join('.planning', 'unrelated.md');
+    fs.writeFileSync(path.join(tmpDir, unrelated), 'seed\n');
+    gitOrThrow(['add', '--', unrelated], { cwd: tmpDir });
+    gitOrThrow(['commit', '-m', 'seed unrelated'], { cwd: tmpDir });
+    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir });
+    // Unrelated modified work present — this is what turns git's answer from
+    // `nothing to commit` into `no changes added to commit`.
+    fs.writeFileSync(path.join(tmpDir, unrelated), 'unrelated edit\n');
+
+    assert.strictEqual(commitFiles(rel).reason, 'nothing_to_commit',
+      'nothing would land for the named path, so the guard must still answer nothing_to_commit');
+  });
+
+  // `--skip-worktree` is NOT a second instance of the above, and the PR body
+  // used to group them. `git add` exits 1 under it (the path reads as outside
+  // the sparse-checkout definition), so it fails closed as `staging_failed`
+  // ABOVE this guard and never reaches the empty-diff decision at all.
+  test('a modified skip-worktree path fails closed as staging_failed, never reaching the guard', () => {
+    const rel = commitFixtureFile();
+    gitOrThrow(['update-index', '--skip-worktree', '--', rel], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, rel), 'hello\nmodified under skip-worktree\n');
+
+    const output = commitFiles(rel);
     assert.strictEqual(output.committed, false);
-    assert.strictEqual(output.reason, 'nothing_to_commit',
-      'git add honoured the flag, so the guard must report the same thing it did');
+    assert.strictEqual(output.reason, 'staging_failed',
+      'git add refuses the path, so the staging-failure block above the guard owns this case');
+  });
+
+  // The same flag with the path ABSENT from disk — the canonical sparse shape —
+  // takes a DIFFERENT route, and the distinction is worth pinning because the
+  // obvious reading of the arm above ("skip-worktree never reaches the guard")
+  // is too strong. A missing path is skipped before `git add` runs at all
+  // (#2014), so `stagedPaths` is empty and the guard's own
+  // `stagedPaths.length === 0` arm answers it. `nothing_to_commit` is the
+  // correct answer there — the file does not exist, so a commit would record
+  // nothing — and it is the PRE-FIX answer too, unchanged by this PR.
+  test('a skip-worktree path absent from disk reports nothing_to_commit via the missing-path arm', () => {
+    const rel = commitFixtureFile();
+    gitOrThrow(['update-index', '--skip-worktree', '--', rel], { cwd: tmpDir });
+    fs.unlinkSync(path.join(tmpDir, rel));
+
+    assert.strictEqual(commitFiles(rel).reason, 'nothing_to_commit',
+      'a missing path is skipped before git add, so the length === 0 arm owns this — not staging_failed');
+  });
+
+  // THREE ARMS PINNING WHY THE PROBE ASKS GIT RATHER THAN RECONSTRUCTING ITS
+  // ANSWER. Each one reds if the dry run is replaced by a
+  // `hash-object` vs `HEAD:<path>` blob comparison, and each is a silent drop
+  // of content the caller named — the exact class this whole guard is careful
+  // about.
+
+  // A mode-only change leaves the blob identical, so a content comparison sees
+  // nothing — while `git commit -- <path>` records the new mode.
+  test('a mode-only change to an assume-unchanged path is still committed', (t) => {
+    const rel = commitFixtureFile('exec.md');
+    // Windows, and any checkout with `core.filemode=false`, cannot represent
+    // the bit — `chmodSync` would then be a no-op and this arm would pass while
+    // pinning nothing. Assert the precondition and skip loudly instead.
+    gitOrThrow(['config', 'core.filemode', 'true'], { cwd: tmpDir });
+    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir });
+    fs.chmodSync(path.join(tmpDir, rel), 0o755);
+    if (!/^100755 /.test(gitOrThrow(['ls-files', '-s', '--', rel], { cwd: tmpDir }))
+      && (fs.statSync(path.join(tmpDir, rel)).mode & 0o111) === 0) {
+      t.skip('filesystem cannot represent the executable bit — nothing to pin here');
+      return;
+    }
+
+    assert.strictEqual(commitFiles(rel).committed, true,
+      'the mode moved and git would record it, so the guard must not report nothing_to_commit');
+    assert.match(
+      gitOrThrow(['ls-tree', 'HEAD', '--', rel], { cwd: tmpDir }), /^100755 /,
+      'and the recorded mode must actually be the executable one');
+  });
+
+  // A non-ASCII path is rendered QUOTED by `git ls-files -v` under the default
+  // `core.quotePath` (`"caf\303\251.md"`), so any probe that parses the path
+  // out of that output reads a filename that does not exist and silently
+  // concludes there is nothing to commit.
+  test('a modified assume-unchanged path with a non-ASCII name is still committed', () => {
+    const rel = commitFixtureFile('caf\u00e9.md');
+    // PIN the quoting explicitly. This arm's whole point is that a probe
+    // parsing the path out of `ls-files -v` reads `"caf\303\251.md"` and finds
+    // no such file; under an ambient `core.quotePath=false` the rejected
+    // implementation would pass here and the arm would be vacuous.
+    gitOrThrow(['config', 'core.quotePath', 'true'], { cwd: tmpDir });
+    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir });
+    fs.writeFileSync(path.join(tmpDir, rel), 'modified\n');
+
+    assert.strictEqual(commitFiles(rel).committed, true,
+      'core.quotePath must not be able to hide a real change from the probe');
+    assert.strictEqual(gitOrThrow(['show', 'HEAD:' + rel], { cwd: tmpDir }), 'modified\n');
   });
 
   // The probe compares the WORKING TREE to HEAD, so an unborn HEAD makes it
@@ -5564,6 +5670,20 @@ describe('#3859: the empty-diff probe is pinned against diff-only configuration'
       cleanup(subSrc);
     });
   }
+
+  // A submodule path cannot be hashed at all (`fatal: Unable to hash sub`),
+  // while `git commit -- sub` advances the recorded gitlink.
+  test('an assume-unchanged submodule with an advanced gitlink is still committed', () => {
+    bumpedSubmodule();
+    const before = gitOrThrow(['rev-parse', 'HEAD:sub'], { cwd: tmpDir }).trim();
+    gitOrThrow(['update-index', '--assume-unchanged', '--', 'sub'], { cwd: tmpDir });
+
+    assert.notStrictEqual(commitFiles('sub').reason, 'nothing_to_commit',
+      'the gitlink would advance, so the guard must stand aside');
+    assert.notStrictEqual(
+      gitOrThrow(['rev-parse', 'HEAD:sub'], { cwd: tmpDir }).trim(), before,
+      'and the recorded gitlink must actually advance');
+  });
 
   // The other direction, and the reason the pin is `=dirty` rather than `=none`.
   // A partial commit of a submodule path records the GITLINK, which moves only
