@@ -8135,6 +8135,20 @@ describe('#3781: acknowledge supports the heading-delimited entry shape', () => 
     assert.ok(ack.content.startsWith('## Deferred Items\n\n- a\n  status: acknowledged\n```\ncode\n'), ack.content);
   });
 
+  test('a heading whose TEXT is a fence delimiter is a heading, not a fence (round 5, RV6.5)', () => {
+    // The entry-level fence scan saw line 0 (`\`\`\``, the heading text) as an
+    // opener: every body line was fenced, the reader read no field, and the
+    // writer's marker landed on a line nothing reads.
+    for (const delim of ['```', '~~~']) {
+      const doc = `## Deferred Items\n\n### ${delim}\n- x\n  status: resolved\n`;
+      assert.deepStrictEqual(parseDeferredItemsWithStatus(doc).map((i) => i.status), ['resolved'], delim);
+      const open = `## Deferred Items\n\n### ${delim}\n- x\n`;
+      const ack = acknowledgeDeferredItem(open, parseDeferredItemsWithStatus(open)[0].name);
+      assert.equal(ack.status, 'ok', delim);
+      assert.equal(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged', delim);
+    }
+  });
+
   test('leaf line-0 rewrite keeps a closing `#` sequence (round 5, RV6.5)', () => {
     const doc = '## Deferred Items\n\n### status: open ###\n- did a thing\n';
     const ack = acknowledgeDeferredItem(doc, parseDeferredItemsWithStatus(doc)[0].name);

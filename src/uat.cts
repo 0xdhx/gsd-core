@@ -2325,7 +2325,7 @@ function acknowledgeHeadingShapedEntry({ content, sectionBody, deferredSection, 
     // a line the reader never reads: `ok` returned, item still outstanding.
     // Walk back over blank and fenced lines alike, classified exactly as the
     // reader classifies them, so the marker lands on a line the reader reads.
-    const fencedInEntry = fencedLineSet(readerLines);
+    const fencedInEntry = entryFencedLines(readerLines, DEFERRED_BULLET_MARKERS, entry.opener);
     let last = rawLines.length - 1;
     while (last > 0 && (readerLines[last].trim() === '' || fencedInEntry.has(last))) last--;
     // A pending entry's continuation sits two columns inside its own marker
@@ -3268,10 +3268,25 @@ function entryFieldLines(
   markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
   openerFlags?: boolean[],
 ): ({ key: string; value: string; valueStart: number } | null)[] {
-  const fenced = markers.blockStructure ? fencedLineSet(entryLines) : new Set<number>();
+  const fenced = entryFencedLines(entryLines, markers, openerFlags);
   return entryLines.map((rawLine, idx) => (
     fenced.has(idx) ? null : parseGapEntryFieldLine(rawLine, markers, stripsMarkerAt(idx, openerFlags))
   ));
+}
+
+/**
+ * The fenced lines of ONE entry, as the reader and the writer both see them.
+ * A leaf's line 0 is its heading TEXT, not a Markdown line: a heading that
+ * reads ``` or ~~~ is a heading, and must not open a fence over the body
+ * beneath it (round 5, RV6.5 — it fenced every field line, so the reader
+ * read nothing and the writer's marker landed on a line nothing reads).
+ * `openerFlags[0] === false` is the leaf tell: a pending or headless entry's
+ * line 0 is an accepted opener, and a marker line is never a delimiter.
+ */
+function entryFencedLines(entryLines: string[], markers: BulletMarkers, openerFlags?: boolean[]): Set<number> {
+  if (!markers.blockStructure) return new Set<number>();
+  const leaf = openerFlags !== undefined && openerFlags[0] === false;
+  return fencedLineSet(leaf ? ['', ...entryLines.slice(1)] : entryLines);
 }
 
 /**
