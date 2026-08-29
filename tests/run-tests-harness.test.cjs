@@ -16,7 +16,7 @@
 
 'use strict';
 
-const { describe, test, beforeEach, afterEach } = require('node:test');
+const { describe, test, before, after, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
@@ -817,17 +817,65 @@ test('noop', () => {});
   });
 
   describe('chunk-timeout instrumentation (#3889)', () => {
+    // Consolidation (CI cost, #4015): this describe block used to spawn the
+    // harness once PER assertion group (3 success-path runs + 2 timeout-path
+    // runs = 5 subprocess boots). Each boot is expensive — run-tests.cjs
+    // starts, globs the suite, then spawns `node --test` children — so on a
+    // CI shard already within ~39s of its 15-minute cap, paying for 5 boots
+    // to check facts that all hold against the SAME run is wasted spend.
+    // Below, exactly ONE successful run and ONE timed-out run are captured
+    // once (via `before`) and every assertion group below reads from those
+    // captured results instead of spawning its own. This is the whole
+    // savings — no assertion is weakened or removed.
+    const HANGS_FOREVER_BODY = `'use strict';
+const { test } = require('node:test');
+test('hangs forever', () => new Promise(() => {}));
+`;
+
+    let successDir;
+    let successRun;
+    let eventsDirBefore;
+    let eventsDirAfter;
+    let timeoutDir;
+    let timeoutRun;
+
+    before(() => {
+      // Single SUCCESS-path run, reused by T2/T3/T5 below.
+      successDir = createTempDir('gsd-3889-success-');
+      seed(successDir, ['a.test.cjs']);
+      eventsDirBefore = fs.readdirSync(require('os').tmpdir())
+        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+      successRun = runHarness(successDir, []);
+      eventsDirAfter = fs.readdirSync(require('os').tmpdir())
+        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+
+      // Single TIMEOUT-path run, reused by T1/T4 below. 2000ms is kept —
+      // it is already the smallest value this suite used anywhere for the
+      // per-chunk timeout, and going lower risks flaking on a loaded CI
+      // box that has to boot node --test, register the hang, and observe
+      // the kill inside the window.
+      timeoutDir = createTempDir('gsd-3889-timeout-');
+      fs.writeFileSync(path.join(timeoutDir, 'hangs.test.cjs'), HANGS_FOREVER_BODY, 'utf8');
+      timeoutRun = runHarness(timeoutDir, [], {
+        RUN_TESTS_NO_FORCE_EXIT: '1',
+        RUN_TESTS_CHUNK_TIMEOUT_MS: '2000',
+      });
+    });
+
+    after(() => {
+      cleanup(successDir);
+      cleanup(timeoutDir);
+    });
+
     // T2: per-chunk elapsed timing appears on the normal SUCCESS path, not
     // only when something goes wrong — this is what makes "which chunk is
     // drifting toward the cap" readable across ordinary green runs.
     test('a successful chunk prints its elapsed time', () => {
-      seed(tmpDir, ['a.test.cjs']);
-      const r = runHarness(tmpDir, []);
-      assert.strictEqual(r.status, 0, `expected a clean pass; STDERR:\n${r.stderr}`);
+      assert.strictEqual(successRun.status, 0, `expected a clean pass; STDERR:\n${successRun.stderr}`);
       assert.match(
-        r.stderr,
+        successRun.stderr,
         /run-tests: chunk 1\/1 completed in \d+ms/,
-        `expected a per-chunk completion timing line; STDERR:\n${r.stderr}`,
+        `expected a per-chunk completion timing line; STDERR:\n${successRun.stderr}`,
       );
     });
 
@@ -838,18 +886,12 @@ test('noop', () => {});
     // prefix) rather than any run-tests-owned directory, since that IS the
     // leak surface being guarded.
     test('the ndjson reporter temp dir is cleaned up after a successful run', () => {
-      seed(tmpDir, ['a.test.cjs']);
-      const before = fs.readdirSync(require('os').tmpdir())
-        .filter((n) => n.startsWith('gsd-run-tests-events-'));
-      const r = runHarness(tmpDir, []);
-      assert.strictEqual(r.status, 0, `expected a clean pass; STDERR:\n${r.stderr}`);
-      const after = fs.readdirSync(require('os').tmpdir())
-        .filter((n) => n.startsWith('gsd-run-tests-events-'));
+      assert.strictEqual(successRun.status, 0, `expected a clean pass; STDERR:\n${successRun.stderr}`);
       assert.deepStrictEqual(
-        after,
-        before,
+        eventsDirAfter,
+        eventsDirBefore,
         `expected no leaked gsd-run-tests-events-* temp dir after a successful run; ` +
-          `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`,
+          `before=${JSON.stringify(eventsDirBefore)} after=${JSON.stringify(eventsDirAfter)}`,
       );
     });
 
@@ -868,13 +910,11 @@ test('noop', () => {});
     // on any platform where fsync(devNull) actually returns EINVAL (this
     // suite's own bench platform, historically).
     test('a successful run never surfaces the devNull fsync/EINVAL reporter crash', () => {
-      seed(tmpDir, ['a.test.cjs']);
-      const r = runHarness(tmpDir, []);
-      assert.strictEqual(r.status, 0, `expected a clean pass; STDERR:\n${r.stderr}`);
+      assert.strictEqual(successRun.status, 0, `expected a clean pass; STDERR:\n${successRun.stderr}`);
       assert.doesNotMatch(
-        r.stderr,
+        successRun.stderr,
         /EINVAL|invalid argument, fsync|WriteStream instance/i,
-        `expected no reporter-destination fsync crash; STDERR:\n${r.stderr}`,
+        `expected no reporter-destination fsync crash; STDERR:\n${successRun.stderr}`,
       );
     });
 
@@ -884,25 +924,16 @@ test('noop', () => {});
     // (never resolving) keeps its test:start event unmatched by any
     // test:pass/test:fail in the ndjson companion reporter's output, which
     // is exactly the signal the diagnostic reads back on timeout.
-    const HANGS_FOREVER_BODY = `'use strict';
-const { test } = require('node:test');
-test('hangs forever', () => new Promise(() => {}));
-`;
     test('a chunk timeout names the file that was in flight when killed', () => {
-      fs.writeFileSync(path.join(tmpDir, 'hangs.test.cjs'), HANGS_FOREVER_BODY, 'utf8');
-      const r = runHarness(tmpDir, [], {
-        RUN_TESTS_NO_FORCE_EXIT: '1',
-        RUN_TESTS_CHUNK_TIMEOUT_MS: '2000',
-      });
       assert.notStrictEqual(
-        r.status,
+        timeoutRun.status,
         0,
-        `expected non-zero exit from a timed-out chunk; got status=${r.status}\nSTDERR:\n${r.stderr}`,
+        `expected non-zero exit from a timed-out chunk; got status=${timeoutRun.status}\nSTDERR:\n${timeoutRun.stderr}`,
       );
       assert.match(
-        r.stderr,
+        timeoutRun.stderr,
         /In flight when killed.*hangs\.test\.cjs/s,
-        `expected the diagnostic to NAME the in-flight file, not just list the chunk; STDERR:\n${r.stderr}`,
+        `expected the diagnostic to NAME the in-flight file, not just list the chunk; STDERR:\n${timeoutRun.stderr}`,
       );
     });
 
@@ -1039,21 +1070,16 @@ test('hangs forever', () => new Promise(() => {}));
     // --test-reporter flags must not change detection, the abort-on-timeout
     // control flow, or the exit code.
     test('existing timeout diagnostic and abort behavior are unchanged', () => {
-      fs.writeFileSync(path.join(tmpDir, 'hangs.test.cjs'), HANGS_FOREVER_BODY, 'utf8');
-      const r = runHarness(tmpDir, [], {
-        RUN_TESTS_NO_FORCE_EXIT: '1',
-        RUN_TESTS_CHUNK_TIMEOUT_MS: '2000',
-      });
-      assert.notStrictEqual(r.status, 0, `expected non-zero exit; STDERR:\n${r.stderr}`);
+      assert.notStrictEqual(timeoutRun.status, 0, `expected non-zero exit; STDERR:\n${timeoutRun.stderr}`);
       assert.match(
-        r.stderr,
+        timeoutRun.stderr,
         /exceeded the per-chunk timeout/,
-        `expected the original timeout diagnostic wording to survive; STDERR:\n${r.stderr}`,
+        `expected the original timeout diagnostic wording to survive; STDERR:\n${timeoutRun.stderr}`,
       );
       assert.match(
-        r.stderr,
+        timeoutRun.stderr,
         /run-tests: chunk 1\/1 was killed after \d+ms/,
-        `expected the new killed/elapsed line; STDERR:\n${r.stderr}`,
+        `expected the new killed/elapsed line; STDERR:\n${timeoutRun.stderr}`,
       );
     });
   });
