@@ -2604,3 +2604,128 @@ describe('#3726: milestone complete refuses to mutate without --confirm', () => 
     assert.deepStrictEqual(snapshotPlanning(), before, 'a version-less invocation must leave .planning/ untouched');
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// #3726 docs pin (PR #3774 review, Minor 1). The changeset is `type: Fixed`,
+// which the docs-required lint exempts, so nothing in CI would notice a later
+// edit that reinstated the bare-`--force` override prose or dropped
+// `--confirm` from the synopsis — doc completeness for this command would
+// otherwise rest on review attention alone. This block is that gate. It is
+// registered in scripts/docs-guard-registry.cjs so it runs on the PR that
+// changes these docs, not only after merge.
+// ────────────────────────────────────────────────────────────────────────
+describe('#3726 milestone complete docs pin', () => {
+  const REPO_ROOT = path.join(__dirname, '..');
+  const readDoc = (...segs) => fs.readFileSync(path.join(REPO_ROOT, 'docs', ...segs), 'utf-8');
+  const SYNOPSIS = 'node gsd-tools.cjs milestone complete <version> (--confirm | --dry-run)';
+  const MIRRORS = [['CLI-TOOLS.md'], ['ja-JP', 'CLI-TOOLS.md'], ['ko-KR', 'CLI-TOOLS.md'], ['pt-BR', 'CLI-TOOLS.md'], ['zh-CN', 'CLI-TOOLS.md']];
+
+  test('the synopsis renders --confirm and --dry-run as alternatives in CLI-TOOLS.md and every localized mirror', () => {
+    for (const rel of MIRRORS) {
+      const synopsis = readDoc(...rel).split('\n').filter((l) => l.includes('milestone complete <version>'));
+      assert.strictEqual(synopsis.length, 1, `docs/${rel.join('/')}: expected exactly one synopsis line`);
+      assert.ok(synopsis[0].startsWith(SYNOPSIS), `docs/${rel.join('/')}: synopsis must begin "${SYNOPSIS}", got: ${synopsis[0]}`);
+    }
+  });
+
+  test('the flag table documents --confirm as required to mutate and not implied by --force', () => {
+    const row = readDoc('CLI-TOOLS.md').split('\n').find((l) => l.startsWith('| `--confirm` |'));
+    assert.ok(row, 'docs/CLI-TOOLS.md: `--confirm` flag row missing');
+    assert.ok(row.includes('Required to mutate'), '`--confirm` row must say it is required to mutate');
+    assert.ok(row.includes('Not implied by `--force`'), '`--confirm` row must say --force does not imply it');
+  });
+
+  // The milestone-complete sections of each doc, bounded by heading — a
+  // renamed heading fails loudly here instead of silently emptying the sweep.
+  function section(text, doc, startRe, endRe) {
+    const lines = text.split('\n');
+    const from = lines.findIndex((l) => startRe.test(l));
+    assert.ok(from >= 0, `docs/${doc}: section heading ${startRe} not found`);
+    let to = lines.findIndex((l, i) => i > from && endRe.test(l));
+    if (to < 0) to = lines.length;
+    return lines.slice(from, to).map((line, i) => ({ line, n: from + i + 1 }));
+  }
+  const SECTIONS = () => {
+    const cli = readDoc('CLI-TOOLS.md');
+    return [
+      { doc: 'CLI-TOOLS.md', rows: section(cli, 'CLI-TOOLS.md', /^### `milestone complete` refuses an untrustworthy window/, /^## /) },
+      { doc: 'CLI-TOOLS.md', rows: section(cli, 'CLI-TOOLS.md', /^## Milestone Commands/, /^## /) },
+      { doc: 'COMMANDS.md', rows: section(readDoc('COMMANDS.md'), 'COMMANDS.md', /^### `\/gsd-complete-milestone`/, /^### /) },
+    ];
+  };
+
+  // Prose is soft-wrapped, so a line is the wrong unit: `Pass \`--force --confirm\`
+  // to override … (\`--force\` alone does not imply it)` spans two lines in
+  // docs/CLI-TOOLS.md, and the second reads bare on its own. A table row is a
+  // paragraph on its own; every paragraph is joined and split at sentence
+  // boundaries. The unit reported is the paragraph's first line.
+  function units(rows) {
+    const out = [];
+    let para = [];
+    const flush = () => {
+      if (para.length === 0) return;
+      const n = para[0].n;
+      const text = para.map(({ line }) => line.trim()).join(' ');
+      // Clause-level: a semicolon-spliced instruction ("…to override; or pass
+      // `--force` alone…") must not coalesce with the compliant clause before it.
+      for (const sentence of text.split(/(?<=[.!?;])\s+/)) out.push({ n, unit: sentence });
+      para = [];
+    };
+    for (const row of rows) {
+      const line = row.line.trim();
+      if (line === '') { flush(); continue; }
+      // A table row is its own paragraph, but it is still sentence-split: a
+      // bare instruction appended inside the `--confirm` cell must not hide
+      // behind that cell's own `--confirm` token (reviewer-found escape).
+      if (line.startsWith('|')) { flush(); para.push({ line, n: row.n }); flush(); continue; }
+      para.push(row);
+    }
+    flush();
+    return out;
+  }
+
+  // Every --force unit that legitimately carries no --confirm, pinned EXACTLY —
+  // the identity-ratchet shape scripts/lib/allowlist-ratchet.cjs uses for the
+  // repo's lints. Classifying prose intent by regex is a snapshot of the shapes
+  // seen so far (the first version of this pin was one, and a reviewer refuted
+  // it with "re-run with `--force`"); pinning the benign set instead means a
+  // new --force sentence or clause without --confirm fails, whatever its
+  // wording, and an edit to a benign one fails loudly until the list is
+  // updated by hand. Named residual: a bare instruction spliced into the SAME
+  // clause as a compliant one ("…to override, or just `--force` if you like")
+  // coalesces with it and passes here; the test below pins the four known
+  // instructions by guard name (a substring match on each instruction's own
+  // `--force --confirm` text), so those cannot lose the pairing unnoticed.
+  const BENIGN_BARE_FORCE_UNITS = [
+    '| `--force` | Override the unstarted-phase guard (see below).',
+    'Not implied by `--force`, which only overrides the guards below.',
+    '`--force` alone does not imply it).',
+    "The guard runs whenever `--force` is absent, independent of `STATE.md`'s `milestone:` field — if that field is present but does not match `<version>`, a WARNING naming both values is emitted to stderr and the scan still runs (#2946).",
+  ];
+
+  test('inside the milestone complete sections, every --force unit without --confirm is a pinned benign one', () => {
+    const bare = [];
+    for (const { doc, rows } of SECTIONS()) {
+      for (const { n, unit } of units(rows)) {
+        if (unit.includes('--force') && !unit.includes('--confirm')) bare.push({ doc, n, unit });
+      }
+    }
+    const unexpected = bare.filter(({ unit }) => !BENIGN_BARE_FORCE_UNITS.includes(unit));
+    assert.deepStrictEqual(unexpected.map(({ doc, n, unit }) => `docs/${doc}:${n} ${unit.slice(0, 100)}`), [],
+      'a --force sentence without --confirm that is not in BENIGN_BARE_FORCE_UNITS — --force alone refuses since #3726; an override instruction must say --force --confirm, and a genuinely benign new sentence is added to the pinned list by hand');
+    const missing = BENIGN_BARE_FORCE_UNITS.filter((u) => !bare.some(({ unit }) => unit === u));
+    assert.deepStrictEqual(missing, [], 'a pinned benign unit no longer appears verbatim — update BENIGN_BARE_FORCE_UNITS to the edited text (or drop it) so the pin stays exact');
+  });
+
+  test('both guard-override instructions in each doc read --force --confirm', () => {
+    // Pinned by guard, not by count: a lost instruction cannot be masked by an
+    // unrelated new match. CLI-TOOLS.md carries one guard per section; the
+    // COMMANDS.md section carries both as blockquotes.
+    const has = (rows, re) => rows.some(({ line }) => re.test(line));
+    const [truncated, unstarted, commands] = SECTIONS();
+    assert.ok(has(truncated.rows, /Pass `--force --confirm` to override/), 'docs/CLI-TOOLS.md truncated-window guard: override instruction missing or not --force --confirm');
+    assert.ok(has(unstarted.rows, /Pass `--force --confirm` to override/), 'docs/CLI-TOOLS.md unstarted-phase guard: override instruction missing or not --force --confirm');
+    assert.ok(has(commands.rows, /\*\*Truncated-window guard\.\*\*.*milestone complete <version> --force --confirm/), 'docs/COMMANDS.md truncated-window guard: override instruction missing or not --force --confirm');
+    assert.ok(has(commands.rows, /\*\*Unstarted-phase guard\.\*\*.*milestone complete <version> --force --confirm/), 'docs/COMMANDS.md unstarted-phase guard: override instruction missing or not --force --confirm');
+  });
+});
