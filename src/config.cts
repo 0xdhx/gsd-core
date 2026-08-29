@@ -13,6 +13,9 @@ import os from 'node:os';
 import io = require('./io.cjs');
 const { output, error, ERROR_REASON } = io;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import cliExitMod = require('./cli-exit.cjs');
+const { ExitError } = cliExitMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import configLoader = require('./config-loader.cjs');
 const { CONFIG_DEFAULTS } = configLoader;
 import { platformWriteSync, platformEnsureDir } from './shell-command-projection.cjs';
@@ -108,6 +111,11 @@ const SCHEMA_DEFAULTS: Record<string, unknown> = {
   // manifest default rather than "Key not found". Derived from the defaults manifest so
   // the manifest stays the single source of truth.
   'planning.pr_strict': CONFIG_DEFAULTS.pr_strict,
+  // #3801: execute-plan reads this key on every run; an absent key must resolve
+  // to the manifest default (2) rather than "Key not Found" — previously the
+  // effective default existed only as the workflow's shell fallback and the
+  // docs disagreed (settings-advanced said 3). Manifest stays the one owner.
+  'workflow.inline_plan_threshold': CONFIG_DEFAULTS.inline_plan_threshold,
 };
 
 /**
@@ -1012,6 +1020,15 @@ function cmdConfigGet(cwd: string, keyPath: string | undefined, raw: boolean, de
       error('No config.json found at ' + configPath, ERROR_REASON.CONFIG_NO_FILE);
     }
   } catch (err) {
+    // ADR-3889: error() now throws ExitError (carries no message) instead of
+    // calling process.exit() directly. The message-sniffing check below
+    // (`.startsWith('No config.json')`) can never match an ExitError raised
+    // by the "no config.json" error() call above it — ExitError.message
+    // defaults to `process exit ${code}` when no message is passed — so
+    // without this unconditional guard that ExitError falls through and gets
+    // re-wrapped as a WRONG reason (CONFIG_PARSE_FAILED instead of
+    // CONFIG_NO_FILE) with a nonsense message, plus a duplicate stderr write.
+    if (err instanceof ExitError) throw err;
     if ((err as Error).message.startsWith('No config.json')) throw err;
     error('Failed to read config.json: ' + (err as Error).message, ERROR_REASON.CONFIG_PARSE_FAILED);
   }
@@ -1204,7 +1221,11 @@ function cmdConfigPath(cwd: string, _raw: boolean, workstreamContext: Workstream
  */
 function cmdMigrateConfig(cwd: string, raw: boolean): void {
   const ws = process.env['GSD_WORKSTREAM'] || null;
-  const report = migrateOnDisk(cwd, ws || undefined);
+  // #3749: resolve the migration target through the project-aware resolver so
+  // GSD_PROJECT scopes the write; migrateOnDisk itself cannot (see its
+  // configPathOverride note).
+  const scopedConfigPath = path.join(planningDir(cwd, ws || undefined), 'config.json');
+  const report = migrateOnDisk(cwd, ws || undefined, scopedConfigPath);
 
   // #3760: deduplicated on (path, reason), so a repeated invocation stays quiet.
   if (report.skipped.length > 0) {

@@ -22,7 +22,7 @@ import markdownTable = require('./markdown-table.cjs');
 const { splitTableRow, isDelimiterRow } = markdownTable;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import coreUtils = require('./core-utils.cjs');
-const { toPosixPath } = coreUtils;
+const { toPosixPath, normalizeLineEndings } = coreUtils;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspace = require('./planning-workspace.cjs');
 const { planningDir } = planningWorkspace;
@@ -34,7 +34,7 @@ import phaseIdMod = require('./phase-id.cjs');
 const { PHASE_NUMBER_TOKEN_SOURCE, scopeToPhase } = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocator = require('./phase-locator.cjs');
-const { getArchivedPhaseDirs, listMilestonePhaseDirs } = phaseLocator;
+const { listMilestonePhaseDirs, getAllArchivedPhaseDirs } = phaseLocator;
 import { requireSafePath, sanitizeForDisplay } from './security.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- config-loader.cjs is an export= CommonJS module
 import configLoader = require('./config-loader.cjs');
@@ -114,6 +114,25 @@ function selectPhaseUatFiles(files: string[], phaseDirName: string): string[] {
   return scopeToPhase(files.filter((f) => f.includes('-UAT') && f.endsWith('.md')), phaseDirName);
 }
 
+/**
+ * The ONE read boundary for every document `cmdAuditUat` scans off disk
+ * (#3707-CR follow-up MAJOR). Wraps `fs.readFileSync` +
+ * `normalizeLineEndings` in a single seam so a lone-CR-separated
+ * `*-UAT.md`, `*-VERIFICATION.md`, or `deferred-items.md` is normalized BY
+ * CONSTRUCTION before it reaches ANY downstream parser — current
+ * (`parseUatItemsWithStats`, `parseVerificationItems`, `parseDeferredItems`)
+ * or future. Fixing this per-parser was the original (#3707-CR) MEDIUM fix's
+ * mistake: two of the four ingresses in this function were normalized by
+ * editing their own parsers directly, and the other two (VERIFICATION,
+ * deferred-items.md) were missed precisely because nothing forced a new call
+ * site to remember the step. Routing every read through this function
+ * removes that failure mode: a parser added later needs no line-ending logic
+ * of its own, because the text it receives is already normalized.
+ */
+function readNormalizedDocument(filePath: string): string {
+  return normalizeLineEndings(fs.readFileSync(filePath, 'utf-8'));
+}
+
 function cmdAuditUat(cwd: string, raw: boolean): void {
   const phasesDir = path.join(planningDir(cwd), 'phases');
   const hasActivePhases = fs.existsSync(phasesDir);
@@ -127,10 +146,13 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
   // mattering when a milestone closes: a deferred human-UAT scenario or a
   // `skipped` live-stack test is exactly what gets archived still-open.
   //
-  // Reuses the canonical `getArchivedPhaseDirs` seam (phase-locator.cts), which
+  // Reuses the canonical `getAllArchivedPhaseDirs` seam (phase-locator.cts), which
   // `findPhaseInternal` already uses for this same fallback, so the archive
   // layout convention stays owned by one module.
-  const archivedDirs = getArchivedPhaseDirs(cwd);
+  // #3804: the guard AND the scan use the cross-workstream enumeration —
+  // a project whose only phases live in workstream milestone trees is a
+  // fully-populated audit, not a broken install.
+  const archivedDirs = getAllArchivedPhaseDirs(cwd);
   if (!hasActivePhases && archivedDirs.length === 0) {
     error('No phases directory found in planning directory');
   }
@@ -174,7 +196,7 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     // the reason scopeToPhase has no unfiltered fallback.
     for (const file of selectPhaseUatFiles(files, dir)) {
       const uatFilePath = path.join(phaseDir, file);
-      const content = fs.readFileSync(uatFilePath, 'utf-8');
+      const content = readNormalizedDocument(uatFilePath);
       const { items, headingsSeen } = parseUatItemsWithStats(content);
       const status = (extractFrontmatter(content, uatFilePath).status as string || 'unknown');
       // `parse_gap` means the file contained `### N.` test blocks that
@@ -235,7 +257,7 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     // for the same reason as the UAT loop above.
     for (const file of scopeToPhase(files.filter(f => f.includes('-VERIFICATION') && f.endsWith('.md')), dir)) {
       const verificationFilePath = path.join(phaseDir, file);
-      const content = fs.readFileSync(verificationFilePath, 'utf-8');
+      const content = readNormalizedDocument(verificationFilePath);
       const status = extractFrontmatter(content, verificationFilePath).status as string || 'unknown';
       if (status === 'human_needed' || status === 'gaps_found') {
         const items = parseVerificationItems(content, status, verificationFilePath);
@@ -263,7 +285,7 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     // required.
     const deferredFile = 'deferred-items.md';
     if (files.includes(deferredFile)) {
-      const content = fs.readFileSync(path.join(phaseDir, deferredFile), 'utf-8');
+      const content = readNormalizedDocument(path.join(phaseDir, deferredFile));
       const items = parseDeferredItems(content);
       if (items.length > 0) {
         results.push({
@@ -364,6 +386,13 @@ function cmdRenderCheckpoint(cwd: string, options: { file?: string } = {}, raw: 
 // ─── parseCurrentTest ─────────────────────────────────────────────────────────
 
 function parseCurrentTest(content: string): CurrentTest {
+  // #3707-CR: this is the render-checkpoint path's own independent ingress
+  // into `tokenizeHeadings` (via the `parseFirstPendingTest` fallback below),
+  // separate from `parseUatItemsWithStats`'s. Normalize here too, ONCE, so a
+  // lone-CR document cannot hide its first pending row from this path either
+  // — see `normalizeLineEndings` for why.
+  content = normalizeLineEndings(content);
+
   // Use the seam to locate the ## Current Test section (ADR-1372 T5).
   // HTML-comment stripping within the section body is UAT-specific, so we keep
   // the comment removal caller-side after extracting the body.
@@ -1220,10 +1249,21 @@ function countUnattributedIndentedRows(surface: string): number {
  * Reported separately so a consumer that must decide whether to WITHHOLD a
  * derived number — as opposed to merely REPORT the gap — can tell "a row I
  * definitely could not read" from "a row I possibly mis-counted".
- * `src/planning-inspect.cts`'s `buildUatRows` is that consumer; `cmdAuditUat`
- * is not, and still gates `parse_gap` on the total.
+ *
+ * #3707-CR: `src/planning-inspect.cts`'s `buildUatRows` does NOT destructure
+ * this field (verified — it and `cmdAuditUat` both consume only `items` and
+ * `headingsSeen`), correcting an earlier stated instruction that it did.
+ * `shortfallBlocks` currently has NO production consumer outside this
+ * function's own computation. It is retained on the return value anyway,
+ * deliberately, as part of this function's published stats contract — tests
+ * assert on the full `{ items, headingsSeen, shortfallBlocks }` shape, and
+ * dropping a returned field is a wider, unrelated change than a line-ending
+ * fix warrants. A future consumer that needs to distinguish an
+ * accepted-over-report shortfall from the rest of `headingsSeen` (the
+ * original design intent above) can still do so.
  */
 function parseUatItemsWithStats(content: string): { items: UatItem[]; headingsSeen: number; shortfallBlocks: number } {
+  content = normalizeLineEndings(content);
   const items: UatItem[] = [];
   let headingsSeen = 0;
   let shortfallBlocks = 0;
@@ -1422,7 +1462,45 @@ function parseUatItemsWithStats(content: string): { items: UatItem[]; headingsSe
     // doing so previously changed `categorizeItem`'s classification for
     // shapes origin/next categorized differently (an unpinned behavior
     // change, not something the blocker required).
-    const resultLineMatch = fenceStrippedBlock.match(/^result:\s*\[?(\w+)\]?.*$/im);
+    // #3078-CR defect A fix, split-then-match scan: the previous `.match()`
+    // against `/^result:.../im` ran a MULTILINE regex anchor directly over
+    // unsplit block text. ECMA-262's LineTerminator set for `^`/`$` under
+    // `/m` includes U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR, but
+    // `content.split('\n')` and this module's own heading tokenizer do NOT
+    // treat either as a boundary. A `result:`-shaped line inside an
+    // `expected: |` scalar body, sitting immediately after one of these
+    // separators instead of an ordinary character, was therefore read as a
+    // genuine line start by the regex engine even though it is not
+    // `\n`-delimited from anything — it is exactly as much "one line" to
+    // every other consumer as the ordinary-character control case.
+    // Splitting on `\n` FIRST and testing each already-split line against a
+    // single-line (`/im`-anchor-free) pattern fixes this: a line is never
+    // split by U+2028/U+2029 (`String.prototype.split` matches only its
+    // literal separator argument, never the wider ECMA-262 LineTerminator
+    // set), so a `result:`-shaped line reachable only via one of those
+    // separators can never register as its own split line — the split view
+    // and the regex view are back in agreement, by construction, exactly the
+    // way `splitLines` module is documented to be immune to the sibling `\r`
+    // bug.
+    //
+    // FIRST MATCH WINS (byte-identical to origin/next otherwise): a block
+    // with more than one column-0 `result:` line resolves to the FIRST one
+    // encountered, same as the pre-existing `.match()` behaviour without
+    // `/g` — this is deliberately NOT an ambiguity/parse-gap case (that
+    // variant was tried and reverted: its boundary-truncation heuristic
+    // mistook an indented `### N.` living inside a legitimate block scalar
+    // for a heading boundary, corrupting every scalar/indent guard in this
+    // module — see tests/uat.test.cjs's #3078 scalar guard family).
+    // Trailing text is matched with `[^]*` rather than `.*` (final review
+    // MINOR 1): `.` never matches U+2028/U+2029, so a column-0 `result:`
+    // line whose trailing text contains one of those separators would
+    // otherwise never reach `$`, and the whole line would fail to match —
+    // an unpinned regression against origin/next, which parses it.
+    const RESULT_LINE_RE = /^result:\s*\[?(\w+)\]?[^]*$/i;
+    const resultLineMatch = fenceStrippedBlock
+      .split('\n')
+      .map((line) => line.match(RESULT_LINE_RE))
+      .find((m): m is RegExpMatchArray => m !== null);
     if (!resultLineMatch) {
       headingsSeen += 1;
       continue;
@@ -1924,14 +2002,27 @@ interface AcknowledgeDeferredItemResult {
  * `status:` away from `acknowledged` (or delete the field) and it resurfaces
  * with no separate cleanup step, exactly like every other category's marker.
  *
- * Deliberately refuses (`unsupported_heading_shape`) rather than guess when
- * the section uses the heading-delimited (#3457) entry shape: reliably
- * mapping a `splitDeferredHeadingEntriesDetailed` entry back to its EXACT source line
- * span is not safely derivable without re-deriving that function's
- * leaf/container walk against a document that may also mix in headless
- * (`splitGapsEntries`-derived) entries between headings — attempting it risks
- * writing into the WRONG entry. The bullet-only (headless) shape below is the
- * primary, documented SCOPE BOUNDARY convention and is handled precisely.
+ * #3781: the heading-delimited (#3457) entry shape is SUPPORTED. The
+ * reader's own walk, `splitDeferredHeadingEntriesDetailed`, records each
+ * entry's (start, end) character span in the SAME pass that groups its
+ * lines — the technique `splitGapsEntriesWithSpans` already uses for the
+ * headless shape — so there is no second walk for the writer to drift from
+ * (#3702 round 5: upstream's fix shipped a hyphen-only sibling walk, and this
+ * PR's widened grammar would have left it reading a different set of
+ * entries than the reader; folding the spans into the one walk is what
+ * keeps the writer and the reader on one grammar). The heading half,
+ * `acknowledgeHeadingShapedEntry`, shares this function's guards and its
+ * rewrite/insert machinery through the same `entryFieldLines` seam, with two
+ * shape-specific rules: the status search runs over the READER-form lines
+ * (the heading TEXT on a leaf's line 0 — including the corner where that
+ * text itself parses as a status field, rewritten with its ATX prefix
+ * preserved), and the insert branch inserts after the entry's LAST NON-BLANK
+ * line, because a heading entry's body is frequently a soft-wrapped
+ * sentence and splicing after line 0 would split it (#3781's sentence-split
+ * trap). Entries whose span embeds a GFM table row are non-contiguous (table
+ * lines are excluded from entries) and still refuse
+ * (`unsupported_heading_shape`) rather than risk a wrong-entry write; the
+ * fully-headless shape below is byte-for-byte the pre-#3781 path.
  *
  * Also refuses `ambiguous` (2+ entries share the exact same text — status must
  * be unique to identify one) and `not_found`, and is a no-op
@@ -1978,8 +2069,11 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
   );
   const sectionBody = deferredSection ? deferredSection.body : content;
 
-  if (splitDeferredHeadingEntriesDetailed(sectionBody) !== null) {
-    return { content, status: 'unsupported_heading_shape' };
+  // #3781: the heading-delimited shape carries its own spans, recorded by
+  // the reader's walk; the headless path below is unchanged.
+  const headingEntries = splitDeferredHeadingEntriesDetailed(sectionBody);
+  if (headingEntries !== null) {
+    return acknowledgeHeadingShapedEntry({ content, sectionBody, deferredSection, headingEntries, targetText });
   }
 
   const entries = splitGapsEntriesWithSpans(sectionBody, DEFERRED_BULLET_MARKERS);
@@ -2143,6 +2237,135 @@ function acknowledgeDeferredItem(content: string, targetText: string): Acknowled
 }
 
 /**
+ * #3781 — strip an ATX heading prefix, mirroring `tokenizeHeadings`' own ATX
+ * regex (≤3 leading spaces, 1–6 `#`, space/tab separator, optional closing
+ * `#` sequence) so the raw heading line reconciles byte-exactly with the
+ * hash-stripped `text` the reader exposes. Returns null when the line is not
+ * an ATX heading line.
+ */
+function stripAtxPrefix(line: string): string | null {
+  const m = /^( {0,3})(#{1,6})([ \t]+.*|[ \t]*)?$/.exec(line.replace(/\r$/, ''));
+  if (!m) return null;
+  return m[3] === undefined
+    ? ''
+    : m[3].replace(/^[ \t]+/, '').replace(/[ \t]+#+[ \t]*$/, '').replace(/^#+[ \t]*$/, '').trim();
+}
+
+/**
+ * #3781 — the heading-shaped half of `acknowledgeDeferredItem`, sharing the
+ * headless path's guards (not_found / ambiguous / already_resolved /
+ * match_verification_failed) and its rewrite/insert machinery, with the two
+ * shape-specific rules documented on `acknowledgeDeferredItem` (reader-form
+ * status search incl. the leaf line-0 ATX corner; insert after the entry's
+ * last non-blank line). Extracted so the headless path stays byte-identical.
+ *
+ * Every question about an entry is asked of the READER'S OWN answer (#3702
+ * round 3, B1/B3 — restated here rather than re-implemented): identity is
+ * `rawGapEntryText` over the walk's lines and opener flags, exactly as
+ * `parseDeferredItemsWithStatus` names the entry; the status line is whichever
+ * line `entryFieldLines` classifies as `status`, so a fenced `status:` or a
+ * rejected-ordinal prose line is never selected; and the rewrite lands at the
+ * offset the classifier reported. Upstream's #3781 carried its own
+ * hyphen-only walk and its own status regexes for this shape; under the
+ * widened marker grammar those would have read a different entry set than
+ * the reader and re-opened the writer/reader drift this PR closes.
+ */
+function acknowledgeHeadingShapedEntry({ content, sectionBody, deferredSection, headingEntries, targetText }: {
+  content: string;
+  sectionBody: string;
+  deferredSection: { body: string; bodyStart: number } | null;
+  headingEntries: DeferredHeadingEntry[];
+  targetText: string;
+}): AcknowledgeDeferredItemResult {
+  const matches = headingEntries.filter(
+    (e) => rawGapEntryText(e.lines, DEFERRED_BULLET_MARKERS, e.opener) === targetText,
+  );
+  if (matches.length === 0) return { content, status: 'not_found' };
+  if (matches.length > 1) return { content, status: 'ambiguous' };
+  const entry = matches[0];
+  // A table row inside the span: the walk skipped it, so `lines` is not 1:1
+  // with the raw slice and no write can be anchored. Refuse, as before #3781.
+  if (entry.embeddedTable) return { content, status: 'unsupported_heading_shape' };
+  const fields = extractGapEntryFields(entry.lines, DEFERRED_BULLET_MARKERS, entry.opener);
+  if (fields.status && fields.status.toLowerCase() === 'resolved') {
+    return { content, status: 'already_resolved' };
+  }
+
+  const sectionOffset = deferredSection ? deferredSection.bodyStart : 0;
+  const rawLines = sectionBody.slice(entry.start, entry.end).split('\n');
+  // The reader-form of the raw slice, index-aligned with it: a leaf's line 0
+  // is the heading TEXT (re-derived from the span's own bytes, not copied
+  // from the walk, so the verification below is genuine), every other line
+  // CR-stripped. Markers stay on the lines — the classifier strips them per
+  // the opener flags, exactly as the reader does.
+  const readerLines = rawLines.map((raw, i) => {
+    const line = raw.replace(/\r$/, '');
+    return i === 0 && entry.kind === 'leaf' ? (stripAtxPrefix(line) ?? line) : line;
+  });
+  // Genuine invariant re-verification: the identity re-derived from the
+  // span's bytes must be the identity that selected the entry — the span was
+  // recorded by offset bookkeeping independent of that comparison.
+  if (readerLines.length !== entry.lines.length
+    || rawGapEntryText(readerLines, DEFERRED_BULLET_MARKERS, entry.opener) !== targetText) {
+    return { content, status: 'match_verification_failed' };
+  }
+
+  const statusLineIdx = entryFieldLines(readerLines, DEFERRED_BULLET_MARKERS, entry.opener)
+    .findIndex((field) => field?.key === 'status');
+
+  let newRawLines: string[];
+  if (statusLineIdx === -1) {
+    // Insert branch: after the entry's LAST NON-BLANK line — a heading
+    // entry's body is frequently a soft-wrapped sentence, and splicing after
+    // line 0 would split it in half (#3781's sentence trap). The headless
+    // (no-heading-anywhere) path keeps its own splice-after-line-0 shape.
+    let last = rawLines.length - 1;
+    while (last > 0 && rawLines[last].replace(/\r$/, '').trim() === '') last--;
+    // A pending entry's continuation sits two columns inside its own marker
+    // indent (the entry's indent CHARACTERS, as the headless path does); a
+    // leaf's body lines are sibling bullets, and an indented bare field line
+    // among them is what the reader reads on that shape.
+    const indent = entry.kind === 'pending'
+      ? `${rawLines[0].replace(/\r$/, '').match(DEFERRED_BULLET_MARKERS.strip)?.[1] ?? ''}  `
+      : '  ';
+    // The inserted line copies the ending of the line it follows. When that
+    // line is the span's LAST, its terminator sits outside the span: the
+    // separator following the span decides, else (end of file) the section's
+    // own evidence — the same rule the headless path applies to line 0.
+    const followsLast = last === rawLines.length - 1;
+    const spanEnd = sectionOffset + entry.end;
+    const prevCr = followsLast
+      ? content.startsWith('\r\n', spanEnd) || (spanEnd >= content.length && crlfAtEof(sectionBody.slice(0, entry.start)))
+      : rawLines[last].endsWith('\r');
+    newRawLines = rawLines.slice();
+    if (followsLast && prevCr) newRawLines[last] = `${rawLines[last].replace(/\r$/, '')}\r`;
+    newRawLines.splice(last + 1, 0, `${indent}status: acknowledged${!followsLast && prevCr ? '\r' : ''}`);
+  } else {
+    // Rewrite at the offset the CLASSIFIER reported, on the RAW line — the
+    // marker, the indent, the key's spelling and any `**bold**` wrapper all
+    // survive because only the value is replaced. A leaf's line 0 is the
+    // heading line, so its ATX prefix is put back in front of the rewritten
+    // text (the reader reads the heading text itself as the field there).
+    const raw = rawLines[statusLineIdx];
+    const cr = raw.endsWith('\r') ? '\r' : '';
+    const line = raw.slice(0, raw.length - cr.length);
+    const reader = readerLines[statusLineIdx];
+    const field = parseGapEntryFieldLine(reader, DEFERRED_BULLET_MARKERS, stripsMarkerAt(statusLineIdx, entry.opener))!;
+    const prefix = reader.slice(0, field.valueStart);
+    const sep = /[ \t]$/.test(prefix) ? '' : ' ';
+    const atx = statusLineIdx === 0 && entry.kind === 'leaf'
+      ? (/^( {0,3}#{1,6}[ \t]+)/.exec(line)?.[1] ?? '')
+      : '';
+    newRawLines = rawLines.slice();
+    newRawLines[statusLineIdx] = `${atx}${prefix}${sep}acknowledged${cr}`;
+  }
+
+  const matchIndexInContent = sectionOffset + entry.start;
+  const newContent = content.slice(0, matchIndexInContent) + newRawLines.join('\n') + content.slice(matchIndexInContent + (entry.end - entry.start));
+  return { content: newContent, status: 'ok' };
+}
+
+/**
  * The two regex shapes a bullet-aware walk needs over one marker set: `open`
  * detects an entry-opening marker, `strip` additionally captures the line's
  * remaining content. Carrying both in ONE object is what keeps a detection
@@ -2265,9 +2488,9 @@ const THEMATIC_BREAK_RE = /^[ \t]*([-*+_])(?:[ \t]*\1){2,}[ \t]*$/;
  * Still NO second fence dialect (the rule `blankIndentedFenceDelimiters`
  * states): the classification is done by `scanFencedBlocks`, the one exported
  * CommonMark state machine, over a de-indented view. Run lengths, backtick
- * vs tilde, closer-must-match-and-not-trail, info-string rules and the
- * unterminated-at-EOF case are all still that engine's answers, not
- * re-derived here. Indent is the only dimension this hides from it, and it is
+ * vs tilde, closer-must-match-and-not-trail and info-string rules are all
+ * still that engine's answers, not re-derived here; the unterminated case is
+ * its answer too, bounded by the walk (round 5, B1 — see `scanFencesFrom`). Indent is the only dimension this hides from it, and it is
  * the exact dimension the deferred grammar has already declared it does not
  * measure. Index alignment is 1:1 by construction — `map` preserves length —
  * so every line index the engine returns still addresses the original line.
@@ -2289,6 +2512,11 @@ function deindentedForFences(lines: string[]): string[] {
  * ANY indent (round 4, M2 — see `deindentedForFences`).
  * #3702's wild records carry reproduction blocks; `+`-prefixed diff lines and
  * `1.`-numbered steps are their normal content, not entries.
+ *
+ * ENTRY-scoped: `lines` are ONE entry's lines (`entryFieldLines`), so an
+ * unterminated fence "running to the end" runs to the end of that entry —
+ * exactly the bound the section-level walks give it (round 5, B1; see
+ * `scanFencesFrom`). The two classifications agree by construction.
  */
 function fencedLineSet(lines: string[]): Set<number> {
   const fenced = new Set<number>();
@@ -2300,15 +2528,70 @@ function fencedLineSet(lines: string[]): Set<number> {
 }
 
 /**
- * Ordered-run memory keyed by INDENT (#3702 round 2, round review): each list
- * level carries its own "the previous opener here was ordered" flag, so a
- * nested `1. / 2.` run resolves its fields while a nested `3.` under a nested
- * `-` is prose, and a top-level run never leaks into a nested list. A new
- * opener at indent `d` resets every deeper level (a new item starts new
- * sub-lists); a paragraph after a blank at indent `d` ends the runs at `d`
- * and deeper; a thematic break or a heading clears everything.
+ * Fence classification for a SECTION-level walk (round 5, B1). Terminated
+ * fences are classified wholesale, as `fencedLineSet` does. The UNTERMINATED
+ * fence is the difference: `scanFencedBlocks` runs it to the end of the
+ * document, and so did round 4 — at any indent, since round 4's M2 — so one
+ * stray delimiter swallowed every entry after it into the entry before it.
+ * `- a` / blank / four-space ``` / blank / `- b` yielded ONE entry where
+ * `next` yields two: a widening that made an already-counted item vanish,
+ * in the direction of silent data loss, on the exact mixed-file shape #3702
+ * exists to close.
+ *
+ * The rule now: an unterminated fence runs to the end of its ENTRY, never
+ * past it. That is CommonMark's own answer for a fence inside a list item —
+ * the fence closes when its container does, and the container closes at the
+ * next item at its level — extended to a document-level stray delimiter,
+ * where CommonMark would swallow to end-of-file and this parser's fail-safe
+ * rule (surface a questionable entry rather than drop a real one) will not.
+ * The scan therefore reports the unterminated opener's index and leaves the
+ * bound to the walk, which knows what a top-level item is: on reaching one,
+ * the walk RESCANS from that line, so a delimiter after the bound is read on
+ * its own terms rather than as the content of a fence that has ended. Still
+ * no second fence dialect — every block boundary is `scanFencedBlocks`'
+ * answer; the walk contributes only the bound.
  */
-class OrderedRuns {
+interface FenceScan {
+  /** Lines inside a TERMINATED fence, delimiters included. */
+  fenced: Set<number>;
+  /** Every fence opener, terminated or not — an opener ends the list runs at its level, as a paragraph does. */
+  openers: Set<number>;
+  /** Opener index of the one unterminated fence in scope, else -1. Lines from it onward are fenced until the walk bounds it. */
+  unterminatedFrom: number;
+}
+
+function scanFencesFrom(lines: string[], from: number): FenceScan {
+  const scan: FenceScan = { fenced: new Set<number>(), openers: new Set<number>(), unterminatedFrom: -1 };
+  for (const block of scanFencedBlocks(deindentedForFences(lines.slice(from)))) {
+    const open = block.openLineIdx + from;
+    scan.openers.add(open);
+    const last = block.closeLineIdx === -1 ? lines.length - 1 : block.closeLineIdx + from;
+    for (let i = open; i <= last; i++) scan.fenced.add(i);
+  }
+  return scan;
+}
+
+/** The scan a grammar without block structure (`## Gaps`) walks under: nothing is fenced. Never mutated. */
+const NO_FENCES: FenceScan = { fenced: new Set<number>(), openers: new Set<number>(), unterminatedFrom: -1 };
+
+/**
+ * Per-indent LIST memory (#3702 round 2, round review; widened round 5, M2):
+ * each list level remembers whether a list is OPEN there, so an ordered
+ * marker that does not start at `0.`/`1.` is an item when it continues or
+ * follows a list at its level, and prose otherwise. A new opener at indent
+ * `d` resets every deeper level (a new item starts new sub-lists); a
+ * paragraph after a blank at indent `d` ends the lists at `d` and deeper; a
+ * thematic break or a heading clears everything.
+ *
+ * Round 2 keyed this on whether the previous opener was ORDERED, so a bullet
+ * item closed the run and `1. a` / `- b` / `5. c` folded `5. c` into `b` —
+ * the mixed-file under-report #3702 names as the shape that bites. In
+ * CommonMark `5. c` there opens a fresh ordered list (`start=5`): a non-1
+ * ordinal is refused only where it would INTERRUPT A PARAGRAPH (§5.3), and
+ * after a list item it interrupts nothing. Keying on "a list is open here"
+ * is that rule as far as this parser can state it without a paragraph model.
+ */
+class ListRuns {
   private readonly byIndent = new Map<number, boolean>();
   at(indent: number): boolean { return this.byIndent.get(indent) ?? false; }
   opened(indent: number, ordered: boolean): void {
@@ -2349,17 +2632,6 @@ function indentOf(line: string): number {
   return col;
 }
 
-/**
- * Line indices of fence OPENING delimiters — a fence at indent d ends the runs
- * at d and deeper. Reads the same de-indented view as `fencedLineSet` (round 4,
- * M2): a delimiter the gate treats as a fence must also end the run it sits in,
- * or a deep fence would hide its contents from the field reader while leaving
- * the list-run memory believing the run continued through it.
- */
-function fenceOpenerLines(lines: string[]): Set<number> {
-  return new Set(scanFencedBlocks(deindentedForFences(lines)).map((block) => block.openLineIdx));
-}
-
 /** A line classified as a list-item opener by `matchListOpener`. */
 interface ListOpener {
   /** Width of the indent before the marker. */
@@ -2370,35 +2642,44 @@ interface ListOpener {
 
 /**
  * Classify `line` as a list-item opener under `markers`, applying the
- * ORDERED-RUN rule (#3702 round 2, B2): a dot-terminated ordered marker opens
- * an item only when it starts at `1.` (`01.` included) or continues a run
- * that did — `inOrderedRun` is the caller's memory of whether the previous
- * accepted opener in the same list was ordered.
+ * ORDERED-START rule (#3702 round 2, B2; round 5, M1/M2): a dot-terminated
+ * ordered marker opens an item when it starts at `0.` or `1.` (`01.`
+ * included), or when a list is already open at its level (`inList` — the
+ * caller's per-indent memory).
  *
  * Why: `\d{1,9}\.` alone reads ordinary prose as a list. "2026. was a bad
  * year for this module" and, under a `### Notes` heading, "3. is the number
  * of retries we settled on." are both sentences, and both opened an entry on
  * round 1 — the second one straight through the "prose is not an item"
  * contract that round claimed to preserve. CommonMark §5.3 faces the same
- * ambiguity when an ordered list would interrupt a paragraph, and resolves it
- * the same way: the list must start with 1. The rule is applied wherever an
- * ordered marker is seen, not only at a paragraph boundary, because this
- * parser has no paragraph model to key it on. Numbers after the first are
- * ignored, as CommonMark ignores them, so `1. / 3. / 7.` is a three-item run.
+ * ambiguity when an ordered list would interrupt a paragraph and resolves it
+ * the same way: the list must start with 1. This parser has no paragraph
+ * model, so it applies that rule wherever NO list is open at the line's
+ * level — the positions a sentence can occupy. Where a list IS open,
+ * CommonMark accepts any start (a list item interrupts no paragraph), and so
+ * does this. Numbers after the first are ignored, as CommonMark ignores
+ * them, so `1. / 3. / 7.` is a three-item run.
  *
- * Stated cost, pinned by test: a hand-numbered list that starts at 2 is read
- * as prose. Every ordered record the #3702 scan found starts at 1, and the
- * hyphen-style `- ` alternative loses nothing, so the trade buys the prose
- * contract back at no measured cost.
+ * `0.` is accepted as a start (round 5, M1): CommonMark §5.2 permits any
+ * 1-9-digit start number and a `0.`-numbered list is ordinary; refusing it
+ * dropped ONLY the first item, since the run then started at `1.` — the
+ * under-report that looks like a clean parse. A sentence opening with "0."
+ * is not a shape anyone writes.
+ *
+ * Stated cost, pinned by test: a list whose first ordinal is 2 or more, at a
+ * paragraph position, reads as prose UNTIL its first `0.`/`1.` line — the
+ * loss is that prefix, not the whole list. Every ordered record the #3702
+ * scan found starts at 1, and the hyphen-style `- ` alternative loses
+ * nothing, so the trade buys the prose contract back at no measured cost.
  *
  * Bullet markers carry no rule — an asterisk bullet is not prose.
  */
-function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boolean): ListOpener | null {
+function matchListOpener(line: string, markers: BulletMarkers, inList: boolean): ListOpener | null {
   const m = line.match(markers.open);
   if (!m) return null;
   const token = m[2];
   const ordered = /^\d/.test(token);
-  if (ordered && !inOrderedRun && parseInt(token, 10) !== 1) return null;
+  if (ordered && !inList && parseInt(token, 10) !== 1) return null;
   return { indent: indentWidth(m[1], markers), ordered };
 }
 
@@ -2424,7 +2705,7 @@ function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boo
  * kept only when its body (minus table lines) contains at least one list item
  * — any of `-`, `*`, `+` or a dot-terminated ordered marker (#3702; the
  * hyphen-only form silently dropped `*`/`+`/ordered bodies), where an
- * ordered marker counts only under `matchListOpener`'s start-at-1 rule:
+ * ordered marker counts only under `matchListOpener`'s ordered-start rule:
  * - a prose-only or bare heading contributes nothing — "prose is not an item"
  *   is this parser's pre-existing contract (see the `# Notes` case);
  * - a table-only body is left entirely to `parseDeferredTableItems`, which
@@ -2436,11 +2717,36 @@ function matchListOpener(line: string, markers: BulletMarkers, inOrderedRun: boo
  * `splitGapsEntries` — headless parity, so loose bullets before a later
  * heading group (the mixed shape) stay one item each.
  */
-/** A heading-path entry with, per line, whether that line was an ACCEPTED list opener. */
+/**
+ * A heading-path entry: its lines, the splitter's per-line opener verdict,
+ * and — since #3781 — where it sits in the section body, so the writer can
+ * anchor a rewrite without a second walk.
+ */
 interface DeferredHeadingEntry {
   lines: string[];
   /** `opener[i]` — line `i` opened a list item under `matchListOpener`'s rules. */
   opener: boolean[];
+  /** `leaf` — a childless heading's entry, `lines[0]` its heading TEXT; `pending` — a headless bullet in the preamble or directly under a container heading. */
+  kind: 'leaf' | 'pending';
+  /** Character span within the section body — `sectionBody.slice(start, end)` is the entry's own raw text, CRLF intact, its lines 1:1 with `lines`. Both -1 when `embeddedTable`. */
+  start: number;
+  end: number;
+  /** A GFM table row sat inside the span. Table lines belong to `parseDeferredTableItems` and are never entry lines, so the raw slice and `lines` disagree and no write can be anchored (#3781). */
+  embeddedTable: boolean;
+}
+
+/** Character offset of each line's start and end within the text they were split from (on `\n`). */
+function lineOffsets(lines: string[]): { lineStarts: number[]; lineEnds: number[] } {
+  const lineStarts: number[] = [];
+  const lineEnds: number[] = [];
+  let cursor = 0;
+  for (const line of lines) {
+    lineStarts.push(cursor);
+    cursor += line.length;
+    lineEnds.push(cursor);
+    cursor += 1; // the '\n' separator — absent after the final line, but nothing reads past it
+  }
+  return { lineStarts, lineEnds };
 }
 
 /**
@@ -2449,12 +2755,17 @@ interface DeferredHeadingEntry {
  * strips the marker off EVERY body line before field extraction (#3457), and a
  * line whose ordinal `matchListOpener` REJECTED must not be stripped — or
  * "3. status: resolved" as prose loses its `3. ` and reads as a resolved field.
+ *
+ * Since #3781 it also records each entry's character span (see
+ * `DeferredHeadingEntry`) in this same pass — the reader's walk IS the
+ * writer's walk, so there is no second copy of the grouping rules to drift.
  */
 function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadingEntry[] | null {
   const headings = tokenizeHeadings(sectionBody);
   if (headings.length === 0) return null;
 
   const lines = sectionBody.split('\n');
+  const { lineStarts, lineEnds } = lineOffsets(lines);
   const headingByLine = new Map<number, { text: string; isContainer: boolean }>();
   for (let i = 0; i < headings.length; i++) {
     // Container iff the next heading is deeper (see doc comment). An empty
@@ -2465,16 +2776,26 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
   }
 
   const entries: DeferredHeadingEntry[] = [];
-  let current: DeferredHeadingEntry | null = null; // accumulating a leaf heading's entry
-  let pending: string[] = []; // preamble / container-heading body lines
+  // The leaf entry being accumulated, with the raw line range it spans.
+  let current: { lines: string[]; opener: boolean[]; startLine: number; endLine: number } | null = null;
   let currentHasBullet = false;
-  // Ordered-run memory for the leaf body being accumulated (#3702 round 2,
-  // B2) — reset at every heading, so `### Notes` + "3. is the number…" is
-  // prose while `### Steps` + "1. do / 2. then" is a list. A blank line then
-  // a non-indented non-list line is a PARAGRAPH, which ends the list
+  // The headless-shaped region being accumulated (preamble / a container
+  // heading's direct lines): the reader's table-filtered, CR-stripped view,
+  // plus the raw line range it spans.
+  let pending: string[] = [];
+  let pendingStartLine = -1;
+  let pendingEndLine = -1;
+  // Table lines are never entry lines; where one sits INSIDE an entry's raw
+  // range, that entry's span is non-contiguous (#3781, `embeddedTable`).
+  const tableLines: number[] = [];
+  const tableWithin = (from: number, to: number): boolean => tableLines.some((t) => t >= from && t <= to);
+  // List memory for the leaf body being accumulated (#3702 round 2, B2) —
+  // reset at every heading, so `### Notes` + "3. is the number…" is prose
+  // while `### Steps` + "1. do / 2. then" is a list. A blank line then a
+  // non-indented non-list line is a PARAGRAPH, which ends the list
   // (CommonMark §5.3); a non-indented line with no blank before it is lazy
   // continuation and keeps it open.
-  const runs = new OrderedRuns();
+  const runs = new ListRuns();
   let blankSeen = false;
   // Same level rule as the headless splitter: the first opener in a leaf body
   // sets the base, and every indent at or shallower than it is one level.
@@ -2483,25 +2804,65 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     const ind = indentOf(line);
     return bodyBase !== null && ind <= bodyBase ? bodyBase : ind;
   };
+  const scan = scanFencesFrom(lines, 0);
 
   const flushCurrent = (): void => {
     // Keep the leaf entry only when its body carries a list item; the heading
     // text line itself (element 0) never counts as one.
-    if (current !== null && currentHasBullet) entries.push(current);
+    if (current !== null && currentHasBullet) {
+      const table = tableWithin(current.startLine, current.endLine);
+      entries.push({
+        lines: current.lines,
+        opener: current.opener,
+        kind: 'leaf',
+        start: table ? -1 : lineStarts[current.startLine],
+        end: table ? -1 : lineEnds[current.endLine],
+        embeddedTable: table,
+      });
+    }
     current = null;
     currentHasBullet = false;
   };
   const flushPending = (): void => {
-    // Headless-region entries carry the splitter's own opener flags — the
-    // same run state (start-at-1, paragraph reset) that split them.
-    for (const { lines, opener } of splitGapsEntriesCore(pending.join('\n'), DEFERRED_BULLET_MARKERS)) {
-      entries.push({ lines, opener });
+    if (pendingStartLine !== -1) {
+      // Headless-region entries carry the splitter's own opener flags — the
+      // same run state (ordered start, paragraph reset) that split them. The
+      // region is contiguous (a heading flushes it), so the core's
+      // region-relative spans translate by the region's own offset — unless a
+      // table row was skipped inside it, where the reader's view and the raw
+      // region disagree and no span is claimed. Both views split identically
+      // otherwise: the core CR-strips per line, and a table row is the only
+      // line the reader's view omits.
+      const table = tableWithin(pendingStartLine, pendingEndLine);
+      const region = table ? pending.join('\n') : lines.slice(pendingStartLine, pendingEndLine + 1).join('\n');
+      const base = lineStarts[pendingStartLine];
+      for (const { lines: entryLines, opener, start, end } of splitGapsEntriesCore(region, DEFERRED_BULLET_MARKERS)) {
+        entries.push({
+          lines: entryLines,
+          opener,
+          kind: 'pending',
+          start: table ? -1 : base + start,
+          end: table ? -1 : base + end,
+          embeddedTable: table,
+        });
+      }
     }
     pending = [];
+    pendingStartLine = -1;
+    pendingEndLine = -1;
+  };
+  const push = (line: string, i: number, opener: boolean): void => {
+    if (current !== null) {
+      current.lines.push(line);
+      current.opener.push(opener);
+      current.endLine = i;
+    } else {
+      pending.push(line);
+      if (pendingStartLine === -1) pendingStartLine = i;
+      pendingEndLine = i;
+    }
   };
 
-  const fenced = fencedLineSet(lines);
-  const fenceOpens = fenceOpenerLines(lines);
   for (let i = 0; i < lines.length; i++) {
     const lineNo = i + 1;
     const heading = headingByLine.get(lineNo);
@@ -2514,9 +2875,10 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
       runs.clear();
       blankSeen = false;
       bodyBase = null;
+      // A heading ends the entry, and with it any unterminated fence (B1).
       if (!heading.isContainer) {
         // Leaf heading: open an entry with the heading text as line 0.
-        current = { lines: [heading.text], opener: [false] };
+        current = { lines: [heading.text], opener: [false], startLine: i, endLine: i };
         currentHasBullet = false;
       }
       continue;
@@ -2530,31 +2892,35 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     // that is not the file's final line then resurfaces its entry as open.
     // The headless path (`splitGapsEntriesCore`) already stores stripped lines.
     const line = lines[i].replace(/\r$/, '');
-    if (fenced.has(i)) {
+    // B1: an unterminated fence runs to the end of its entry. The next line
+    // shaped like a top-level item ends it — rescan from there, so a later
+    // delimiter is read on its own terms (see `scanFencesFrom`).
+    if (scan.fenced.has(i) || (scan.unterminatedFrom !== -1 && i >= scan.unterminatedFrom)) {
       // Fence content is body text, never list-item evidence (M2) — and
       // never an opener, so it is never marker-stripped for fields either.
       // Its opener ends the runs at its level and deeper, as a paragraph does.
-      if (fenceOpens.has(i)) runs.endedAt(levelOf(line));
-      if (current !== null) {
-        current.lines.push(line);
-        current.opener.push(false);
-      } else {
-        pending.push(line);
-      }
+      if (scan.openers.has(i)) runs.endedAt(levelOf(line));
+      push(line, i, false);
       continue;
     }
-    // A thematic break is a separator: not evidence, not body (M1).
+    // A thematic break is a separator: not evidence, and it clears the list
+    // memory (M1). It stays a BODY line — the entry's span must stay
+    // contiguous for the writer, and the entry's name stays what `next`
+    // reported for a body containing one (round 5, m3).
     if (THEMATIC_BREAK_RE.test(line)) {
       runs.clear();
       blankSeen = false;
+      push(line, i, false);
       continue;
     }
     // Table lines belong to parseDeferredTableItems, never to a heading entry.
-    if (/^\s*\|/.test(line)) continue;
+    if (/^\s*\|/.test(line)) {
+      tableLines.push(i);
+      continue;
+    }
     if (current !== null) {
-      current.lines.push(line);
       const opener = matchListOpener(line, DEFERRED_BULLET_MARKERS, runs.at(levelOf(line)));
-      current.opener.push(opener !== null);
+      push(line, i, opener !== null);
       if (opener !== null) {
         currentHasBullet = true;
         if (bodyBase === null) bodyBase = opener.indent;
@@ -2562,10 +2928,9 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
       } else if (blankSeen && line.trim() !== '') {
         runs.endedAt(levelOf(line)); // a paragraph after a blank line ends the lists at its level and deeper
       }
-      if (line.trim() === '') blankSeen = true;
-      else blankSeen = false;
+      blankSeen = line.trim() === '';
     } else {
-      pending.push(line);
+      push(line, i, false); // the core derives its own opener verdicts for the region
     }
   }
   flushCurrent();
@@ -2652,25 +3017,17 @@ function splitGapsEntriesCore(
   markers: BulletMarkers = HYPHEN_BULLET_MARKERS,
 ): GapsEntrySpan[] {
   const rawLines = sectionBody.split('\n');
-  const lineStarts: number[] = [];
-  const lineEnds: number[] = [];
-  let cursor = 0;
-  for (const rawLine of rawLines) {
-    lineStarts.push(cursor);
-    cursor += rawLine.length;
-    lineEnds.push(cursor);
-    cursor += 1; // the '\n' separator — absent after the final line, but nothing reads past it
-  }
+  const { lineStarts, lineEnds } = lineOffsets(rawLines);
 
   const entries: GapsEntrySpan[] = [];
   let current: string[] | null = null;
   let currentStartLine = -1;
   let currentEndLine = -1;
   let baseIndent: number | null = null;
-  // Ordered-run memory per indent (#3702 round 2, B2 + round review) — the
-  // top level decides entry boundaries; nested levels decide only which
+  // List memory per indent (#3702 round 2, B2 + round review; round 5, M2) —
+  // the top level decides entry boundaries; nested levels decide only which
   // continuation lines count as accepted openers for field stripping.
-  const runs = new OrderedRuns();
+  const runs = new ListRuns();
   // Per-line opener flags for `current`, recorded HERE — the one place the
   // run state is known — so the heading path's strip-only-openers rule reads
   // the splitter's own verdict instead of re-deriving it (round review: a
@@ -2686,8 +3043,7 @@ function splitGapsEntriesCore(
   // Block structure (M1/M2 + column indents) is a property of the GRAMMAR,
   // not of this seam: the Gaps set opts out and stays byte-for-byte on its
   // `next` behaviour — see `indentWidth` for the indent half of that opt-out.
-  const fenced = markers.blockStructure ? fencedLineSet(rawLines) : new Set<number>();
-  const fenceOpens = markers.blockStructure ? fenceOpenerLines(rawLines) : new Set<number>();
+  const scan = markers.blockStructure ? scanFencesFrom(rawLines, 0) : NO_FENCES;
   let blankSeen = false;
   // The run LEVEL of a line: every indent at or shallower than the list's
   // base is the one top level (a dedenting list keeps its entry boundaries);
@@ -2698,13 +3054,16 @@ function splitGapsEntriesCore(
   };
   rawLines.forEach((rawLine, idx) => {
     const line = rawLine.replace(/\r$/, '');
-    if (fenced.has(idx)) {
+    // B1: an unterminated fence runs to the end of its entry — the next line
+    // shaped like a top-level item ends it; rescan from there so a later
+    // delimiter is read on its own terms (see `scanFencesFrom`).
+    if (scan.fenced.has(idx) || (scan.unterminatedFrom !== -1 && idx >= scan.unterminatedFrom)) {
       // Fence content never opens an entry (M2). Inside an open entry it is
       // continuation — pushed, so the span invariant `acknowledgeDeferredItem`
       // re-verifies still holds; before the first entry it is discarded. A
       // fence is a non-list block: its opener ends the runs at its level and
       // deeper, exactly as a paragraph does.
-      if (fenceOpens.has(idx)) runs.endedAt(levelOf(line));
+      if (scan.openers.has(idx)) runs.endedAt(levelOf(line));
       if (current !== null) {
         current.push(line);
         currentOpeners.push(false);

@@ -13,6 +13,9 @@ import { escapeRegex } from './pattern.cjs';
 import ioMod = require('./io.cjs');
 const { output, error } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+import cliExitModule = require('./cli-exit.cjs');
+const { ExitError } = cliExitModule;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateContract = require('./state-contract.cjs');
 const { publishStateContract } = stateContract;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -39,7 +42,19 @@ const { planningDir, planningPaths } = planningWorkspace;
 import { realClock } from './clock.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatter = require('./frontmatter.cjs');
-const { extractFrontmatter, reconstructFrontmatter, stripFrontmatter, propagateCommentChannel } = frontmatter;
+const { extractFrontmatter, reconstructFrontmatter, stripFrontmatter, propagateCommentChannel, FRONTMATTER_UNPARSEABLE } = frontmatter;
+
+/**
+ * ADR-3473 §8.1 (#3881, consequence 2 wiring): does `existingFm` carry the
+ * `FRONTMATTER_UNPARSEABLE` marker `extractFrontmatter` sets when a frontmatter-fenced region
+ * exists but failed to parse (malformed YAML, or a refused anchor/alias/merge key)? Mirrors
+ * `state-transition.cts`'s private helper of the same name/shape — kept local rather than
+ * exported+imported because the two modules' `existingFm` values come from independent
+ * `extractFrontmatter` calls and this predicate is a two-line symbol read, not shared state.
+ */
+function isUnparseableFrontmatter(existingFm: Record<string, unknown>): boolean {
+  return (existingFm as unknown as Record<symbol, unknown>)[FRONTMATTER_UNPARSEABLE] === true;
+}
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import scanPhasePlans = require('./plan-scan.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -529,7 +544,7 @@ function cmdStateLoad(cwd: string, raw: boolean): void {
       `state_exists=${stateExists}`,
     ];
     process.stdout.write(lines.join('\n'));
-    process.exit(0);
+    throw new ExitError(0);
   }
 
   output(result, false, undefined);
@@ -2833,6 +2848,30 @@ function syncStateFrontmatter(
     content,
     cwd ? planningPaths(cwd).state : undefined,
   ) as Record<string, unknown>;
+
+  // #3881 review, second round: an UNPARSEABLE frontmatter block (malformed YAML, a git
+  // merge-conflict marker, a refused anchor) must never be silently REPLACED by a freshly
+  // re-derived one — that destroys the only copy of what the block actually contained, with
+  // no signal to the human that their document was in conflict. `beginFrontmatterReassembly`
+  // (state-transition.cts) already preserves the raw fmPrefix through the pure transform
+  // layer for every `transitionCore` kind; this was the gap — this function re-parses the
+  // ALREADY-preserved `content` and, finding {} + the marker, rebuilt a fresh block anyway,
+  // discarding the raw prefix the transform layer had just protected. Confirmed by execution
+  // against `state complete-phase`/`update`/`patch`/`begin-phase`: each returned success with
+  // the conflict markers gone and a freshly-derived, well-formed frontmatter block in their
+  // place (re-derivation, not deletion — the document never lost its frontmatter FENCE).
+  //
+  // `sanctionedPermanentEmptyFallback` is threaded ONLY from `writeStateMd`, itself consumed
+  // ONLY by `cmdStateSync` (#905) and `/gsd-health --repair`'s `REGENERATE_STATE` — ADR-3408
+  // §8.3's CLOSED list of commands whose documented contract is "body wins, re-derive
+  // unconditionally" (a factory reset / explicit resync). Those two are untouched here: this
+  // guard fires only on the OTHER call path (`syncAndPreserveStateMd`, i.e. every
+  // `readModifyWriteStateMd`-based command), where re-deriving over unparseable content was
+  // never the intended contract in the first place — it was an unhandled gap, not a decision.
+  if (!sanctionedPermanentEmptyFallback && isUnparseableFrontmatter(existingFm)) {
+    return content;
+  }
+
   const body = stripFrontmatter(content);
   // #3017: pass the stored milestone from the existing frontmatter so
   // buildStateFrontmatter scopes its disk scan to the correct milestone
@@ -3031,7 +3070,7 @@ function syncStateFrontmatter(
   // #3257: propagate full-line frontmatter comments from the extracted source onto the
   // rebuilt derivedFm (buildStateFrontmatter + the Object.keys carry-forward above both
   // skip the Symbol-keyed channel, so without this the comments would be lost here even
-  // though parseYamlRegion/reconstructFrontmatter preserve them in isolation).
+  // though parseGuardedYamlRegion/reconstructFrontmatter preserve them in isolation).
   propagateCommentChannel(existingFm as unknown as Frontmatter, derivedFm as unknown as Frontmatter);
 
   const yamlStr = reconstructFrontmatter(derivedFm as unknown as Frontmatter);
@@ -3385,8 +3424,26 @@ function applyPostSyncPreservation(
   // above (null when resync:true) — these are independent snapshots.
   // Strip frontmatter before calling stateExtractField so the YAML `status:`
   // key in the frontmatter block cannot shadow the body field we are tracking.
-  const preBody = stripFrontmatter(originalContent);
   const preFmSnapshot = extractFrontmatter(originalContent, statePath) as Record<string, unknown>;
+
+  // #3881 review, second round: `syncStateFrontmatter` above already declines to re-derive
+  // over an UNPARSEABLE original frontmatter block (its own matching guard), so `syncedContent`
+  // here is `transformedContent` verbatim. But this function's own downstream preservation
+  // machinery (`applyStatePreservation` + the `authoritativeFm` reassertion below) reads
+  // `postFm = extractFrontmatter(syncedContent, ...)` — {} + the marker, since the block still
+  // doesn't parse — restores curated fields from `transaction.snapshot`, and reconstructs a
+  // FRESH frontmatter block from the result, destroying the raw block a second time even
+  // though `syncStateFrontmatter` just finished protecting it. `applyPostSyncPreservation` is
+  // reached ONLY via the non-sanctioned path (`syncAndPreserveStateMd`; `writeStateMd`'s two
+  // ADR-3408 §8.3 closed-list callers — `cmdStateSync` #905 and `/gsd-health --repair`'s
+  // `REGENERATE_STATE` — never call it at all), so this guard needs no extra parameter to stay
+  // scoped off that list. Confirmed by execution: `state begin-phase` on a conflict-marked
+  // STATE.md reached exactly this second clobber even after the `syncStateFrontmatter` fix.
+  if (isUnparseableFrontmatter(preFmSnapshot)) {
+    return transformedContent;
+  }
+
+  const preBody = stripFrontmatter(originalContent);
   const preBodyStatus = stateExtractField(preBody, 'Status');
   // Bug #1230 / Change B: scope stopped_at delta to the ## Session section,
   // mirroring buildStateFrontmatter's sessionBodyScope logic.
@@ -3587,6 +3644,23 @@ function applyPostSyncPreservation(
   }
 
   if (preservation.mutated || authoritativeReasserted) {
+    // #3742: preservation RESTORES frontmatter keys the body-derived rebuild
+    // could not produce (e.g. `current_phase` on a layout with no body
+    // `**Current Phase:**` line) — but the comment channel was filtered
+    // against the pre-restore key set during sync, so a full-line comment
+    // attached to a restored key died with nothing to re-attach it. Propagate
+    // the channel from the PRE-WRITE snapshot here, after the restores, so a
+    // comment's survival depends on its key surviving the whole write — not
+    // on which body line happened to feed the rebuild. Merge semantics
+    // (propagateCommentChannel) keep any channel the synced content already
+    // carried. No resync gate: this is the RMW path, where `resync` is the
+    // DEFAULT (readModifyWriteStateMd derives it as `options.resync !==
+    // false`) and preservation itself runs regardless — the factory-reset
+    // semantic the #3742 review worried about lives in writeStateMd's
+    // `rebuild` transactions, which never reach this branch.
+    if (preFmSnapshot && !isUnparseableFrontmatter(preFmSnapshot)) {
+      propagateCommentChannel(preFmSnapshot as unknown as Frontmatter, preservation.postFm as unknown as Frontmatter);
+    }
     const yamlStr = reconstructFrontmatter(preservation.postFm as unknown as Frontmatter);
     const body = stripFrontmatter(syncedContent);
     return `---\n${yamlStr}\n---\n\n${body}`;
@@ -5113,6 +5187,19 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
 
   const verify = options && options.verify;
   const content = fs.readFileSync(statePath, 'utf-8');
+  // ADR-3473 §8.5 (#3881): `state sync` is on ADR-3408 §8.3's closed
+  // sanctioned-regenerate list — "the body wins" — and `syncStateFrontmatter`
+  // (below, via `writeStateMd`'s `sanctionedPermanentEmptyFallback`) is
+  // therefore CORRECT to overwrite even an unparseable existing frontmatter
+  // block (git merge-conflict markers, malformed YAML). What was missing was
+  // disclosure: a derived conclusion (`synced: true`) must not be reported as
+  // authoritative when the derivation dropped input it could not resolve
+  // (§8.5) — silently destroying the only copy of an unreadable block with no
+  // signal is "failure is a value" (§8.4) violated. Computed once, up front,
+  // from the pre-write snapshot so both the `--verify` (dry-run) and the real
+  // write branch can surface it identically.
+  const existingSyncFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
+  const syncFrontmatterWasUnparseable = isUnparseableFrontmatter(existingSyncFm);
   const changes: string[] = [];
   let modified = content;
 
@@ -5269,12 +5356,27 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
   const coreChanges = (syncResult.data as { changes?: string[] } | undefined)?.changes ?? [];
   changes.push(...coreChanges);
 
+  // #3881 (ADR-3473 §8.5): only warn when a write will actually regenerate the
+  // frontmatter — if nothing changed this run, the unparseable block (if any)
+  // was never touched, so there is nothing to disclose. Mirrors the exact
+  // condition the write branch below uses to decide whether to write at all.
+  const syncWillWrite = changes.length > 0 || modified !== content;
+  if (syncWillWrite && syncFrontmatterWasUnparseable) {
+    const unparseableWarning =
+      `gsd: warning — STATE.md's existing frontmatter could not be parsed (malformed YAML, or ` +
+      `unresolved content such as git merge-conflict markers) and was regenerated from the body; ` +
+      `any content in the old frontmatter block — including merge-conflict markers — has been ` +
+      `replaced. (#3881)`;
+    process.stderr.write(`${unparseableWarning}\n`);
+    changes.push(unparseableWarning);
+  }
+
   if (verify) {
     output({ synced: false, changes, dry_run: true }, raw, undefined);
     return;
   }
 
-  if (changes.length > 0 || modified !== content) {
+  if (syncWillWrite) {
     // ADR-3473 §8.6: `rebuild()` is the typed expression of #905's contract —
     // `state sync` exists to let the body win, so preservation must NOT run,
     // and the snapshot is carried anyway because §8.7's reporting needs it.
@@ -5689,16 +5791,20 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
 
     // Bug #1255: operate on body only so the YAML frontmatter `status:` key
     // cannot shadow the body Status field (pipe-table or inline).
-    const existingFm = extractFrontmatter(content, statePath) as Record<string, unknown>;
-    const hasFrontmatter = Object.keys(existingFm).length > 0;
-    let body = stripFrontmatter(content);
+    //
+    // ADR-3473 §8.1 (#3881 review, finding 5): previously this block hand-reimplemented
+    // the isUnparseableFrontmatter/rawFrontmatterPrefix shape inline instead of using the
+    // canonical helper — the sixth copy of a block already duplicated 5x in
+    // state-transition.cts. Routed through the shared `beginFrontmatterReassembly` so this
+    // module can never drift from the frontmatter-preservation contract state-transition.cts
+    // enforces everywhere else.
+    const { existingFm, body: initialBody, reassemble } =
+      stateTransitionMod.beginFrontmatterReassembly(content, statePath);
+    let body = initialBody;
     const curatedPhaseName = existingFm['current_phase_name'];
     if (typeof curatedPhaseName === 'string' && curatedPhaseName.trim().length > 0) {
       rmwOptions.authoritativeFm = { current_phase_name: curatedPhaseName };
     }
-
-    const reassemble = (b: string) =>
-      hasFrontmatter ? `---\n${reconstructFrontmatter(existingFm as unknown as Frontmatter)}\n---\n\n${b}` : b;
 
     // Update Status field (body only — #1255)
     const statusValue = `Phase ${currentPhase} complete`;

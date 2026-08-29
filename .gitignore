@@ -194,6 +194,7 @@ build/
 /gsd-core/bin/lib/installer-migrations/006-pi-extension-cjs-to-js.cjs
 /gsd-core/bin/lib/installer-migrations/007-retire-config-root-commonjs-marker.cjs
 /gsd-core/bin/lib/installer-migrations/009-pi-retire-reserved-hooks-dir.cjs
+/gsd-core/bin/lib/installer-migrations/010-antigravity-retire-confighome-artifacts.cjs
 /gsd-core/bin/lib/observability/logger.cjs
 /gsd-core/bin/lib/active-workstream-store.cjs
 /gsd-core/bin/lib/adr-parser.cjs
@@ -301,6 +302,7 @@ build/
 /gsd-core/bin/lib/audit.cjs
 /gsd-core/bin/lib/git-base-branch.cjs
 /gsd-core/bin/lib/host-runtime-detection.cjs
+/gsd-core/bin/lib/task-content-resolution.cjs
 __pycache__/
 *.pyc
 .venv/

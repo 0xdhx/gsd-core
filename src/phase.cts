@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- io.cjs is an export= CommonJS module
 import ioMod = require('./io.cjs');
-const { output, error, ERROR_REASON } = ioMod;
+const { output, error, ERROR_REASON, formatDiagnosticToken } = ioMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import stateContract = require('./state-contract.cjs');
 const { publishStateContract } = stateContract;
@@ -36,7 +36,7 @@ import coreUtilsMod = require('./core-utils.cjs');
 // drift and no parity test needed to police one.
 const {
   toPosixPath, generateSlugInternal, readSubdirectories, extractCanonicalPlanId,
-  findUnsummarizedPlans,
+  findUnsummarizedPlans, normalizeLineEndings,
 } = coreUtilsMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-id.cjs is an export= CommonJS module
 import phaseIdMod = require('./phase-id.cjs');
@@ -607,21 +607,75 @@ interface RawPlan {
 
 /**
  * Resolve a raw `depends_on` token to the `RawPlan.id` it refers to
- * (case-folded exact match, falling back to canonical-id matching). Returns
+ * (case-folded exact match, falling back to canonical-id matching, falling
+ * back to the in-phase short-form plan number — #3897 rung 4). Returns
  * `null` when the token does not resolve to any plan in this phase (a typo
  * or a cross-phase reference) — every call site treats that as "ignore this
  * edge", never a throw. Shared by `computeDependencyLevels`'s DAG-edge
- * resolution, the `depends_on` display mapping, and (#2830) the
- * halt-propagation node resolution, so the three can never disagree about
- * which token resolves to which plan.
+ * resolution and (#2830) the halt-propagation node resolution, so the two can
+ * never disagree about which token resolves to which plan. NOT used by the
+ * `depends_on` display mapping (#3785/N3) — that stays a passthrough by
+ * design; see the comment at its call site.
+ *
+ * `shortFormToId` (#3897 rung 4, ADR-3473 §8.9) is the third tier, consulted
+ * only when neither `planMap` nor `canonicalToId` resolves the token. It is
+ * optional so any caller that has not been threaded through yet (there are
+ * none left in this file) degrades to the pre-#3897 two-tier behavior rather
+ * than throwing on a missing argument.
  */
 function resolveDependencyId(
   dep: string,
   planMap: Map<string, RawPlan>,
   canonicalToId: Map<string, string>,
+  shortFormToId?: Map<string, string>,
 ): string | null {
   const lower = dep.toLowerCase();
-  return planMap.has(lower) ? (planMap.get(lower) as RawPlan).id : (canonicalToId.get(lower) ?? null);
+  if (planMap.has(lower)) return (planMap.get(lower) as RawPlan).id;
+  if (canonicalToId.has(lower)) return canonicalToId.get(lower) as string;
+  return shortFormToId?.get(lower) ?? null;
+}
+
+// #3897 rung 4 (ADR-3473 §8.9) — builds the third depends_on resolution tier:
+// a map from an in-phase BARE PLAN NUMBER (e.g. "01") to the plan id whose
+// canonical id ends with that number. Recovered from the retired SDK lineage
+// (sdk/src/query/phase.ts at 11918dcc3^) with ONE deliberate narrowing: the
+// lost implementation indexed ANY trailing dash-segment of a canonical id,
+// with no constraint that the segment be a plan NUMBER — so a phase
+// containing both `09-FIX-auth-PLAN.md` and `09-GAP-auth-PLAN.md` (canonical
+// id `09-FIX-auth`, trailing segment "auth") would silently bind
+// `depends_on: ["auth"]` to whichever sorted first, fabricating a
+// wave-affecting DAG edge with ZERO warning — a mis-resolved edge, which is
+// worse than a dropped one (found in isolated correctness review, #3897).
+// `docs/reference/plan-md.md` already documents this tier as resolving "the
+// bare plan number", so requiring `/^\d+$/` on the trailing segment is a
+// strict narrowing onto the tier's OWN documented contract, not a behavior
+// change for any legitimate input. Do NOT restore the unconstrained
+// lastDash-slice "to match the recovered original" — the original was wrong
+// here; this rung deliberately departs from it in this one respect, and only
+// this one. Everything else — the `lastDash` bound, first-write-wins,
+// lowercasing — is kept exactly as recovered:
+//   - first write wins, deterministic because rawPlans is passed in sorted
+//     plan-file order (D4/T44) and this loop iterates in that same order;
+//   - a canonical id with no dash (`lastDash === -1` or `lastDash === 0`,
+//     e.g. "24" or "-01") or a trailing dash (`lastDash === canonical.length
+//     - 1`, e.g. "09-") is never indexed (D5).
+// Exported so callers can build this map once and so tests assert against
+// this REAL implementation rather than a hand-rolled copy that could
+// silently disagree with it after a future change here (CLAUDE.md's
+// generative-fix-divergence rule).
+function buildShortFormToId(rawPlans: RawPlan[]): Map<string, string> {
+  const shortFormToId = new Map<string, string>();
+  for (const p of rawPlans) {
+    const canonical = extractCanonicalPlanId(p.id);
+    const lastDash = canonical.lastIndexOf('-');
+    if (lastDash > 0 && lastDash < canonical.length - 1) {
+      const shortForm = canonical.slice(lastDash + 1).toLowerCase();
+      if (/^\d+$/.test(shortForm) && !shortFormToId.has(shortForm)) {
+        shortFormToId.set(shortForm, p.id);
+      }
+    }
+  }
+  return shortFormToId;
 }
 
 // O(V + E). Assigns each in-phase plan its longest-path topological level over the
@@ -630,21 +684,36 @@ function resolveDependencyId(
 // the exact dequeue order this pass already produces — a valid topological order — passed to
 // computeHaltPropagation as `precomputedOrder` so halt propagation does not re-run Kahn's
 // algorithm a second time over the same graph.
+//
+// `shortFormToId` (#3897 rung 4, optional — see resolveDependencyId) is threaded through so a
+// bare in-phase plan-number token (`depends_on: ["01"]`) resolves as a real DAG edge instead of
+// being dropped and silently collapsing the dependent plan to wave 1 (D3).
 function computeDependencyLevels(
   rawPlans: RawPlan[],
   planMap: Map<string, RawPlan>,
   canonicalToId: Map<string, string>,
-): { level: Map<string, number>; visited: number; order: string[] } {
+  shortFormToId?: Map<string, string>,
+): { level: Map<string, number>; visited: number; order: string[]; unresolved: Array<{ plan: string; token: string }> } {
   const level = new Map<string, number>();
   const inDeg = new Map<string, number>();
   const adj = new Map<string, string[]>();
+  // #3427 / ADR-3473 §8.5: a depends_on token that resolves via NONE of the
+  // three tiers (planMap, canonicalToId, shortFormToId) is a dropped edge.
+  // Naming it here (rather than silently `continue`-ing past it) lets
+  // cmdPhasePlanIndex surface the token's own warning instead of
+  // manufacturing a wave-mismatch verdict from the resulting damaged graph
+  // (#3427).
+  const unresolved: Array<{ plan: string; token: string }> = [];
 
   for (const p of rawPlans) {
     if (!inDeg.has(p.id)) inDeg.set(p.id, 0);
     if (!adj.has(p.id)) adj.set(p.id, []);
     for (const dep of p.dependsOn) {
-      const resolvedDep = resolveDependencyId(dep, planMap, canonicalToId);
-      if (!resolvedDep) continue;
+      const resolvedDep = resolveDependencyId(dep, planMap, canonicalToId, shortFormToId);
+      if (!resolvedDep) {
+        unresolved.push({ plan: p.id, token: String(dep) });
+        continue;
+      }
       if (!adj.has(resolvedDep)) adj.set(resolvedDep, []);
       (adj.get(resolvedDep) as string[]).push(p.id);
       inDeg.set(p.id, (inDeg.get(p.id) ?? 0) + 1);
@@ -679,7 +748,7 @@ function computeDependencyLevels(
     }
   }
 
-  return { level, visited, order: queue };
+  return { level, visited, order: queue, unresolved };
 }
 
 function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
@@ -857,8 +926,16 @@ function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
   const canonicalToId = new Map(
     rawPlans.map((p) => [extractCanonicalPlanId(p.id).toLowerCase(), p.id]),
   );
+  // #3897 rung 4 (ADR-3473 §8.9) — the third depends_on resolution tier.
+  // Resolves a bare in-phase plan-number short form (e.g. "01") to its owning
+  // plan id. In-phase only by construction (T49): the map is built from THIS
+  // phase's rawPlans alone, so a short form colliding with a different
+  // phase's plan can never be a candidate. See {@link buildShortFormToId}'s
+  // own comment for the numeric-only narrowing this rung applies on top of
+  // the recovered SDK-lineage algorithm.
+  const shortFormToId = buildShortFormToId(rawPlans);
 
-  const { level, visited, order } = computeDependencyLevels(rawPlans, planMap, canonicalToId);
+  const { level, visited, order, unresolved } = computeDependencyLevels(rawPlans, planMap, canonicalToId, shortFormToId);
 
   if (visited < rawPlans.length) {
     const cycleNodes = rawPlans.filter((p) => !level.has(p.id)).map((p) => p.id);
@@ -876,7 +953,7 @@ function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
   const haltNodes = rawPlans.map((p) => ({
     id: p.id,
     resolvedDependsOn: p.dependsOn
-      .map((dep) => resolveDependencyId(String(dep), planMap, canonicalToId))
+      .map((dep) => resolveDependencyId(String(dep), planMap, canonicalToId, shortFormToId))
       .filter((id): id is string => id !== null),
     halted: p.halted,
   }));
@@ -893,6 +970,20 @@ function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
   const runnable: string[] = [];
   let hasCheckpoints = false;
   const warnings: string[] = [];
+
+  // #3427 / ADR-3473 §8.5: name every dropped depends_on edge (plan AND
+  // token) rather than letting it silently collapse the plan to a DAG root.
+  // A plan with at least one unresolved token gets ITS OWN warning here and
+  // the wave-mismatch verdict below is suppressed for that plan ONLY — a
+  // plan with no dropped edges and a genuinely wrong `wave:` still warns
+  // (N3, D6, T25).
+  const plansWithUnresolvedTokens = new Set<string>();
+  for (const { plan, token } of unresolved) {
+    plansWithUnresolvedTokens.add(plan);
+    warnings.push(
+      `Plan ${plan}: depends_on token ${formatDiagnosticToken(token)} does not resolve to any plan in this phase — edge dropped, wave placement for this plan may be unreliable`,
+    );
+  }
 
   for (const rawPlan of rawPlans) {
     if (!rawPlan.autonomous) {
@@ -911,7 +1002,17 @@ function cmdPhasePlanIndex(cwd: string, phase: string, raw: boolean): void {
 
     const computedWave = (level.get(rawPlan.id) ?? 0) + levelOffset;
     const effectiveWave = computedWave;
-    if (rawPlan.declaredWave !== null && rawPlan.declaredWave !== computedWave) {
+    // #3427 (D5/N3): suppress the wave-mismatch verdict for a plan that has
+    // at least one unresolved depends_on token — its own dropped-edge
+    // warning above already explains the degraded wave placement, so the
+    // mismatch here would blame the author for a DAG the tool itself
+    // couldn't build. A plan with NO unresolved tokens still gets a genuine
+    // mismatch reported (N3, T25) — the suppression is per-plan, never blanket.
+    if (
+      rawPlan.declaredWave !== null &&
+      rawPlan.declaredWave !== computedWave &&
+      !plansWithUnresolvedTokens.has(rawPlan.id)
+    ) {
       warnings.push(
         `Plan ${rawPlan.id}: declared wave: ${rawPlan.declaredWave} but depends_on DAG places it in wave ${computedWave}`,
       );
@@ -2407,7 +2508,12 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
       phaseFullDirBaseName,
     )) {
       const verificationFilePath = path.join(phaseFullDir, file);
-      const content = fs.readFileSync(verificationFilePath, 'utf-8');
+      // #3707-CR follow-up MINOR: normalize line endings at this read boundary
+      // (same fix as src/verification.cts's readVerificationStatus) so a
+      // lone-CR VERIFICATION.md's `---\r...\r---` frontmatter fence still
+      // matches extractFrontmatter's byte-0 check instead of silently
+      // dropping the human_needed/gaps_found advisory warning below.
+      const content = normalizeLineEndings(fs.readFileSync(verificationFilePath, 'utf-8'));
       // #1159 (Defect A): read ONLY the frontmatter `status` key to avoid false positives
       // from historical metadata in the file body (e.g. `previous_status: gaps_found`).
       // A full-text regex like /status: gaps_found/ matches the substring inside
@@ -3518,4 +3624,5 @@ export = {
   cmdPhaseUatPassed,
   cmdPhaseListPlans,
   computeDependencyLevels,
+  buildShortFormToId,
 };

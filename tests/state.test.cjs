@@ -1,4 +1,4 @@
-// docs-guard-exempt: docs/CONFIGURATION.md is cited only in a comment; never read.
+// docs-guard-exempt: docs/CONFIGURATION.md and docs/reference/state-md.md are cited only in comments; never read.
 // allow-test-rule: source-text-is-the-product
 // Reads .md/.json/.yml product files whose deployed text IS what the
 // runtime loads — testing text content tests the deployed contract.
@@ -37,6 +37,40 @@ const { escapeRegex } = require('../gsd-core/bin/lib/pattern.cjs');
 const frontmatterLib = require('../gsd-core/bin/lib/frontmatter.cjs');
 const { SCOPE } = require('../gsd-core/bin/lib/planning-scope.cjs');
 const workstreamInventory = require('../gsd-core/bin/lib/workstream-inventory.cjs');
+const { collectSection } = require('../gsd-core/bin/lib/markdown-sectionizer.cjs');
+const { splitTableRow } = require('../gsd-core/bin/lib/markdown-table.cjs');
+
+/**
+ * Test-side helper mirroring the ad-hoc "## Heading ... up to next heading"
+ * extraction previously hand-rolled at many call sites in this file — routes
+ * through the canonical markdown-sectionizer seam instead. Returns an object
+ * shaped like a regex exec match (`[1]` is the body) so existing call sites
+ * that destructure `match[1]` keep working, or `null` when the heading is
+ * absent (matching `String.prototype.match`'s null-on-no-match contract).
+ */
+function sectionMatchOf(text, headingName) {
+  const section = collectSection(text, (h) => h.text.toLowerCase() === headingName.toLowerCase());
+  return section ? [section.body, section.body] : null;
+}
+
+/**
+ * Return the second cell of a headerless `| Label | Value |` row inside
+ * `section` whose first cell equals `label` (case-insensitive), or null when
+ * absent. STATE.md's Current Position/Configuration tables have no header/
+ * delimiter row, so parseMarkdownTable's GFM-table contract does not apply —
+ * splitTableRow is the correct-granularity seam call here.
+ */
+function pipeTableCell(section, label) {
+  for (const line of section.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('|')) continue;
+    const cells = splitTableRow(trimmed);
+    if (cells[0] && cells[0].toLowerCase() === label.toLowerCase()) {
+      return cells[1] !== undefined ? cells[1] : null;
+    }
+  }
+  return null;
+}
 // Phase 12 (#3310, ADR-3180 §8.4 rule 3): `cmdStateValidate`'s `warnings` are
 // now `Diagnostic[]` (S0NN codes), not bare strings, and `drift` is gone.
 const { SEVERITY } = require('../gsd-core/bin/lib/health-diagnostic-types.cjs');
@@ -113,7 +147,7 @@ function readShippedStateTemplateBody(replacements) {
   const templatePath = path.join(__dirname, '..', 'gsd-core', 'templates', 'state.md');
   const template = fs.readFileSync(templatePath, 'utf-8');
   // eslint-disable-next-line local/no-unbounded-quantifier -- parses this repo's own state.md template, fixed-size author-controlled content
-  const fencedDocument = template.match(/```markdown\r?\n([\s\S]*?)```/);
+  const fencedDocument = template.match(/```markdown\r?\n([\s\S]*?)```/); // allow-adhoc-markdown: deliberately independent of the generator's own fence-handling — regresses #3873
   assert.ok(fencedDocument, 'gsd-core/templates/state.md must contain a fenced markdown document');
 
   let body = fencedDocument[1];
@@ -999,6 +1033,114 @@ current_phase: 3
     assert.ok(content.includes('03-03'), 'the state update still took effect');
   });
 
+  // #3742 — comment survival must not depend on the document body: a
+  // column-0 comment died whenever the body had no **Current Phase:** line
+  // (the preservation restore re-added the key but nothing re-attached the
+  // comment channel), and an indented comment under progress: died always
+  // (the channel only ever knew top-level keys).
+  test('#3742: comments survive begin-phase with and without a body Current Phase line', () => {
+    const COL0 = '# PROVENANCE-COL0: hand-counted; do not resync';
+    const NESTED = '# PROVENANCE-NESTED: nested under progress';
+    for (const withBodyLine of [true, false]) {
+      fs.writeFileSync(
+        path.join(tmpDir, '.planning', 'STATE.md'),
+        [
+          '---',
+          'gsd_state_version: 1.0',
+          COL0,
+          'current_phase: 01',
+          'current_phase_name: probe-phase',
+          'status: executing',
+          'last_updated: "2026-08-10T00:00:00.000Z"',
+          'progress:',
+          '  ' + NESTED,
+          '  total_phases: 2',
+          '  completed_phases: 0',
+          '  total_plans: 1',
+          '  completed_plans: 0',
+          '---',
+          '',
+          '## Current Position',
+          '',
+          '**Status:** Executing',
+          ...(withBodyLine ? ['**Current Phase:** 01'] : []),
+          '',
+        ].join('\n'),
+      );
+
+      runGsdTools('state begin-phase --phase 01 --name probe-phase --plans 1', tmpDir);
+
+      const content = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+      assert.ok(
+        content.includes(COL0),
+        `#3742: column-0 comment must survive begin-phase (body Current Phase line: ${withBodyLine}); got:\n${content}`,
+      );
+      assert.ok(
+        content.includes(NESTED),
+        `#3742: indented comment under progress must survive begin-phase (body Current Phase line: ${withBodyLine}); got:\n${content}`,
+      );
+    }
+  });
+
+  test('#3742: comments survive state update (the issue\'s anomaly verb)', () => {
+    const COL0 = '# PROVENANCE-COL0: do not resync';
+    const NESTED = '# PROVENANCE-NESTED: nested under progress';
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        COL0,
+        'current_phase: 3',
+        'status: executing',
+        'progress:',
+        '  ' + NESTED,
+        '  total_phases: 9',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '**Current Phase:** 03',
+        '**Status:** Executing',
+        '',
+      ].join('\n'),
+    );
+
+    runGsdTools('state update Status Paused', tmpDir);
+
+    const content = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(content.includes(COL0), `#3742: column-0 comment must survive state update; got:\n${content}`);
+    assert.ok(content.includes(NESTED), `#3742: nested comment must survive state update; got:\n${content}`);
+  });
+
+  test('#3742: trailing comments do not duplicate across repeated writes', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      [
+        '---',
+        'gsd_state_version: 1.0',
+        'current_phase: 3',
+        'status: executing',
+        '# TRAILING: do not resync',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '**Current Phase:** 03',
+        '**Status:** Executing',
+        '',
+      ].join('\n'),
+    );
+
+    for (let i = 0; i < 3; i++) {
+      runGsdTools('state update Status Paused', tmpDir);
+    }
+
+    const content = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    const count = (content.match(/# TRAILING: do not resync/g) || []).length;
+    assert.strictEqual(count, 1, `#3742: trailing comment must appear exactly once after repeated writes, got ${count}:\n${content}`);
+  });
+
   test('round-trip: write then read via state json', () => {
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'STATE.md'),
@@ -1057,6 +1199,161 @@ describe('stateExtractField and stateReplaceField helpers', () => {
     const content = '# State\n\n**status:** Active\n';
     const result = stateExtractField(content, 'Status');
     assert.strictEqual(result, 'Active', 'should match field name case-insensitively');
+  });
+
+  // (#3812) docs/reference/state-md.md's "### Current Position" section
+  // promises: every field there is single-valued, and duplicates resolve by
+  // FORM first (bold `**F:**` anywhere, then plain `^F:`, then pipe-table),
+  // and only within the winning form does first-occurrence win. #2956 already
+  // fixed the INTER-section case (a duplicate in a different section never
+  // shadows the real one) by scoping to `## Current Position`; these rows
+  // pin the INTRA-section case #2956 never addressed — every fixture here
+  // duplicates the field WITHIN the same `## Current Position` section, so a
+  // reader that merely scopes correctly (and gets first-occurrence right by
+  // accident) cannot pass. Each row is exercised through the real production
+  // chain — `stateCurrentPositionSlice` (the function `state.cts`'s private
+  // `matchCurrentPositionSection` delegates to) feeding `stateExtractField`
+  // — not bare `stateExtractField` over hand-scoped content, so section
+  // scoping is genuinely exercised rather than assumed. See
+  // .gsd/phase/docs-3812-current-position-cardinality/50-test-matrix.md.
+
+  function extractViaProductionChain(body, fieldName) {
+    const scope = stateDocument.stateCurrentPositionSlice(body) ?? body;
+    return stateExtractField(scope, fieldName);
+  }
+
+  test('T1: plain-then-plain intra-section duplicate resolves to the first occurrence (#3812)', () => {
+    const content = [
+      '# STATE',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 1 of 5 (First, plain)',
+      'Plan: 1 of 3',
+      'Phase: 9 of 9 (Second, plain)',
+    ].join('\n');
+
+    const result = extractViaProductionChain(content, 'Phase');
+    assert.strictEqual(
+      result,
+      '1 of 5 (First, plain)',
+      'within one form (plain), a duplicated Phase field must resolve to the first occurrence'
+    );
+  });
+
+  test('T2: mixed-form intra-section duplicate — later BOLD line beats an earlier plain line (#3812)', () => {
+    const content = [
+      '# STATE',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 1 of 5 (First, plain)',
+      'Plan: 1 of 3',
+      '**Phase:** 9 of 9 (Second, bold)',
+    ].join('\n');
+
+    const result = extractViaProductionChain(content, 'Phase');
+    assert.strictEqual(
+      result,
+      '9 of 9 (Second, bold)',
+      'bold form outranks plain form regardless of document order, per docs/reference/state-md.md'
+    );
+  });
+
+  test('T3: an indented Phase line is invisible to the plain form; the later un-indented line wins (#3812)', () => {
+    const content = [
+      '# STATE',
+      '',
+      '## Current Position',
+      '',
+      '    Phase: 1 of 5 (Indented, ignored)',
+      'Phase: 9 of 9 (Un-indented, matches)',
+      'Plan: 1 of 3',
+    ].join('\n');
+
+    const result = extractViaProductionChain(content, 'Phase');
+    assert.strictEqual(
+      result,
+      '9 of 9 (Un-indented, matches)',
+      'the plain form anchors at true line-start; an indented line never matches it'
+    );
+  });
+
+  test('T4: a sibling field between duplicated Phase lines resolves to its own value (#3812)', () => {
+    const content = [
+      '# STATE',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 1 of 5 (First, plain)',
+      'Plan: 2 of 3',
+      'Phase: 9 of 9 (Second, plain)',
+    ].join('\n');
+
+    const phase = extractViaProductionChain(content, 'Phase');
+    const plan = extractViaProductionChain(content, 'Plan');
+    assert.strictEqual(
+      phase,
+      '1 of 5 (First, plain)',
+      'Phase must still resolve to the first occurrence within its form with a sibling field in between'
+    );
+    assert.strictEqual(
+      plan,
+      '2 of 3',
+      'Plan must resolve to its own value, not be affected by the duplicated Phase field'
+    );
+  });
+
+  test('T5: a bold Phase line in a DIFFERENT section never shadows the plain value inside Current Position (#3812)', () => {
+    const content = [
+      '# STATE',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 1 of 5 (in section, plain)',
+      'Plan: 1 of 3',
+      '',
+      '## Archive',
+      '',
+      '**Phase:** 88 (bold, other section — must NOT win)',
+    ].join('\n');
+
+    const result = extractViaProductionChain(content, 'Phase');
+    assert.strictEqual(
+      result,
+      '1 of 5 (in section, plain)',
+      'the form ranking applies only within the Current Position section — a bold line elsewhere must not outrank the in-section plain value'
+    );
+
+    // Discrimination: a reader that runs stateExtractField over the WHOLE
+    // document (skipping the #2956 section scope) disagrees with production
+    // here — it lets the out-of-section bold line win.
+    const wholeDocumentResult = stateExtractField(content, 'Phase');
+    assert.strictEqual(
+      wholeDocumentResult,
+      '88 (bold, other section — must NOT win)',
+      'sanity check: an unscoped reader gets this case wrong, which is exactly the bug this row pins'
+    );
+    assert.notStrictEqual(result, wholeDocumentResult, 'the scoped and unscoped readers must disagree on this fixture');
+  });
+
+  test('T6: a bold Phase line with only trailing whitespace resolves to an empty string, not a fallthrough (#3812)', () => {
+    const content = [
+      '# STATE',
+      '',
+      '## Current Position',
+      '',
+      '**Phase:**   ',
+      'Phase: 1 of 5 (plain, must NOT be used)',
+      'Plan: 1 of 3',
+    ].join('\n');
+
+    const result = extractViaProductionChain(content, 'Phase');
+    assert.strictEqual(
+      result,
+      '',
+      'the bold form wins outright even when its captured value is only trailing whitespace; it must not fall through to the plain line below'
+    );
   });
 
   // stateReplaceField tests
@@ -2473,8 +2770,7 @@ describe('cmdStateResolveBlocker (state resolve-blocker)', () => {
     assert.ok(!updated.includes('- Single blocker'), 'resolved blocker should be removed');
 
     // Section should contain "None" placeholder, not be empty
-    // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-    const sectionMatch = updated.match(/## Blockers\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+    const sectionMatch = sectionMatchOf(updated, 'Blockers');
     assert.ok(sectionMatch, 'Blockers section should still exist');
     assert.ok(sectionMatch[1].includes('None'), 'Blockers section should contain None placeholder');
   });
@@ -2877,8 +3173,7 @@ Progress: [..........] 0%
     );
 
     // Extract the Current Position section
-    // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-    const posMatch = content.match(/## Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+    const posMatch = sectionMatchOf(content, 'Current Position');
     assert.ok(posMatch, 'Current Position section should exist');
     const posSection = posMatch[1];
 
@@ -2979,8 +3274,7 @@ Progress: [..........] 0%
     const content = fs.readFileSync(
       path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8'
     );
-    // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-    const posMatch = content.match(/## Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+    const posMatch = sectionMatchOf(content, 'Current Position');
     assert.ok(posMatch, 'Current Position section should exist after advance-plan');
     const posSection = posMatch[1];
 
@@ -4097,8 +4391,7 @@ Progress: [##########] 20%
     );
 
     // Current Position Status: line must also be "Ready to execute"
-    // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-    const posMatch = stateContent.match(/## Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+    const posMatch = sectionMatchOf(stateContent, 'Current Position');
     assert.ok(posMatch, 'Current Position section not found');
     const posStatusMatch = posMatch[1].match(/^Status:\s*(.+)/m);
     assert.ok(posStatusMatch, 'Status field not found in Current Position section');
@@ -4153,8 +4446,7 @@ Progress: [##########] 20%
     const stateContent = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
 
     // Locate the Current Position section and verify the Status line there.
-    // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-    const posMatch = stateContent.match(/## Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+    const posMatch = sectionMatchOf(stateContent, 'Current Position');
     assert.ok(posMatch, 'Current Position section not found');
     const posStatusMatch = posMatch[1].match(/^Status:\s*(.+)/m);
     assert.ok(posStatusMatch, 'Status field not found in Current Position section');
@@ -8024,7 +8316,7 @@ describe('state add-roadmap-evolution (bug #1140)', () => {
   // Body of `## Accumulated Context` bounded by the next h2 (or EOF), so
   // placement assertions prove a subsection sits INSIDE that section.
   const accumulatedContextBody = (state) => {
-    const m = state.match(/##\s*Accumulated Context\s*\r?\n([\s\S]*?)(?=\n##[^#]|$)/);
+    const m = sectionMatchOf(state, 'Accumulated Context');
     return m ? m[1] : null;
   };
 
@@ -8566,7 +8858,14 @@ describe('regressions: table-format STATE.md (#1162)', () => {
     fs.mkdirSync(phaseDir, { recursive: true });
     fs.writeFileSync(path.join(phaseDir, '1-01-PLAN.md'), '# Plan 1');
 
-    const result = runGsdTools(['state', 'planned-phase', '1', '--plan-count', '1'], tmpDir);
+    // #3884 (ADR-3473 §8.4): `--plan-count` was never a declared flag (the
+    // real flag is `--plans`) and the bare '1' was never read as a phase
+    // positional either — both were silently dropped by the pre-#3884
+    // permissive parser. The command "worked" only because
+    // cmdStatePlannedPhase falls back to STATE.md's own current phase (1
+    // here) when no --phase is given, so the assertion below never actually
+    // exercised phase/plan-count plumbing. Corrected to the real flags.
+    const result = runGsdTools(['state', 'planned-phase', '--phase', '1', '--plans', '1'], tmpDir);
 
     assert.ok(result.success, `Command failed: ${result.error}`);
 
@@ -8707,7 +9006,9 @@ describe('regressions: table-format STATE.md (#1162) — updateCurrentPositionFi
     fs.mkdirSync(phaseDir, { recursive: true });
     fs.writeFileSync(path.join(phaseDir, '2-01-PLAN.md'), '# Plan\n');
 
-    const result = runGsdTools(['state', 'planned-phase', '2', '--plan-count', '1'], tmpDir);
+    // #3884: `--plan-count` / bare positional never worked — see the (a)
+    // Finding-2a-sibling note on the earlier occurrence of this pattern.
+    const result = runGsdTools(['state', 'planned-phase', '--phase', '2', '--plans', '1'], tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const written = fs.readFileSync(statePath, 'utf-8');
@@ -8733,7 +9034,9 @@ describe('regressions: table-format STATE.md (#1162) — updateCurrentPositionFi
     fs.mkdirSync(phaseDir, { recursive: true });
     fs.writeFileSync(path.join(phaseDir, '2-01-PLAN.md'), '# Plan\n');
 
-    const result = runGsdTools(['state', 'planned-phase', '2', '--plan-count', '1'], tmpDir);
+    // #3884: `--plan-count` / bare positional never worked — see the note on
+    // the first occurrence of this pattern above.
+    const result = runGsdTools(['state', 'planned-phase', '--phase', '2', '--plans', '1'], tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const written = fs.readFileSync(statePath, 'utf-8');
@@ -8754,7 +9057,9 @@ describe('regressions: table-format STATE.md (#1162) — updateCurrentPositionFi
     fs.mkdirSync(phaseDir, { recursive: true });
     fs.writeFileSync(path.join(phaseDir, '2-01-PLAN.md'), '# Plan\n');
 
-    const result = runGsdTools(['state', 'planned-phase', '2', '--plan-count', '1'], tmpDir);
+    // #3884: `--plan-count` / bare positional never worked — see the note on
+    // the first occurrence of this pattern above.
+    const result = runGsdTools(['state', 'planned-phase', '--phase', '2', '--plans', '1'], tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
 
     const written = fs.readFileSync(statePath, 'utf-8');
@@ -8927,8 +9232,7 @@ describe('#1255 — begin/complete-phase advance status for pipe-table STATE.md'
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
 
       // Extract the ## Current Position section only, to avoid matching Configuration rows
-      // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-      const cpMatch = after.match(/##\s*Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+      const cpMatch = sectionMatchOf(after, 'Current Position');
       assert.ok(cpMatch, '## Current Position section must exist');
       const cpSection = cpMatch[1];
 
@@ -8940,8 +9244,7 @@ describe('#1255 — begin/complete-phase advance status for pipe-table STATE.md'
 
       // Last activity cell must include date + narrative (not bare date)
       assert.ok(
-        // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md generated by the tool under test against a bounded fixture project, not adversarial input
-        /\|\s*Last activity\s*\|[^|]*—\s*Phase 1 execution started\s*\|/i.test(cpSection),
+        /—\s*Phase 1 execution started\s*$/i.test(pipeTableCell(cpSection, 'Last activity') || ''),
         `Current Position Last activity cell must include narrative '— Phase 1 execution started'; got Current Position:\n${cpSection}`
       );
     } finally {
@@ -9004,8 +9307,7 @@ describe('#1255 — begin/complete-phase advance status for pipe-table STATE.md'
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
 
       // Extract the ## Current Position section only, to avoid matching Configuration rows
-      // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-      const cpMatch = after.match(/##\s*Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+      const cpMatch = sectionMatchOf(after, 'Current Position');
       assert.ok(cpMatch, '## Current Position section must exist');
       const cpSection = cpMatch[1];
 
@@ -9027,8 +9329,7 @@ describe('#1255 — begin/complete-phase advance status for pipe-table STATE.md'
 
       // Bug 2: Last activity cell must include date + narrative (not bare date)
       assert.ok(
-        // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md generated by the tool under test against a bounded fixture project, not adversarial input
-        /\|\s*Last activity\s*\|[^|]*—\s*Phase 1 marked complete\s*\|/i.test(cpSection),
+        /—\s*Phase 1 marked complete\s*$/i.test(pipeTableCell(cpSection, 'Last activity') || ''),
         `Current Position Last activity cell must include narrative '— Phase 1 marked complete'; got Current Position:\n${cpSection}`
       );
     } finally {
@@ -9176,8 +9477,7 @@ describe('#1257 — planned-phase and begin-phase pipe-table regressions', () =>
       // Extract the ## Configuration section (stops before ## Current Position)
       // to avoid false-positive from the Current Position table (which IS updated
       // by updateCurrentPositionFields).
-      // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-      const cfgMatch = after.match(/##\s*Configuration\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+      const cfgMatch = sectionMatchOf(after, 'Configuration');
       assert.ok(cfgMatch, '## Configuration section must exist');
       const cfgSection = cfgMatch[1];
 
@@ -9234,15 +9534,13 @@ describe('#1257 — planned-phase and begin-phase pipe-table regressions', () =>
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
 
       // Extract ## Current Position section only
-      // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-      const cpMatch = after.match(/##\s*Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+      const cpMatch = sectionMatchOf(after, 'Current Position');
       assert.ok(cpMatch, '## Current Position section must exist');
       const cpSection = cpMatch[1];
 
       // The pipe-table Phase cell must be updated to reflect the executing phase
       assert.ok(
-        // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md generated by the tool under test against a bounded fixture project, not adversarial input
-        /\|\s*Phase\s*\|[^|]*1[^|]*EXECUTING[^|]*\|/i.test(cpSection),
+        /1[\s\S]*EXECUTING/i.test(pipeTableCell(cpSection, 'Phase') || ''),
         `Current Position pipe-table Phase cell must contain phase 1 EXECUTING; got Current Position:\n${cpSection}`
       );
 
@@ -9270,8 +9568,7 @@ describe('#1257 — planned-phase and begin-phase pipe-table regressions', () =>
       const after = fs.readFileSync(path.join(dir, '.planning', 'STATE.md'), 'utf8');
 
       // Extract ## Current Position section only
-      // eslint-disable-next-line local/no-unbounded-quantifier -- parses STATE.md this test just wrote via a fixture, fixed-size test-controlled content
-      const cpMatch = after.match(/##\s*Current Position\s*\r?\n([\s\S]*?)(?=\r?\n##|$)/i);
+      const cpMatch = sectionMatchOf(after, 'Current Position');
       assert.ok(cpMatch, '## Current Position section must exist');
       const cpSection = cpMatch[1];
 
@@ -18889,5 +19186,124 @@ describe('ADR-3473 §8.7 (#3872): reconcileReportedFields / the transaction diff
       }),
       { seed: 20260825, numRuns: 200 },
     );
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Consumer-output identity (ADR-3180 Decision 4(b)) — #3358 / #3884
+//
+// For #3358 the consumer is `state planned-phase`'s EFFECT on STATE.md, not
+// `parseNamedArgs`'s return value — a unit assertion on the parser alone
+// would have passed throughout this defect's entire life. These rows spawn
+// the real CLI against a temp project and assert on STATE.md's bytes.
+// ────────────────────────────────────────────────────────────────────────
+describe('state — consumer-output identity (ADR-3180 Decision 4(b), #3358)', () => {
+  function stateMdWithPopulatedPhaseTwo() {
+    return [
+      '---',
+      "gsd_state_version: '1.0'",
+      'status: planning',
+      'progress:',
+      '  total_phases: 5',
+      '  completed_phases: 1',
+      '  total_plans: 10',
+      '  completed_plans: 4',
+      '  percent: 40',
+      '---',
+      '',
+      '# Project State',
+      '',
+      '## Current Position',
+      '',
+      'Phase: 2 of 5 (Widget Support)',
+      'Plan: 1 of 3 in current phase',
+      'Status: Ready to execute',
+      'Last activity: 2026-08-20 — Phase 2 planning complete',
+      '',
+      'Progress: [####------] 40%',
+      '',
+    ].join('\n');
+  }
+
+  // #3358: a stray positional (`3`) past `state planned-phase`'s declared
+  // boundary is silently dropped by the CURRENT permissive parseNamedArgs —
+  // every flag resolves to `null` — and the command still RUNS, overwriting
+  // the previously-current phase block.
+  //
+  // Measured on this tree, 2026-08-26, against exactly this fixture:
+  //   $ gsd-tools query state.planned-phase 3 --cwd <tmp>
+  //   {"updated":["Current Position","Current Phase Name"],"phase":null,"plan_count":null}
+  //   exit 0
+  // STATE.md's `## Current Position` block changed from:
+  //   Phase: 2 of 5 (Widget Support)
+  // to:
+  //   Phase: null — READY TO EXECUTE
+  // (and frontmatter gained `current_phase_name: READY TO EXECUTE`, an
+  // outright corruption of the curated phase name).
+  test('positionalPlannedPhaseLeavesStateMdUntouched_3358', () => {
+    const tmpDir = createTempProject();
+    try {
+      const statePath = writeState(tmpDir, stateMdWithPopulatedPhaseTwo());
+      const before = fs.readFileSync(statePath);
+
+      const result = runGsdTools('query state.planned-phase 3', tmpDir);
+
+      assert.notStrictEqual(result.exitCode, 0, 'a positional argument past the boundary must exit non-zero');
+      const after = fs.readFileSync(statePath);
+      assert.ok(before.equals(after), 'STATE.md must be byte-identical to before the rejected call');
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  // Control: the flag form of the exact same intent must keep succeeding and
+  // keep updating STATE.md — proves C1 above is not passing merely because
+  // `state planned-phase` is broken outright.
+  test('flagFormPlannedPhaseStillUpdatesStateMd', () => {
+    const tmpDir = createTempProject();
+    try {
+      const statePath = writeState(tmpDir, stateMdWithPopulatedPhaseTwo());
+
+      const result = runGsdTools('query state.planned-phase --phase 3 --name X --plans 2', tmpDir);
+
+      assert.strictEqual(result.success, true, result.error);
+      const after = fs.readFileSync(statePath, 'utf-8');
+      assert.match(after, /Phase: 3 \(X\) — READY TO EXECUTE/);
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
+
+  // #3358, second call site: an extra positional token on `add-decision`
+  // must not be silently absorbed into a successful write.
+  test('positionalOnAddDecisionAppendsNothing', () => {
+    const tmpDir = createTempProject();
+    try {
+      const statePath = writeState(tmpDir, [
+        '---',
+        "gsd_state_version: '1.0'",
+        'status: planning',
+        '---',
+        '',
+        '# Project State',
+        '',
+        '## Accumulated Context',
+        '',
+        '### Decisions',
+        '',
+        '- none yet',
+        '',
+      ].join('\n'));
+      const before = fs.readFileSync(statePath, 'utf-8');
+
+      const result = runGsdTools(['query', 'state.add-decision', 'stray-token', '--summary', 'x'], tmpDir);
+
+      assert.notStrictEqual(result.exitCode, 0, 'an extra positional argument must exit non-zero');
+      const after = fs.readFileSync(statePath, 'utf-8');
+      assert.ok(!after.includes('- [Phase'), 'no decision row should have been appended');
+      assert.strictEqual(after, before, 'STATE.md must be unchanged when the call is rejected');
+    } finally {
+      cleanup(tmpDir);
+    }
   });
 });
