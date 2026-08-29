@@ -2588,4 +2588,19 @@ describe('#3726: milestone complete refuses to mutate without --confirm', () => 
     assert.ok(fs.existsSync(path.join(tmpDir, '.planning', 'milestones', 'v1.0-ROADMAP.md')), 'ROADMAP archived');
     assert.ok(!fs.existsSync(path.join(tmpDir, '.planning', 'phases', '01-foundation')), 'phase dir moved');
   });
+
+  // #3726 (PR #3774 review, Nit 1): the documented arg-discovery path is
+  // "invoke the command without args and the error lists what is required"
+  // (gsd-tools.cjs top-level usage). The version-required refusal is that
+  // error for `milestone complete`, so it must name --confirm too — otherwise
+  // discovering the flag takes a second round trip through the gate.
+  test('the version-required refusal names --confirm (arg-discovery path)', () => {
+    seedMutableMilestone();
+    const before = snapshotPlanning();
+    const result = runGsdTools(['milestone', 'complete'], tmpDir);
+    assert.strictEqual(result.success, false, 'bare `milestone complete` must refuse');
+    assert.match(result.error || '', /version required/, 'refusal must still name the missing version');
+    assert.match(result.error || '', /--confirm/, 'refusal must name --confirm so one invocation lists everything required');
+    assert.deepStrictEqual(snapshotPlanning(), before, 'a version-less invocation must leave .planning/ untouched');
+  });
 });

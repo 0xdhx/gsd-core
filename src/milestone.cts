@@ -564,7 +564,7 @@ function applyQuickTasksReset(content: string): { content: string; warning: { fi
 
 function cmdMilestoneComplete(cwd: string, version: string, options: MilestoneCompleteOptions, raw: boolean): void {
   if (!version) {
-    error('version required for milestone complete (e.g., v1.0)');
+    error('version required for milestone complete (e.g., v1.0) — and --confirm to mutate');
   }
   // #2288 security: `version` is a CLI positional that is interpolated into
   // multiple filesystem sinks below — `path.join(archiveDir, `${version}-ROADMAP.md`)`,
