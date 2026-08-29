@@ -8111,6 +8111,38 @@ describe('#3781: acknowledge supports the heading-delimited entry shape', () => 
     assert.equal(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
   });
 
+  test('an entry whose body ENDS in a fence acks readably — the marker lands before the fence, never inside it (round 5, RV6.5)', () => {
+    // Unclosed fence: it runs to the entry's end, so "after the last
+    // non-blank line" is fence content — the reader never sees the marker.
+    const unclosed = '## Deferred Items\n\n### E\n- **What:** x\n```\ncode\n';
+    let ack = acknowledgeDeferredItem(unclosed, parseDeferredItemsWithStatus(unclosed)[0].name);
+    assert.equal(ack.status, 'ok');
+    assert.equal(ack.content, '## Deferred Items\n\n### E\n- **What:** x\n  status: acknowledged\n```\ncode\n');
+    assert.equal(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged', 'the marker must be read back');
+    // Closed fence at the end of the body: same placement, for the same reason.
+    const closed = '## Deferred Items\n\n### E\n- **What:** x\n```\ncode\n```\n';
+    ack = acknowledgeDeferredItem(closed, parseDeferredItemsWithStatus(closed)[0].name);
+    assert.equal(ack.status, 'ok');
+    assert.equal(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+    assert.ok(ack.content.includes('- **What:** x\n  status: acknowledged\n```'), ack.content);
+    // A pending (preamble) entry ending in an unclosed fence before a heading.
+    const pending = '## Deferred Items\n\n- a\n```\ncode\n\n### E\n- b\n';
+    const items = parseDeferredItemsWithStatus(pending);
+    assert.equal(items.length, 2, JSON.stringify(items));
+    ack = acknowledgeDeferredItem(pending, items[0].name);
+    assert.equal(ack.status, 'ok');
+    assert.deepStrictEqual(parseDeferredItemsWithStatus(ack.content).map((i) => i.status), ['acknowledged', '']);
+    assert.ok(ack.content.startsWith('## Deferred Items\n\n- a\n  status: acknowledged\n```\ncode\n'), ack.content);
+  });
+
+  test('leaf line-0 rewrite keeps a closing `#` sequence (round 5, RV6.5)', () => {
+    const doc = '## Deferred Items\n\n### status: open ###\n- did a thing\n';
+    const ack = acknowledgeDeferredItem(doc, parseDeferredItemsWithStatus(doc)[0].name);
+    assert.equal(ack.status, 'ok');
+    assert.ok(ack.content.includes('### status: acknowledged ###'), ack.content);
+    assert.equal(parseDeferredItemsWithStatus(ack.content)[0].status, 'acknowledged');
+  });
+
   test('leaf line-0 corner: a heading whose text parses as a status field', () => {
     const doc = '## Deferred Items\n\n### status: open\n- did a thing\n';
     const before = parseDeferredItemsWithStatus(doc);

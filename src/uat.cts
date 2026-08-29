@@ -2319,8 +2319,15 @@ function acknowledgeHeadingShapedEntry({ content, sectionBody, deferredSection, 
     // entry's body is frequently a soft-wrapped sentence, and splicing after
     // line 0 would split it in half (#3781's sentence trap). The headless
     // (no-heading-anywhere) path keeps its own splice-after-line-0 shape.
+    // …and never INSIDE a fence (round 5, RV6.5 review): an entry whose body
+    // ends in a fenced block — closed or, worse, unclosed and so running to
+    // the entry's end — would otherwise receive its marker as fence content,
+    // a line the reader never reads: `ok` returned, item still outstanding.
+    // Walk back over blank and fenced lines alike, classified exactly as the
+    // reader classifies them, so the marker lands on a line the reader reads.
+    const fencedInEntry = fencedLineSet(readerLines);
     let last = rawLines.length - 1;
-    while (last > 0 && rawLines[last].replace(/\r$/, '').trim() === '') last--;
+    while (last > 0 && (readerLines[last].trim() === '' || fencedInEntry.has(last))) last--;
     // A pending entry's continuation sits two columns inside its own marker
     // indent (the entry's indent CHARACTERS, as the headless path does); a
     // leaf's body lines are sibling bullets, and an indented bare field line
@@ -2353,11 +2360,12 @@ function acknowledgeHeadingShapedEntry({ content, sectionBody, deferredSection, 
     const field = parseGapEntryFieldLine(reader, DEFERRED_BULLET_MARKERS, stripsMarkerAt(statusLineIdx, entry.opener))!;
     const prefix = reader.slice(0, field.valueStart);
     const sep = /[ \t]$/.test(prefix) ? '' : ' ';
-    const atx = statusLineIdx === 0 && entry.kind === 'leaf'
-      ? (/^( {0,3}#{1,6}[ \t]+)/.exec(line)?.[1] ?? '')
-      : '';
+    const leafLine0 = statusLineIdx === 0 && entry.kind === 'leaf';
+    const atx = leafLine0 ? (/^( {0,3}#{1,6}[ \t]+)/.exec(line)?.[1] ?? '') : '';
+    // A closing `#` sequence is Markdown the reader ignores; keep it (RV6.5).
+    const closing = leafLine0 ? (/[ \t]+#+[ \t]*$/.exec(line)?.[0] ?? '') : '';
     newRawLines = rawLines.slice();
-    newRawLines[statusLineIdx] = `${atx}${prefix}${sep}acknowledged${cr}`;
+    newRawLines[statusLineIdx] = `${atx}${prefix}${sep}acknowledged${closing}${cr}`;
   }
 
   const matchIndexInContent = sectionOffset + entry.start;
