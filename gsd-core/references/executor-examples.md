@@ -91,8 +91,9 @@ The file has no template — write it by hand, as a Markdown list under a
   and nothing inside a fenced code block is an entry or a field — at any indent,
   including one deeper than CommonMark's three-space cap, which is what a fence
   written under a nested bullet looks like. A fence that is never closed runs to
-  the end of its own entry and no further: a stray delimiter cannot hide the
-  entries after it.
+  the end of its own entry and no further, so an unclosed delimiter cannot hide
+  the entries after it — a closed pair of delimiters is a fence, whatever sits
+  between them.
 
 An entry is RESOLVED only if it carries an explicit `status: resolved`. Anything
 else — including an entry with no `status:` at all — stays open and will surface
