@@ -2830,13 +2830,17 @@ describe('#3702 round 4: the fence gate is indent-unbounded, like the rest of th
     assert.ok(!names.includes('also not an entry'), `fenced content became an entry: ${JSON.stringify(names)}`);
   });
 
-  test('an UNTERMINATED deep fence runs to end-of-file, exactly as CommonMark says', () => {
-    // Indent is the only dimension hidden from the engine; the unterminated
-    // case is still its answer, not a re-derivation.
+  test('an UNTERMINATED deep fence runs to the end of its ENTRY (round 5, B1) — the status inside it stays gated, the next entry does not', () => {
+    // Round 4 titled this "runs to end-of-file, exactly as CommonMark says";
+    // CommonMark bounds a fence by its container, and the review's B1 showed
+    // the end-of-file reading swallowing the entries after a stray delimiter.
+    // The engine still classifies; the walk bounds it at the entry.
     const doc = `${H}- alpha\n        \`\`\`text\n        status: resolved\n`;
     const items = parseDeferredItemsWithStatus(doc);
     assert.strictEqual(items.length, 1);
     assert.notStrictEqual(String(items[0].status || '').toLowerCase(), 'resolved');
+    const two = parseDeferredItemsWithStatus(`${doc}- beta\n  status: resolved\n`);
+    assert.deepStrictEqual(two.map((i) => [i.name, i.status]), [['alpha ```text status: resolved', ''], ['beta status: resolved', 'resolved']]);
   });
 
   test('a deep fence still CLOSES: fields after it are read again', () => {
@@ -3300,8 +3304,36 @@ describe('#3702 round 2: thematic breaks and fenced code are not list items (M1,
     assert.deepStrictEqual(names('### Entry\n\n```sh\n1. run this\n2. then this\n```\n'), []);
     assert.deepStrictEqual(names('```diff\n+ added\n- removed\n```\n'), []);
     assert.deepStrictEqual(names('~~~\n* not an item\n~~~\n'), []);
-    // An unterminated fence runs to the end of the section.
-    assert.deepStrictEqual(names('```\n- still fenced\n'), []);
+    // An unterminated fence runs to the end of its ENTRY, never past it
+    // (round 5, B1): a stray delimiter before the first item hides nothing.
+    assert.deepStrictEqual(names('```\n- still fenced\n'), ['still fenced']);
+  });
+
+  test('B1 (round 5): an unterminated fence runs to the end of its entry — a stray delimiter cannot swallow later entries', () => {
+    // The exact review reproduction, at indent 0 and at 4: `next` reports two
+    // entries and round 4 reported ONE, with `- b` swallowed into `a`'s name.
+    assert.deepStrictEqual(names('- a\n\n```\n\n- b\n'), ['a  ```', 'b']);
+    assert.deepStrictEqual(names('- a\n\n    ```\n\n- b\n'), ['a  ```', 'b']);
+    // A TERMINATED deep fence still gates what it encloses (round 4, M2 holds).
+    assert.deepStrictEqual(names('- a\n    ```\n    - not b\n    ```\n- b\n'), ['a ``` - not b ```', 'b']);
+    // Inside its own entry the stray fence still gates: a `status:` under it
+    // does not resolve the entry, and the NEXT entry is read on its own terms.
+    const statusesOf = (md) => parseDeferredItemsWithStatus(SECTION + md).map((i) => i.status);
+    assert.deepStrictEqual(statusesOf('- alpha\n    ```\n    status: resolved\n- beta\n  status: resolved\n'), ['', 'resolved']);
+    // A delimiter after the bound is a fence in its own right: without the
+    // rescan the `~~~` pair below would be invisible and beta would resolve.
+    assert.deepStrictEqual(statusesOf('- a\n```\n- b\n  ~~~\n  status: resolved\n  ~~~\n- c\n'), ['', '', '']);
+    assert.deepStrictEqual(names('- a\n```\n- b\n  ~~~\n  status: resolved\n  ~~~\n- c\n'), ['a ```', 'b ~~~ status: resolved ~~~', 'c']);
+    // Heading shape: a heading ends the entry, and the fence with it. (At
+    // indent 0 the heading TOKENIZER applies CommonMark's own fence rule, so
+    // `### Next` after a stray delimiter is body text there, exactly as on
+    // `next`; at four spaces the tokenizer sees no fence and the heading holds.)
+    assert.deepStrictEqual(names('### Entry\n\n- **What:** x\n\n```\n\n### Next\n\n- y\n'), ['Entry  - **What:** x  ```  ### Next  - y']);
+    assert.deepStrictEqual(names('### Entry\n\n- **What:** x\n\n    ```\n\n### Next\n\n- y\n'), ['Entry  - **What:** x  ```', 'Next  - y']);
+    // And in the headless region before the first heading (four spaces, for
+    // the tokenizer reason above — at indent 0 the section has no heading).
+    assert.deepStrictEqual(names('    ```\n- a\n\n### Entry\n\n- b\n'), ['a', 'Entry  - b']);
+    assert.deepStrictEqual(names('```\n- a\n\n### Entry\n\n- b\n'), ['a  ### Entry', 'b']);
   });
 
   test('M2: a fence inside an entry is continuation, and the entry still parses around it', () => {

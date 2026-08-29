@@ -2565,14 +2565,30 @@ function scanFencesFrom(lines: string[], from: number): FenceScan {
   for (const block of scanFencedBlocks(deindentedForFences(lines.slice(from)))) {
     const open = block.openLineIdx + from;
     scan.openers.add(open);
-    const last = block.closeLineIdx === -1 ? lines.length - 1 : block.closeLineIdx + from;
-    for (let i = open; i <= last; i++) scan.fenced.add(i);
+    if (block.closeLineIdx === -1) {
+      scan.unterminatedFrom = open; // always the scan's last block
+      break;
+    }
+    for (let i = open; i <= block.closeLineIdx + from; i++) scan.fenced.add(i);
   }
   return scan;
 }
 
 /** The scan a grammar without block structure (`## Gaps`) walks under: nothing is fenced. Never mutated. */
 const NO_FENCES: FenceScan = { fenced: new Set<number>(), openers: new Set<number>(), unterminatedFrom: -1 };
+
+/**
+ * Does `line` LOOK like a top-level list item under `markers` — a marker at
+ * or above the base indent, start value ignored? The bound an unterminated
+ * fence runs to (round 5, B1; see `scanFencesFrom`). Shape rather than the
+ * ordered-start rule, because the list memory inside a fence is not evidence
+ * of anything, and closing a stray fence one line early errs in the
+ * surfacing direction.
+ */
+function topLevelItemShape(line: string, markers: BulletMarkers, baseIndent: number | null): boolean {
+  const m = line.match(markers.open);
+  return m !== null && (baseIndent === null || indentWidth(m[1], markers) <= baseIndent);
+}
 
 /**
  * Per-indent LIST memory (#3702 round 2, round review; widened round 5, M2):
@@ -2804,7 +2820,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     const ind = indentOf(line);
     return bodyBase !== null && ind <= bodyBase ? bodyBase : ind;
   };
-  const scan = scanFencesFrom(lines, 0);
+  let scan = scanFencesFrom(lines, 0);
 
   const flushCurrent = (): void => {
     // Keep the leaf entry only when its body carries a list item; the heading
@@ -2876,6 +2892,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
       blankSeen = false;
       bodyBase = null;
       // A heading ends the entry, and with it any unterminated fence (B1).
+      scan = scanFencesFrom(lines, i + 1);
       if (!heading.isContainer) {
         // Leaf heading: open an entry with the heading text as line 0.
         current = { lines: [heading.text], opener: [false], startLine: i, endLine: i };
@@ -2895,6 +2912,9 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
     // B1: an unterminated fence runs to the end of its entry. The next line
     // shaped like a top-level item ends it — rescan from there, so a later
     // delimiter is read on its own terms (see `scanFencesFrom`).
+    if (scan.unterminatedFrom !== -1 && i > scan.unterminatedFrom && topLevelItemShape(line, DEFERRED_BULLET_MARKERS, bodyBase)) {
+      scan = scanFencesFrom(lines, i);
+    }
     if (scan.fenced.has(i) || (scan.unterminatedFrom !== -1 && i >= scan.unterminatedFrom)) {
       // Fence content is body text, never list-item evidence (M2) — and
       // never an opener, so it is never marker-stripped for fields either.
@@ -3043,7 +3063,7 @@ function splitGapsEntriesCore(
   // Block structure (M1/M2 + column indents) is a property of the GRAMMAR,
   // not of this seam: the Gaps set opts out and stays byte-for-byte on its
   // `next` behaviour — see `indentWidth` for the indent half of that opt-out.
-  const scan = markers.blockStructure ? scanFencesFrom(rawLines, 0) : NO_FENCES;
+  let scan = markers.blockStructure ? scanFencesFrom(rawLines, 0) : NO_FENCES;
   let blankSeen = false;
   // The run LEVEL of a line: every indent at or shallower than the list's
   // base is the one top level (a dedenting list keeps its entry boundaries);
@@ -3057,6 +3077,9 @@ function splitGapsEntriesCore(
     // B1: an unterminated fence runs to the end of its entry — the next line
     // shaped like a top-level item ends it; rescan from there so a later
     // delimiter is read on its own terms (see `scanFencesFrom`).
+    if (scan.unterminatedFrom !== -1 && idx > scan.unterminatedFrom && topLevelItemShape(line, markers, baseIndent)) {
+      scan = scanFencesFrom(rawLines, idx);
+    }
     if (scan.fenced.has(idx) || (scan.unterminatedFrom !== -1 && idx >= scan.unterminatedFrom)) {
       // Fence content never opens an entry (M2). Inside an open entry it is
       // continuation — pushed, so the span invariant `acknowledgeDeferredItem`
