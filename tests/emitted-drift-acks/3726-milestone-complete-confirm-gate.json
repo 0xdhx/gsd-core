@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "paths": {
-    "complete-milestone.md": {
-      "reason": "#3726: +420 bytes (40180 -> 40600). The archive_milestone step's two `milestone complete` invocations now pass the required `--confirm` flag (the command refuses to mutate without it — the archive is irreversible), with a note explaining the flag and pointing at `--dry-run` for previews. Deliberate runtime-loaded workflow text for the new gate, not converter drift. Re-filed in a fresh fragment because the spent 3409-unreachable-guard-arms.json this append previously rode on was swept from next by #3078."
-    }
-  }
-}
