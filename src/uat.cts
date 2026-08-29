@@ -2695,7 +2695,7 @@ function matchListOpener(line: string, markers: BulletMarkers, inList: boolean):
   if (!m) return null;
   const token = m[2];
   const ordered = /^\d/.test(token);
-  if (ordered && !inList && parseInt(token, 10) !== 1) return null;
+  if (ordered && !inList && parseInt(token, 10) > 1) return null;
   return { indent: indentWidth(m[1], markers), ordered };
 }
 

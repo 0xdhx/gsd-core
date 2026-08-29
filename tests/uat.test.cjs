@@ -3247,6 +3247,21 @@ describe('#3702 round 2: the ordered marker and the prose contract (B2, m1)', ()
     assert.deepStrictEqual(names('1. alpha\n- beta\n2. gamma\n'), ['alpha', 'beta 2. gamma']);
   });
 
+  test('round 5 (M1): the ordered-start threshold — `0.` and `1.` open a list, `2.` does not', () => {
+    // CommonMark §5.2 permits any 1-9-digit start; a `0.`-numbered list is
+    // ordinary. Refusing `0.` dropped ONLY the first item, because the run
+    // then started at `1.` — the mixed under-report that looks like a clean
+    // parse. Boundary: limit-1 / limit / limit+1 of the threshold itself.
+    assert.deepStrictEqual(names('0. alpha\n1. beta\n2. gamma\n'), ['alpha', 'beta', 'gamma']);
+    assert.deepStrictEqual(names('1. alpha\n2. beta\n'), ['alpha', 'beta']);
+    assert.deepStrictEqual(names('2. alpha\n3. beta\n'), []);
+    assert.deepStrictEqual(names('0. only\n'), ['only']);
+    assert.deepStrictEqual(names('00. alpha\n01. beta\n'), ['alpha', 'beta']);
+    // The cost, stated accurately: a list starting at 2 or more reads as
+    // prose UNTIL its first `0.`/`1.` line — the loss is the prefix.
+    assert.deepStrictEqual(names('2. alpha\n3. beta\n1. gamma\n'), ['gamma']);
+  });
+
   test('m1: the 9-digit boundary of an ordered start', () => {
     // `999999999.` is a legal CommonMark ordered marker; ten digits is not.
     assert.deepStrictEqual(names('1. a\n999999999. b\n'), ['a', 'b']);
