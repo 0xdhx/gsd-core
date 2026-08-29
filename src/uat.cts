@@ -2608,14 +2608,14 @@ function topLevelItemShape(line: string, markers: BulletMarkers, baseIndent: num
  * is that rule as far as this parser can state it without a paragraph model.
  */
 class ListRuns {
-  private readonly byIndent = new Map<number, boolean>();
-  at(indent: number): boolean { return this.byIndent.get(indent) ?? false; }
-  opened(indent: number, ordered: boolean): void {
-    for (const d of [...this.byIndent.keys()]) if (d > indent) this.byIndent.delete(d);
-    this.byIndent.set(indent, ordered);
+  private readonly byIndent = new Set<number>();
+  at(indent: number): boolean { return this.byIndent.has(indent); }
+  opened(indent: number): void {
+    for (const d of [...this.byIndent]) if (d > indent) this.byIndent.delete(d);
+    this.byIndent.add(indent);
   }
   endedAt(indent: number): void {
-    for (const d of [...this.byIndent.keys()]) if (d >= indent) this.byIndent.delete(d);
+    for (const d of [...this.byIndent]) if (d >= indent) this.byIndent.delete(d);
   }
   clear(): void { this.byIndent.clear(); }
 }
@@ -2652,8 +2652,6 @@ function indentOf(line: string): number {
 interface ListOpener {
   /** Width of the indent before the marker. */
   indent: number;
-  /** `true` for a dot-terminated ordered marker, `false` for `-`, `*`, `+`. */
-  ordered: boolean;
 }
 
 /**
@@ -2694,9 +2692,8 @@ function matchListOpener(line: string, markers: BulletMarkers, inList: boolean):
   const m = line.match(markers.open);
   if (!m) return null;
   const token = m[2];
-  const ordered = /^\d/.test(token);
-  if (ordered && !inList && parseInt(token, 10) > 1) return null;
-  return { indent: indentWidth(m[1], markers), ordered };
+  if (/^\d/.test(token) && !inList && parseInt(token, 10) > 1) return null;
+  return { indent: indentWidth(m[1], markers) };
 }
 
 /**
@@ -2944,7 +2941,7 @@ function splitDeferredHeadingEntriesDetailed(sectionBody: string): DeferredHeadi
       if (opener !== null) {
         currentHasBullet = true;
         if (bodyBase === null) bodyBase = opener.indent;
-        runs.opened(levelOf(line), opener.ordered);
+        runs.opened(levelOf(line));
       } else if (blankSeen && line.trim() !== '') {
         runs.endedAt(levelOf(line)); // a paragraph after a blank line ends the lists at its level and deeper
       }
@@ -3108,7 +3105,7 @@ function splitGapsEntriesCore(
     if (opener !== null) {
       const { indent } = opener;
       if (baseIndent === null) baseIndent = indent;
-      runs.opened(levelOf(line), opener.ordered);
+      runs.opened(levelOf(line));
       if (indent <= baseIndent) {
         flush();
         current = [line];

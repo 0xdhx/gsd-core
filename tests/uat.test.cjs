@@ -3242,9 +3242,10 @@ describe('#3702 round 2: the ordered marker and the prose contract (B2, m1)', ()
     // read as prose, the same way CommonMark refuses it as a paragraph
     // interruption. The wild records (#3702) all start at 1.
     assert.deepStrictEqual(names('2. alpha\n3. beta\n'), []);
-    // A non-ordered opener ends the run; a following non-1 ordered line is prose
-    // folded into the open entry rather than a new item.
-    assert.deepStrictEqual(names('1. alpha\n- beta\n2. gamma\n'), ['alpha', 'beta 2. gamma']);
+    // A bullet does NOT end the list for this purpose (round 5, M2): a list is
+    // open at the level, so the following non-1 ordinal is an item — CommonMark
+    // reads `2. gamma` there as a fresh ordered list (start=2), not as text.
+    assert.deepStrictEqual(names('1. alpha\n- beta\n2. gamma\n'), ['alpha', 'beta', 'gamma']);
   });
 
   test('round 5 (M1): the ordered-start threshold — `0.` and `1.` open a list, `2.` does not', () => {
@@ -3260,6 +3261,23 @@ describe('#3702 round 2: the ordered marker and the prose contract (B2, m1)', ()
     // The cost, stated accurately: a list starting at 2 or more reads as
     // prose UNTIL its first `0.`/`1.` line — the loss is the prefix.
     assert.deepStrictEqual(names('2. alpha\n3. beta\n1. gamma\n'), ['gamma']);
+  });
+
+  test('round 5 (M2): a non-1 ordinal is an item wherever a list is already open at its level', () => {
+    // `1. a` / `- b` / `5. c` folded `5. c` into `b` on round 4 — the
+    // ordered-run memory was cleared by the bullet. In CommonMark `5. c` there
+    // is a fresh ordered list (start=5): a non-1 start is refused only where
+    // it would interrupt a PARAGRAPH, and after a list item it interrupts none.
+    assert.deepStrictEqual(names('1. a\n- b\n5. c\n'), ['a', 'b', 'c']);
+    assert.deepStrictEqual(names('- a\n5. c\n'), ['a', 'c']);
+    // Across a blank line the list is still open (CommonMark: a loose list).
+    assert.deepStrictEqual(names('- a\n\n5. c\n'), ['a', 'c']);
+    // A paragraph after the blank ENDS the list; the ordinal after it is prose
+    // — the round-2 B2 contract, now placed where CommonMark places it.
+    assert.deepStrictEqual(names('- a\n\nprose here\n5. c\n'), ['a  prose here 5. c']);
+    // Doc start and after a heading are paragraph positions: the B2 pins hold.
+    assert.deepStrictEqual(names('5. c\n'), []);
+    assert.deepStrictEqual(names('### Notes\n\n5. c\n'), []);
   });
 
   test('m1: the 9-digit boundary of an ordered start', () => {
@@ -3426,13 +3444,19 @@ describe('#3702 round 2: round-review refinements (ordered run, rejected ordinal
     assert.strictEqual(names(md).length, 2);
   });
 
-  test('an ordered run is per INDENT: a nested `1. / 2.` run resolves (round-1 parity), a nested ordinal under a nested bullet is prose', () => {
+  test('an ordered run is per INDENT: a nested `1. / 2.` run resolves (round-1 parity), and a nested ordinal after a nested bullet continues that level\'s list', () => {
     // Round-review continuation 2: nested openers read the top-level run and
     // never wrote their own.
     for (const eol of ['\n', '\r\n']) {
       const nestedRun = '- alpha\n  1. what: detail\n  2. status: resolved\n\n### Entry\n\n- **What:** x\n'.replace(/\n/g, eol);
       assert.deepStrictEqual(statuses(nestedRun), ['resolved', ''], JSON.stringify(eol));
-      const leak = '1. alpha\n  - nested prose\n  3. status: resolved\n\n### Entry\n\n- **What:** x\n'.replace(/\n/g, eol);
+      // Round 5 (M2): a list is open at the nested level, so `3.` is an item
+      // there — a fresh ordered list in CommonMark — and a nested item that
+      // reads `status: resolved` is a field line, as `- status: resolved` is.
+      const nestedAfterBullet = '1. alpha\n  - nested item\n  3. status: resolved\n\n### Entry\n\n- **What:** x\n'.replace(/\n/g, eol);
+      assert.deepStrictEqual(statuses(nestedAfterBullet), ['resolved', ''], JSON.stringify(eol));
+      // With NO list open at the nested level the ordinal is prose (round 2).
+      const leak = '1. alpha\n  nested prose\n  3. status: resolved\n\n### Entry\n\n- **What:** x\n'.replace(/\n/g, eol);
       assert.deepStrictEqual(statuses(leak), ['', ''], JSON.stringify(eol));
     }
     // A new top-level item resets the nested levels: `2.` under beta does not continue alpha's nested run.
@@ -3473,10 +3497,13 @@ describe('#3702 round 2: round-review refinements (ordered run, rejected ordinal
   });
 
   test('a REJECTED ordinal line under a heading is not marker-stripped, so it cannot manufacture a field', () => {
-    // `3. status: resolved` is prose by the start-at-1 rule; before this fix the
-    // heading path stripped its marker anyway and read a resolved field off it.
-    assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n3. status: resolved\n'), ['']);
-    assert.strictEqual(names('### Entry\n\n- **What:** x\n3. status: resolved\n').length, 1);
+    // `3. status: resolved` at a PARAGRAPH position is prose by the
+    // ordered-start rule; before this fix the heading path stripped its marker
+    // anyway and read a resolved field off it. (Round 5, M2: directly after a
+    // list item it is an item instead — a list is open there.)
+    assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n\nSome prose.\n3. status: resolved\n'), ['']);
+    assert.strictEqual(names('### Entry\n\n- **What:** x\n\nSome prose.\n3. status: resolved\n').length, 1);
+    assert.deepStrictEqual(statuses('### Entry\n\n- **What:** x\n3. status: resolved\n'), ['resolved']);
     // An ACCEPTED ordered status line still resolves, as `- status: resolved` does.
     assert.deepStrictEqual(statuses('### Entry\n\n1. **What:** x\n2. **Status:** resolved\n'), ['resolved']);
     // Same rule in a headless region of a heading-shaped file.
