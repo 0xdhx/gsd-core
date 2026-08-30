@@ -317,7 +317,7 @@ const LIB = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib');
  * returning the parsed JSON result and the git argv list that was actually
  * executed (so "git commit never ran" is asserted directly, not inferred).
  */
-function commitWithFailingAdd({ cwd, files, failFor = [], stderr = 'fatal: injected staging failure', timeout = false, amend = false, gitVerb = 'add' }) {
+function commitWithFailingAdd({ cwd, files, failFor = [], stderr = 'fatal: injected staging failure', timeout = false, amend = false, gitVerb = 'add', matchArg = null }) {
   const callsOut = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2608-')), 'calls.json');
   // `timeout` is `false` | `true` (alias for `'posix'`) | `'posix'` | `'windows'` —
   // #3050: the shared isSpawnTimeout predicate only requires `error.code ===
@@ -333,11 +333,12 @@ const failFor = ${JSON.stringify(failFor)};
 const stderrText = ${JSON.stringify(stderr)};
 const timeoutShape = ${JSON.stringify(timeoutShape)};
 const gitVerb = ${JSON.stringify(gitVerb)};
+const matchArg = ${JSON.stringify(matchArg)};
 const real = projection.execGit;
 const calls = [];
 projection.execGit = (args, opts) => {
   calls.push(args);
-  if (args[0] === gitVerb && failFor.includes(args[args.length - 1])) {
+  if (args[0] === gitVerb && (matchArg === null || args.includes(matchArg)) && failFor.includes(args[args.length - 1])) {
     if (timeoutShape === 'posix') {
       // The exact shape spawnSync produces on a POSIX timeout, which
       // shell-command-projection surfaces as signal + error.code.
@@ -934,6 +935,145 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
   });
 });
 
+
+describe('#3859: an unanswered dry-run probe must not close the assume-unchanged path', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempGitProject();
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  // Round 3. The `git commit --dry-run --porcelain` probe is the ONE probe in
+  // the guard whose rc 0 is the reassuring answer ("git would record
+  // something, stand aside"). `execGit` reports a spawn timeout as
+  // `exitCode: 1` (`_spawnResult`: `result.status ?? 1`) — byte-identical to
+  // git's own "nothing to record" — so an unanswered probe read as a
+  // confirmed one, the guard returned `nothing_to_commit`, and content the
+  // caller named in `--files` was never committed. The diff probe is safe by
+  // construction (rc 0 is the DANGEROUS answer there, and a timeout can only
+  // produce non-zero); the two sequencer probes carry an explicit
+  // `isSpawnTimeout` disjunct. This probe now stands aside on anything but a
+  // CONFIRMED rc 1 with no spawn error — the same "only a confirmed answer
+  // decides" rule the diff probe already follows, from the other direction.
+  //
+  // Seam: `commitWithFailingAdd`'s injected `execGit` with `gitVerb: 'commit'`
+  // AND `matchArg: '--dry-run'` — the real `git commit … -- <path>` shares
+  // both `args[0]` and its last argument with the probe, so the verb alone
+  // would intercept the commit this arm exists to prove still happens.
+  function assumeUnchangedModified() {
+    const rel = path.posix.join('.planning', 'assumed.md');
+    fs.writeFileSync(path.join(tmpDir, rel), 'seed\n');
+    gitOrThrow(['add', '--', rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['commit', '-m', 'seed assumed'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    fs.writeFileSync(path.join(tmpDir, rel), 'modified under assume-unchanged\n');
+    return rel;
+  }
+
+  for (const shape of ['posix', 'windows']) {
+    test(`a timed-out dry-run probe (${shape}) still commits the modified assume-unchanged path`, () => {
+      const rel = assumeUnchangedModified();
+
+      const { result, gitCalls } = commitWithFailingAdd({
+        cwd: tmpDir,
+        files: [rel],
+        failFor: [rel],
+        gitVerb: 'commit',
+        matchArg: '--dry-run',
+        timeout: shape,
+      });
+
+      assert.notEqual(result.reason, 'nothing_to_commit',
+        'an unanswered dry run must not be read as "nothing would be recorded" — that drops content '
+        + 'the caller named in --files and reports there was nothing to write');
+      assert.equal(result.committed, true, 'the commit must still happen — git would have recorded it');
+      assert.ok(gitCalls.some((a) => a[0] === 'commit' && a.includes('--dry-run')),
+        'the probe must have been the call that timed out');
+      assert.ok(gitCalls.some((a) => a[0] === 'commit' && !a.includes('--dry-run')),
+        'and the guard must fall through to the real git commit');
+      assert.equal(
+        gitOrThrow(['show', 'HEAD:' + rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS }),
+        'modified under assume-unchanged\n',
+        'and the content it records must be the working-tree content');
+    });
+  }
+
+  // A genuine git error from the dry run (rc 128, no spawn error) is not a
+  // "nothing to record" answer either. It falls through to git, which fails
+  // the same way it would have — loudly — rather than manufacturing a no-op.
+  test('a dry-run probe that errors (rc 128) still reaches git instead of reporting nothing_to_commit', () => {
+    const rel = assumeUnchangedModified();
+
+    const { result, gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [rel],
+      failFor: [rel],
+      gitVerb: 'commit',
+      matchArg: '--dry-run',
+      timeout: false,
+    });
+
+    assert.notEqual(result.reason, 'nothing_to_commit',
+      'rc 128 is a failed probe, not a confirmed empty one');
+    assert.equal(result.committed, true);
+    assert.ok(gitCalls.some((a) => a[0] === 'commit' && !a.includes('--dry-run')));
+  });
+
+  // The `ls-files -v` read is an optimisation, never a gate: when it cannot
+  // answer, the dry run runs anyway. Pinned, because the reviewer named it
+  // as untested and a later "tidy-up" that returns false on a failed read
+  // would drop the content by a different door.
+  test('a timed-out ls-files probe falls through to the dry run, and the path is still committed', () => {
+    const rel = assumeUnchangedModified();
+
+    const { result, gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [rel],
+      failFor: [rel],
+      gitVerb: 'ls-files',
+      timeout: true,
+    });
+
+    assert.equal(result.committed, true,
+      'an unreadable tag list must not decide anything — the dry run answers instead');
+    assert.ok(gitCalls.some((a) => a[0] === 'commit' && a.includes('--dry-run')),
+      'the dry run must have run despite the unanswered ls-files read');
+    assert.equal(
+      gitOrThrow(['show', 'HEAD:' + rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS }),
+      'modified under assume-unchanged\n');
+  });
+
+  // NEGATIVE CONTROL for the conservative reading, mirroring the sequencer
+  // arms': an UNMODIFIED assume-unchanged path in a clean tree, dry run timed
+  // out. Standing aside must not manufacture a DIFFERENT answer — it falls
+  // through to git, git says there is nothing to commit, and the caller sees
+  // the same reason the guard would have given.
+  test('a timed-out dry-run probe on an unmodified assume-unchanged path still reports nothing_to_commit', () => {
+    const rel = path.posix.join('.planning', 'assumed.md');
+    fs.writeFileSync(path.join(tmpDir, rel), 'seed\n');
+    gitOrThrow(['add', '--', rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['commit', '-m', 'seed assumed'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+    gitOrThrow(['update-index', '--assume-unchanged', '--', rel], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS });
+
+    const { result, gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [rel],
+      failFor: [rel],
+      gitVerb: 'commit',
+      matchArg: '--dry-run',
+      timeout: true,
+    });
+
+    assert.equal(result.reason, 'nothing_to_commit',
+      'the conservative reading defers to git, which reports the same thing the probe would have');
+    assert.ok(gitCalls.some((a) => a[0] === 'commit' && !a.includes('--dry-run')),
+      'and it gets there by asking git, not by short-circuiting on an unanswered probe');
+  });
+});
 
 describe('workflow call sites declare --files (#2269)', () => {
   // WHAT COUNTS AS AN INVOCATION — the question this scan kept answering by

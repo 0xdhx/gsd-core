@@ -1821,9 +1821,11 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // this fix during a revert, reintroducing the very misreport it removes.
   // `canScope` below keeps its narrower merge-only test on purpose — widening it
   // would change pre-existing cherry-pick behaviour, which is outside this fix.
-  // Only the scoped, non-amend call can return through the guard below, so both
-  // added probes are gated on that — an unscoped commit or an --amend would
-  // otherwise pay for git invocations whose answer it can never use.
+  // Only the scoped, non-amend call can return through the guard below, so the
+  // cherry-pick probe and the guard's own probes are gated on that — an
+  // unscoped commit or an --amend would otherwise pay for git invocations whose
+  // answer it can never use. The MERGE_HEAD probe above predates this fix and
+  // stays unconditional: `canScope` needs it on every path.
   // A non-zero exit from either sequencer probe means "not in that state" AND
   // "the probe never answered" — `execGit` surfaces a spawn timeout as
   // `exitCode: 1` (`_spawnResult`: `result.status ?? 1`), which is the exact
@@ -1964,10 +1966,26 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     // `core.quotePath` note above, and the dry run below needs no path anyway.
     if (listed.exitCode === 0
       && !listed.stdout.split('\n').some((line) => /^[a-z] /.test(line))) return false;
-    return execGit(
+    const dryRun = execGit(
       ['commit', '--dry-run', '--porcelain', '-m', sanitizedMessage as string, '--', ...stagedPaths],
       { cwd },
-    ).exitCode === 0;
+    );
+    // Only a CONFIRMED "nothing to record" closes the path: rc 1 from a git
+    // that actually answered. This is the one probe in the guard whose rc 0
+    // is the REASSURING answer, so it inverts the diff probe's safety: there
+    // a timeout can only yield non-zero and reads as "not clean"; here
+    // `execGit` collapses a spawn timeout (or any spawn error) to
+    // `exitCode: 1` (`_spawnResult`: `result.status ?? 1`), byte-identical to
+    // git's own "nothing to record" — and the guard then reports
+    // `nothing_to_commit` about content it never asked git to write. Same
+    // conflation the sequencer probes above defend against, same remedy: an
+    // unanswered probe falls toward the commit, where git speaks for itself
+    // (and a genuine error there is reported loudly, as it always was). rc 128
+    // is likewise not an answer. Timeout kill of a dry run CAN leave a stale
+    // `index.lock` behind (it refreshes the index); the real commit then
+    // fails on it, loudly — never silently.
+    if (isSpawnTimeout(dryRun) || dryRun.error !== null) return true;
+    return dryRun.exitCode !== 1;
   };
   const nothingToCommit = guardApplies
     && (stagedPaths.length === 0
