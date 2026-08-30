@@ -21,6 +21,21 @@ permissions:
   contents: read
 
 jobs:
+  # #3833: a conflicted PR must provision no compute runner. The gate fails OPEN
+  # on everything except an explicit `mergeable: false`, and it no-ops (exit 0,
+  # zero API calls) on push and workflow_dispatch — so this job is safe to make
+  # an unconditional dependency of the lanes below.
+  #
+  # `changes` is deliberately NOT gated: it is a 2-minute scope classifier that
+  # runs in parallel with this job, and serializing it behind the preflight
+  # would add latency to every healthy PR for no saving.
+  preflight:
+    name: PR mergeability
+    uses: ./.github/workflows/pr-mergeable-preflight.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
   changes:
     name: Detect test scope
     runs-on: ubuntu-latest
@@ -85,6 +100,7 @@ jobs:
   # Static lint: test-suite and PR-check contracts.
   # Runs once, not per matrix lane.
   lint-tests:
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -113,7 +129,7 @@ jobs:
 
   test:
     name: test (${{ matrix.os }}, ${{ matrix.node-version }}${{ matrix.shard && format(', shard {0}', matrix.shard) || '' }})
-    needs: changes
+    needs: [changes, preflight]
     if: needs.changes.outputs.product_changed == 'true'
     runs-on: ${{ matrix.os }}
     # #2952: the `scope: full` lane is sharded three ways (see the matrix
@@ -228,6 +244,9 @@ jobs:
           persist-credentials: true
           token: ${{ github.token }}
 
+      - name: Record job start time (near-cap check)
+        run: node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV, "CI_JOB_START_EPOCH_MS=" + Date.now() + "\n")'
+
       - name: Guard — require GitHub-hosted runner
         run: node scripts/ci-guard-runner.cjs
 
@@ -333,9 +352,17 @@ jobs:
         if: matrix.scope == 'full' && matrix.shard == '1/3' && needs.changes.outputs.full_matrix == 'true'
         run: npm run test:slow
 
+      - name: Check job budget (near-cap advisory)
+        if: always()
+        continue-on-error: true
+        env:
+          CI_JOB_LABEL: "test (${{ matrix.os }}, ${{ matrix.node-version }}${{ matrix.shard && format(', shard {0}', matrix.shard) || '' }})"
+          CI_JOB_TIMEOUT_MINUTES: '15'
+        run: node scripts/ci-check-job-near-cap.cjs
+
   test-inert:
     name: test (inert CI)
-    needs: changes
+    needs: [changes, preflight]
     if: needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.product_changed != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -389,7 +416,7 @@ jobs:
 
   test-full:
     name: full test (${{ matrix.os }}, ${{ matrix.node-version }}, shard ${{ matrix.shard }}/3)
-    needs: changes
+    needs: [changes, preflight]
     if: needs.changes.outputs.code_changed == 'true' && needs.changes.outputs.full_matrix == 'true'
     runs-on: ${{ matrix.os }}
     defaults:
@@ -417,9 +444,17 @@ jobs:
     # a 20-minute cap) on 05b170e44 and 18m14s (91%) on 81eeb8a53. The Windows
     # shards are slow for platform reasons — process spawn and filesystem cost,
     # not extra work — and this lane has already blown its cap twice before
-    # (#1051, #1212). 30 is ~1.5x the worst observed shard, restoring the
-    # headroom that #1212's sharding bought and this suite has since eaten.
-    timeout-minutes: 30
+    # (#1051, #1212).
+    # #3787: fresh measurement on windows-latest/24 shard 3/3 hit 26m18s (run
+    # 32614439702), so the 18m59s figure above is stale and the 30-minute cap
+    # only had ~1.14x headroom, in violation of this repo's own 1.5x rule
+    # (tests/ci-test-job-timeout-budget.test.cjs). 1.5x of 27m requires 41m
+    # minimum; 45 is used instead of the bare minimum because shard
+    # composition is unstable — adding one test file reshuffled 115 of 268
+    # unit files between shards — so the per-shard worst case moves run to
+    # run and a budget pinned to the exact minimum would be re-breached by
+    # the next file anyone adds.
+    timeout-minutes: 45
     env:
       GSD_PLUGIN_ROOT: .ci-gsd-plugin-root-disabled
       # #2665: strict on Linux/macOS, report-only on Windows (see the `test` job note).
@@ -476,6 +511,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
           token: ${{ github.token }}
+
+      - name: Record job start time (near-cap check)
+        run: node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV, "CI_JOB_START_EPOCH_MS=" + Date.now() + "\n")'
 
       - name: Guard — require GitHub-hosted runner
         run: node scripts/ci-guard-runner.cjs
@@ -538,6 +576,14 @@ jobs:
         if: matrix.shard == 1
         run: npm run test:security
 
+      - name: Check job budget (near-cap advisory)
+        if: always()
+        continue-on-error: true
+        env:
+          CI_JOB_LABEL: "full test (${{ matrix.os }}, ${{ matrix.node-version }}, shard ${{ matrix.shard }}/3)"
+          CI_JOB_TIMEOUT_MINUTES: '45'
+        run: node scripts/ci-check-job-near-cap.cjs
+
   # #2952: the coverage gate that the `test` lane used to run inline. Sharding
   # the unit suite means no single runner sees the whole picture, so the gate
   # moves here, downloads every shard's raw V8 dumps into one coverage/tmp, and
@@ -546,7 +592,7 @@ jobs:
   # include/exclude globs changes, only where they are evaluated.
   coverage-gate:
     name: Coverage gate (merged shards)
-    needs: [changes, test]
+    needs: [changes, test, preflight]
     if: needs.changes.outputs.product_changed == 'true' && needs.test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -619,7 +665,7 @@ jobs:
   # to walk on a docs-only change.
   qa-loop-walk:
     name: QA loop walk (smell ratchet)
-    needs: changes
+    needs: [changes, preflight]
     if: needs.changes.outputs.product_changed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -678,6 +724,7 @@ jobs:
   required-tests:
     name: Required tests
     needs:
+      - preflight
       - changes
       - lint-tests
       - test
@@ -691,6 +738,7 @@ jobs:
     steps:
       - name: Summarize required test gate
         env:
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           CODE_CHANGED: ${{ needs.changes.outputs.code_changed }}
           PRODUCT_CHANGED: ${{ needs.changes.outputs.product_changed }}
           CHANGES_RESULT: ${{ needs.changes.result }}
@@ -702,6 +750,7 @@ jobs:
           QA_LOOP_WALK_RESULT: ${{ needs.qa-loop-walk.result }}
         run: |
           set -euo pipefail
+          echo "preflight=$PREFLIGHT_RESULT"
           echo "code_changed=$CODE_CHANGED"
           echo "product_changed=$PRODUCT_CHANGED"
           echo "changes=$CHANGES_RESULT"
@@ -711,6 +760,18 @@ jobs:
           echo "test-full=$FULL_TEST_RESULT"
           echo "coverage-gate=$COVERAGE_GATE_RESULT"
           echo "qa-loop-walk=$QA_LOOP_WALK_RESULT"
+
+          # #3833: the preflight arm comes FIRST and reports its own cause.
+          # Without it a conflicted PR skips `changes` too, and this gate would
+          # blame scope detection for a merge conflict. It also matters that
+          # this job stays `if: always()` and exits NON-ZERO here: a required
+          # status check that merely goes absent does not block a merge (see
+          # the mutation-gate note in mutation.yml, #3319), so the required
+          # `Required tests` context has to actually report red.
+          if [ "$PREFLIGHT_RESULT" != "success" ]; then
+            echo "::error::PR mergeability preflight did not pass ($PREFLIGHT_RESULT) — resolve the merge conflict and push again; no test lane runs until then"
+            exit 1
+          fi
 
           if [ "$CHANGES_RESULT" != "success" ]; then
             echo "::error::test scope detection did not pass"
@@ -799,37 +860,3 @@ jobs:
         with:
           path: .gsd-cache/emitted-baseline.json
           key: emitted-baseline-${{ github.sha }}
-
-  # #2914: tests/emitted-drift-ack.json (the LEGACY single ack file) must never persist
-  # on `next`. Every entry is scoped to the diff that introduced it (#2789) — once
-  # merged it is, by definition, already at the base, so it is spent and inert
-  # regardless of shape. Acks now go in per-PR fragments under
-  # tests/emitted-drift-acks/ instead — one independently-named file per PR, never a
-  # single file every PR rewrites wholesale — so a fragment LEFT ON next is harmless and
-  # is deliberately NOT what this guard checks; only the legacy shared file is a shared
-  # merge-conflict cell worth guarding against. This is DELIBERATELY NOT a PR-lane check
-  # comparing a PR's base ack against `next`: that is exactly the #2768 shape #2789 was
-  # written to end (a spent-but-present base ack would red every open PR the moment one
-  # landed). It runs only here, on push to `next`, asserting a fact about `next`'s own
-  # tree; it needs no npm install, since the guard is pure fs.existsSync.
-  #
-  # Enforcement scope, stated honestly: this job is push-triggered and runs post-merge,
-  # and is not wired into `required-tests` — it cannot BLOCK a merge. A red run here
-  # only turns `next`'s own CI red for manual follow-up, same as publish-emitted-baseline
-  # above. It fires reliably today because the path that reaches `next`
-  # (`auto-backmerge.yml`'s admin-merge step) authenticates with `GSD_BOT_PR_TOKEN`, a
-  # PAT, which DOES trigger this workflow on push. If that secret ever lapses, the
-  # `|| secrets.GITHUB_TOKEN` fallback there would push with the default token instead,
-  # which GitHub's anti-recursion rule keeps from triggering new workflow runs —
-  # silently skipping this job and publish-emitted-baseline alike. That is a known,
-  # shared limitation of every push-to-next job in this file, not specific to this guard.
-  guard-no-ack-on-next:
-    name: Guard no spent ack on next
-    if: github.event_name == 'push' && github.ref == 'refs/heads/next'
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-
-      - name: Assert tests/emitted-drift-ack.json is absent
-        run: node scripts/lint-emitted-drift-ack.cjs --guard-next
