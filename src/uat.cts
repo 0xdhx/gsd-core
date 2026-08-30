@@ -35,6 +35,9 @@ const { PHASE_NUMBER_TOKEN_SOURCE, scopeToPhase } = phaseIdMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocator = require('./phase-locator.cjs');
 const { listMilestonePhaseDirs, getAllArchivedPhaseDirs } = phaseLocator;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import auditMod = require('./audit.cjs');
+const { isAuditItemAcknowledged, deriveUatGapSnapshotValue } = auditMod;
 import { requireSafePath, sanitizeForDisplay } from './security.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- config-loader.cjs is an export= CommonJS module
 import configLoader = require('./config-loader.cjs');
@@ -158,6 +161,7 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
   }
 
   const results: UatFileResult[] = [];
+  let acknowledgedFiles = 0;
 
   // Active dirs are milestone-filtered; archived dirs deliberately are NOT.
   // listMilestonePhaseDirs derives the CURRENT milestone's phase directories
@@ -198,7 +202,16 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
       const uatFilePath = path.join(phaseDir, file);
       const content = readNormalizedDocument(uatFilePath);
       const { items, headingsSeen } = parseUatItemsWithStats(content);
-      const status = (extractFrontmatter(content, uatFilePath).status as string || 'unknown');
+      const uatFm = extractFrontmatter(content, uatFilePath) as Record<string, unknown>;
+      const status = ((uatFm.status as string) || 'unknown').toLowerCase();
+      // #3805: honour the audit_acknowledged marker with the SAME snapshot
+      // key audit.cts's scanUatGaps uses ('gap_snapshot', derived value
+      // composed by the shared derivation) — one acknowledgement means the
+      // same thing to both commands.
+      if (isAuditItemAcknowledged(uatFm, { snapshotKey: 'gap_snapshot', currentValue: deriveUatGapSnapshotValue(status, content) })) {
+        acknowledgedFiles++;
+        continue;
+      }
       // `parse_gap` means the file contained `### N.` test blocks that
       // yielded no items — NOT merely "zero items and not complete" (#3707
       // MAJOR: that broader signal false-positived on an all-pass file and on
@@ -258,8 +271,17 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     for (const file of scopeToPhase(files.filter(f => f.includes('-VERIFICATION') && f.endsWith('.md')), dir)) {
       const verificationFilePath = path.join(phaseDir, file);
       const content = readNormalizedDocument(verificationFilePath);
-      const status = extractFrontmatter(content, verificationFilePath).status as string || 'unknown';
+      const verFm = extractFrontmatter(content, verificationFilePath) as Record<string, unknown>;
+      const status = ((verFm.status as string) || 'unknown').toLowerCase();
+      // #3805: same marker, same 'status' snapshot key as scanVerificationGaps,
+      // and the same ORDERING — the open-status gate runs FIRST (a marker on
+      // a file that would never surface is not a suppressed item), then the
+      // acknowledgement suppresses what the gate surfaced.
       if (status === 'human_needed' || status === 'gaps_found') {
+        if (isAuditItemAcknowledged(verFm, { snapshotKey: 'status', currentValue: status })) {
+          acknowledgedFiles++;
+          continue;
+        }
         const items = parseVerificationItems(content, status, verificationFilePath);
         if (items.length > 0) {
           results.push({
@@ -349,7 +371,9 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     }
   }
 
-  output({ results, summary }, raw, undefined);
+  // #3805: acknowledged files surface as a COUNT (audit-open's honesty
+  // model: the marker fired, the items are suppressed, both facts visible).
+  output({ results, summary, acknowledged_files: acknowledgedFiles }, raw, undefined);
 }
 
 // ─── cmdRenderCheckpoint ──────────────────────────────────────────────────────
@@ -3065,6 +3089,23 @@ function splitGapsEntriesCore(
     }
   };
 
+  // #3898 (from `next`): a spaced-hyphen thematic break (`- - -`, `- -`,
+  // `-  -  -`, …) in `## Gaps` is a SEPARATOR, not an entry. The hyphen opener
+  // matches it (hyphen + whitespace), which fabricated a gap named `- -` with
+  // result 'unknown' — an item no edit can clear, because there is no entry,
+  // only the separator the author wrote deliberately. A line whose content
+  // after the opening marker is solely hyphens and spaces (with at least one
+  // further hyphen) is skipped: it neither opens an entry nor folds into the
+  // current one. Deliberately NOT a full thematic-break concept (option 2 in
+  // the issue): a break does not close the Gaps list — entries after it keep
+  // parsing. The deferred grammar (`blockStructure`) has its own, CommonMark
+  // reading of the same line through THEMATIC_BREAK_RE below, where a break
+  // CLOSES the list; this helper is consulted only for the Gaps set.
+  const isSeparatorShaped = (line: string, bulletPrefixLen: number): boolean => {
+    const remainder = line.slice(bulletPrefixLen);
+    return /^[-\s]*$/.test(remainder) && remainder.includes('-');
+  };
+
   // Block structure (M1/M2 + column indents) is a property of the GRAMMAR,
   // not of this seam: the Gaps set opts out and stays byte-for-byte on its
   // `next` behaviour — see `indentWidth` for the indent half of that opt-out.
@@ -3108,6 +3149,23 @@ function splitGapsEntriesCore(
       runs.clear();
       blankSeen = false;
       return;
+    }
+    // #3898 narrowed skip (review disposition a), Gaps set only: a
+    // separator-shaped line is skipped when it sits BETWEEN entries (nothing
+    // open yet, or it would open a top-level entry — where the phantom came
+    // from). One landing strictly INSIDE a live entry (indent > baseIndent)
+    // folds back as a continuation line, so the entry's GapsEntrySpan stays
+    // byte-contiguous — the span invariant below and the ack writer's identity
+    // re-verification both hold. The indent compare is the raw character
+    // count, which is what `indentWidth` measures for the Gaps set.
+    if (!markers.blockStructure) {
+      const bulletMatch = line.match(/^(\s*)-\s/);
+      if (
+        bulletMatch && isSeparatorShaped(line, bulletMatch[0].length) &&
+        (current === null || bulletMatch[1].length <= (baseIndent ?? 0))
+      ) {
+        return; // separator line between entries — neither an opener nor a continuation
+      }
     }
     const opener = matchListOpener(line, markers, runs.at(levelOf(line)));
     if (opener !== null) {
