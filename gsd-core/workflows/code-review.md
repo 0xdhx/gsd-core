@@ -256,7 +256,7 @@ if [ -n "$PHASE_COMMITS" ]; then
   # merge (and conflict-resolutions-only for a conflicted one), so a phase
   # whose work lands as one merge commit would otherwise scope to zero files.
   # On non-merge commits --first-parent changes nothing.
-  PHASE_DIFF_FILES=$(for c in $PHASE_COMMITS; do
+  PHASE_DIFF_FILES=$(for c in $(printf '%s' "$PHASE_COMMITS"); do
     git show --pretty=format: --name-only --first-parent "$c" -- . \
       ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
       ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \

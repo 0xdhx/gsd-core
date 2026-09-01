@@ -1407,7 +1407,7 @@ describe('#3926 — Tier-3 scope is the phase change set, not everything since t
       'Tier-3 fence must not diff to HEAD — the scope is the phase change set (#3926)'
     );
     assert.ok(
-      tier3.includes('PHASE_DIFF_FILES=$(for c in $PHASE_COMMITS'),
+      tier3.includes('PHASE_DIFF_FILES=$(for c in $(printf'),
       'Tier-3 fence must derive the change set from the phase commits themselves'
     );
     assert.ok(
