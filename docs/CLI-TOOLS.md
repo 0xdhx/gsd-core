@@ -381,7 +381,11 @@ none blocks completion:
   is the only thing in question: a separator between two cited IDs could equally
   be a range or an annotation, and the command cannot tell them apart, so it
   states both readings rather than asserting a failure that may not have
-  happened. It speaks about the **separator**, not about the whole line.
+  happened. It speaks about the **separator**, not about the whole line. It is
+  also the *weakest* of the three claims, so it yields to the other two: a
+  demonstrated drop elsewhere on the line makes it a misparse, and an
+  unexamined over-cap token makes the line unverified — a voice whose claim is
+  that nothing was dropped cannot speak over a token no rule read.
 
 **Each warning carries a machine-readable kind.** The prose goes to
 `warnings[]` as before — that field is unchanged and is still an array of
