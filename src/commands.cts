@@ -1809,11 +1809,15 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // operation that rewrites the tip with only those paths.
   const mergeHeadProbe = execGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], { cwd });
   const isMergeInProgress = mergeHeadProbe.exitCode === 0;
+  // PROVENANCE FOR THIS WHOLE BLOCK: every behavioural claim below was DRIVEN
+  // against git 2.54, not reasoned by analogy. Individual claims state what was
+  // observed and omit the version; where a claim is version-SENSITIVE rather
+  // than merely version-observed, it says so at the claim.
+  //
   // #3776: git refuses a PARTIAL commit (`git commit -- <paths>`) while a merge
   // or a cherry-pick is in progress, so in those states the pathspec describes
   // nothing about what would actually land and the empty-diff decision below
-  // must not be made from it. Driven against git 2.54 rather than reasoned by
-  // analogy, because the three sequencer states do NOT agree:
+  // must not be made from it. The three sequencer states do NOT agree:
   //   MERGE_HEAD        -> `fatal: cannot do a partial commit during a merge.`
   //   CHERRY_PICK_HEAD  -> `fatal: cannot do a partial commit during a cherry-pick.`
   //   REVERT_HEAD       -> permitted; behaves like an ordinary commit.
@@ -1898,9 +1902,9 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   //  - the probe is pinned against user configuration that would make `git diff`
   //    answer a DIFFERENT question than `git commit -- <paths>` asks. `git diff`
   //    is porcelain and honours settings the commit does not, so without these
-  //    flags a caller's config decides whether the guard fires. Driven against
-  //    git 2.54, each with the paired `git commit -- <path>` confirmed to record
-  //    the change the probe reported as absent:
+  //    flags a caller's config decides whether the guard fires. Each vector
+  //    below was driven with the paired `git commit -- <path>` confirmed to
+  //    record the change the probe reported as absent:
   //      `diff.ignoreSubmodules=all`   -> a gitlink bump is invisible to the probe
   //      `.gitmodules` `ignore = all`  -> the same, and it needs NO local config:
   //                                       it is checked in, so it arrives with a
@@ -1926,7 +1930,7 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // `--assume-unchanged` tells git to skip the worktree stat for a path, so
   // `git add` stages nothing and BOTH diff forms report no difference — while
   // `git commit -- <path>` reads the working tree directly and records it
-  // (driven, git 2.54: probe rc 0, commit rc 0, new content in the tree). Left
+  // (driven: probe rc 0, commit rc 0, new content in the tree). Left
   // to the diff probe alone the guard reports `nothing_to_commit` about content
   // the caller explicitly named in `--files` and git would have written. #3776
   // is a purely diagnostic bug — nothing is corrupted and no wrong commit is
@@ -1955,13 +1959,15 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // `nothing_to_commit` — #3776's exact shape, in #3776's exact configuration.
   // `--no-verify` forecloses that structurally instead of resting on the
   // version, and is behaviour-neutral where the version already agrees (driven:
-  // rc 0 would-record / rc 1 nothing, identical with and without it).
+  // rc 0 would-record / rc 1 nothing, identical with and without it). This is
+  // VERSION-SENSITIVE reasoning, hence stated at the claim per the provenance
+  // note above.
   //
   // It is still NOT hook-free in general, and `--no-verify` does not widen that
-  // claim: git 2.54 fires `post-index-change` on this call with or without the
-  // flag (driven both ways), so a repo using that hook sees it once for the
-  // probe and once for the commit. Stated rather than claimed away; the
-  // narrower claim is the true one. `--porcelain` keeps the output to a couple
+  // claim: `post-index-change` fires on this call with or without the flag
+  // (driven both ways), so a repo using that hook sees it once for the probe
+  // and once for the commit. Stated rather than claimed away; the narrower
+  // claim is the true one. `--porcelain` keeps the output to a couple
   // of machine-readable lines instead of a full status listing — the rc is
   // identical either way (driven: 0 would-record / 1 nothing), but the plain
   // form prints every untracked path, which on a large tree is output this
