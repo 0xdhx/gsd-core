@@ -1883,11 +1883,11 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   //    would be a REGRESSION rather than a hardening. With every named path
   //    missing, `stagedPaths` is empty, so `canScope` is false and the
   //    fall-through reaches a BARE `git commit` — which git PERMITS during a
-  //    merge, and which then CONCLUDES that merge: rc 0, a three-parent commit
-  //    recording the entire index, under a message naming a path that does not
-  //    exist, reported to the caller as `committed: true` (driven). Today's
-  //    answer writes nothing at all. That is the same trade the timeout routing
-  //    above already refuses — suppressing a misreport must not be paid for by
+  //    merge, and which then CONCLUDES that merge: rc 0, a two-parent merge
+  //    commit recording the entire index, under a message naming a path that
+  //    does not exist, reported to the caller as `committed: true` (driven).
+  //    Today's answer writes nothing at all. That is the same trade the timeout
+  //    routing above already refuses — a misreport must not be paid for by
   //    committing content the caller never named — which is why the sequencer
   //    states gate the DIFF branch only. The behaviour is also PRE-EXISTING and
   //    unchanged by this fix: before it the identical short-circuit ran ABOVE
@@ -1965,8 +1965,10 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   //
   // It is still NOT hook-free in general, and `--no-verify` does not widen that
   // claim: `post-index-change` fires on this call with or without the flag
-  // (driven both ways), so a repo using that hook sees it once for the probe
-  // and once for the commit. Stated rather than claimed away; the narrower
+  // (driven both ways), so a repo using that hook sees TWO extra invocations
+  // for the probe — git fires it twice per `commit --dry-run`, and twice again
+  // for the real commit (driven: 2/2/2 across flagged probe, unflagged probe
+  // and real commit). Stated rather than claimed away; the narrower
   // claim is the true one. `--porcelain` keeps the output to a couple
   // of machine-readable lines instead of a full status listing — the rc is
   // identical either way (driven: 0 would-record / 1 nothing), but the plain
