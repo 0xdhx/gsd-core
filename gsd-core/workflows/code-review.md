@@ -239,20 +239,37 @@ if [ -n "$PHASE_COMMITS" ]; then
   fi
 fi
 
+# #3926: bound the change set at the phase, not at the present. A
+# `${DIFF_BASE}..HEAD` range sweeps everything that landed after the phase's
+# first commit — work interleaved from other sessions and commits after the
+# phase closed all join the review scope (measured: a 20-file phase scoped as
+# 248 files, which also crossed the >50 threshold and silently downgraded
+# --depth=deep to standard). PHASE_COMMITS already holds every commit of the
+# phase, so derive the change set from those commits themselves. This is
+# exact under every history shape — interleaved commits, a merge landing
+# mid-phase, a phase spanning a rebase — where bounding the range at the
+# newest phase commit would still sweep every interleaved commit.
+PHASE_DIFF_FILES=""
+if [ -n "$PHASE_COMMITS" ]; then
+  PHASE_DIFF_FILES=$(for c in $PHASE_COMMITS; do
+    git show --pretty=format: --name-only "$c" -- . \
+      ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
+      ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \
+      ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock' 2>/dev/null
+  done | grep -v '^$' | sort -u)
+fi
+
 if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
   # Full git-diff fallback (per D-02): SUMMARY scoping yielded nothing.
   if [ -n "$DIFF_BASE" ]; then
-    # Run git diff with specific exclusions (per D-03)
-    DIFF_FILES=$(git diff --name-only "${DIFF_BASE}..HEAD" -- . \
-      ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
-      ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \
-      ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock' 2>/dev/null)
+    # Exclusions (per D-03) are applied inside the PHASE_DIFF_FILES derivation.
+    DIFF_FILES="$PHASE_DIFF_FILES"
 
     while IFS= read -r file; do
       [ -n "$file" ] && REVIEW_FILES+=("$file")
     done <<< "$DIFF_FILES"
 
-    echo "File scope: ${#REVIEW_FILES[@]} files from git diff (base: ${DIFF_BASE})"
+    echo "File scope: ${#REVIEW_FILES[@]} files from phase commits (base: ${DIFF_BASE})"
   else
     # Fail closed — no reliable diff base found. Do not use arbitrary HEAD~N.
     echo "Warning: No phase commits found for '${PADDED_PHASE}'. Cannot determine reliable diff scope."
@@ -262,10 +279,9 @@ elif [ -n "$DIFF_BASE" ]; then
   # #2666 cross-check: SUMMARY yielded a non-empty (possibly partial) scope.
   # Warn about — and add — any changed files the SUMMARY extractor did not surface,
   # so a partial result can no longer silently ship an incomplete review scope.
-  DIFF_FILES=$(git diff --name-only "${DIFF_BASE}..HEAD" -- . \
-    ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
-    ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \
-    ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock' 2>/dev/null)
+  # #3926: compare against the phase's own change set, never ..HEAD — these
+  # files are ADDED to the scope, so an inflated diff *becomes* the scope.
+  DIFF_FILES="$PHASE_DIFF_FILES"
 
   # Build a newline-delimited list of already-scoped files for exact membership
   # testing (portable — bash 3.2 on macOS has no associative arrays). grep -Fxq
@@ -537,8 +553,17 @@ if [ -n "$PHASE_COMMITS" ]; then
   if ! git rev-parse "${DIFF_BASE}" >/dev/null 2>&1; then
     DIFF_BASE=$(echo "$PHASE_COMMITS" | tail -1)
   fi
+  # #3926: also hand the agent an upper bound — its fallback diff otherwise
+  # runs ${DIFF_BASE}..HEAD, sweeping everything landed since the phase's
+  # first commit. The newest phase commit is an approximate bound (commits
+  # interleaved inside the phase window still enter that range), which is
+  # acceptable for a last-resort safety net that normal operation never
+  # reaches — the workflow always passes files: — and strictly tighter than
+  # HEAD.
+  DIFF_TIP=$(echo "$PHASE_COMMITS" | head -1)
 else
   DIFF_BASE=""
+  DIFF_TIP=""
 fi
 ```
 
@@ -608,6 +633,7 @@ depth: ${REVIEW_DEPTH}
 phase_dir: ${PHASE_DIR}
 review_path: ${REVIEW_PATH}
 ${DIFF_BASE:+diff_base: ${DIFF_BASE}}
+${DIFF_TIP:+diff_tip: ${DIFF_TIP}}
 files:
 ${CONFIG_FILES}
 </config>
