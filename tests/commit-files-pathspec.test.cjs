@@ -933,6 +933,56 @@ describe('#3859: an unanswered sequencer probe must not open the empty-diff guar
     assert.ok(gitCalls.some((a) => a[0] === 'commit'),
       'and it gets there by asking git, not by short-circuiting on an unanswered probe');
   });
+
+  // Round 4, review finding 1 + its coverage half. The `stagedPaths.length === 0`
+  // disjunct is NOT gated on `partialCommitRefused`, so an all-missing `--files`
+  // list during a merge or cherry-pick returns `nothing_to_commit` while the
+  // sequencer ref is still live and the resolved content sits staged.
+  //
+  // These arms pin that as the DELIBERATE answer, not an oversight. Gating the
+  // disjunct sends this case to a BARE `git commit` (stagedPaths is empty, so
+  // `canScope` is false), which git permits during a merge and which CONCLUDES
+  // it — recording the whole index under a message naming a path that does not
+  // exist, and reporting `committed: true`. Trading a report that writes nothing
+  // for one that silently writes everything is the trade the timeout routing
+  // above already refuses.
+  //
+  // The behaviour is also pre-existing: before this fix the identical
+  // short-circuit ran ABOVE the MERGE_HEAD probe, so it never consulted the
+  // sequencer either. Nothing here is a regression pin; these are behaviour
+  // pins, and they red on the gated implementation rather than at base.
+  for (const kind of ['merge', 'cherry-pick']) {
+    const ref = kind === 'merge' ? 'MERGE_HEAD' : 'CHERRY_PICK_HEAD';
+    test(`all named --files paths missing during a ${kind} reports nothing_to_commit and leaves the ${kind} open`, () => {
+      conflictedSequence(kind);
+      assert.ok(fs.existsSync(path.join(tmpDir, '.git', ref)),
+        `fixture must leave a ${kind} in progress`);
+      const before = headCount(tmpDir);
+      const missing = path.posix.join('.planning', 'never-produced.md');
+      assert.ok(!fs.existsSync(path.join(tmpDir, missing)),
+        'the named path must genuinely be absent from disk');
+
+      const { result, gitCalls } = commitWithFailingAdd({
+        cwd: tmpDir,
+        files: [missing],
+        failFor: [],
+      });
+
+      assert.equal(result.reason, 'nothing_to_commit',
+        'every named path was skipped before git add (#2014), so there is nothing declared to commit');
+      assert.equal(result.committed, false);
+      assert.ok(!gitCalls.some((a) => a[0] === 'commit'),
+        'git commit must NOT run — a bare commit here would conclude the sequencer with the whole index');
+      assert.equal(headCount(tmpDir), before,
+        'and no commit may be recorded');
+      assert.ok(fs.existsSync(path.join(tmpDir, '.git', ref)),
+        `the ${kind} must still be in progress — the caller's own resolution is untouched`);
+      assert.equal(
+        gitOrThrow(['diff', '--cached', '--name-only'], { cwd: tmpDir, timeoutMs: STAGING_GIT_TIMEOUT_MS }).trim(),
+        path.posix.join('.planning', 'shared.md'),
+        'and the staged resolution is still staged, not swallowed');
+    });
+  }
 });
 
 

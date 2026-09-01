@@ -1875,6 +1875,23 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   //    Spreading an empty array yields a pathspec-less `diff`, which tests the
   //    WHOLE tree — unrelated work elsewhere would then suppress the guard and
   //    regress the skip-missing contract (#2014).
+  //    It is deliberately NOT gated on `partialCommitRefused`, and gating it
+  //    would be a REGRESSION rather than a hardening. With every named path
+  //    missing, `stagedPaths` is empty, so `canScope` is false and the
+  //    fall-through reaches a BARE `git commit` — which git PERMITS during a
+  //    merge, and which then CONCLUDES that merge: rc 0, a three-parent commit
+  //    recording the entire index, under a message naming a path that does not
+  //    exist, reported to the caller as `committed: true` (driven). Today's
+  //    answer writes nothing at all. That is the same trade the timeout routing
+  //    above already refuses — suppressing a misreport must not be paid for by
+  //    committing content the caller never named — which is why the sequencer
+  //    states gate the DIFF branch only. The behaviour is also PRE-EXISTING and
+  //    unchanged by this fix: before it the identical short-circuit ran ABOVE
+  //    the MERGE_HEAD probe, so it never consulted the sequencer either. The
+  //    residual it leaves — a merge held open behind a `nothing_to_commit`
+  //    report — is offered as a separate issue with the other three, not folded
+  //    in here. Both sequencer shapes are pinned in
+  //    tests/commit-files-pathspec.test.cjs.
   //  - `!partialCommitRefused`: see above — deciding "nothing to commit" from a
   //    pathspec git will not honour would abandon an in-progress merge, so those
   //    states keep their pre-existing behaviour untouched.
