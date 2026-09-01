@@ -1926,11 +1926,23 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
   // pre-fix. Both shapes are pinned.)
   //
   // Then ASK GIT, rather than reconstructing its answer. `git commit --dry-run`
-  // is the same decision the real commit makes, and it does not run the
-  // `pre-commit` hook (driven: a rejecting one neither fires nor writes its
-  // marker) — which is what matters, because a firing `pre-commit` is the whole
-  // of #3776. It is NOT hook-free in general: git 2.54 does fire
-  // `post-index-change` here, so a repo using that hook sees it once for the
+  // is the same decision the real commit makes, and `--no-verify` is what keeps
+  // it a DECISION rather than an execution. git 2.54 already declines to run
+  // `pre-commit` on a dry run (driven: a rejecting one neither fires nor writes
+  // its marker), which is the property that matters here, because a firing
+  // `pre-commit` is the whole of #3776 — but that is an observed behaviour of
+  // one version, and the failure it would produce on a version that differs is
+  // SILENT. A `pre-commit` that fires and rejects exits 1, the same code git
+  // returns for `nothing to record`, so the closure below would read it as a
+  // CONFIRMED empty answer, drop the content the caller named, and report
+  // `nothing_to_commit` — #3776's exact shape, in #3776's exact configuration.
+  // `--no-verify` forecloses that structurally instead of resting on the
+  // version, and is behaviour-neutral where the version already agrees (driven:
+  // rc 0 would-record / rc 1 nothing, identical with and without it).
+  //
+  // It is still NOT hook-free in general, and `--no-verify` does not widen that
+  // claim: git 2.54 fires `post-index-change` on this call with or without the
+  // flag (driven both ways), so a repo using that hook sees it once for the
   // probe and once for the commit. Stated rather than claimed away; the
   // narrower claim is the true one. `--porcelain` keeps the output to a couple
   // of machine-readable lines instead of a full status listing — the rc is
@@ -1967,7 +1979,7 @@ function cmdCommit(cwd: string, message: string | undefined, files: string[] | u
     if (listed.exitCode === 0
       && !listed.stdout.split('\n').some((line) => /^[a-z] /.test(line))) return false;
     const dryRun = execGit(
-      ['commit', '--dry-run', '--porcelain', '-m', sanitizedMessage as string, '--', ...stagedPaths],
+      ['commit', '--dry-run', '--porcelain', '--no-verify', '-m', sanitizedMessage as string, '--', ...stagedPaths],
       { cwd },
     );
     // Only a CONFIRMED "nothing to record" closes the path: rc 1 from a git

@@ -1073,6 +1073,41 @@ describe('#3859: an unanswered dry-run probe must not close the assume-unchanged
     assert.ok(gitCalls.some((a) => a[0] === 'commit' && !a.includes('--dry-run')),
       'and it gets there by asking git, not by short-circuiting on an unanswered probe');
   });
+
+  // Round 4, review finding 3. The probe's safety rests on `git commit
+  // --dry-run` not running `pre-commit`, which git 2.54 satisfies on its own —
+  // so this arm pins the FLAG, not an outcome, and that is deliberate: the
+  // outcome it protects is unobservable on a git that already declines to run
+  // the hook. On a git that DID run it, a rejecting hook exits 1, the closure
+  // reads that as a confirmed "nothing to record", and the caller's content is
+  // dropped under a `nothing_to_commit` report — #3776 re-entered through the
+  // probe. `--no-verify` removes the dependency on the version rather than
+  // documenting it.
+  //
+  // It is a seam assertion over the argv the guard actually issued, not a
+  // source grep: the flag is read off the executed call, so deleting it from
+  // the probe reds this arm.
+  test('the dry-run probe carries --no-verify so a hook-firing git cannot close the guard', () => {
+    const rel = assumeUnchangedModified();
+
+    const { gitCalls } = commitWithFailingAdd({
+      cwd: tmpDir,
+      files: [rel],
+      failFor: [],
+    });
+
+    const dryRuns = gitCalls.filter((a) => a[0] === 'commit' && a.includes('--dry-run'));
+    assert.equal(dryRuns.length, 1,
+      'the assume-unchanged branch must have reached the dry-run probe exactly once');
+    assert.ok(dryRuns[0].includes('--no-verify'),
+      'the probe must not be able to execute a pre-commit hook, whatever the git version does by default');
+    // And the REAL commit must not inherit it — #3776 is a bug about a hook
+    // whose message reached the caller wrongly, never a licence to skip hooks.
+    const realCommits = gitCalls.filter((a) => a[0] === 'commit' && !a.includes('--dry-run'));
+    assert.ok(realCommits.length > 0, 'the guard must have fallen through to a real commit');
+    assert.ok(realCommits.every((a) => !a.includes('--no-verify')),
+      'the real commit still runs the caller\'s hooks — only the probe is exempt');
+  });
 });
 
 describe('workflow call sites declare --files (#2269)', () => {
