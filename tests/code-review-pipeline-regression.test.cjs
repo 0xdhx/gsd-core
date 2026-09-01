@@ -353,15 +353,24 @@ describe('Bug 1 — compute_file_scope SUMMARY parser', () => {
   // commits themselves — the cross-check itself (compare + warn + add) stays.
   test('#2666 docs-parity: Tier-3 intersects/warns against the phase change set', () => {
     const src = fs.readFileSync(WORKFLOW_PATH, 'utf8');
-    // The shipped workflow must derive the phase change set AND emit a warning
-    // when it contains files the SUMMARY extractor did not surface.
+    // Pin the cross-check's own lines INSIDE the Tier-3 fence — a whole-doc
+    // grep passes even with the cross-check deleted (driven by the #3926
+    // pre-file adversarial review): scope every assertion to the fence.
+    const fenceStart = src.indexOf('# Compute diff base from phase commits');
+    assert.ok(fenceStart !== -1, 'Tier-3 fence anchor must exist');
+    const fenceEnd = src.indexOf('\n```', fenceStart);
+    const fence = src.slice(fenceStart, fenceEnd);
     assert.ok(
-      src.includes('DIFF_FILES="$PHASE_DIFF_FILES"'),
-      'code-review.md must cross-check the SUMMARY scope against the phase change set (#2666, #3926)'
+      fence.includes('DIFF_FILES="$PHASE_DIFF_FILES"'),
+      'the cross-check must compare against the phase change set (#2666, #3926)'
     );
     assert.ok(
-      /warn|missing|not surfaced|did not|not in/i.test(src),
-      'code-review.md must warn when git diff contains files the SUMMARY extractor dropped (#2666)'
+      fence.includes('MISSING_FROM_SUMMARY+=("$file"); REVIEW_FILES+=("$file")'),
+      'the cross-check must ADD files the SUMMARY missed to the review scope (#2666)'
+    );
+    assert.ok(
+      fence.includes('Warning: SUMMARY scope was missing'),
+      'the cross-check must WARN when the SUMMARY missed changed files (#2666)'
     );
   });
 
@@ -1343,6 +1352,44 @@ describe('#3926 — Tier-3 scope is the phase change set, not everything since t
           ['phase-a.txt', 'phase-b.txt'],
           `cross-check must add only missed PHASE files; got: ${JSON.stringify(scope)}`
         );
+        assert.match(
+          result.stdout,
+          /Warning: SUMMARY scope was missing 1 changed file/,
+          'the cross-check must WARN about the file the SUMMARY missed (#2666)'
+        );
+      } finally {
+        cleanup(repo);
+      }
+    }
+  );
+
+  test(
+    'a phase landing as one phase-scoped MERGE commit scopes to its first-parent diff, not the empty combined diff',
+    SKIP_WIN32,
+    () => {
+      // Phase-06's work arrives as a clean --no-ff merge whose SUBJECT is
+      // phase-scoped while the branch commits are not — `git show` without
+      // --first-parent prints an EMPTY combined diff for it, scoping the
+      // phase to zero files (driven by the #3926 pre-file adversarial review).
+      const repo = createTempGitProject('gsd-3926-merge-');
+      try {
+        fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+        gitOrThrow(['add', 'base.txt'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        gitOrThrow(['commit', '-m', 'chore: base'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        gitOrThrow(['checkout', '-b', 'phase-branch'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        fs.writeFileSync(path.join(repo, 'branch-work.txt'), 'work\n');
+        gitOrThrow(['add', 'branch-work.txt'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        gitOrThrow(['commit', '-m', 'feat: branch work, not phase scoped'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        gitOrThrow(['checkout', '-'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        gitOrThrow(['merge', '--no-ff', 'phase-branch', '-m', 'feat(06): land phase work'], { cwd: repo, timeoutMs: GIT_TIMEOUT_MS });
+        const result = runScope(repo, 'REVIEW_FILES=()');
+        assert.equal(result.status, 0, `fence exited ${result.status}; stderr=${result.stderr}`);
+        const scope = parseSentinel(result.stdout, 'REVIEW_FILES');
+        assert.deepStrictEqual(
+          scope,
+          ['branch-work.txt'],
+          `merge-landed phase must scope to its first-parent diff; got: ${JSON.stringify(scope)}`
+        );
       } finally {
         cleanup(repo);
       }
@@ -1362,6 +1409,10 @@ describe('#3926 — Tier-3 scope is the phase change set, not everything since t
     assert.ok(
       tier3.includes('PHASE_DIFF_FILES=$(for c in $PHASE_COMMITS'),
       'Tier-3 fence must derive the change set from the phase commits themselves'
+    );
+    assert.ok(
+      tier3.includes('--first-parent "$c"'),
+      'the per-commit show must use --first-parent — a clean phase-scoped merge otherwise contributes an EMPTY combined diff (#3926)'
     );
     assert.ok(
       workflow.includes('${DIFF_TIP:+diff_tip: ${DIFF_TIP}}'),

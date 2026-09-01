@@ -251,8 +251,13 @@ fi
 # newest phase commit would still sweep every interleaved commit.
 PHASE_DIFF_FILES=""
 if [ -n "$PHASE_COMMITS" ]; then
+  # --first-parent: a phase-scoped MERGE commit must contribute its diff
+  # against its first parent. The default combined diff is EMPTY for a clean
+  # merge (and conflict-resolutions-only for a conflicted one), so a phase
+  # whose work lands as one merge commit would otherwise scope to zero files.
+  # On non-merge commits --first-parent changes nothing.
   PHASE_DIFF_FILES=$(for c in $PHASE_COMMITS; do
-    git show --pretty=format: --name-only "$c" -- . \
+    git show --pretty=format: --name-only --first-parent "$c" -- . \
       ':!.planning/' ':!ROADMAP.md' ':!STATE.md' \
       ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' \
       ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock' 2>/dev/null
