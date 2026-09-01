@@ -2504,6 +2504,21 @@ type RequirementsLineAnalysis = {
    *  about the endpoints the rule actually fired on. */
   spacedRangePairs: Array<[string, string]>;
   /**
+   * Nothing on the line was DEMONSTRABLY dropped: no rule that names a specific
+   * unselected ID fired, and any spaced range fired on endpoints the selector
+   * actually took.
+   *
+   * This is the shared precondition of both NON-assertive voices — the
+   * ambiguous range reading and the over-cap "not classified" report — and it
+   * is named once because they had drifted apart. Round 7 review, Minor 1:
+   * `rangeReadingOnly` carried the conjunction inline and omitted the cap,
+   * while the over-cap channel carried its own copy that excluded a spaced
+   * range wholesale. A line with a clean, fully-selected range beside an
+   * unexamined over-cap token satisfied neither guard as intended and reached
+   * the ambiguous voice.
+   */
+  nothingDemonstrablyDropped: boolean;
+  /**
    * The round-3 channel discriminator (review finding Major 3). True when the
    * ONLY thing to report is a range *reading*: R2 fired, no other rule did, and
    * every endpoint R2 fired on was actually selected. Nothing was dropped, so
@@ -2979,15 +2994,31 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
   // look like a clean `REQ-01` is exactly the evidence this rule needs, so it
   // has to see the character the tokenizer removed.
   const delimiterDroppedIds = reqDelimiterDroppedIds(rawLine, selected, REQ_TOKEN_SCAN_LIMIT);
-  const rangeReadingOnly =
-    hasSpacedRange &&
+  const nothingDemonstrablyDropped =
     rangeTokens.length === 0 &&
     !hasGluedRangeFragment &&
     inertIdShaped.length === 0 &&
-    // R4 is a DEMONSTRATED drop, so the ambiguous voice — whose whole claim is
-    // that nothing was dropped — must not speak for a line carrying one.
+    // R4 is a DEMONSTRATED drop, so neither non-assertive voice — one claiming
+    // nothing was dropped, the other that nothing could be checked — may speak
+    // for a line carrying one.
     delimiterDroppedIds.length === 0 &&
+    // R2 firing on an endpoint the selector did NOT take is itself a
+    // demonstrated drop, and the assertive channel is right there. Vacuously
+    // true when no spaced range fired, which is what makes this a strict
+    // superset of the `!hasSpacedRange` guard the over-cap channel used to
+    // carry — that channel's behaviour on a line with no spaced range is
+    // unchanged, byte for byte.
     spacedRangePairs.every(([a, b]) => selected.has(a.toUpperCase()) && selected.has(b.toUpperCase()));
+  const rangeReadingOnly =
+    hasSpacedRange &&
+    nothingDemonstrablyDropped &&
+    // The cap bounds the WORK, never the warning. An over-cap token is not
+    // classified by ANY rule (R1-R4 all skip it), so the voice whose entire
+    // claim is that nothing was dropped has no basis to speak for this line.
+    // It falls to the over-cap channel below instead — `unverified`, because
+    // the line was not CHECKED; not `misparse`, because nothing on it
+    // demonstrably failed to parse either. Round 7 review, Minor 1.
+    oversizedTokens.length === 0;
 
   // Named rather than inlined into the return literal (round 3 review Minor 3):
   // this disjunction is the module's single most important predicate, and in
@@ -3014,6 +3045,7 @@ function analyzeRequirementsLine(rawLine: string): RequirementsLineAnalysis {
     zeroSelectionInert,
     placeholderLed,
     spacedRangePairs,
+    nothingDemonstrablyDropped,
     rangeReadingOnly,
     delimiterDroppedIds,
     oversizedTokens,
@@ -3123,21 +3155,17 @@ function formatRequirementsLineWarning(
     };
   }
 
-  if (
-    analysis.oversizedTokens.length > 0 &&
-    analysis.rangeTokens.length === 0 &&
-    !analysis.hasSpacedRange &&
-    !analysis.hasGluedRangeFragment &&
-    analysis.inertIdShaped.length === 0 &&
-    // R4 is a DEMONSTRATED drop, and this voice's whole claim is that NOTHING
-    // could be checked. Both cannot be true at once: `REQ-01, REQ-02: <over-cap
-    // token>` names REQ-02 in `delimiterDroppedIds` and then reported
-    // `req-line-unverified`, whose message never mentions it — the concrete,
-    // actionable finding masked by the token beside it. Same exclusion, same
-    // reason, as `rangeReadingOnly` above. The assertive channel already
-    // appends the over-cap rider, so routing there loses nothing about the cap.
-    analysis.delimiterDroppedIds.length === 0
-  ) {
+  if (analysis.oversizedTokens.length > 0 && analysis.nothingDemonstrablyDropped) {
+    // A DEMONSTRATED drop outranks this voice, whose whole claim is that
+    // NOTHING could be checked — both cannot be true at once. `REQ-01,
+    // REQ-02: <over-cap token>` names REQ-02 in `delimiterDroppedIds` and
+    // then reported `req-line-unverified`, whose message never mentions it:
+    // the concrete, actionable finding masked by the token beside it. That
+    // exclusion now lives in `nothingDemonstrablyDropped`, shared verbatim
+    // with `rangeReadingOnly` above rather than duplicated here — the
+    // duplication is what let the two drift (round 7 review, Minor 1). The
+    // assertive channel already appends the over-cap rider, so routing a
+    // demonstrated drop there loses nothing about the cap.
     // OVER-CAP channel — no rule could run, so no rule may be diagnosed. Say
     // exactly that: the line was not classified, rather than not a problem.
     return {

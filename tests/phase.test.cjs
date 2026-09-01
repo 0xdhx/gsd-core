@@ -12713,6 +12713,63 @@ describe('issue #3697: phase complete must warn when the Requirements line under
     );
   });
 
+  test('#3697-19n (over-cap beside a CLEAN range): the cap outranks the ambiguous voice', () => {
+    // The twin of #3697-19l on the other side of the boundary. There, a
+    // DEMONSTRATED drop outranks the unverified voice; here nothing was
+    // demonstrated, so the cap does — and what must not happen is the line
+    // reading as clean. `req-line-range-reading` is documented (in its own code
+    // comment and in CONTEXT.md's PHASE.REQ-LINE.SEAM.kinds predicate) to mean
+    // nothing was dropped, and this line carries a token no rule ever examined.
+    // Round 7 review, Minor 1.
+    const overCap = 'x'.repeat(2049);
+    assert.strictEqual(overCap.length, 2049, '#3697-19n fixture must be one past the cap');
+    const line = `RANGE-01 - RANGE-05, ${overCap}`;
+    const a = analyzeRequirementsLine(line);
+    // The range half is genuinely clean: R2 fired, both endpoints were taken.
+    assert.deepStrictEqual(
+      a.citedReqIds, ['RANGE-01', 'RANGE-05'],
+      '#3697-19n: both endpoints really are selected — this is the CLEAN range shape',
+    );
+    assert.ok(a.hasSpacedRange, '#3697-19n: and R2 really did fire');
+    assert.strictEqual(a.delimiterDroppedIds.length, 0, '#3697-19n: nothing was demonstrably dropped');
+    assert.ok(a.oversizedTokens.length > 0, '#3697-19n: while an over-cap token is present');
+    // The predicate itself, pinned: the ambiguous voice must stand down.
+    assert.strictEqual(
+      a.rangeReadingOnly, false,
+      '#3697-19n: the ambiguous voice claims nothing was dropped — it may not speak over an unexamined token',
+    );
+    const w = formatRequirementsLineWarning('1', line, a);
+    assert.strictEqual(
+      reqLineCode(w), REQ_LINE_WARNING_CODE.unverified,
+      '#3697-19n: an unexamined token makes the line UNVERIFIED, not clean',
+    );
+    // And specifically NOT the assertive voice: nothing on this line failed to
+    // parse, so `misparse` would be the #2334 over-warning class returning
+    // through the fix for its own false-clean.
+    assert.notStrictEqual(
+      reqLineCode(w), REQ_LINE_WARNING_CODE.misparse,
+      '#3697-19n: nothing demonstrably failed to parse — asserting a misparse here is the #2334 class',
+    );
+    assert.match(
+      reqLineText(w), /exceed the 2048-character scan limit/,
+      '#3697-19n: and the cap is named, so the reader knows what was not looked at',
+    );
+  });
+
+  test('#3697-19o (control for -19n): the same range WITHOUT an over-cap token still reads as a range', () => {
+    // Negative control. -19n must not be satisfiable by routing every spaced
+    // range to `unverified`; the ambiguous voice is still correct when there
+    // is nothing unexamined on the line.
+    const line = 'RANGE-01 - RANGE-05';
+    const a = analyzeRequirementsLine(line);
+    assert.strictEqual(a.oversizedTokens.length, 0, '#3697-19o: nothing over the cap here');
+    assert.strictEqual(a.rangeReadingOnly, true, '#3697-19o: so the ambiguous voice is the right one');
+    assert.strictEqual(
+      reqLineCode(formatRequirementsLineWarning('1', line, a)), REQ_LINE_WARNING_CODE.rangeReading,
+      '#3697-19o: unchanged by the -19n fix — a clean range is still a range reading',
+    );
+  });
+
   // DECLARED BLIND SPOTS, pinned so the docs and the code cannot drift apart
   // again — that drift IS the round 4 blocker. R4's trigger is a glued `;`/`:`
   // or an embedded invisible. Styling is TOLERATED around an id, never a
