@@ -931,12 +931,19 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
     // PRESENCE, not truthiness — a project `fast_mode: false` or
     // `dynamic_routing: false` is a collision the project must win, and the
     // historical `|| fallback` coercion of that falsy value is kept exactly
-    // (so `false` still reads as `null`, as it always has). Only an ABSENT
-    // project key falls through to the global projection. Caught by the
-    // pre-create review: a plain `parsed[k] || globalBase[k]` let every falsy
-    // project value lose to a truthy global one.
-    const projectOr = (key: string, fallback: unknown): unknown =>
-      parsed[key] !== undefined ? (parsed[key] || fallback) : globalBase[key];
+    // (so `false` still reads as `null`, as it always has). Only an UNSET
+    // project key falls through to the global projection — and an explicit
+    // `null` IS unset, exactly as the `??`-routed keys above already read it
+    // and as readGsdEffectiveModelOverrides always has: a `!== undefined`
+    // presence test admitted `null` as "set", the `|| fallback` arm coerced
+    // it, and a correctly-projected global value was silently dropped (PR
+    // review, round 1). Caught by the pre-create review: a plain
+    // `parsed[k] || globalBase[k]` let every falsy project value lose to a
+    // truthy global one.
+    const projectOr = (key: string, fallback: unknown): unknown => {
+      const v = parsed[key];
+      return v !== undefined && v !== null ? (v || fallback) : globalBase[key];
+    };
 
     const parallelization = (() => {
       const val = get('parallelization') ?? globalBase['parallelization'];
@@ -992,7 +999,7 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       subagent_timeout: get('subagent_timeout', { section: 'workflow', field: 'subagent_timeout' }) ?? globalBase['subagent_timeout'],
       model_overrides: projectOr('model_overrides', null),
       models: projectOr('models', null),
-      granularity: parsed['granularity'] !== undefined ? parsed['granularity'] : globalBase['granularity'],
+      granularity: parsed['granularity'] ?? globalBase['granularity'],
       granularities: projectOr('granularities', null),
       planning: projectOr('planning', null),
       dynamic_routing: projectOr('dynamic_routing', null),
@@ -1011,10 +1018,9 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       // failure mode this module's own A3 test guards against.
       phase_commit_docs: (parsed['phase_commit_docs']) || {},
       manager: (parsed['manager']) || {},
-      response_language: (() => {
-        const v = get('response_language');
-        return v !== undefined ? (v || null) : globalBase['response_language'];
-      })(),
+      // `get('response_language')` with no nested alias is `parsed['response_language']`
+      // verbatim, so this is the same presence-then-coerce read as the keys above.
+      response_language: projectOr('response_language', null),
       claude_md_path: get('claude_md_path') || null,
       claude_md_assembly: (parsed['claude_md_assembly']) || null,
       phase_id_convention: get('phase_id_convention') ?? null,

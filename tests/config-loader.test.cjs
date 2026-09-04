@@ -1428,6 +1428,33 @@ describe('#4071 global defaults merge per key under a project config', () => {
     });
   }
 
+  // Round-1 review (Major): an explicit project `null` counts as UNSET — the
+  // contract CONFIGURATION.md states — so it must fall through to the
+  // global projection exactly as an absent key does, on every `||`-routed key
+  // and on the hand-rolled `granularity`. Before the fix the `!== undefined`
+  // presence test admitted `null` as "set", the `|| fallback` arm coerced it,
+  // and a correctly-projected global value was silently dropped: the #4071
+  // defect class re-entered through `null` instead of through "a project
+  // config exists". The `??`-routed keys never had this gap.
+  const NULL_IS_UNSET_KEYS = [...OR_KEYS, 'granularity'];
+  for (const key of NULL_IS_UNSET_KEYS) {
+    test(`null-is-unset: an explicit project null "${key}" falls through to the global value`, () => {
+      writeConfig(tmpDir, { [key]: null });
+      writeGlobalDefaults({ [key]: `gsd-4071-global-${key}` });
+      assert.deepEqual(loadConfigResolved(tmpDir).config[key], `gsd-4071-global-${key}`,
+        `project null must read as unset for "${key}" and honor the global value`);
+    });
+  }
+
+  test('null-is-unset: with no global file an explicit project null keeps its historical coercion', () => {
+    writeConfig(tmpDir, { model_overrides: null, granularity: null, agent_skills: null, response_language: null });
+    const { config } = loadConfigResolved(tmpDir);
+    assert.equal(config['model_overrides'], null);
+    assert.equal(config['granularity'], null);
+    assert.deepEqual(config['agent_skills'], {});
+    assert.equal(config['response_language'], null);
+  });
+
   test('a project nested spelling still wins over a global flat one', () => {
     writeConfig(tmpDir, { workflow: { research: false } });
     writeGlobalDefaults({ research: true });
