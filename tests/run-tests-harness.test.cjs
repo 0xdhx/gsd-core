@@ -1030,6 +1030,17 @@ setInterval(() => {}, 1 << 30);
         ['win32', 24, { RUN_TESTS_NO_FORCE_EXIT: '1', RUN_TESTS_FORCE_EXIT: '1' }, off, 'opt-out beats opt-in'],
         ['win32', 20, {}, off, 'flag does not exist before Node 22'],
         ['linux', 20, { RUN_TESTS_FORCE_EXIT: '1' }, off, 'opt-in cannot enable a flag the engine lacks'],
+        // #4031 round 1: boundary coverage for the `nodeMajor < 22` gate, per CONTEXT.md
+        // RULESET.TESTS.boundary-coverage (limit-1 / limit / limit+1). Pinned to win32 with an
+        // EMPTY env deliberately: that is the combination where the version gate is the only
+        // thing that can produce `off`. A non-win32 row with an empty env is off under the
+        // correct predicate and under `< 21`, `<= 22` and `< 23` alike, so it discriminates
+        // nothing. (Setting RUN_TESTS_FORCE_EXIT would make a non-win32 row discriminate, since
+        // the opt-in arm sits below the version gate — but that pins the boundary against the
+        // opt-in path rather than against the default the flag actually ships with.)
+        ['win32', 21, {}, off, 'limit-1: the flag does not exist on Node 21'],
+        ['win32', 22, {}, on, 'limit: Node 22 is the first version carrying the flag, so the win32 default applies'],
+        ['win32', 23, {}, on, 'limit+1: the win32 default still applies above the floor'],
         ['linux', 24, { RUN_TESTS_FORCE_EXIT: '' }, off, 'an empty opt-in reads as unset (any non-empty value sets it)'],
         ['win32', 24, { RUN_TESTS_NO_FORCE_EXIT: '' }, on, 'an empty opt-out reads as unset'],
       ];
