@@ -955,8 +955,15 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
     const _baseConfig: Record<string, unknown> = {
       model_profile: get('model_profile') ?? globalBase['model_profile'],
       commit_docs: (() => {
-        const explicit = get('commit_docs', { section: 'planning', field: 'commit_docs' });
-        if (explicit !== undefined) return explicit;
+        // An explicit `null` is unset here as on every other resolution key
+        // (PR review, round 1 — self-found sibling): before #4071 it was
+        // returned verbatim and short-circuited every tier below. `get()`
+        // returns a present top-level value BEFORE looking at the nested
+        // alias, so a top-level `null` must not shadow an explicit
+        // `planning.commit_docs` — retry the alias before falling through.
+        let explicit = get('commit_docs', { section: 'planning', field: 'commit_docs' });
+        if (explicit === null) explicit = getNested('planning', 'commit_docs');
+        if (explicit !== undefined && explicit !== null) return explicit;
         if (isGitIgnored(cwd, '.planning/')) return false;
         // #4071: the gitignore inference stays AHEAD of the global file — it is
         // a fact about this repository, and a machine-wide `true` must not

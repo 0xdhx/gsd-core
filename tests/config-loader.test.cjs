@@ -1446,6 +1446,32 @@ describe('#4071 global defaults merge per key under a project config', () => {
     });
   }
 
+  // Self-found sibling of the round-1 Major (defect class: a `!== undefined`
+  // presence test in front of the global-defaults tier): `commit_docs`
+  // returned an explicit project `null` verbatim, short-circuiting the
+  // gitignore, global AND builtin tiers. It is on the documented resolution
+  // set, so `null` counts as unset here too.
+  test('null-is-unset: an explicit project null commit_docs falls through to the global value', () => {
+    writeConfig(tmpDir, { commit_docs: null });
+    writeGlobalDefaults({ commit_docs: false }); // builtin is true — false is the anti-vacuity sentinel
+    assert.equal(loadConfigResolved(tmpDir).config['commit_docs'], false);
+  });
+
+  // Round review (self-found, pre-push): the flat/nested read returns a
+  // top-level `null` BEFORE consulting the `planning.commit_docs` alias, so
+  // treating that null as unset must retry the alias — otherwise a nested
+  // explicit opt-out is skipped and the chain lands on the builtin `true`.
+  test('null-is-unset: a top-level null commit_docs does not shadow the nested planning.commit_docs alias', () => {
+    writeConfig(tmpDir, { commit_docs: null, planning: { commit_docs: false } });
+    writeGlobalDefaults({ commit_docs: true });
+    assert.equal(loadConfigResolved(tmpDir).config['commit_docs'], false);
+  });
+
+  test('null-is-unset: an explicit project null commit_docs with no global file resolves to the builtin', () => {
+    writeConfig(tmpDir, { commit_docs: null });
+    assert.equal(loadConfigResolved(tmpDir).config['commit_docs'], configLoader.CONFIG_DEFAULTS.commit_docs);
+  });
+
   test('null-is-unset: with no global file an explicit project null keeps its historical coercion', () => {
     writeConfig(tmpDir, { model_overrides: null, granularity: null, agent_skills: null, response_language: null });
     const { config } = loadConfigResolved(tmpDir);
