@@ -116,6 +116,33 @@ function _getConfigValue(
   return undefined;
 }
 
+/**
+ * #4071: the flat-then-nested read for a GLOBAL-DEFAULTS RESOLUTION key, where
+ * an explicit `null` means UNSET (the documented contract for that set). A
+ * legacy flat `null` must not shadow an explicitly-set nested alias: with the
+ * global tier now sitting behind the builtin, `{ research: null, workflow:
+ * { research: true } }` would otherwise resolve past the project's own nested
+ * value to a machine-wide one. Only an explicitly-set nested value overrides
+ * the null; with none set the flat value is returned unchanged.
+ *
+ * Deliberately NOT folded into `_getConfigValue`: outside the resolution set
+ * `null` can be an explicit operational value (`max_prompt_tokens: null` is
+ * "no trim", planning-config.md), and there the flat spelling must keep
+ * winning. Exported for tests.
+ */
+function _getConfigValueNullAsUnset(
+  parsed: Record<string, unknown>,
+  key: string,
+  nested?: { section: string; field: string },
+): unknown {
+  const value = _getConfigValue(parsed, key, nested);
+  if (value === null && nested) {
+    const nestedValue = _getConfigNested(parsed, nested.section, nested.field);
+    if (nestedValue !== undefined) return nestedValue;
+  }
+  return value;
+}
+
 /** Shared nested-only config lookup; exported for parity tests. */
 function _getConfigNested(parsed: Record<string, unknown>, section: string, field: string): unknown {
   const sec = parsed[section];
@@ -887,6 +914,10 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
 
     const get = (key: string, nested?: { section: string; field: string }): unknown =>
       _getConfigValue(parsed, key, nested);
+    // #4071: the read for a resolution key that carries a nested alias — an
+    // explicit flat `null` is unset there and yields to the nested spelling.
+    const getResolved = (key: string, nested: { section: string; field: string }): unknown =>
+      _getConfigValueNullAsUnset(parsed, key, nested);
 
     /**
      * Nested-ONLY read — no top-level fallback (#3648).
@@ -957,12 +988,10 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       commit_docs: (() => {
         // An explicit `null` is unset here as on every other resolution key
         // (PR review, round 1 — self-found sibling): before #4071 it was
-        // returned verbatim and short-circuited every tier below. `get()`
-        // returns a present top-level value BEFORE looking at the nested
-        // alias, so a top-level `null` must not shadow an explicit
-        // `planning.commit_docs` — retry the alias before falling through.
-        let explicit = get('commit_docs', { section: 'planning', field: 'commit_docs' });
-        if (explicit === null) explicit = getNested('planning', 'commit_docs');
+        // returned verbatim and short-circuited every tier below. A flat
+        // `null` yielding to an explicit `planning.commit_docs` is
+        // getResolved()'s job, not a special case here.
+        const explicit = getResolved('commit_docs', { section: 'planning', field: 'commit_docs' });
         if (explicit !== undefined && explicit !== null) return explicit;
         if (isGitIgnored(cwd, '.planning/')) return false;
         // #4071: the gitignore inference stays AHEAD of the global file — it is
@@ -977,11 +1006,11 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       phase_branch_template: get('phase_branch_template', { section: 'git', field: 'phase_branch_template' }) ?? defaults.phase_branch_template,
       milestone_branch_template: get('milestone_branch_template', { section: 'git', field: 'milestone_branch_template' }) ?? defaults.milestone_branch_template,
       quick_branch_template: get('quick_branch_template', { section: 'git', field: 'quick_branch_template' }) ?? defaults.quick_branch_template,
-      research: get('research', { section: 'workflow', field: 'research' }) ?? globalBase['research'],
-      plan_checker: get('plan_checker', { section: 'workflow', field: 'plan_check' }) ?? globalBase['plan_checker'],
-      verifier: get('verifier', { section: 'workflow', field: 'verifier' }) ?? globalBase['verifier'],
-      nyquist_validation: get('nyquist_validation', { section: 'workflow', field: 'nyquist_validation' }) ?? globalBase['nyquist_validation'],
-      post_planning_gaps: get('post_planning_gaps', { section: 'workflow', field: 'post_planning_gaps' }) ?? globalBase['post_planning_gaps'],
+      research: getResolved('research', { section: 'workflow', field: 'research' }) ?? globalBase['research'],
+      plan_checker: getResolved('plan_checker', { section: 'workflow', field: 'plan_check' }) ?? globalBase['plan_checker'],
+      verifier: getResolved('verifier', { section: 'workflow', field: 'verifier' }) ?? globalBase['verifier'],
+      nyquist_validation: getResolved('nyquist_validation', { section: 'workflow', field: 'nyquist_validation' }) ?? globalBase['nyquist_validation'],
+      post_planning_gaps: getResolved('post_planning_gaps', { section: 'workflow', field: 'post_planning_gaps' }) ?? globalBase['post_planning_gaps'],
       // #4071: Branch D has projected this since #3894 but Branch A never did,
       // so a global value was inert here AND a project value never surfaced
       // through this loader. Nested-only read (#3648): the key has no legacy
@@ -993,7 +1022,7 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       exa_search: get('exa_search') ?? defaults.exa_search,
       mvp_mode: get('mvp_mode', { section: 'workflow', field: 'mvp_mode' }) ?? false,
       tdd_mode: getNested('workflow', 'tdd_mode') ?? false,
-      text_mode: get('text_mode', { section: 'workflow', field: 'text_mode' }) ?? globalBase['text_mode'],
+      text_mode: getResolved('text_mode', { section: 'workflow', field: 'text_mode' }) ?? globalBase['text_mode'],
       auto_advance: get('auto_advance', { section: 'workflow', field: 'auto_advance' }) ?? false,
       _auto_chain_active: get('_auto_chain_active', { section: 'workflow', field: '_auto_chain_active' }) ?? false,
       mode: get('mode') ?? 'interactive',
@@ -1003,7 +1032,7 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       context_window: get('context_window') ?? globalBase['context_window'],
       phase_naming: get('phase_naming') ?? defaults.phase_naming,
       project_code: get('project_code') ?? defaults.project_code,
-      subagent_timeout: get('subagent_timeout', { section: 'workflow', field: 'subagent_timeout' }) ?? globalBase['subagent_timeout'],
+      subagent_timeout: getResolved('subagent_timeout', { section: 'workflow', field: 'subagent_timeout' }) ?? globalBase['subagent_timeout'],
       model_overrides: projectOr('model_overrides', null),
       models: projectOr('models', null),
       granularity: parsed['granularity'] ?? globalBase['granularity'],
@@ -1164,6 +1193,7 @@ export = {
   _getConfigDefault,
   _getNestedConfigDefault,
   _getConfigValue,
+  _getConfigValueNullAsUnset,
   _getConfigNested,
   _deepMergeConfig,
   _warnedUnknownConfigKeys,

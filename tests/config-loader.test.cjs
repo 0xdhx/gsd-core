@@ -1472,6 +1472,47 @@ describe('#4071 global defaults merge per key under a project config', () => {
     assert.equal(loadConfigResolved(tmpDir).config['commit_docs'], configLoader.CONFIG_DEFAULTS.commit_docs);
   });
 
+  // Round review (pre-push, refuted claim): `get()` returns a present flat
+  // value BEFORE consulting the nested alias, so a legacy flat `null` shadowed
+  // an explicit nested spelling. Pre-#4071 that null fell to the BUILTIN; with
+  // the global tier behind it, a machine-wide value could now defeat an
+  // explicit nested project value — strictly worse. A flat `null` yields to
+  // an explicitly-set nested alias, on every alias-carrying resolution key.
+  const NESTED_ALIAS_KEYS = {
+    research: ['workflow', 'research'], plan_checker: ['workflow', 'plan_check'],
+    verifier: ['workflow', 'verifier'], nyquist_validation: ['workflow', 'nyquist_validation'],
+    post_planning_gaps: ['workflow', 'post_planning_gaps'], text_mode: ['workflow', 'text_mode'],
+    subagent_timeout: ['workflow', 'subagent_timeout'], commit_docs: ['planning', 'commit_docs'],
+  };
+  for (const [flat, [section, field]] of Object.entries(NESTED_ALIAS_KEYS)) {
+    test(`null-is-unset: a null legacy flat "${flat}" does not shadow an explicit nested ${section}.${field}`, () => {
+      writeConfig(tmpDir, { [flat]: null, [section]: { [field]: `gsd-4071-nested-${flat}` } });
+      writeGlobalDefaults({ [flat]: `gsd-4071-global-${flat}` });
+      assert.equal(loadConfigResolved(tmpDir).config[flat], `gsd-4071-nested-${flat}`,
+        `the explicit nested ${section}.${field} must win over a null flat "${flat}" and over the global value`);
+    });
+  }
+
+  test('_getConfigValueNullAsUnset: a flat null with no nested value set is still returned as null (shape unchanged)', () => {
+    const n = { section: 'workflow', field: 'research' };
+    assert.equal(configLoader._getConfigValueNullAsUnset({ research: null }, 'research', n), null);
+    assert.equal(configLoader._getConfigValueNullAsUnset({ research: null, workflow: {} }, 'research', n), null);
+    assert.equal(configLoader._getConfigValueNullAsUnset({ research: null, workflow: { research: false } }, 'research', n), false);
+    assert.equal(configLoader._getConfigValueNullAsUnset({ research: false, workflow: { research: true } }, 'research', n), false, 'a set flat value still wins');
+    // The generic reader is untouched: outside the resolution set a flat null still wins.
+    assert.equal(configLoader._getConfigValue({ research: null, workflow: { research: false } }, 'research', n), null);
+  });
+
+  // Pre-push round review: the null-is-unset rule is scoped to the resolution
+  // set. `max_prompt_tokens: null` is a documented explicit value ("no trim",
+  // planning-config.md), so its flat spelling must keep winning over the
+  // nested alias exactly as before this PR.
+  test('null-is-unset is scoped: a flat max_prompt_tokens null still wins over the nested alias', () => {
+    writeConfig(tmpDir, { max_prompt_tokens: null, review: { max_prompt_tokens: 1234 } });
+    const { config } = loadConfigResolved(tmpDir);
+    assert.equal(config['review']['max_prompt_tokens'], null, 'the flat explicit null ("no trim") must not be overridden by the nested value');
+  });
+
   test('null-is-unset: with no global file an explicit project null keeps its historical coercion', () => {
     writeConfig(tmpDir, { model_overrides: null, granularity: null, agent_skills: null, response_language: null });
     const { config } = loadConfigResolved(tmpDir);
