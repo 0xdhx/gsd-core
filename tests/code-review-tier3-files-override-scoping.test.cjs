@@ -89,9 +89,17 @@ function writeAndCommit(dir, relPath, content, message) {
   gitOrThrow(['commit', '-q', '-m', message], { cwd: dir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS });
 }
 
-// Matches the issue's own fixture exactly: a phase dir with one SUMMARY
-// listing only src/alpha.js, and 5 commits adding src/{alpha,beta,gamma,
-// delta,epsilon}.js.
+// Matches the issue's own fixture: a phase dir with one SUMMARY listing only
+// src/alpha.js, and 5 commits adding src/{alpha,beta,gamma,delta,epsilon}.js.
+//
+// #3926: Tier 3 no longer derives its change set from `${DIFF_BASE}..HEAD`; it
+// reads the phase's commit SET from the SUMMARY's `## Task Commits` section.
+// The SUMMARY is therefore written TWICE -- first with key_files alone, so the
+// phase directory is created early and anchors DIFF_BASE exactly as before, and
+// again after the five commits exist, to record their hashes. Recording them up
+// front is impossible (a commit cannot name its own hash), and moving the phase
+// dir's creation after the commits would push DIFF_BASE past them, filtering the
+// very set this fixture is built to surface.
 function buildFixture(tmpDir) {
   seedFixtureRepo(tmpDir);
   writeAndCommit(tmpDir, 'README.md', '# init\n', 'chore: init');
@@ -101,9 +109,25 @@ function buildFixture(tmpDir) {
     '---\nkey_files:\n  created:\n    - src/alpha.js\n---\n# Summary\n',
     'feat(03-01): phase 3 plan 1',
   );
+  const taskCommits = [];
   for (const name of ['alpha', 'beta', 'gamma', 'delta', 'epsilon']) {
     writeAndCommit(tmpDir, `src/${name}.js`, `${name}\n`, `feat(03-01): add ${name}`);
+    taskCommits.push(
+      gitOrThrow(['rev-parse', 'HEAD'], { cwd: tmpDir, timeoutMs: GIT_FIXTURE_TIMEOUT_MS }).trim(),
+    );
   }
+  // Canonical `## Task Commits` rows -- the one shape the workflow's awk and the
+  // drift lint both pin: an optional list marker, a `**Task N: ...**` label, then
+  // the backticked hash after the closing bold.
+  const rows = taskCommits
+    .map((sha, i) => `${i + 1}. **Task ${i + 1}: add file ${i + 1}** - \`${sha}\` (feat)`)
+    .join('\n');
+  writeAndCommit(
+    tmpDir,
+    '.planning/phases/03-demo/03-01-SUMMARY.md',
+    `---\nkey_files:\n  created:\n    - src/alpha.js\n---\n# Summary\n\n## Task Commits\n\n${rows}\n`,
+    'docs(03-01): record phase 3 plan 1 task commits',
+  );
 }
 
 /**
@@ -114,7 +138,7 @@ function buildFixture(tmpDir) {
  */
 function runTier3(tmpDir, { filesOverride, seedReviewFiles }) {
   const content = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
-  const tier3 = extractFirstBashBlockAfter(content, '**Tier 3 — Git diff fallback', '**Post-processing');
+  const tier3 = extractFirstBashBlockAfter(content, '**Tier 3 — Phase task-commit fallback', '**Post-processing');
 
   const seedInit = `REVIEW_FILES=(${seedReviewFiles.map((f) => `"${f}"`).join(' ')})`;
 
@@ -167,10 +191,15 @@ function runTier3(tmpDir, { filesOverride, seedReviewFiles }) {
 
 describe('#4460: code-review.md Tier 3 does not widen an explicit --files override', () => {
   const workflowContent = fs.readFileSync(WORKFLOW_PATH, 'utf-8');
-  const tier3Fence = extractFirstBashBlockAfter(workflowContent, '**Tier 3 — Git diff fallback', '**Post-processing');
+  const tier3Fence = extractFirstBashBlockAfter(workflowContent, '**Tier 3 — Phase task-commit fallback', '**Post-processing');
 
   test('the #2666 cross-check elif references FILES_OVERRIDE (the gate exists)', () => {
-    const crossCheckIdx = tier3Fence.indexOf('#2666 cross-check');
+    // #3926: anchor on the cross-check's OWN comment, not the bare '#2666
+    // cross-check' substring. Tier 3 now has an earlier empty-scope arm whose
+    // prose and echo BOTH name the cross-check, so the bare substring resolves
+    // to that arm and this assertion then reads the wrong `elif` -- it passed
+    // with the real guard deleted (driven).
+    const crossCheckIdx = tier3Fence.indexOf('#2666 cross-check: SUMMARY yielded');
     assert.ok(crossCheckIdx !== -1, 'Tier 3 fence must contain the #2666 cross-check comment');
     const elifLine = tier3Fence.slice(0, crossCheckIdx).split('\n').filter((l) => l.trim().startsWith('elif')).pop();
     assert.ok(
