@@ -51,13 +51,53 @@ function writeWorkstreamConfig(tmpDir, wsName, obj) {
 }
 
 
+/**
+ * #4071: pin GSD_HOME to an EMPTY sandbox for a describe whose assertions are the
+ * BUILTIN defaults.
+ *
+ * Before #4071 a project config short-circuited ~/.gsd/defaults.json entirely, so
+ * a test asserting a builtin default was insensitive to the developer's global
+ * file. Every resolution key now falls through to it, so the same assertion
+ * becomes machine-dependent: on a machine whose ~/.gsd/defaults.json sets
+ * `model_profile`, `assert.equal(config.model_profile, 'balanced')` reads the
+ * global value instead.
+ *
+ * CI never sees it. scripts/run-tests.cjs sandboxes GSD_HOME unconditionally
+ * (ADR-1244 D2) and the loader reads `process.env.GSD_HOME || os.homedir()`, so
+ * the suite is isolated under `npm test`. A bare `node --test
+ * tests/config-loader.test.cjs` — the normal way to debug one file — is not, and
+ * fails 4 tests here against a populated global file. Pinning makes each such
+ * describe say what it means rather than depend on the runner to mean it.
+ *
+ * This is the in-process twin of the spawn-path pin at `installSpawnHome()`.
+ */
+function useEmptyGlobalHome() {
+  let origGsdHome;
+  let homeTmp;
+  return {
+    set() {
+      origGsdHome = process.env['GSD_HOME'];
+      homeTmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-cfg-loader-empty-home-'));
+      process.env['GSD_HOME'] = homeTmp;
+    },
+    restore() {
+      if (origGsdHome === undefined) delete process.env['GSD_HOME'];
+      else process.env['GSD_HOME'] = origGsdHome;
+      if (homeTmp) { cleanup(homeTmp); homeTmp = undefined; }
+    },
+  };
+}
+
+
 // ─── defaults when no config.json ────────────────────────────────────────────
 
 describe('loadConfig — defaults when no config.json', () => {
   let tmpDir;
+  // #4071: these assertions are the BUILTIN defaults — see useEmptyGlobalHome().
+  const globalHome = useEmptyGlobalHome();
 
-  beforeEach(() => { tmpDir = makeTempProject(); });
-  afterEach(() => { if (tmpDir) cleanup(tmpDir); tmpDir = null; });
+  beforeEach(() => { globalHome.set(); tmpDir = makeTempProject(); });
+  afterEach(() => { if (tmpDir) cleanup(tmpDir); tmpDir = null; globalHome.restore(); });
 
   test('returns an object with expected default keys when config.json is absent', () => {
     const config = loadConfig(tmpDir);
@@ -275,9 +315,11 @@ describe('loadConfig — unknown-key warning dedup', () => {
 
 describe('loadConfig — malformed JSON', () => {
   let tmpDir;
+  // #4071: these assertions are the BUILTIN defaults — see useEmptyGlobalHome().
+  const globalHome = useEmptyGlobalHome();
 
-  beforeEach(() => { tmpDir = makeTempProject(); });
-  afterEach(() => { if (tmpDir) cleanup(tmpDir); tmpDir = null; });
+  beforeEach(() => { globalHome.set(); tmpDir = makeTempProject(); });
+  afterEach(() => { if (tmpDir) cleanup(tmpDir); tmpDir = null; globalHome.restore(); });
 
   test('malformed config.json returns defaults without throwing', () => {
     const configPath = path.join(tmpDir, '.planning', 'config.json');
@@ -300,9 +342,11 @@ describe('loadConfig — malformed JSON', () => {
 
 describe('loadConfig — adversarial fixtures', () => {
   let tmpDir;
+  // #4071: these assertions are the BUILTIN defaults — see useEmptyGlobalHome().
+  const globalHome = useEmptyGlobalHome();
 
-  beforeEach(() => { tmpDir = makeTempProject(); });
-  afterEach(() => { if (tmpDir) cleanup(tmpDir); tmpDir = null; });
+  beforeEach(() => { globalHome.set(); tmpDir = makeTempProject(); });
+  afterEach(() => { if (tmpDir) cleanup(tmpDir); tmpDir = null; globalHome.restore(); });
 
   test('agent_skills.__proto__ key in config does not pollute Object prototype', () => {
     // Write config with a prototype-pollution candidate key
