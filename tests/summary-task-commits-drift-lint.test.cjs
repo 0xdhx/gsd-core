@@ -443,7 +443,16 @@ describe('#3926 — SUMMARY task-commits drift lint', () => {
     // `summary-new_v2.md`, `summary-a.b.md` — so the "a fifth template is
     // covered automatically" property was only true for suffixes that happened
     // to be alphanumeric. Raised by the #3926 pre-push body audit.
-    for (const name of ['summary.md', 'summary-minimal.md', 'summary-new_v2.md', 'summary-a.b.md']) {
+    // `summary.compact.md` is the DOT-separated variant: `#4139` (Phase 6,
+    // artifact templates) landed it on `next` carrying a real `## Task
+    // Commits` section, and a hyphen-only separator class left it outside the
+    // guard's domain entirely — found by re-deriving the census against the
+    // template directory rather than against the four names this guard was
+    // written for.
+    for (const name of [
+      'summary.md', 'summary-minimal.md', 'summary-new_v2.md', 'summary-a.b.md',
+      'summary.compact.md',
+    ]) {
       assert.ok(TEMPLATE_RE.test(name), `${name} should be enumerated`);
     }
     for (const name of ['not-summary.md', 'summary.txt', 'summaryx.md']) {

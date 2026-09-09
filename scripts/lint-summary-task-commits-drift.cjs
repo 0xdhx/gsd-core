@@ -49,12 +49,18 @@ const { ExitError, runMain } = require('./lib/cli-exit.cjs');
 const ROOT = path.resolve(__dirname, '..');
 
 const TEMPLATE_DIR = 'gsd-core/templates';
-// Every SUMMARY template, not a list of the four that exist today. The parser
+// Every SUMMARY template, not a list of the ones that exist today. The parser
 // reads whichever template produced the SUMMARY on disk, so the guard's set has
 // to be the DIRECTORY's set: a hardcoded list silently stops covering the
-// domain the moment a fifth `summary-*.md` lands, and a template whose Task
+// domain the moment another `summary*.md` lands, and a template whose Task
 // Commits line shape differs is exactly what this guard exists to refuse.
-const TEMPLATE_RE = /^summary(-[^/]*)?\.md$/;
+//
+// The separator class is `[-.]`, not `-` alone. `summary.compact.md` (#4139,
+// Phase 6's artifact templates) ships a real `## Task Commits` section and a
+// hyphen-only class did not reach it — the template was in the domain and
+// outside the guard, which is the one state this enumeration exists to make
+// impossible. `summaryx.md` stays excluded: the suffix must be separated.
+const TEMPLATE_RE = /^summary([-.][^/]*)?\.md$/;
 
 /**
  * Enumerate the SUMMARY templates. Throws rather than returning an empty set:
