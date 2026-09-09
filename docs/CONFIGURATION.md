@@ -2301,8 +2301,8 @@ The global file is read for runtime resolution in both directory shapes
   configuration — model resolution reads it directly.
 - **In a real project (`.planning/config.json` present, even if empty)**, the global file is
   merged **per key** behind the project config: a key the project config sets wins (a key set to
-  `null` counts as unset, as it always has), and a key only the global file sets is honored exactly
-  as it would be with no project config. This
+  `null` counts as unset across the whole resolution set), and a key only the global file sets is
+  honored exactly as it would be with no project config. This
   covers the whole resolution set — `model_profile`, `model_overrides`, `models`,
   `model_policy`, `model_profile_overrides`, `dynamic_routing`, `runtime`,
   `resolve_model_ids`, `context_window`, `granularity`, `granularities`, `effort`,
