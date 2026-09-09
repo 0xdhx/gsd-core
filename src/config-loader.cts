@@ -1043,7 +1043,19 @@ function loadConfigResolved(cwd: string, options: Record<string, unknown> = {}):
       // #4071 exists to remove.
       agent_tools: (parsed['agent_tools']) || null,
       models: projectOr('models', null),
-      granularity: parsed['granularity'] ?? globalBase['granularity'],
+      // #4071 (round 2): read the project's NESTED spelling before the global
+      // tier, exactly as the alias-carrying keys above do. `planning.granularity`
+      // is a documented tier of the granularity chain (CONFIGURATION.md, the
+      // `granularities.<phase_type>` row), but it is resolved DOWNSTREAM by
+      // resolveGranularityInternal, which reads `config.granularity` first. Before
+      // this PR that key was null when only the nested spelling was set, so the
+      // downstream tier was reached; with the global tier behind it a machine-wide
+      // `granularity` would be returned first and an explicit project
+      // `planning.granularity` would never be consulted — a global defeating an
+      // explicit project value, the precise failure the nested-alias reader above
+      // exists to prevent, on the one resolution key whose nested spelling lives
+      // outside the loader.
+      granularity: getResolved('granularity', { section: 'planning', field: 'granularity' }) ?? globalBase['granularity'],
       granularities: projectOr('granularities', null),
       planning: projectOr('planning', null),
       dynamic_routing: projectOr('dynamic_routing', null),

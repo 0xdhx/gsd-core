@@ -1538,6 +1538,10 @@ describe('#4071 global defaults merge per key under a project config', () => {
     verifier: ['workflow', 'verifier'], nyquist_validation: ['workflow', 'nyquist_validation'],
     post_planning_gaps: ['workflow', 'post_planning_gaps'], text_mode: ['workflow', 'text_mode'],
     subagent_timeout: ['workflow', 'subagent_timeout'], commit_docs: ['planning', 'commit_docs'],
+    // Round 2: granularity's nested spelling is resolved DOWNSTREAM (see the
+    // dedicated regression below), so it was absent from this set even though it
+    // carries one. Same rule, same reason.
+    granularity: ['planning', 'granularity'],
   };
   for (const [flat, [section, field]] of Object.entries(NESTED_ALIAS_KEYS)) {
     test(`null-is-unset: a null legacy flat "${flat}" does not shadow an explicit nested ${section}.${field}`, () => {
@@ -1547,6 +1551,34 @@ describe('#4071 global defaults merge per key under a project config', () => {
         `the explicit nested ${section}.${field} must win over a null flat "${flat}" and over the global value`);
     });
   }
+
+  // Round 2 of review, self-found via the round's own adversarial pass. The
+  // granularity chain documented in CONFIGURATION.md is
+  // `granularities[phaseType]` -> `granularity` -> `planning.granularity` ->
+  // 'standard', and resolveGranularityInternal reads `config.granularity`
+  // BEFORE the project's `planning.granularity`. Before #4071 `config.granularity`
+  // was null when only the nested spelling was set, so the downstream tier was
+  // reached and the project won. With the global tier behind it, a machine-wide
+  // `granularity` was returned first and the project's explicit
+  // `planning.granularity` was never consulted. Measured against unmodified
+  // `next`: project {planning:{granularity:'fine'}} + global
+  // {granularity:'coarse'} resolved 'fine' on next and 'coarse' on this PR
+  // before the fix. Values are from VALID_GRANULARITIES (model-resolver.cts);
+  // the end-to-end assertion through resolveGranularityInternal itself lives in
+  // tests/roadmapper-granularity.test.cjs, which owns that seam.
+  test('a global granularity does not defeat an explicit project planning.granularity (no flat key set)', () => {
+    writeConfig(tmpDir, { planning: { granularity: 'fine' } });
+    writeGlobalDefaults({ granularity: 'coarse' });
+    assert.equal(loadConfigResolved(tmpDir).config.granularity, 'fine',
+      "an explicit project planning.granularity must beat a machine-wide global granularity");
+  });
+
+  test('a global granularity IS honored when the project sets neither spelling', () => {
+    writeConfig(tmpDir, { model_profile: 'budget' });
+    writeGlobalDefaults({ granularity: 'coarse' });
+    assert.equal(loadConfigResolved(tmpDir).config.granularity, 'coarse',
+      'anti-vacuity: the fix above must not disable the global tier this PR exists to add');
+  });
 
   test('_getConfigValueNullAsUnset: a flat null with no nested value set is still returned as null (shape unchanged)', () => {
     const n = { section: 'workflow', field: 'research' };

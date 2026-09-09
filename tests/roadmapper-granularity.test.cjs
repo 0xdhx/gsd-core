@@ -229,6 +229,54 @@ describe('#68 config-schema: granularities.<phase_type> validation', () => {
   });
 });
 
+// ─── #4071: a global granularity must not defeat an explicit project value ───
+
+describe('#4071 resolver: a global ~/.gsd/defaults.json granularity does not defeat the project', () => {
+  let projectDir;
+  let gsdHome;
+  let origGsdHome;
+
+  beforeEach(() => {
+    projectDir = makeTmp('4071');
+    gsdHome = makeTmp('4071-home');
+    fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+    origGsdHome = process.env.GSD_HOME;
+    process.env.GSD_HOME = gsdHome;
+  });
+  afterEach(() => {
+    if (origGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = origGsdHome;
+    cleanup(projectDir); cleanup(gsdHome);
+  });
+
+  const writeGlobal = (obj) =>
+    fs.writeFileSync(path.join(gsdHome, '.gsd', 'defaults.json'), JSON.stringify(obj));
+
+  // #4071 made every resolution key fall through to the global file. `granularity`
+  // is read at model-resolver.cts:643 BEFORE the project's `planning.granularity`
+  // at :646-649, so a machine-wide value was returned first and an explicit
+  // project nested value was never consulted. This is the end-to-end pin for the
+  // loader-level regression test in tests/config-loader.test.cjs.
+  test('explicit project planning.granularity beats a global granularity', () => {
+    writeConfig(projectDir, { planning: { granularity: 'fine' } });
+    writeGlobal({ granularity: 'coarse' });
+    assert.equal(resolveGranularityInternal(projectDir, 'planning'), 'fine');
+  });
+
+  test('a project flat granularity still beats both the nested spelling and the global', () => {
+    writeConfig(projectDir, { granularity: 'standard', planning: { granularity: 'fine' } });
+    writeGlobal({ granularity: 'coarse' });
+    assert.equal(resolveGranularityInternal(projectDir, 'planning'), 'standard');
+  });
+
+  // Anti-vacuity: the guard above must not disable the tier #4071 exists to add.
+  test('a global granularity IS honored when the project sets neither spelling', () => {
+    writeConfig(projectDir, { model_profile: 'budget' });
+    writeGlobal({ granularity: 'coarse' });
+    assert.equal(resolveGranularityInternal(projectDir, 'planning'), 'coarse');
+  });
+});
+
 // ─── Resolver behavior: per-phase override wins ──────────────────────────────
 
 describe('#68 resolver: granularities.<phase_type> overrides global granularity', () => {
