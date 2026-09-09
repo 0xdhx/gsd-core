@@ -2302,7 +2302,8 @@ The global file is read for runtime resolution in both directory shapes
 - **In a real project (`.planning/config.json` present, even if empty)**, the global file is
   merged **per key** behind the project config: a key the project config sets wins (a key set to
   `null` counts as unset across the whole resolution set), and a key only the global file sets is
-  honored exactly as it would be with no project config. This
+  honored as it would be with no project config — with one shape exception, `parallelization`, noted
+  below. This
   covers the whole resolution set — `model_profile`, `model_overrides`, `models`,
   `model_policy`, `model_profile_overrides`, `dynamic_routing`, `runtime`,
   `resolve_model_ids`, `context_window`, `granularity`, `granularities`, `effort`,
@@ -2314,6 +2315,12 @@ The global file is read for runtime resolution in both directory shapes
   existed — its mere presence, not a per-key collision, was the trigger — and a one-time
   stderr warning named the ignored keys ([#3532](https://github.com/open-gsd/gsd-core/issues/3532)).
   That warning is gone, because nothing is ignored any more.
+- **`parallelization` is the one key whose SHAPE differs between the two directory shapes**, and
+  that difference predates #4071. Under a project config the value is normalized
+  (`{ "enabled": false }` reads as `false`); with no project config it is returned as written. A
+  global `parallelization` is honored in both, but a caller reading the raw value sees a boolean in
+  the first case and the object in the second. #4071 applies the existing project-config
+  normalization to the new source rather than changing either shape.
 - **Two project-side rules stay ahead of the global file.** A `.planning/` directory that is
   gitignored resolves `commit_docs` to `false` before a global `commit_docs` is consulted —
   that is a fact about the repository, and a machine-wide `true` must not re-enable committing
