@@ -223,6 +223,7 @@ module.exports = {
   "tests/hooks-commonjs-marker.test.cjs",
   "tests/hooks-crash-policy.test.cjs",
   "tests/hooks-opt-in.test.cjs",
+  "tests/host-integration-validator-parity.test.cjs",
   "tests/host-integration.test.cjs",
   "tests/host-runtime-detection.test.cjs",
   "tests/ingest-docs.test.cjs",
