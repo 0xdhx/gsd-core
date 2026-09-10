@@ -159,6 +159,35 @@ const FIXTURE_HOOK_TIMEOUT_SECONDS = 5;
  */
 const STAGED_HOOK_SCRIPT_TIMEOUT_MS = 20000;
 
+/**
+ * A single `gsd-tools.cjs` CLI subcommand invocation, spawned directly (never
+ * via an intermediate shell script), used by a loop/hook-point e2e test. The
+ * command does real in-process work -- capability/config resolution, project
+ * scaffolding, or (for the `check` verbs that inspect git-tracked state) real
+ * git plumbing calls -- but as ONE process with no confirmed nested-subprocess
+ * fan-out, verified per-site by reading each file's own runner function, not
+ * assumed from "hook" in the filename. Representative verbs seen at this
+ * norm's 7 sites: `loop render-hooks <point>`, `check <check-id>`,
+ * `execute <hook-point>`, and `init new-project` (tests/loop-walk.qa.test.cjs's
+ * concurrency test) -- the norm describes the CALL SHAPE (single direct
+ * gsd-tools.cjs spawn, no fan-out), not one specific verb family, so this list
+ * is illustrative, not exhaustive.
+ *
+ * Distinct from `HOOK_FANOUT_TIMEOUT_MS` (a bash-hosted script that itself
+ * shells out to further subprocesses) despite the coincidentally-matching
+ * value: this norm's sites spawn `gsd-tools.cjs` and nothing beneath it.
+ * Distinct from `PROBE_TIMEOUT_MS`: the same underlying `loop render-hooks`
+ * command is ALSO called at `PROBE_TIMEOUT_MS` (15000ms) elsewhere in the
+ * suite against lighter temp-project fixtures -- the two bounds are kept
+ * separate rather than equalized, since this migration never raises or
+ * lowers a value without a fresh bench citation.
+ *
+ * Shared across 7 files in batch #4518 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const LOOP_HOOK_POINT_CLI_TIMEOUT_MS = 60000;
+
 module.exports = {
   PROBE_TIMEOUT_MS,
   HOOK_FANOUT_TIMEOUT_MS,
@@ -170,4 +199,5 @@ module.exports = {
   QUICK_SPAWN_TIMEOUT_MS,
   FIXTURE_HOOK_TIMEOUT_SECONDS,
   STAGED_HOOK_SCRIPT_TIMEOUT_MS,
+  LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
 };
