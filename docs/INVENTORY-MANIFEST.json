@@ -401,6 +401,7 @@
       "core-utils.cjs",
       "coverage.cjs",
       "decisions.cjs",
+      "dispatch-isolation.cjs",
       "docs.cjs",
       "drift.cjs",
       "edge-probe.cjs",
