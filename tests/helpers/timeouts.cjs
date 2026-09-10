@@ -188,6 +188,42 @@ const STAGED_HOOK_SCRIPT_TIMEOUT_MS = 20000;
  */
 const LOOP_HOOK_POINT_CLI_TIMEOUT_MS = 60000;
 
+/**
+ * A security-scan shell script (secret-scan.sh, secret-scan-lint.sh,
+ * prompt-injection-scan.sh, base64-scan.sh) invoked with missing or invalid
+ * CLI arguments -- exits almost instantly with a usage error, no scan work
+ * performed at all. A distinct, lighter-weight class than a real scan of
+ * even a single tiny fixture (`QUICK_SPAWN_TIMEOUT_MS`, 10000ms) -- this is
+ * the fast-fail path, not the scan path.
+ *
+ * Deliberately a separate name from `MALFORMED_INPUT_HOOK_TIMEOUT_MS`, even
+ * though the two currently coincide at the same value: that constant bounds
+ * a Node hook script fed malformed input (a different runtime, a different
+ * failure shape), not a bash scan script given no arguments. Collapsing them
+ * would let a future, independent tune of either value silently move the
+ * other -- the same reasoning `SEAM_DEFAULT_TIMEOUT_MS` documents for its own
+ * coincidence with `HOOK_FANOUT_TIMEOUT_MS`.
+ *
+ * Shared across 2 files in batch #4519 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const SCAN_USAGE_ERROR_TIMEOUT_MS = 5000;
+
+/**
+ * A Node hook script (gsd-prompt-guard-hook.js, gsd-read-injection-scanner.js)
+ * spawned directly and fed malformed JSON on stdin -- expected to fail closed
+ * gracefully, no subprocess fan-out, no real scan work. A different operation
+ * family from `SCAN_USAGE_ERROR_TIMEOUT_MS` (a bash scan script given no
+ * arguments) despite the coincidentally-matching value -- see that constant's
+ * own doc comment for why the two are kept separate rather than merged.
+ *
+ * Shared across 2 files in batch #4519 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const MALFORMED_INPUT_HOOK_TIMEOUT_MS = 5000;
+
 module.exports = {
   PROBE_TIMEOUT_MS,
   HOOK_FANOUT_TIMEOUT_MS,
@@ -200,4 +236,6 @@ module.exports = {
   FIXTURE_HOOK_TIMEOUT_SECONDS,
   STAGED_HOOK_SCRIPT_TIMEOUT_MS,
   LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
+  SCAN_USAGE_ERROR_TIMEOUT_MS,
+  MALFORMED_INPUT_HOOK_TIMEOUT_MS,
 };
