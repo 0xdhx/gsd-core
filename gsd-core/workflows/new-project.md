@@ -516,6 +516,10 @@ These spawn additional agents during planning/execution. They add tokens and tim
 
 All recommended for important projects. Skip for quick experiments.
 
+A fourth question in this same round covers Compact Content (#4139) — not a spawned agent,
+but grouped here because it's the last general workflow-behavior toggle before the more
+involved AI-models round below.
+
 ```
 questions: [
   {
@@ -543,6 +547,15 @@ questions: [
     options: [
       { label: "Yes (Recommended)", description: "Confirm deliverables match phase goals" },
       { label: "No", description: "Trust execution, skip verification" }
+    ]
+  },
+  {
+    header: "Compact Content",
+    question: "Use token-minimized instruction content where available? (smaller context footprint)",
+    multiSelect: false,
+    options: [
+      { label: "No (Recommended)", description: "Full instruction detail loaded every time. Best while evaluating GSD or on a large context window." },
+      { label: "Yes", description: "Terser instructions where a compact variant exists; canonical detail loads only when actually needed. Frees up context for long sessions or large codebases." }
     ]
   }
 ]
@@ -605,7 +618,7 @@ Create `.planning/config.json` with all settings (CLI fills in remaining default
 
 ```bash
 mkdir -p .planning
-gsd_run query config-new-project '{"mode":"[yolo|interactive]","granularity":"[selected]","parallelization":true|false,"commit_docs":true|false,"model_profile":"quality|balanced|budget|adaptive|inherit","workflow":{"research":true|false,"plan_check":true|false,"verifier":true|false,"nyquist_validation":[false if granularity=coarse, true otherwise]},"plan_review":{"source_grounding":true|false},"ship":{"pr_body_sections":[{"heading":"User Stories & Acceptance Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## User Stories || REQUIREMENTS.md ## Acceptance Criteria","fallback":"- Acceptance criteria are covered by the linked requirements and verification evidence."},{"heading":"Risks & Dependencies","enabled":true|false,"source":"PLAN.md ## Risks || PLAN.md ## Dependencies","fallback":"- No known high-risk rollout dependencies."},{"heading":"Success Metrics & Release Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## Definition of Done || VERIFICATION.md ## Release Criteria","fallback":"- Release when automated verification and required manual checks pass."},{"heading":"Stakeholder Review & Approval","enabled":true|false,"template":"- Product owner approval pending for {phase_name}."}]}}'
+gsd_run query config-new-project '{"mode":"[yolo|interactive]","granularity":"[selected]","parallelization":true|false,"commit_docs":true|false,"model_profile":"quality|balanced|budget|adaptive|inherit","workflow":{"research":true|false,"plan_check":true|false,"verifier":true|false,"compact_content":true|false,"nyquist_validation":[false if granularity=coarse, true otherwise]},"plan_review":{"source_grounding":true|false},"ship":{"pr_body_sections":[{"heading":"User Stories & Acceptance Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## User Stories || REQUIREMENTS.md ## Acceptance Criteria","fallback":"- Acceptance criteria are covered by the linked requirements and verification evidence."},{"heading":"Risks & Dependencies","enabled":true|false,"source":"PLAN.md ## Risks || PLAN.md ## Dependencies","fallback":"- No known high-risk rollout dependencies."},{"heading":"Success Metrics & Release Criteria","enabled":true|false,"source":"REQUIREMENTS.md ## Definition of Done || VERIFICATION.md ## Release Criteria","fallback":"- Release when automated verification and required manual checks pass."},{"heading":"Stakeholder Review & Approval","enabled":true|false,"template":"- Product owner approval pending for {phase_name}."}]}}'
 ```
 
 **Note:** Run `/gsd:settings` anytime to update model profile, workflow agents, branching strategy, and other preferences.
@@ -629,15 +642,18 @@ gsd_run query commit "chore: add project config" --files .planning/config.json
 
 **Detect multi-repo workspace:**
 
-Check for directories with their own `.git` folders (separate repos within the workspace):
+Check for directories with their own `.git` (separate repos within the workspace —
+this also finds linked git worktree children, whose `.git` is a file rather than a
+directory, unlike a plain `find -type d` predicate would):
 
 ```bash
-find . -maxdepth 1 -type d -not -name ".*" -not -name "node_modules" -exec test -d "{}/.git" \; -print
+gsd_run query init.new-project
 ```
 
-**If sub-repos found:**
+Read the `sub_repos_detected` array from the JSON output — each entry is a bare
+directory name already relative to the workspace root (e.g. `"backend"`).
 
-Strip the `./` prefix to get directory names (e.g., `./backend` → `backend`).
+**If sub-repos found:**
 
 Use AskUserQuestion:
 

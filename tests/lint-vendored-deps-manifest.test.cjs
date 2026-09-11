@@ -22,12 +22,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { cleanup } = require('./helpers.cjs');
 
 const {
   VENDORED,
   compareFiles,
   checkRow,
   stripRangeOperator,
+  pinOperatorPrefix,
+  fixRow,
   declaredValueExports,
   checkHandAuthoredTwin,
   resolvePath,
@@ -266,5 +269,120 @@ describe('G3: the hand-authored js-yaml type twin is excluded from byte-compare,
     // for an actual export statement, not just the word (which legitimately appears in
     // this file's own prose explaining the exclusion).
     assert.doesNotMatch(content, /export function loadAll\(/, 'loadAll must stay undeclared per the narrowed surface');
+  });
+});
+
+describe('#4573: pinOperatorPrefix / fixRow — mechanical --fix for Dependabot-range vendor drift', () => {
+  test('pinOperatorPrefix extracts the leading range-operator token, or "" for an exact pin', () => {
+    assert.equal(pinOperatorPrefix('^4.3.1'), '^');
+    assert.equal(pinOperatorPrefix('~4.3.1'), '~');
+    assert.equal(pinOperatorPrefix('4.3.1'), '');
+    assert.equal(pinOperatorPrefix('>=4.3.1'), '>=');
+  });
+
+  test('regression guard: stripRangeOperator is unchanged for the same inputs after the PIN_OPERATOR_RE refactor', () => {
+    assert.equal(stripRangeOperator('^4.3.1'), '4.3.1');
+    assert.equal(stripRangeOperator('~4.3.1'), '4.3.1');
+    assert.equal(stripRangeOperator('4.3.1'), '4.3.1');
+    assert.equal(stripRangeOperator('>=4.3.1'), '4.3.1');
+  });
+
+  test('fixRow resolves mechanical .cjs drift: mutated vendored js-yaml.cjs is byte-restored to match node_modules', (t) => {
+    // Operates on an ISOLATED TEMP COPY, never the real gsd-core/bin/lib/vendor/js-yaml.cjs.
+    // node --test runs files concurrently; the real file is `require()`-able by other test
+    // files at any moment, and fs.copyFileSync's write is not atomic against a concurrent
+    // reader on every filesystem. A prior version of this test wrote directly to the real
+    // file and a concurrent require() elsewhere caught it mid-overwrite, reading a truncated
+    // file and crashing an unrelated test with a SyntaxError -- confirmed via real CI logs,
+    // not a hypothetical. upstreamCjs stays pointed at the real node_modules copy (read-only,
+    // nothing writes to node_modules during tests, so sharing it is safe); only the
+    // destination is redirected to a private temp path.
+    const row = jsYamlRow();
+    const upstreamAbs = path.join(REPO_ROOT, row.upstreamCjs);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-vendored-deps-fixrow-'));
+    const tempVendoredAbs = path.join(tmpDir, 'js-yaml.cjs');
+    t.after(() => cleanup(tmpDir));
+
+    const original = fs.readFileSync(upstreamAbs, 'utf8');
+    fs.writeFileSync(tempVendoredAbs, `${original}\n// mutated for test\n`);
+    const tempRow = { ...row, vendoredCjs: tempVendoredAbs };
+
+    const findings = fixRow(tempRow);
+    assert.deepEqual(findings, [], `expected fixRow to leave zero findings, got: ${JSON.stringify(findings)}`);
+    assert.ok(
+      fs.readFileSync(tempVendoredAbs).equals(fs.readFileSync(upstreamAbs)),
+      'expected the vendored .cjs to byte-equal node_modules/js-yaml/dist/js-yaml.js after fixRow',
+    );
+  });
+
+  test('fixRow does NOT mask a genuine hand-authored-twin incompatibility: a fake declared export still surfaces after --fix', (t) => {
+    // fixRow's first line unconditionally copies onto row.vendoredCjs regardless of what this
+    // test is exercising -- redirect it to a private temp path too, same reasoning as the
+    // preceding test (avoid ANY write to the real, shared, concurrently-`require()`-able
+    // gsd-core/bin/lib/vendor/js-yaml.cjs). srcTwin (a .d.cts type-only file, never require()'d
+    // at runtime) is mutated in place as before -- this test's actual subject.
+    const row = jsYamlRow();
+    const srcTwinAbs = path.join(REPO_ROOT, row.srcTwin);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-vendored-deps-fixrow-'));
+    const tempVendoredAbs = path.join(tmpDir, 'js-yaml.cjs');
+    t.after(() => cleanup(tmpDir));
+    const tempRow = { ...row, vendoredCjs: tempVendoredAbs };
+
+    const original = fs.readFileSync(srcTwinAbs, 'utf8');
+    fs.writeFileSync(
+      srcTwinAbs,
+      `${original}\nexport function thisFixRowExportDoesNotExistAtRuntime(): void;\n`,
+    );
+    t.after(() => {
+      fs.writeFileSync(srcTwinAbs, original);
+    });
+
+    const findings = fixRow(tempRow);
+    assert.ok(
+      findings.some((f) => f.includes('thisFixRowExportDoesNotExistAtRuntime')),
+      `expected the hand-authored-twin finding to survive fixRow, got: ${JSON.stringify(findings)}`,
+    );
+  });
+
+  test('fixRow preserves the pin\'s original range-operator style when rewriting package.json', (t) => {
+    // Isolates BOTH real-file writes fixRow makes: the vendoredCjs copy (redirected to a temp
+    // path, same reasoning as the two tests above) AND the package.json pin rewrite this test
+    // specifically exercises (redirected via fixRow's pkgRoot parameter to an isolated temp
+    // root containing its own package.json + node_modules/js-yaml/package.json). Neither the
+    // real vendored .cjs nor the real package.json is touched -- both are readable at module
+    // top-level by other concurrently-running node --test files, the same race class already
+    // fixed for the vendored .cjs.
+    const row = jsYamlRow();
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lint-vendored-deps-fixrow-'));
+    t.after(() => cleanup(tmpDir));
+    const tempVendoredAbs = path.join(tmpDir, 'js-yaml.cjs');
+    const tempRow = { ...row, vendoredCjs: tempVendoredAbs };
+
+    const realInstalledPkgPath = path.join(REPO_ROOT, 'node_modules', 'js-yaml', 'package.json');
+    const installedVersion = JSON.parse(fs.readFileSync(realInstalledPkgPath, 'utf8')).version;
+
+    const tempPkgRoot = path.join(tmpDir, 'pkgroot');
+    const tempNodeModulesJsYamlDir = path.join(tempPkgRoot, 'node_modules', 'js-yaml');
+    fs.mkdirSync(tempNodeModulesJsYamlDir, { recursive: true });
+    const stalePin = installedVersion === '4.0.0' ? '~4.0.1' : '~4.0.0';
+    fs.writeFileSync(
+      path.join(tempPkgRoot, 'package.json'),
+      `${JSON.stringify({ devDependencies: { 'js-yaml': stalePin } }, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(tempNodeModulesJsYamlDir, 'package.json'),
+      `${JSON.stringify({ name: 'js-yaml', version: installedVersion }, null, 2)}\n`,
+    );
+
+    const findings = fixRow(tempRow, tempPkgRoot);
+    assert.deepEqual(findings, [], `expected fixRow to leave zero findings, got: ${JSON.stringify(findings)}`);
+
+    const after = JSON.parse(fs.readFileSync(path.join(tempPkgRoot, 'package.json'), 'utf8'));
+    const pinnedAfter = after.devDependencies['js-yaml'];
+    assert.equal(
+      pinnedAfter,
+      `~${installedVersion}`,
+      `expected fixRow to preserve the "~" range-operator style from the stale pin and correct the version to the installed one, got pin "${pinnedAfter}"`,
+    );
   });
 });
