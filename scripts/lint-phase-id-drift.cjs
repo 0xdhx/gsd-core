@@ -20,6 +20,34 @@
  * directly above). Sites that build their regex from `PHASE_NUMBER_TOKEN_SOURCE`
  * carry no literal grammar and pass automatically.
  *
+ * #4634 extends the same pattern with two more detectors:
+ *
+ * - name-validity-guard drift: `hasNameableContent(s)` in `src/roadmap-parser.cts`
+ *   is the sole owner of the "does this string have nameable content" predicate
+ *   (`/[\p{L}\p{N}]/u.test(s)`). Any other `src/**` file re-deriving that exact
+ *   character class (regex-literal or `new RegExp` template form) instead of
+ *   calling `hasNameableContent` is drift, sanctioned the same way as the token
+ *   and bracket rules (`// phase-id-owner:` on the nearest preceding non-blank
+ *   line), with a line-level escape for a line that already calls
+ *   `hasNameableContent(`.
+ *
+ * - shell phase-number-arithmetic ban: `$((10#...))` base-10-forced arithmetic
+ *   inside `gsd-core/workflows/**\/*.md` and `gsd-core/references/**\/*.md` breaks
+ *   on decimal or multi-segment phase ids and is banned outright. This scan runs
+ *   over markdown, not `.cts` source, so its sanction is an HTML comment on the
+ *   nearest preceding non-blank line: `<!-- phase-id-owner: <reason> -->`.
+ *
+ * - branch-slug fallback drift: a `.replace('{slug}', ... || 'phase')` call
+ *   silently substitutes the literal string `'phase'` when a phase's slug
+ *   can't be derived, producing a non-identifying branch name like
+ *   `gsd/phase-08-phase` (#4126, now fixed via the shared renderPhaseBranchName
+ *   owner in phase-id.cts, consumed by both prior call sites). Sanctioned
+ *   the same way as the token/bracket/name-validity rules (`// phase-id-owner:`
+ *   on the nearest preceding non-blank line), with a line-level escape for a
+ *   line that already calls `renderPhaseBranchName(`. Unlike the other
+ *   `.cts`-scanning rules, this one has no per-file exemption — it is a banned
+ *   anti-pattern everywhere, not a grammar with one legitimate owner site.
+ *
  * Detection is intentionally NARROW: only the contiguous canonical token
  * (`\d+[A-Z]?(?:\.\d+)*`, its `[A-Za-z]` and `[.-]` near-variants, in both
  * regex-literal `\d` and `new RegExp` template `\\d` escaping) is drift. Bare
@@ -83,6 +111,18 @@ const BRACKET_OWNER_HINT =
   'BRACKET_PROJECT_CODE_SRC / BRACKET_ID_SRC / bracketMilestoneIntroSrcFor / BRACKET_MILESTONE_INTRO_CAPTURING_SRC';
 
 /**
+ * Pure: true if the nearest preceding non-blank line to `lines[i]` is a
+ * dedicated sanction comment matching `ownerRe`. Shared by every detector in
+ * this file so the "how do you sanction a finding" walk has one owner instead
+ * of four independent copies that could silently diverge.
+ */
+function isSanctionedByPrecedingComment(lines, i, ownerRe) {
+  let j = i - 1;
+  while (j >= 0 && lines[j].trim() === '') j--; // nearest preceding non-blank line
+  return j >= 0 && ownerRe.test(lines[j]);
+}
+
+/**
  * Pure: find every literal re-derivation of the canonical phase-number token in
  * `text` that is NOT sanctioned. A site is sanctioned when the nearest preceding
  * NON-BLANK line is a dedicated `// phase-id-owner:` comment (blank lines between
@@ -100,9 +140,7 @@ function findPhaseIdRegexDrift(text) {
     const m = TOKEN_DRIFT_RE.exec(line);
     if (!m) continue;
     if (line.includes(CANON_REF)) continue;
-    let j = i - 1;
-    while (j >= 0 && lines[j].trim() === '') j--; // nearest preceding non-blank line
-    if (j >= 0 && OWNER_RE.test(lines[j])) continue;
+    if (isSanctionedByPrecedingComment(lines, i, OWNER_RE)) continue;
     out.push({ line: i + 1, found: m[0] });
   }
   return out;
@@ -122,12 +160,132 @@ function findBracketGrammarDrift(text) {
   for (let i = 0; i < lines.length; i++) {
     const m = BRACKET_CODE_DRIFT_RE.exec(lines[i]);
     if (!m) continue;
-    let j = i - 1;
-    while (j >= 0 && lines[j].trim() === '') j--; // nearest preceding non-blank line
-    if (j >= 0 && OWNER_RE.test(lines[j])) continue;
+    if (isSanctionedByPrecedingComment(lines, i, OWNER_RE)) continue;
     out.push({ line: i + 1, found: m[0] });
   }
   return out;
+}
+
+// #4634: the name-validity-guard grammar — `hasNameableContent(s)` in
+// `src/roadmap-parser.cts` is `/[\p{L}\p{N}]/u.test(s)`. Tolerates both the
+// regex-literal single-backslash form and the doubled-backslash template
+// form (`new RegExp('[\\p{L}\\p{N}]'`), mirroring how TOKEN_DRIFT_RE tolerates
+// both escapings.
+const NAME_VALIDITY_DRIFT_RE = /\[\\{1,2}p\{L\}\\{1,2}p\{N\}\]/;
+const NAME_VALIDITY_CANON_REF = 'hasNameableContent(';
+
+/**
+ * Pure: find every literal re-derivation of the canonical name-validity
+ * character class in `text` that is NOT sanctioned. Same sanction mechanism
+ * as the token/bracket rules — a dedicated `// phase-id-owner:` comment on
+ * the nearest preceding non-blank line — plus a line-level escape for a line
+ * that already calls `hasNameableContent(`. Returns [{ line, found }].
+ */
+function findNameValidityDrift(text) {
+  const out = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = NAME_VALIDITY_DRIFT_RE.exec(line);
+    if (!m) continue;
+    if (line.includes(NAME_VALIDITY_CANON_REF)) continue;
+    if (isSanctionedByPrecedingComment(lines, i, OWNER_RE)) continue;
+    out.push({ line: i + 1, found: m[0] });
+  }
+  return out;
+}
+
+// #4634: the branch-slug fallback anti-pattern (#4126) — a
+// `.replace('{slug}', ... || 'phase')` call silently falls back to the
+// literal string `'phase'` when a phase's slug can't be derived, producing a
+// non-identifying branch name like `gsd/phase-08-phase`. Now fixed at both
+// prior call sites (commands.cts, init.cts) via the shared
+// `renderPhaseBranchName` owner in phase-id.cts; this rule is the ratchet
+// against a THIRD site reintroducing the inline fallback. Deliberately
+// narrow: it requires the literal `'phase'` fallback on the same line as the
+// `{slug}` template token, so it does NOT match the sibling milestone-branch
+// fallback (`|| 'milestone'`), which is a different, correct-as-is case.
+const BRANCH_SLUG_FALLBACK_DRIFT_RE = /\{slug\}'.*\|\|\s*'phase'/;
+
+// The canonical fix is `renderPhaseBranchName(...)`. There is no "owner file"
+// for this rule the way there is for the token/bracket/name-validity
+// grammars above — it is a banned anti-pattern everywhere, so no per-file
+// exemption exists.
+const BRANCH_SLUG_FALLBACK_CANON_REF = 'renderPhaseBranchName(';
+
+/**
+ * Pure: find every unsanctioned branch-slug `|| 'phase'` fallback in `text`.
+ * Same sanction mechanism as the token/bracket/name-validity rules — a
+ * dedicated `// phase-id-owner:` comment on the nearest preceding non-blank
+ * line — plus a line-level escape for a line that already calls
+ * `renderPhaseBranchName(`. Returns [{ line, found }].
+ */
+function findBranchSlugFallbackDrift(text) {
+  const out = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const m = BRANCH_SLUG_FALLBACK_DRIFT_RE.exec(line);
+    if (!m) continue;
+    if (line.includes(BRANCH_SLUG_FALLBACK_CANON_REF)) continue;
+    if (isSanctionedByPrecedingComment(lines, i, OWNER_RE)) continue;
+    out.push({ line: i + 1, found: m[0] });
+  }
+  return out;
+}
+
+// #4634: ban base-10-forced shell arithmetic (`$((10#...))`) on any variable —
+// this construct is exactly the pattern that breaks on a decimal or
+// multi-segment phase id, so any occurrence is banned outright, full stop.
+const SHELL_PHASE_ARITH_DRIFT_RE = /\$\(\(\s*10#/;
+
+// A markdown comment can't easily carry a `//` line, so the sanction for the
+// shell-arithmetic rule is an HTML comment on the nearest preceding non-blank
+// line: `<!-- phase-id-owner: <reason> -->`.
+const MD_OWNER_RE = /^\s*<!--.*phase-id-owner:/;
+
+/**
+ * Pure: find every unsanctioned `$((10#...))` base-10-forced shell arithmetic
+ * site in `text`. Sanctioned by an HTML comment `<!-- phase-id-owner: ... -->`
+ * on the nearest preceding non-blank line. Returns [{ line, found }].
+ */
+function findShellPhaseArithDrift(text) {
+  const out = [];
+  const lines = text.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const m = SHELL_PHASE_ARITH_DRIFT_RE.exec(lines[i]);
+    if (!m) continue;
+    if (isSanctionedByPrecedingComment(lines, i, MD_OWNER_RE)) continue;
+    out.push({ line: i + 1, found: m[0] });
+  }
+  return out;
+}
+
+// #4634: the markdown scan roots — shell embedded in workflow/reference docs.
+const MD_SCAN_DIRS = [path.join('gsd-core', 'workflows'), path.join('gsd-core', 'references')];
+
+/**
+ * Scan `gsd-core/workflows/**\/*.md` and `gsd-core/references/**\/*.md` for
+ * unsanctioned `$((10#...))` shell arithmetic. Returns [{ file, line, found }]
+ * with repo-relative paths.
+ */
+function scanMarkdownShellArith(root) {
+  const violations = [];
+  for (const dir of MD_SCAN_DIRS) {
+    for (const file of walkMd(path.join(root, dir), [])) {
+      const rel = path.relative(root, file);
+      let text;
+      try {
+        text = fs.readFileSync(file, 'utf8');
+      } catch {
+        continue;
+      }
+      for (const d of findShellPhaseArithDrift(text)) {
+        violations.push({ file: rel, kind: 'shell-arith', ...d });
+      }
+    }
+  }
+  return violations;
 }
 
 // Authored TypeScript source only (the generated bin/lib/*.cjs mirror it).
@@ -136,7 +294,14 @@ const SCAN_EXT = new Set(['.cts', '.ts', '.mts']);
 // The canonical owner defines the grammar; it is exempt by construction.
 const EXEMPT = new Set([path.join('src', 'phase-id.cts')]);
 
-function walk(dir, acc) {
+// #4634: the name-validity-guard rule owns a DIFFERENT file (roadmap-parser.cts
+// defines `hasNameableContent`), so it needs its own exemption set — the
+// token/bracket rules above must NOT start exempting roadmap-parser.cts too,
+// since it is not their owner.
+const NAME_VALIDITY_EXEMPT = new Set([path.join('src', 'roadmap-parser.cts')]);
+
+function walk(dir, acc, ext) {
+  const extSet = ext || SCAN_EXT;
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -147,12 +312,20 @@ function walk(dir, acc) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.git') continue;
-      walk(full, acc);
-    } else if (entry.isFile() && SCAN_EXT.has(path.extname(entry.name))) {
+      walk(full, acc, extSet);
+    } else if (entry.isFile() && extSet.has(path.extname(entry.name))) {
       acc.push(full);
     }
   }
   return acc;
+}
+
+// #4634: markdown scan for the shell phase-arithmetic ban walks a disjoint set
+// of roots/extensions from the src/**/*.cts scan above, so it gets its own thin
+// wrapper over the same `walk` rather than a parallel tree-walker.
+const MD_EXT = new Set(['.md']);
+function walkMd(dir, acc) {
+  return walk(dir, acc, MD_EXT);
 }
 
 // ─── #2761 M4: the heading-baseline selector census ────────────────────────
@@ -239,23 +412,55 @@ function scanRepo(root) {
       for (const d of findBracketGrammarDrift(text)) {
         violations.push({ file: rel, kind: 'bracket', ...d });
       }
+      // #4634: name-validity-guard drift, exempting only its own owner file.
+      if (!NAME_VALIDITY_EXEMPT.has(rel)) {
+        for (const d of findNameValidityDrift(text)) {
+          violations.push({ file: rel, kind: 'name-validity', ...d });
+        }
+      }
+      // #4634: branch-slug fallback anti-pattern, exempt nowhere.
+      for (const d of findBranchSlugFallbackDrift(text)) {
+        violations.push({ file: rel, kind: 'branch-slug-fallback', ...d });
+      }
     }
   }
   return violations;
 }
 
+/**
+ * Scan EVERYTHING this seam guards: the `src/**\/*.cts` token/bracket/
+ * name-validity invariants (`scanRepo`) plus the markdown shell
+ * phase-arithmetic ban (`scanMarkdownShellArith`). This is what the CLI runs;
+ * `scanRepo` alone stays narrowly scoped to its original src/** contract so
+ * a live, separately-tracked markdown defect (#4619) cannot make the
+ * pinned-clean `scanRepo` test spuriously fail.
+ */
+function scanAll(root) {
+  return [...scanRepo(root), ...scanMarkdownShellArith(root)];
+}
+
 function main() {
   const root = path.join(__dirname, '..');
-  const violations = scanRepo(root);
+  const violations = scanAll(root);
   if (violations.length === 0) {
-    process.stdout.write('ok phase-id-drift: no unsanctioned phase-token or bracket-grammar re-derivations outside phase-id.cts\n');
+    process.stdout.write(
+      'ok phase-id-drift: no unsanctioned phase-token, bracket-grammar, name-validity, ' +
+        'branch-slug-fallback, or shell phase-arithmetic re-derivations found\n',
+    );
     return;
   }
   process.stderr.write('phase-id-drift: literal re-derivation(s) of a canonical grammar found.\n');
   process.stderr.write(`Build the regex from phase-id.cjs \`${CANON_REF}\` (or phaseMarkdownRegexSource for a\n`);
   process.stderr.write(`known number) for the phase-number token, or from ${BRACKET_OWNER_HINT}\n`);
-  process.stderr.write('for the bracket grammar — or sanction the site with a dedicated\n');
-  process.stderr.write('`// phase-id-owner: <reason>` comment on the line directly above the regex:\n');
+  process.stderr.write('for the bracket grammar, or call `hasNameableContent(` (src/roadmap-parser.cts) for\n');
+  process.stderr.write('the name-validity predicate — or sanction the site with a dedicated\n');
+  process.stderr.write('`// phase-id-owner: <reason>` comment on the line directly above the regex.\n');
+  process.stderr.write('`$((10#...))` base-10-forced shell arithmetic is banned outright in\n');
+  process.stderr.write('gsd-core/workflows/**/*.md and gsd-core/references/**/*.md — sanction with\n');
+  process.stderr.write('`<!-- phase-id-owner: <reason> -->` on the line directly above.\n');
+  process.stderr.write('A `.replace(\'{slug}\', ... || \'phase\')` fallback is banned outright (#4126) —\n');
+  process.stderr.write('use `renderPhaseBranchName(` or sanction with\n');
+  process.stderr.write('`// phase-id-owner: <reason>` on the line directly above:\n');
   for (const d of violations) {
     process.stderr.write(`  [${d.kind}] ${d.file}:${d.line}  ${d.found}\n`);
   }
@@ -267,9 +472,17 @@ if (require.main === module) main();
 module.exports = {
   findPhaseIdRegexDrift,
   findBracketGrammarDrift,
+  findNameValidityDrift,
+  findBranchSlugFallbackDrift,
+  findShellPhaseArithDrift,
+  scanMarkdownShellArith,
   scanRepo,
+  scanAll,
   countSelectorBaselines,
   scanSelectorBaselines,
   TOKEN_DRIFT_RE,
   BRACKET_CODE_DRIFT_RE,
+  NAME_VALIDITY_DRIFT_RE,
+  BRANCH_SLUG_FALLBACK_DRIFT_RE,
+  SHELL_PHASE_ARITH_DRIFT_RE,
 };
