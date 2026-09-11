@@ -43,6 +43,7 @@ module.exports = {
   "tests/codex-config.test.cjs",
   "tests/commands.test.cjs",
   "tests/commit-docs-bypass.test.cjs",
+  "tests/commit-files-deletion.test.cjs",
   "tests/commit-files-pathspec.test.cjs",
   "tests/commonjs-marker.test.cjs",
   "tests/completion-ratio-scope-withholding.test.cjs",
