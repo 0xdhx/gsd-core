@@ -2909,8 +2909,9 @@ describe('#3861 round 2 — the ledger write refuses a non-regular file', () => 
 
 describe('#3861 round 2 — a DOTTED phase number does not break the step', () => {
   // Found by the round's own adversarial review, in its MISSED section -- no finding asked about
-  // it. Both callers explicitly accept `03.1` (code-review.md:60, code-review-fix.md:36 validate
-  // ^[0-9]+(\.[0-9]+)?$), and the step reconstructed the path with `printf "%02d"`, which cannot
+  // it. Both callers explicitly accept `03.1` (code-review.md:63, code-review-fix.md:39 validate
+  // ^[0-9]+(\.[0-9]+)*$ -- widened from `?` to `*` by #4568; this comment named the pre-#4568
+  // form until round 11), and the step reconstructed the path with `printf "%02d"`, which cannot
   // format one: bash prints `invalid number` and exits 1. Under `set -euo pipefail` that aborts
   // the step on its FIRST line -- the loudest possible failure from a gate that promises never to
   // block, and it takes the phase's whole review report with it.
@@ -2964,15 +2965,124 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     // PHASE_NUMBER is interpolated into a file path. The first draft of the dotted-phase fix
     // carried an unusable value VERBATIM, which made `${PHASE_DIR}/../../etc/passwd-REVIEW.md`
     // reachable where the old `printf "%02d"` had at least mangled it to `00` -- a regression
-    // introduced by the fix, found by adversarially reviewing it. Both callers already validate
-    // ^[0-9]+(\.[0-9]+)?$; this step has two call sites and validates for itself.
-    for (const bad of ['../../etc/passwd', 'abc', '', '1.2.3', '-1', '3.', '.1', '+1', '3 1']) {
+    // introduced by the fix, found by adversarially reviewing it. Both callers validate
+    // ^[0-9]+(\.[0-9]+)*$ -- an UNBOUNDED segment count since #4568 -- and this step has two
+    // call sites and validates for itself.
+    // `1.2.3` LEFT THIS LIST in round 11. It is a legal N-segment id at the current base, and
+    // asserting its refusal here is precisely what held the step narrower than both callers;
+    // the positive case is its own test below. What remains here is SHAPE, not arity, so the
+    // two malformed-dot cases that the arity guard used to mask are added explicitly.
+    for (const bad of ['../../etc/passwd', 'abc', '', '-1', '3.', '.1', '+1', '3 1', '1..2', '1.2.']) {
       const out = runShippedGateCounts({ reviewText: '', writeReview: false, phaseNumber: bad });
       assert.strictEqual(out.exitCode, 0, 'advisory: `' + bad + '` must not abort the step');
       assert.match(out.stdout, /skipped \(unusable phase number/,
         '`' + bad + '` must be refused by name, not silently coerced');
       assert.doesNotMatch(out.stdout, /Code review: /,
         '`' + bad + '` must not report counts read from a path built out of it');
+    }
+  });
+
+  test('an N-SEGMENT phase number reports counts, exactly as its callers accept it', { skip: !HAS_BASH }, () => {
+    // #3861 round 11. Found by this round's own adversarial review, not by the maintainer's.
+    // The base range widened both callers to `^[0-9]+(\\.[0-9]+)*$` (#4568), matching the
+    // segment-count freedom the canonical grammar in src/phase-id.cts has carried since
+    // #2128. This step still carried
+    // `*.*.*) _ok=0` -- "more than one dot: not the documented shape" -- so `23.1.2` took the
+    // refusal arm, printed `skipped (unusable phase number ...)` and wrote NO ledger, for a
+    // phase id its own dispatcher had just produced.
+    //
+    // It degraded LOUDLY, not silently, which is exactly why nothing caught it: the
+    // traversal-fence test above asserted that refusal as CORRECT. An arity bound and a shape
+    // bound had been folded into one arm, so the test that should have failed was the test
+    // that encoded the bug.
+    //
+    // THREE segments and FOUR, deliberately: the retired guard was arity-shaped, so a fix that
+    // merely moved the bound from two dots to three would pass a three-segment-only test.
+    for (const phase of ['23.1.2', '1.2.3.4']) {
+      const review = ['---', 'phase: ' + phase, 'status: issues_found', 'findings:',
+        '  critical: 1', '  warning: 2', '  info: 0', '  total: 3', '---', '',
+        '### CR-01: a finding'].join('\n');
+      const padded = phase.replace(/^[0-9]+/, (m) => m.padStart(2, '0'));
+      const out = runShippedGateCounts({ reviewText: review, padded, phaseNumber: phase });
+      assert.strictEqual(out.exitCode, 0, phase + ': advisory -- must not abort the step');
+      assert.doesNotMatch(out.stdout, /skipped \(unusable phase number/,
+        phase + ': must NOT be refused -- both of this step\'s callers accept it');
+      assert.match(out.stdout, /^Code review: 3 findings — 1 critical, 2 warning, 0 info\.$/m,
+        phase + ': the review must be found at the N-segment path and reported');
+      assert.doesNotMatch(out.stderr, /invalid number/,
+        phase + ': the phase number must never reach printf %02d unsplit');
+    }
+  });
+
+  test('the fence agrees with its callers across a probed set spanning both boundaries', { skip: !HAS_BASH }, () => {
+    // #3861 round 11. The first cut of this test was named "congruence, not merely wider" and
+    // probed 14 ids, none of them near the length bound. It passed, and the property it named
+    // was false: the shipped fence is deliberately NARROWER than the callers' regex, because
+    // the two `?????????*` checks bound the integer part and the suffix to 8 characters each.
+    // That overclaim was caught by this round's second adversarial review, which drove
+    // `123456789` and `1.1234567.1` — both caller-valid, both fence-refused.
+    //
+    // EXAMPLE-BASED, and the name says so rather than promising a language-level invariant.
+    // A finite probe set cannot prove congruence over an infinite language: the third review
+    // pass demonstrated this by injecting a `2) _ok=0` arm into the fence, which this test
+    // still passed because `2` is not in the list below. Read it as a regression pin over the
+    // values that actually broke, not as an exhaustive equivalence proof.
+    //
+    // It asserts two things, in two parts:
+    //   (1) WITHIN the length bound, the fence and the callers agree exactly -- that is what
+    //       round 11's shape fix bought, and the regression worth pinning.
+    //   (2) BEYOND it, the fence refuses ids the callers accept. That divergence is
+    //       PRE-EXISTING and untouched by this round (the bound predates the N-segment work
+    //       and guards `$((10#...))` against bash's 2^64 wrap); it is pinned here so it stays
+    //       a KNOWN narrowing rather than drifting back into an accidental one.
+    const CALLER_RE = /^[0-9]+(\.[0-9]+)*$/;
+    const refused = (v) => {
+      const out = runShippedGateCounts({ reviewText: '', writeReview: false, phaseNumber: v });
+      assert.strictEqual(out.exitCode, 0, v + ': advisory -- must not abort');
+      return /skipped \(unusable phase number/.test(out.stdout);
+    };
+
+    // (1) agreement, for every id whose components are each within the bound
+    for (const v of ['1', '03', '03.1', '23.1.2', '1.2.3.4', '12345678', '1.12345678',
+                     '1.1234567.1', '12345678.12345678', '1.1.1.1.1.1.1.1.1.1',
+                     '1..2', '1.2.', '.1', '3.', 'abc', '-1', '+1', '3 1', '../../etc/passwd']) {
+      assert.strictEqual(refused(v), !CALLER_RE.test(v),
+        v + ': with every component within the bound, step and callers must agree');
+    }
+
+    // (2) the remaining deliberate narrowing: a SINGLE component over 8 characters.
+    // This is the `$((10#...))` overflow guard and it is NOT a congruence defect -- bash
+    // integers wrap at 2^64, so an unbounded integer segment silently becomes a negative
+    // padded phase. Pinned so the narrowing stays known rather than drifting back.
+    for (const v of ['123456789', '1.999999999']) {
+      assert.ok(CALLER_RE.test(v), v + ': precondition -- the callers do accept this');
+      assert.ok(refused(v),
+        v + ': the per-component 8-char bound must keep refusing this; if this flips, the '
+          + 'bound changed and `$((10#...))` overflow protection needs re-deriving');
+    }
+  });
+
+  test('the length bound is PER COMPONENT, not over the whole tail after the first dot', { skip: !HAS_BASH }, () => {
+    // #3861 round 11, C1. The bound used to read `${_pn#*.}` -- the entire suffix -- which is
+    // one component only while an id has at most two. The moment N-segment ids were accepted,
+    // that form rejected `1.1234567.1`: every component is a legal 7 digits, but the tail
+    // measures 9 characters. The comment above the check had promised per-component bounding
+    // since before this PR; the code only became untrue of it when the arity arm came out.
+    //
+    // Drives the boundary from both sides on a LATER segment, which is the part the old form
+    // got wrong -- an 8-char middle segment must pass and a 9-char one must fail, with the
+    // total length in both cases well past what the old whole-tail bound allowed.
+    const cases = [
+      ['1.12345678.1', false, 'an 8-char middle segment is within the per-component bound'],
+      ['1.123456789.1', true, 'a 9-char middle segment exceeds it'],
+      ['1.1234567.1', false, 'the id the whole-tail bound rejected for its total length'],
+      ['12345678.12345678', false, 'two 8-char components, 17 characters total'],
+    ];
+    for (const [phase, mustRefuse, why] of cases) {
+      const out = runShippedGateCounts({ reviewText: '', writeReview: false, phaseNumber: phase });
+      assert.strictEqual(out.exitCode, 0, phase + ': advisory -- must not abort');
+      assert.strictEqual(/skipped \(unusable phase number/.test(out.stdout), mustRefuse,
+        phase + ': ' + why);
     }
   });
 
