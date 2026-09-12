@@ -20,12 +20,17 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 
 **Check results using deterministic path (not glob):**
 ```bash
-# PADDED must survive a DOTTED phase number. Both callers explicitly accept `03.1`
-# (code-review.md:60, code-review-fix.md:36 validate `^[0-9]+(\.[0-9]+)?$`), and
+# PADDED must survive a DOTTED phase number, of ANY segment count. Both callers explicitly
+# accept `03.1` AND `23.1.2` (code-review.md:63, code-review-fix.md:39 validate
+# `^[0-9]+(\.[0-9]+)*$` -- an unbounded `*`, widened by #4568), and
 # `printf "%02d"` cannot format one: bash prints `invalid number` and exits 1, which under
 # `set -euo pipefail` aborts this step on its FIRST line -- the loudest possible failure from
 # the gate that promises never to block, and it takes the whole phase's review reporting with
-# it. Pad the integer part only and carry the sub-number verbatim, so 3.1 -> 03.1 and 3 -> 03.
+# it. Pad the integer part only and carry the sub-number verbatim, so 3.1 -> 03.1, 23.1.2 ->
+# 23.1.2 and 3 -> 03. The segment count is deliberately NOT bounded here: the canonical
+# grammar in src/phase-id.cts (`PHASE_NUMBER_TOKEN_SOURCE`, #2128) is unbounded in segments,
+# and #4568 widened both of this step's callers to match it on that axis, so a guard narrower
+# than the caller means no ledger for a phase id the caller already accepted.
 # On failure NO path is built and the fence refuses by name: advisory means advisory, and it
 # also means never probing a path assembled out of a value we just rejected.
 # VALIDATE, THEN FORMAT -- never format and fall back on failure. `printf "%02d" abc` writes
@@ -38,13 +43,13 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
 # `${PHASE_DIR}/../../etc/passwd-REVIEW.md`, where the old `printf "%02d"` had at least
-# mangled it to `00`. Both callers already validate `^[0-9]+(\.[0-9]+)?$` against their own
-# PADDED_PHASE (code-review.md:60, code-review-fix.md:36) -- the padded form, not the raw
+# mangled it to `00`. Both callers already validate `^[0-9]+(\.[0-9]+)*$` against their own
+# PADDED_PHASE (code-review.md:63, code-review-fix.md:39) -- the padded form, not the raw
 # PHASE_NUMBER this step is handed; this step has two call sites and validates for
 # itself rather than trusting either. Anything else yields an EMPTY PADDED and the blocks
 # below refuse to build a path from it.
 # PHASE_DIR is checked for NON-EMPTINESS ONLY. Both inputs come from the caller's init query, so
-# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)?$`, asserted by both
+# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`, asserted by both
 # callers) to check against. A filesystem path admits `..` and symlinked parents alike, so a shape
 # check here rejects working setups and proves nothing. Residual: PHASE_DIR may itself be a symlink
 # and the ledger is written through it -- left alone, and not a security boundary.
@@ -55,17 +60,34 @@ _ok=1
 case "$_pn" in
   ''|*[!0-9.]*) _ok=0 ;;   # empty, or any character outside [0-9.] -- this is the traversal fence
   .*|*.)        _ok=0 ;;   # leading or trailing dot
-  *.*.*)        _ok=0 ;;   # more than one dot: not the documented shape
+  *..*)         _ok=0 ;;   # EMPTY SEGMENT. The three arms together accept exactly
+                           # digits(.digits)* -- byte-congruent with the callers'
+                           # ^[0-9]+(\.[0-9]+)*$ -- rather than merely wider than the
+                           # retired `*.*.*` arity bound, which masked `1..2` by accident.
 esac
 # LENGTH-BOUND EACH COMPONENT SEPARATELY. Bash integers wrap at 2^64, so `$((10#$_int))` on a
 # 54-digit value yields -7908320945662590977 SILENTLY and that becomes the padded phase. The
 # bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
 # integer part is a legal 8 digits, while accepting `1.123456` -- an accidental bound on the
-# composite that was both too strict and too loose. The sub-number is bounded too, since it is
-# also interpolated into a filename and filesystem components are finite. Both driven.
+# composite that was both too strict and too loose. Every later segment is bounded too, since
+# each is interpolated into a filename and filesystem components are finite.
+# THE LOOP IS THE POINT, and it is what makes the heading above TRUE. The earlier form bounded
+# `${_pn#*.}` -- the WHOLE tail after the first dot -- which is one component only while the id
+# has at most two. Once N-segment ids are accepted (see the shape arms), that form rejects
+# `1.1234567.1`, whose every component is a legal 7-or-fewer digits, purely because the tail
+# measures 9 characters. That is the composite bound this comment already called "too strict",
+# surviving one level up. Walk the segments instead, so the rule is per-component in fact and
+# not only in the heading. The loop terminates on any string the shape arms admit: each pass
+# strips a leading `<seg>.`, and the no-dot pass clears $_rest.
 if [ "$_ok" = "1" ]; then
-  case "${_pn%%.*}" in ?????????*) _ok=0 ;; esac
-  case "$_pn" in *.*) case "${_pn#*.}" in ?????????*) _ok=0 ;; esac ;; esac
+  _rest="$_pn"
+  while [ -n "$_rest" ]; do
+    case "$_rest" in
+      *.*) _seg="${_rest%%.*}"; _rest="${_rest#*.}" ;;
+      *)   _seg="$_rest";       _rest="" ;;
+    esac
+    case "$_seg" in ?????????*) _ok=0 ;; esac
+  done
 fi
 if [ "$_ok" = "1" ]; then
   _int="${_pn%%.*}"
@@ -186,12 +208,17 @@ the step — never blocks:
 # the embedded script throws on reading the empty review path, the trailing `|| echo` swallows it
 # as a non-blocking skip, and no ledger is written at all. The shim preamble below is re-emitted
 # for the same reason, and these three belong beside it.
-# PADDED must survive a DOTTED phase number. Both callers explicitly accept `03.1`
-# (code-review.md:60, code-review-fix.md:36 validate `^[0-9]+(\.[0-9]+)?$`), and
+# PADDED must survive a DOTTED phase number, of ANY segment count. Both callers explicitly
+# accept `03.1` AND `23.1.2` (code-review.md:63, code-review-fix.md:39 validate
+# `^[0-9]+(\.[0-9]+)*$` -- an unbounded `*`, widened by #4568), and
 # `printf "%02d"` cannot format one: bash prints `invalid number` and exits 1, which under
 # `set -euo pipefail` aborts this step on its FIRST line -- the loudest possible failure from
 # the gate that promises never to block, and it takes the whole phase's review reporting with
-# it. Pad the integer part only and carry the sub-number verbatim, so 3.1 -> 03.1 and 3 -> 03.
+# it. Pad the integer part only and carry the sub-number verbatim, so 3.1 -> 03.1, 23.1.2 ->
+# 23.1.2 and 3 -> 03. The segment count is deliberately NOT bounded here: the canonical
+# grammar in src/phase-id.cts (`PHASE_NUMBER_TOKEN_SOURCE`, #2128) is unbounded in segments,
+# and #4568 widened both of this step's callers to match it on that axis, so a guard narrower
+# than the caller means no ledger for a phase id the caller already accepted.
 # On failure NO path is built and the fence refuses by name: advisory means advisory, and it
 # also means never probing a path assembled out of a value we just rejected.
 # VALIDATE, THEN FORMAT -- never format and fall back on failure. `printf "%02d" abc` writes
@@ -204,13 +231,13 @@ the step — never blocks:
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
 # `${PHASE_DIR}/../../etc/passwd-REVIEW.md`, where the old `printf "%02d"` had at least
-# mangled it to `00`. Both callers already validate `^[0-9]+(\.[0-9]+)?$` against their own
-# PADDED_PHASE (code-review.md:60, code-review-fix.md:36) -- the padded form, not the raw
+# mangled it to `00`. Both callers already validate `^[0-9]+(\.[0-9]+)*$` against their own
+# PADDED_PHASE (code-review.md:63, code-review-fix.md:39) -- the padded form, not the raw
 # PHASE_NUMBER this step is handed; this step has two call sites and validates for
 # itself rather than trusting either. Anything else yields an EMPTY PADDED and the blocks
 # below refuse to build a path from it.
 # PHASE_DIR is checked for NON-EMPTINESS ONLY. Both inputs come from the caller's init query, so
-# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)?$`, asserted by both
+# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`, asserted by both
 # callers) to check against. A filesystem path admits `..` and symlinked parents alike, so a shape
 # check here rejects working setups and proves nothing. Residual: PHASE_DIR may itself be a symlink
 # and the ledger is written through it -- left alone, and not a security boundary.
@@ -221,17 +248,34 @@ _ok=1
 case "$_pn" in
   ''|*[!0-9.]*) _ok=0 ;;   # empty, or any character outside [0-9.] -- this is the traversal fence
   .*|*.)        _ok=0 ;;   # leading or trailing dot
-  *.*.*)        _ok=0 ;;   # more than one dot: not the documented shape
+  *..*)         _ok=0 ;;   # EMPTY SEGMENT. The three arms together accept exactly
+                           # digits(.digits)* -- byte-congruent with the callers'
+                           # ^[0-9]+(\.[0-9]+)*$ -- rather than merely wider than the
+                           # retired `*.*.*` arity bound, which masked `1..2` by accident.
 esac
 # LENGTH-BOUND EACH COMPONENT SEPARATELY. Bash integers wrap at 2^64, so `$((10#$_int))` on a
 # 54-digit value yields -7908320945662590977 SILENTLY and that becomes the padded phase. The
 # bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
 # integer part is a legal 8 digits, while accepting `1.123456` -- an accidental bound on the
-# composite that was both too strict and too loose. The sub-number is bounded too, since it is
-# also interpolated into a filename and filesystem components are finite. Both driven.
+# composite that was both too strict and too loose. Every later segment is bounded too, since
+# each is interpolated into a filename and filesystem components are finite.
+# THE LOOP IS THE POINT, and it is what makes the heading above TRUE. The earlier form bounded
+# `${_pn#*.}` -- the WHOLE tail after the first dot -- which is one component only while the id
+# has at most two. Once N-segment ids are accepted (see the shape arms), that form rejects
+# `1.1234567.1`, whose every component is a legal 7-or-fewer digits, purely because the tail
+# measures 9 characters. That is the composite bound this comment already called "too strict",
+# surviving one level up. Walk the segments instead, so the rule is per-component in fact and
+# not only in the heading. The loop terminates on any string the shape arms admit: each pass
+# strips a leading `<seg>.`, and the no-dot pass clears $_rest.
 if [ "$_ok" = "1" ]; then
-  case "${_pn%%.*}" in ?????????*) _ok=0 ;; esac
-  case "$_pn" in *.*) case "${_pn#*.}" in ?????????*) _ok=0 ;; esac ;; esac
+  _rest="$_pn"
+  while [ -n "$_rest" ]; do
+    case "$_rest" in
+      *.*) _seg="${_rest%%.*}"; _rest="${_rest#*.}" ;;
+      *)   _seg="$_rest";       _rest="" ;;
+    esac
+    case "$_seg" in ?????????*) _ok=0 ;; esac
+  done
 fi
 if [ "$_ok" = "1" ]; then
   _int="${_pn%%.*}"
