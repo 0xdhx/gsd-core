@@ -20,17 +20,21 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 
 **Check results using deterministic path (not glob):**
 ```bash
-# PADDED must survive a DOTTED phase number, of ANY segment count. Both callers explicitly
-# accept `03.1` AND `23.1.2` (code-review.md:63, code-review-fix.md:39 validate
-# `^[0-9]+(\.[0-9]+)*$` -- an unbounded `*`, widened by #4568), and
+# PADDED must survive a DOTTED phase number, of ANY segment count. This step is dispatched from
+# exactly TWO places: `execute-phase.md` (`code_review_gate`) and `code-review-fix.md`
+# (`record_disposition`). Only the second validates anything -- `code-review-fix.md:39` anchors
+# `^[0-9]+(\.[0-9]+)*$`, an unbounded `*` widened by #4568, so it accepts `03.1` AND `23.1.2`.
+# `execute-phase.md` applies NO shape gate at all, so this fence is not mirroring an upstream
+# guarantee; it IS the guarantee. (`code-review.md:63` carries an identical validator but never
+# dispatches this step. It was cited here as a caller for several rounds and is not one.) And
 # `printf "%02d"` cannot format one: bash prints `invalid number` and exits 1, which under
 # `set -euo pipefail` aborts this step on its FIRST line -- the loudest possible failure from
 # the gate that promises never to block, and it takes the whole phase's review reporting with
 # it. Pad the integer part only and carry the sub-number verbatim, so 3.1 -> 03.1, 23.1.2 ->
 # 23.1.2 and 3 -> 03. The segment count is deliberately NOT bounded here: the canonical
 # grammar in src/phase-id.cts (`PHASE_NUMBER_TOKEN_SOURCE`, #2128) is unbounded in segments,
-# and #4568 widened both of this step's callers to match it on that axis, so a guard narrower
-# than the caller means no ledger for a phase id the caller already accepted.
+# and #4568 widened the one dispatcher that validates to match it on that axis, so a guard
+# narrower than that dispatcher means no ledger for a phase id the dispatcher already accepted.
 # On failure NO path is built and the fence refuses by name: advisory means advisory, and it
 # also means never probing a path assembled out of a value we just rejected.
 # VALIDATE, THEN FORMAT -- never format and fall back on failure. `printf "%02d" abc` writes
@@ -43,14 +47,14 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
 # `${PHASE_DIR}/../../etc/passwd-REVIEW.md`, where the old `printf "%02d"` had at least
-# mangled it to `00`. Both callers already validate `^[0-9]+(\.[0-9]+)*$` against their own
-# PADDED_PHASE (code-review.md:63, code-review-fix.md:39) -- the padded form, not the raw
-# PHASE_NUMBER this step is handed; this step has two call sites and validates for
+# mangled it to `00`. `code-review-fix.md:39` already validates `^[0-9]+(\.[0-9]+)*$` against its
+# own PADDED_PHASE -- the padded form, not the raw PHASE_NUMBER this step is handed -- while
+# `execute-phase.md` validates nothing at all; this step has two call sites and validates for
 # itself rather than trusting either. Anything else yields an EMPTY PADDED and the blocks
 # below refuse to build a path from it.
 # PHASE_DIR is checked for NON-EMPTINESS ONLY. Both inputs come from the caller's init query, so
-# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`, asserted by both
-# callers) to check against. A filesystem path admits `..` and symlinked parents alike, so a shape
+# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`) to check
+# against. A filesystem path admits `..` and symlinked parents alike, so a shape
 # check here rejects working setups and proves nothing. Residual: PHASE_DIR may itself be a symlink
 # and the ledger is written through it -- left alone, and not a security boundary.
 _pd="${PHASE_DIR:-}"
@@ -208,17 +212,21 @@ the step — never blocks:
 # the embedded script throws on reading the empty review path, the trailing `|| echo` swallows it
 # as a non-blocking skip, and no ledger is written at all. The shim preamble below is re-emitted
 # for the same reason, and these three belong beside it.
-# PADDED must survive a DOTTED phase number, of ANY segment count. Both callers explicitly
-# accept `03.1` AND `23.1.2` (code-review.md:63, code-review-fix.md:39 validate
-# `^[0-9]+(\.[0-9]+)*$` -- an unbounded `*`, widened by #4568), and
+# PADDED must survive a DOTTED phase number, of ANY segment count. This step is dispatched from
+# exactly TWO places: `execute-phase.md` (`code_review_gate`) and `code-review-fix.md`
+# (`record_disposition`). Only the second validates anything -- `code-review-fix.md:39` anchors
+# `^[0-9]+(\.[0-9]+)*$`, an unbounded `*` widened by #4568, so it accepts `03.1` AND `23.1.2`.
+# `execute-phase.md` applies NO shape gate at all, so this fence is not mirroring an upstream
+# guarantee; it IS the guarantee. (`code-review.md:63` carries an identical validator but never
+# dispatches this step. It was cited here as a caller for several rounds and is not one.) And
 # `printf "%02d"` cannot format one: bash prints `invalid number` and exits 1, which under
 # `set -euo pipefail` aborts this step on its FIRST line -- the loudest possible failure from
 # the gate that promises never to block, and it takes the whole phase's review reporting with
 # it. Pad the integer part only and carry the sub-number verbatim, so 3.1 -> 03.1, 23.1.2 ->
 # 23.1.2 and 3 -> 03. The segment count is deliberately NOT bounded here: the canonical
 # grammar in src/phase-id.cts (`PHASE_NUMBER_TOKEN_SOURCE`, #2128) is unbounded in segments,
-# and #4568 widened both of this step's callers to match it on that axis, so a guard narrower
-# than the caller means no ledger for a phase id the caller already accepted.
+# and #4568 widened the one dispatcher that validates to match it on that axis, so a guard
+# narrower than that dispatcher means no ledger for a phase id the dispatcher already accepted.
 # On failure NO path is built and the fence refuses by name: advisory means advisory, and it
 # also means never probing a path assembled out of a value we just rejected.
 # VALIDATE, THEN FORMAT -- never format and fall back on failure. `printf "%02d" abc` writes
@@ -231,14 +239,14 @@ the step — never blocks:
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
 # `${PHASE_DIR}/../../etc/passwd-REVIEW.md`, where the old `printf "%02d"` had at least
-# mangled it to `00`. Both callers already validate `^[0-9]+(\.[0-9]+)*$` against their own
-# PADDED_PHASE (code-review.md:63, code-review-fix.md:39) -- the padded form, not the raw
-# PHASE_NUMBER this step is handed; this step has two call sites and validates for
+# mangled it to `00`. `code-review-fix.md:39` already validates `^[0-9]+(\.[0-9]+)*$` against its
+# own PADDED_PHASE -- the padded form, not the raw PHASE_NUMBER this step is handed -- while
+# `execute-phase.md` validates nothing at all; this step has two call sites and validates for
 # itself rather than trusting either. Anything else yields an EMPTY PADDED and the blocks
 # below refuse to build a path from it.
 # PHASE_DIR is checked for NON-EMPTINESS ONLY. Both inputs come from the caller's init query, so
-# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`, asserted by both
-# callers) to check against. A filesystem path admits `..` and symlinked parents alike, so a shape
+# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`) to check
+# against. A filesystem path admits `..` and symlinked parents alike, so a shape
 # check here rejects working setups and proves nothing. Residual: PHASE_DIR may itself be a symlink
 # and the ledger is written through it -- left alone, and not a security boundary.
 _pd="${PHASE_DIR:-}"
