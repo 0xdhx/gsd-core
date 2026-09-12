@@ -2909,9 +2909,11 @@ describe('#3861 round 2 — the ledger write refuses a non-regular file', () => 
 
 describe('#3861 round 2 — a DOTTED phase number does not break the step', () => {
   // Found by the round's own adversarial review, in its MISSED section -- no finding asked about
-  // it. Both callers explicitly accept `03.1` (code-review.md:63, code-review-fix.md:39 validate
-  // ^[0-9]+(\.[0-9]+)*$ -- widened from `?` to `*` by #4568; this comment named the pre-#4568
-  // form until round 11), and the step reconstructed the path with `printf "%02d"`, which cannot
+  // it. Both of this step's call sites accept `03.1` -- `code-review-fix.md:39` validates
+  // ^[0-9]+(\.[0-9]+)*$ (widened from `?` to `*` by #4568; this comment named the pre-#4568 form
+  // until round 11) and `execute-phase.md` applies no shape gate at all. (`code-review.md:63`
+  // carries an identical validator but never dispatches this step; it was cited here as a caller
+  // for several rounds and is not one.) The step reconstructed the path with `printf "%02d"`, which cannot
   // format one: bash prints `invalid number` and exits 1. Under `set -euo pipefail` that aborts
   // the step on its FIRST line -- the loudest possible failure from a gate that promises never to
   // block, and it takes the phase's whole review report with it.
@@ -2965,11 +2967,12 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     // PHASE_NUMBER is interpolated into a file path. The first draft of the dotted-phase fix
     // carried an unusable value VERBATIM, which made `${PHASE_DIR}/../../etc/passwd-REVIEW.md`
     // reachable where the old `printf "%02d"` had at least mangled it to `00` -- a regression
-    // introduced by the fix, found by adversarially reviewing it. Both callers validate
-    // ^[0-9]+(\.[0-9]+)*$ -- an UNBOUNDED segment count since #4568 -- and this step has two
+    // introduced by the fix, found by adversarially reviewing it. Both call sites accept
+    // ^[0-9]+(\.[0-9]+)*$ -- an UNBOUNDED segment count since #4568, anchored at
+    // `code-review-fix.md:39` and ungated at `execute-phase.md` -- and this step has two
     // call sites and validates for itself.
     // `1.2.3` LEFT THIS LIST in round 11. It is a legal N-segment id at the current base, and
-    // asserting its refusal here is precisely what held the step narrower than both callers;
+    // asserting its refusal here is precisely what held the step narrower than both of them;
     // the positive case is its own test below. What remains here is SHAPE, not arity, so the
     // two malformed-dot cases that the arity guard used to mask are added explicitly.
     for (const bad of ['../../etc/passwd', 'abc', '', '-1', '3.', '.1', '+1', '3 1', '1..2', '1.2.']) {
@@ -2984,7 +2987,7 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
 
   test('an N-SEGMENT phase number reports counts, exactly as its callers accept it', { skip: !HAS_BASH }, () => {
     // #3861 round 11. Found by this round's own adversarial review, not by the maintainer's.
-    // The base range widened both callers to `^[0-9]+(\\.[0-9]+)*$` (#4568), matching the
+    // The base range widened `code-review-fix.md:39` to `^[0-9]+(\\.[0-9]+)*$` (#4568), matching the
     // segment-count freedom the canonical grammar in src/phase-id.cts has carried since
     // #2128. This step still carried
     // `*.*.*) _ok=0` -- "more than one dot: not the documented shape" -- so `23.1.2` took the
