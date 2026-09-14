@@ -124,8 +124,15 @@ DISPOSITION_FILE="${_pd}/${PADDED}-REVIEW-DISPOSITION.md"
 # Guarded and `|| true`: this step is advisory, so a REVIEW.md that is missing, a directory, or
 # otherwise unreadable must leave the counts empty and let execution continue — never abort the
 # step under `set -e`/`pipefail`.
+# REVIEW_READ records that the file was actually OPENED, separately from what it yielded. An
+# absent or unreadable review and a present-but-unparseable one both leave every value below
+# empty, and the reporting arm used to treat the two identically -- silence -- so a REVIEW.md
+# with three criticals and an unterminated frontmatter read exactly like a clean review. A
+# malformed report must not read as a clean one; the arm below tells them apart on this flag.
 REVIEW_FM=""
+REVIEW_READ=0
 if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
+  REVIEW_READ=1
   REVIEW_FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
 fi
 # `|| true` on every read: under `pipefail` a non-matching `grep` exits 1, and an assignment
@@ -176,7 +183,18 @@ fi
 # gate — applied to the block that is this step's primary deliverable rather than only to its
 # sibling. The status arm is re-derived here, not left to the reader, for the same reason.
 case "$REVIEW_STATUS" in
-  ''|clean|skipped) ;;   # nothing to report; block 2 still reconciles an existing ledger
+  '')
+    # NO STATUS is not NO REVIEW. When the file was read and yielded no status -- unterminated
+    # frontmatter, no frontmatter, no `status:` key, a zero-byte file -- the review is
+    # UNPARSEABLE, and saying nothing would make it indistinguishable from a clean one. State it,
+    # without the breakdown (there is none to trust) and without the --fix suggestion (nothing
+    # here proves there are findings to fix). An absent or unreadable review stays silent: there
+    # is nothing to describe, and guessing is the failure the guard above exists to prevent.
+    if [ "$REVIEW_READ" = "1" ]; then
+      echo "Code review status unparsed: REVIEW.md is present but its frontmatter has no parseable status; severity counts unavailable."
+    fi
+    ;;
+  clean|skipped) ;;   # nothing to report; block 2 still reconciles an existing ledger
   *)
     if [ "$REVIEW_COUNTS_OK" = "1" ]; then
       echo "Code review: ${REVIEW_TOTAL} findings — ${REVIEW_CRITICAL} critical, ${REVIEW_WARNING} warning, ${REVIEW_INFO} info."
@@ -309,7 +327,9 @@ DISPOSITION_FILE="${_pd}/${PADDED}-REVIEW-DISPOSITION.md"
 # re-review rewrites an existing ledger it was never meant to touch.
 REVIEW_STATUS=""
 REVIEW_TOTAL=""
+REVIEW_READ=0   # block 1's distinction, re-derived here: read-but-unparseable is not absent
 if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
+  REVIEW_READ=1
   _FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
   REVIEW_STATUS=$(echo "$_FM" | grep -m1 "^status:" | cut -d: -f2 | tr -d ' ' || true)
   # The frontmatter total is carried into the script so the two parsers in this step can be
@@ -336,13 +356,16 @@ _fix_any=0
 # $(printf '%s' "$PADDED") per lint-workflow-shellcheck's #4109 remedy: a bare $VAR in a `for x in`
 # splits differently under bash and zsh.
 for _f in "${_pd}/$(printf '%s' "$PADDED")-REVIEW-FIX.iter"*.md; do [ -f "$_f" ] && _fix_any=1; done
+# The word for an empty status names WHICH empty it is, for the same reason block 1 does: a
+# review that was read and could not be parsed is 'unparsed', an absent one is 'none'.
+_st="${REVIEW_STATUS:-none}"; [ -z "$REVIEW_STATUS" ] && [ "$REVIEW_READ" = "1" ] && _st="unparsed"
 case "$REVIEW_STATUS" in
   ''|clean|skipped)
     if [ ! -f "$DISPOSITION_FILE" ] && [ "$_fix_any" = "0" ]; then
-      echo "Code review disposition skipped (status: ${REVIEW_STATUS:-none})"
+      echo "Code review disposition skipped (status: ${_st})"
       return 0 2>/dev/null || exit 0
     fi
-    echo "Code review ${REVIEW_STATUS:-unreported}; reconciling the fix report and any existing disposition ledger."
+    echo "Code review status ${_st}; reconciling the fix report and any existing disposition ledger."
     ;;
 esac
 _GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd_run is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; case "$(gsd_run runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') GSD_IDENTITY_STATUS=ok;; esac; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi

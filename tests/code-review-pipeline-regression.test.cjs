@@ -3028,6 +3028,9 @@ function readGateMessage(stdout) {
     return { reported: true, countsOk: '1', total: full[1], critical: full[2], warning: full[3], info: full[4] };
   }
   if (/^Code review found issues\.$/m.test(stdout)) return { reported: true, countsOk: '0' };
+  // The third arm (round 11): the file was READ and yielded no status. Reported -- the operator is
+  // told something -- but no counts and no verdict, which is what `unparsed` records.
+  if (/^Code review status unparsed: /m.test(stdout)) return { reported: true, countsOk: '0', unparsed: true };
   return { reported: false };
 }
 
@@ -3044,7 +3047,13 @@ function renderGateMessage(counts, phaseNumber) {
     const n = (v) => parseInt(v, 10);
     if (n(counts.critical) + n(counts.warning) + n(counts.info) !== n(counts.total)) ok = false;
   }
-  if (counts.status === '' || counts.status === 'clean' || counts.status === 'skipped') return '';
+  // A mirror is always handed a TEXT, so the file was read by construction: an empty status here
+  // is the read-but-unparseable arm, never the absent one (round 11 Minor -- a malformed report
+  // must not read as clean). The absent arm is driven directly, not through the mirror.
+  if (counts.status === '') {
+    return 'Code review status unparsed: REVIEW.md is present but its frontmatter has no parseable status; severity counts unavailable.\n';
+  }
+  if (counts.status === 'clean' || counts.status === 'skipped') return '';
   const head = ok
     ? `Code review: ${counts.total} findings — ${counts.critical} critical, ${counts.warning} warning, ${counts.info} info.`
     : 'Code review found issues.';
@@ -3500,15 +3509,78 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
   // action never executes (NR stays 0). The output is empty because `closed` is never set and the
   // END block therefore prints nothing.
   //
-  // And note what this test does NOT prove on its own: its observable — exit 0, empty stdout — is
-  // identical to the missing-file case. That the file was actually READ is established by the
-  // harness (writeReview defaults true, so a real zero-byte file exists) and by the fence's guard,
-  // not by the assertions below.
-  test('an EMPTY REVIEW.md leaves the counts empty and does not abort', { skip: !HAS_BASH }, () => {
+  // Since round 11 the observable is NOT the missing-file case's any more, and that is the point:
+  // a zero-byte REVIEW.md was read and has no parseable status, so the fence says so rather than
+  // staying silent -- silence is what a clean review looks like. The counts are still empty and
+  // nothing is guessed; what changed is that the operator is told the report could not be read.
+  test('an EMPTY REVIEW.md leaves the counts empty, reports the unparseable status, and does not abort', { skip: !HAS_BASH }, () => {
     const shipped = runShippedGateCounts({ reviewText: '' });   // writeReview defaults true: a real, empty file
     assert.strictEqual(shipped.exitCode, 0, 'advisory: an empty review must not abort the step');
-    assert.strictEqual(shipped.stdout, '', 'an empty review reports nothing, and does not guess');
-    assert.strictEqual(readGateMessage(shipped.stdout).reported, false);
+    assert.match(shipped.stdout, /^Code review status unparsed: /m, 'an empty file was read, and says so');
+    assert.doesNotMatch(shipped.stdout, /^Code review: \d+ findings/m, 'and no breakdown is invented');
+    assert.strictEqual(readGateMessage(shipped.stdout).unparsed, true);
+  });
+});
+
+describe('#3861 round 11 — a malformed report does not read as clean in the counting arm', () => {
+  // A REVIEW.md with three criticals and an UNTERMINATED frontmatter yielded REVIEW_STATUS='',
+  // and the counting arm then printed nothing -- byte-identical to a clean review. Block 2 still
+  // said `status: none` rather than `clean`, so a careful reader could separate them downstream,
+  // which is the only reason this was Minor. The counting arm now distinguishes 'no findings'
+  // from 'could not parse', and block 2 names the same distinction ('unparsed' vs 'none').
+  const UNTERMINATED = ['---', 'phase: 01', 'status: issues_found', 'findings:',
+    '  critical: 3', '  warning: 0', '  info: 0', '  total: 3', '',
+    '## Critical Issues', '', '### CR-01: a', '### CR-02: b', '### CR-03: c'].join('\n');
+
+  test('an unterminated frontmatter is reported as unparsed, not passed over in silence', { skip: !HAS_BASH }, () => {
+    const shipped = runShippedGateCounts({ reviewText: UNTERMINATED });
+    assert.strictEqual(shipped.exitCode, 0, 'advisory: a malformed review must not abort the step');
+    assert.match(shipped.stdout, /^Code review status unparsed: REVIEW\.md is present but its frontmatter has no parseable status; severity counts unavailable\.$/m);
+    assert.doesNotMatch(shipped.stdout, /^Code review: \d+ findings/m, 'a breakdown read from an unterminated block would be the body leak this scan prevents');
+    assert.doesNotMatch(shipped.stdout, /Consider running/, 'nothing here proves there are findings to fix');
+    assert.strictEqual(readGateMessage(shipped.stdout).unparsed, true);
+  });
+
+  test('a closed frontmatter with no status: key is the same arm', { skip: !HAS_BASH }, () => {
+    const noStatus = ['---', 'phase: 01', 'findings:', '  critical: 3', '  warning: 0', '  info: 0',
+      '  total: 3', '---', '', '### CR-01: a'].join('\n');
+    const shipped = runShippedGateCounts({ reviewText: noStatus });
+    assert.match(shipped.stdout, /^Code review status unparsed: /m);
+  });
+
+  test('a review with no frontmatter at all is the same arm', { skip: !HAS_BASH }, () => {
+    const shipped = runShippedGateCounts({ reviewText: '# Phase 01\n\n### CR-01: a finding\n' });
+    assert.match(shipped.stdout, /^Code review status unparsed: /m);
+  });
+
+  test('the absent, directory and unreadable cases stay silent — nothing was read, so nothing is described', { skip: !HAS_BASH }, () => {
+    // The distinction is READ-ness, not emptiness: the three guard-refused shapes have no file
+    // content to describe, and describing one would be the guess the guard exists to prevent.
+    // (The mode-bit case is pinned by its own root-aware test above.)
+    assert.strictEqual(runShippedGateCounts({ reviewText: '', writeReview: false }).stdout, '', 'absent');
+    assert.strictEqual(runShippedGateCounts({ reviewText: UNTERMINATED, plantDir: true }).stdout, '', 'directory');
+  });
+
+  test('block 2 names the same distinction: unparsed for a read file, none for an absent one', { skip: !HAS_BASH }, () => {
+    const script = bashFences(fs.readFileSync(DISPOSITION_STEP_PATH, 'utf8'))[1];
+    const runBlock2 = (dir, padded) => runHook('-c', ['set -euo pipefail\n' + script + '\n'], {
+      interpreter: 'bash', timeoutMs: PROBE_TIMEOUT_MS,
+      env: { ...process.env, PHASE_DIR: dir, PHASE_NUMBER: String(Number(padded)) },
+    });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3861-unparsed-'));
+    try {
+      // No REVIEW.md, no ledger, no fix report -> skipped (status: none)
+      let res = runBlock2(dir, '01');
+      assert.strictEqual(res.exitCode, 0);
+      assert.match(res.stdout, /^Code review disposition skipped \(status: none\)$/m, 'absent reads as none');
+      fs.writeFileSync(path.join(dir, '01-REVIEW.md'), UNTERMINATED);
+      res = runBlock2(dir, '01');
+      assert.strictEqual(res.exitCode, 0);
+      assert.match(res.stdout, /^Code review disposition skipped \(status: unparsed\)$/m, 'a read-but-unparseable review reads as unparsed');
+      assert.doesNotMatch(res.stdout, /status: none/);
+    } finally {
+      cleanup(dir);
+    }
   });
 });
 
