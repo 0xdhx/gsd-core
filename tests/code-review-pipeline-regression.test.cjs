@@ -2283,6 +2283,104 @@ describe('#3861 round 2 — severity comes from the section, not just the id pre
   });
 });
 
+describe('#3861 round 11 — a carried row keeps the severity the ledger recorded', () => {
+  // The ledger always WROTE a severity (table cell + frontmatter key) and nothing read it back:
+  // the row regex skipped the cell as [^|]*, the frontmatter walk collected only titles, and a
+  // carried row was rebuilt from the id prefix because sectionSev holds only the CURRENT review's
+  // findings. So the one case round 2's M3 fix exists for -- a Critical the reviewer mis-numbered
+  // WR-04 -- was recorded critical on run 1 and silently re-recorded warning on run 2, once the
+  // review stopped reporting it. Every carried-row test used CR-01/IN-01, whose prefix already
+  // matched, so the fallback returned the right answer by coincidence and no mutation could tell
+  // the two paths apart. Reproduced by the round-11 review by executing the shipped script twice.
+  const REVIEW_1 = ['---', 'phase: 01', 'status: issues_found', '---', '',
+    '## Critical Issues', '', '### CR-01: properly numbered', '',
+    '### WR-04: a critical the reviewer mis-numbered', ''].join('\n');
+  // Run 2: the review no longer reports WR-04 at all.
+  const REVIEW_2_DROPPED = ['---', 'phase: 01', 'status: issues_found', '---', '',
+    '## Critical Issues', '', '### CR-01: properly numbered', ''].join('\n');
+  const rowOf = (ledger, id) => {
+    const row = ledgerRows(ledger).find((r) => r.id === id);
+    assert.ok(row, id + ' must have a row');
+    return row;
+  };
+  // Run 1's ledger, with WR-04 deferred BY HAND, the way the ledger's own legend instructs. Edited
+  // in place so the frontmatter (and its title) is present -- a bare row would carry no title and
+  // sameFinding() would pass through its back-compat arm, never consulting identity at all.
+  const deferredLedger = () => {
+    const first = runShippedDisposition({ reviewText: REVIEW_1 }).ledger;
+    assert.strictEqual(rowOf(first, 'WR-04').severity, 'critical', 'run 1 records the section severity');
+    const edited = first.replace(/^\| WR-04 \| critical \| open \| - \|$/m, '| WR-04 | critical | deferred | waiting on team A |');
+    assert.notStrictEqual(edited, first, 'the hand edit must have landed');
+    return edited;
+  };
+
+  test("a deferred WR-* filed under '## Critical Issues' stays critical once the review stops reporting it", () => {
+    const after = runShippedDisposition({ reviewText: REVIEW_2_DROPPED, priorText: deferredLedger() });
+    const row = rowOf(after.ledger, 'WR-04');
+    assert.strictEqual(row.severity, 'critical', 'the recorded severity survives the carry -- the prefix would say warning');
+    assert.strictEqual(row.disposition, 'deferred', 'and so does the decision');
+    assert.match(row.source, /^waiting on team A/, 'and the reason');
+    assert.match(row.source, /\(not in the current review\)$/, 'and the row is marked carried');
+    assert.match(after.ledger, /^ {4}severity: critical$/m, 'the frontmatter agrees with the table');
+  });
+
+  test('the recorded severity also outranks the prefix while the review still reports the finding under no recognized section', () => {
+    // A re-review that dropped the documented headings. The current review gives no section, the
+    // ledger remembers what the last one said, and that is a better source than the id alone.
+    const plain = ['---', 'phase: 01', 'status: issues_found', '---', '',
+      '### CR-01: properly numbered', '### WR-04: a critical the reviewer mis-numbered'].join('\n');
+    const after = runShippedDisposition({ reviewText: plain, priorText: deferredLedger() });
+    assert.strictEqual(rowOf(after.ledger, 'WR-04').severity, 'critical');
+  });
+
+  test("the current review's section still wins over the recorded value", () => {
+    // Precedence control: a reviewer who re-tiers a finding on re-review is the newer statement.
+    const retiered = ['---', 'phase: 01', 'status: issues_found', '---', '',
+      '## Critical Issues', '', '### CR-01: properly numbered', '',
+      '## Warnings', '', '### WR-04: a critical the reviewer mis-numbered'].join('\n');
+    const after = runShippedDisposition({ reviewText: retiered, priorText: deferredLedger() });
+    assert.strictEqual(rowOf(after.ledger, 'WR-04').severity, 'warning', 'the section is the current statement');
+  });
+
+  test('a REUSED id does not inherit the old finding\'s severity', () => {
+    // Identity control, the same rule the disposition takes: ids are reused across re-reviews, so
+    // a brand-new WR-04 under no section starts from its own prefix, not from the finding it
+    // replaced. Inheriting here would put a Critical tier on an ordinary warning.
+    const reused = ['---', 'phase: 01', 'status: issues_found', '---', '',
+      '### CR-01: properly numbered', '### WR-04: an entirely different finding'].join('\n');
+    const after = runShippedDisposition({ reviewText: reused, priorText: deferredLedger() });
+    const row = rowOf(after.ledger, 'WR-04');
+    assert.strictEqual(row.severity, 'warning', 'a different finding under a reused id is inferred from its prefix');
+    assert.strictEqual(row.disposition, 'open', 'and, as before, does not inherit the decision either');
+  });
+
+  test('a hand-mangled Severity cell falls back to the frontmatter copy, and a mangled pair to the prefix', () => {
+    // Both sources are enum-validated (ADR-227): a value outside critical|warning|info is not a
+    // severity. The table is read first because it is the surface a human edits; the frontmatter
+    // is the copy a human is not invited to touch.
+    const base = deferredLedger();
+    const cellMangled = base.replace('| WR-04 | critical | deferred |', '| WR-04 | critcal | deferred |');
+    assert.notStrictEqual(cellMangled, base);
+    let after = runShippedDisposition({ reviewText: REVIEW_2_DROPPED, priorText: cellMangled });
+    assert.strictEqual(rowOf(after.ledger, 'WR-04').severity, 'critical', 'the frontmatter still knows');
+    assert.strictEqual(rowOf(after.ledger, 'WR-04').disposition, 'deferred', 'a bad severity cell does not cost the decision');
+    const bothMangled = cellMangled.replace(/^( {2}- id: WR-04\n {4}severity: )critical$/m, '$1critcal');
+    assert.notStrictEqual(bothMangled, cellMangled, 'the frontmatter mangling must have landed');
+    after = runShippedDisposition({ reviewText: REVIEW_2_DROPPED, priorText: bothMangled });
+    assert.strictEqual(rowOf(after.ledger, 'WR-04').severity, 'warning', 'nothing recorded is usable, so the prefix is all that is left');
+  });
+
+  test('a pre-severity ledger (bare rows, no frontmatter) still infers from the prefix', () => {
+    // Back-compat control. A ledger written by hand with no severity cell to speak of is not
+    // rejected; it just has nothing to carry, so the prefix governs as it always did.
+    const bare = '| WR-04 |  | deferred | by hand |\n';
+    const after = runShippedDisposition({ reviewText: REVIEW_2_DROPPED, priorText: bare });
+    const row = rowOf(after.ledger, 'WR-04');
+    assert.strictEqual(row.severity, 'warning');
+    assert.strictEqual(row.disposition, 'deferred', 'an empty severity cell does not cost the decision');
+  });
+});
+
 describe('#3861 round 2 — a finding the heading parser cannot match is SURFACED, not dropped (B4)', () => {
   // Two independent parsers produce two numbers one paragraph apart: the counts come from
   // REVIEW.md's frontmatter, the rows from `### <ID>:` heading matches against a CLOSED
