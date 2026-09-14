@@ -172,6 +172,13 @@ the shape #3780 reported for `WINDOWS.md` under parallel executors, closed there
 lock (#4681); the disposition step does not take that lock. No lost update has been reproduced; the
 window is stated so it is not mistaken for a guarantee.
 
+Not to be confused with the **Review Dispositions Ledger** of reviews-mode planning
+([ADR-3806](../adr/3806-review-dispositions-ledger.md), `docs/features/review-dispositions-ledger.md`):
+that one is a `## Review Dispositions Ledger` section inside `PLAN.md`, append-only per round, over
+`REVIEWS.md` findings. This artifact is a sibling file beside `REVIEW.md`, rewritten idempotently
+with rows carried. Same word, different inputs, writers, files and durability rules; neither governs
+the other.
+
 The record is a sibling artifact rather than a section inside REVIEW.md because `--auto`'s
 re-review loop rewrites REVIEW.md on every iteration — a ledger kept inside it would not survive
 the next pass — and because REVIEW.md has a single writer (`gsd-code-reviewer`) that the gate is
