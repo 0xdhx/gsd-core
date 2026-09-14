@@ -197,6 +197,28 @@ function reviewFor(findings) {
     .concat(findings.map((f) => '### ' + f.id + ': ' + f.title + '\n')).join('\n');
 }
 
+// A SECTION severity per finding, drawn independently of its id prefix. Severity entered the
+// ledger's round-trip contract the moment the section began outranking the prefix (round 2, M3):
+// from then on the recorded value carried information the id alone could not reproduce, and a
+// carried row that re-derived it from the prefix was lossy on exactly the findings the section
+// rule exists for. Every fixture used ids whose prefix happened to match their section, so the
+// lossy path returned the right answer by coincidence -- the same shape as this file's own
+// origin story. Drawn from the three headings gsd-code-reviewer.md emits.
+const SECTION = fc.constantFrom('critical', 'warning', 'info');
+const SECTIONED = FINDINGS.chain((findings) =>
+  fc.array(SECTION, { minLength: findings.length, maxLength: findings.length })
+    .map((secs) => findings.map((f, i) => ({ id: f.id, title: f.title, section: secs[i] })))
+);
+const SECTION_HEADING = { critical: '## Critical Issues', warning: '## Warnings', info: '## Info' };
+function sectionedReviewFor(findings) {
+  const lines = ['---', 'phase: 01', 'status: issues_found', '---', ''];
+  for (const sev of ['critical', 'warning', 'info']) {
+    lines.push(SECTION_HEADING[sev], '');
+    for (const f of findings) if (f.section === sev) lines.push('### ' + f.id + ': ' + f.title, '');
+  }
+  return lines.join('\n');
+}
+
 // What the ledger MUST hold for a title, derived from the heading grammar rather than copied
 // from the render. ID_RE's `:\s*` eats the leading whitespace and its `.trim()` the trailing, so
 // the stored value is the trimmed title; oneLine() is then the identity on it, because this
@@ -367,6 +389,36 @@ describe('#3829 — the disposition ledger is a render/re-parse fixed point', ()
         const third = runOnce(dir, '01');
         assert.ok(third.unchanged, 'the third run must report the ledger unchanged');
         assert.strictEqual(third.ledger, second.ledger, 'render -> re-parse -> render is a fixed point');
+      } finally {
+        cleanup(dir);
+      }
+    }), RUNS);
+  });
+
+  test('a carried row keeps the severity its section gave it, whatever its id prefix says', () => {
+    fc.assert(fc.property(SECTIONED, (findings) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3829-prop-'));
+      try {
+        fs.writeFileSync(path.join(dir, '01-REVIEW.md'), sectionedReviewFor(findings));
+        const first = runOnce(dir, '01');
+        assert.ok(first.ledger !== null, 'a review with findings must produce a ledger');
+        // Run 2: the review reports NOTHING, so every row is carried. This is the path that
+        // rebuilt severity from the prefix -- sectionSev holds only the current review's
+        // findings, which is now none of them.
+        fs.writeFileSync(path.join(dir, '01-REVIEW.md'), reviewFor([]));
+        const second = runOnce(dir, '01');
+        for (const f of findings) {
+          const row = second.ledger.split('\n').find((l) => l.startsWith('| ' + f.id + ' '));
+          assert.ok(row, f.id + ' must be carried, not dropped');
+          const cells = row.split(/\s\|\s/).map((c) => c.replace(/^\|\s*|\s*\|$/g, '').trim());
+          assert.strictEqual(cells[1], f.section,
+            f.id + ': the carried row must keep the section severity, not re-infer it from the prefix');
+          assert.match(row, /\(not in the current review\)\s*\|$/, 'and be marked carried');
+        }
+        // And a THIRD run changes nothing: reading the severity back and writing it again is a
+        // fixed point, so the unchanged-run check is not defeated by the new field.
+        const third = runOnce(dir, '01');
+        assert.ok(third.unchanged, 'the third run must report unchanged');
       } finally {
         cleanup(dir);
       }

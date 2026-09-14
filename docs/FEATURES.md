@@ -2499,7 +2499,15 @@ typo cannot quietly mark a phase as triaged.
 Severity comes from the section a finding sits under (`## Critical Issues`, `## Warnings`,
 `## Info`) when the review uses those headings, and from the ID prefix otherwise. The section is
 the reviewer's own statement of severity, so a Critical filed under `## Critical Issues` is
-recorded critical even if its ID was mis-numbered `WR-04`.
+recorded critical even if its ID was mis-numbered `WR-04`. That severity is then **remembered**:
+a row the current review no longer reports, or reports under no recognized heading, keeps the
+severity the ledger recorded rather than having it re-inferred from the ID prefix — so the
+mis-numbered `WR-04` above stays `critical` on the second run, deferred or not. The precedence is
+the current review's section, then the recorded value, then the prefix; the recorded value is
+inherited only while the ID still names the same finding, by the same title check the disposition
+uses, so a reused ID starts from its own review. That check has the same compatibility arm the
+disposition has: a ledger written before titles were recorded carries no title to compare, so its
+severities — like its decisions — inherit on the ID alone.
 
 If the review's `total:` exceeds the number of findings whose headings the gate could parse, the
 shortfall is stated — on the console and as an `unparsed:` key in the ledger's frontmatter. A
