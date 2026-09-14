@@ -1177,6 +1177,20 @@ from `todos/pending/` to `todos/completed/` and upserts `completed:` and
 `status: completed` inside the file's frontmatter block. Unknown flags are
 rejected loudly.
 
+`<filename>` is a **basename inside the todos root**, not a path. A basename
+guard runs first, before `<filename>` is joined onto any directory: a value
+containing an embedded separator (either `/` or `\`, e.g. `sub/name.md` or
+`sub\name.md`), a value whose own basename differs from itself (e.g.
+`a/../../b.md`, `../sibling.md`), a bare `.` or `..`, an absolute path (e.g.
+`/etc/passwd`), or a NUL byte is rejected as a usage error **before** any file
+is read or moved (#4327, #4652). A traversal that only escapes the `pending`/
+`completed` subdirectory without leaving the todos root (`../sibling.md`) is
+caught by this same guard, not by containment. Containment against the todos
+root still runs afterward as defense-in-depth for the resolved source and
+target paths, so neither half of the move can land outside the root. The
+check covers both halves of the move, and `--dry-run` is rejected on the same
+terms rather than previewing a resolved outside path.
+
 ```bash
 # UAT audit — scan all phases for unresolved items
 node gsd-tools.cjs audit-uat
@@ -1233,7 +1247,7 @@ node gsd-tools.cjs restore-custom-files --config-dir <config-dir> --apply
 | Field | Meaning |
 |---|---|
 | `path` | Path relative to the config dir — where the file came from and goes back to |
-| `outcome` | `eligible` (plan mode) · `restored` · `skipped_destination_managed` · `skipped_destination_exists` · `skipped_copy_failed` · `skipped_unsafe_path` |
+| `outcome` | `eligible` (plan mode) · `restored` · `already_present` · `skipped_destination_managed` · `skipped_destination_exists` · `skipped_copy_failed` · `skipped_unsafe_path` |
 | `warnings` | Advisory `{code, detail}` findings from the compatibility pass; never blocks a restore |
 
 Warning codes: `destination_managed`, `destination_exists`,
@@ -1248,9 +1262,12 @@ retired, invokes a `/gsd:` command that no longer exists, or is missing the
 Three things the restore never does: it never deletes the backup, it never
 overwrites a path the new release ships (`skipped_destination_managed`), and it
 never overwrites a different file already on disk
-(`skipped_destination_exists`). Symlinked backup entries are skipped outright
-rather than followed (`skipped_unsafe_path`). A single unwritable entry is
-reported and the remaining entries still restore.
+(`skipped_destination_exists`). A destination that is already byte-identical to
+its backup is reported as `already_present` and left untouched — it counts
+toward neither `eligible_count` nor `restored_count`, so a plan run after a
+successful restore no longer offers the same file again. Symlinked backup
+entries are skipped outright rather than followed (`skipped_unsafe_path`). A
+single unwritable entry is reported and the remaining entries still restore.
 
 ---
 
@@ -1406,7 +1423,7 @@ User-facing entry point: `/gsd-graphify` (see [Command Reference](COMMANDS.md#gs
 
 ```bash
 node gsd-tools.cjs config-set review.models.codex    "gpt-5"
-node gsd-tools.cjs config-set review.models.gemini   "gemini-2.5-pro"
+node gsd-tools.cjs config-set review.models.agy      "gemini-3.1-pro-preview"
 node gsd-tools.cjs config-set review.models.opencode "claude-sonnet-4"
 node gsd-tools.cjs config-set review.models.claude   ""   # clear — fall back to session model
 ```

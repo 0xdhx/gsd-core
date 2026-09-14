@@ -265,6 +265,72 @@ const GENERATOR_SCRIPT_TIMEOUT_MS = 30000;
  */
 const REAL_REPO_GIT_TIMEOUT_MS = 30000;
 
+/**
+ * NOT a subprocess spawn timeout. This is `node:test`'s own per-test
+ * `{ timeout }` option (the second positional argument to `test(name,
+ * options, fn)`), used as a hang BACKSTOP -- not an assertion -- for tests
+ * that exercise a pathological, adversarially-large input against an
+ * algorithmic bound (ADR-612 bracket-coherence and read-tolerance) rather
+ * than a wall-clock ceiling. If the bound holds, the test finishes in
+ * milliseconds; this only turns a genuine runaway into a deterministic
+ * failure instead of a suite that never returns.
+ *
+ * Shared across 2 files in batch #4522 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const PATHOLOGICAL_INPUT_TEST_TIMEOUT_MS = 60000;
+
+/**
+ * A single `gsd-tools.cjs` CLI subcommand invocation, spawned directly
+ * (execFileSync/spawnSync, or the process seam's runNode wrapping the same
+ * shape -- never via an intermediate shell script), with no confirmed
+ * nested-subprocess fan-out. A distinct, heavier tier than
+ * `PROBE_TIMEOUT_MS` (15000ms, the lighter CLI-query/probe class) but half
+ * of `LOOP_HOOK_POINT_CLI_TIMEOUT_MS` (60000ms) -- not equalized to either
+ * without bench data. Coincides numerically with `BUILD_TIMEOUT_MS`,
+ * `GENERATOR_SCRIPT_TIMEOUT_MS`, and `REAL_REPO_GIT_TIMEOUT_MS`, none of
+ * which describe this call shape (a `build-hooks.js` bundle, a
+ * `scripts/*.cjs` generator, and real-repo git plumbing respectively) --
+ * disclosed, not merged.
+ *
+ * Shared across 2 files in batch #4522 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS = 30000;
+
+/**
+ * NOT a subprocess spawn timeout. Fixture DATA -- the default, plausible-
+ * looking `invoke.timeoutMs` value for a well-formed task-content-resolver
+ * manifest, used as the base fixture across most "valid resolver" tests on
+ * the RESOLUTION side of that system (tests/task-content-resolution.cjs and
+ * its grammar-parity sibling). Coincides in value and role with epic #4445
+ * batch 10's file-local `TASK_RESOLVER_FIXTURE_TIMEOUT_MS` in
+ * tests/capability-validator-task-content-resolver.test.cjs (the VALIDATION
+ * side of the same resolver system, a different file, not exported) --
+ * disclosed, not merged; both independently describe the same manifest
+ * field's plausible default, unsurprising for two suites covering the same
+ * resolver.
+ *
+ * Shared across 2 files in batch #4524 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const TASK_RESOLVER_INVOKE_TIMEOUT_MS = 10000;
+
+/**
+ * NOT a subprocess spawn timeout. Fixture DATA -- the default `timeoutMs`
+ * value for an `http-reachable`-kind reviewer-lane probe declaration,
+ * validated by `validateReviewerBody()` (pure schema validation, never a
+ * real HTTP call or spawn in these tests).
+ *
+ * Shared across 2 files in batch #4527 of the ad hoc timeout literal
+ * migration, epic #4445 -- every site independently arrived at this exact
+ * value -- that is why it lives here rather than as a file-local constant.
+ */
+const HTTP_REACHABLE_PROBE_TIMEOUT_FIXTURE_MS = 2000;
+
 module.exports = {
   PROBE_TIMEOUT_MS,
   HOOK_FANOUT_TIMEOUT_MS,
@@ -281,4 +347,8 @@ module.exports = {
   MALFORMED_INPUT_HOOK_TIMEOUT_MS,
   GENERATOR_SCRIPT_TIMEOUT_MS,
   REAL_REPO_GIT_TIMEOUT_MS,
+  PATHOLOGICAL_INPUT_TEST_TIMEOUT_MS,
+  GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS,
+  TASK_RESOLVER_INVOKE_TIMEOUT_MS,
+  HTTP_REACHABLE_PROBE_TIMEOUT_FIXTURE_MS,
 };
