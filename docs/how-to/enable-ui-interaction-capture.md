@@ -16,7 +16,16 @@ paint, without configuring an MCP server or widening the agent's tool surface.
   `google-chrome-stable`, `chromium`, `chromium-browser` and `chrome` on `PATH`, then the
   standard macOS and Windows install paths. `CHROME_BIN=/path/to/chrome` overrides it.
 - `npx` able to fetch `chrome-devtools-mcp` (the package that ships the `chrome-devtools` CLI).
-  It is resolved at the documented floor `^1.8.0`; `CHROME_DEVTOOLS_MCP_VERSION` overrides it.
+  It is resolved at the documented floor `^1.9.0` (the release that added `--workspace`, which
+  confines the driver's file writes to the capture directory); `CHROME_DEVTOOLS_MCP_VERSION`
+  overrides it.
+- Nothing else. Every driver call runs under a ceiling — `CHROME_DEVTOOLS_START_TIMEOUT` (default
+  180 s, for the npx fetch plus the Chrome launch) and `CHROME_DEVTOOLS_STEP_TIMEOUT` (default
+  60 s, per capture verb). At the ceiling the client's whole process group is killed (TERM, then
+  KILL two seconds later) and the step is counted as failed, so a cold npm cache or a Chrome that
+  never comes up costs a failed step rather than an open-ended wait. The one exception is a
+  watchdog whose own clock (`sleep`) cannot launch: it stands down instead of killing a healthy
+  call, and that call is then unbounded, as every call was before the ceilings existed.
 - A dev server the static capture already reaches — interaction capture runs against the same
   URL and skips itself when the static block reached nothing.
 
@@ -81,7 +90,10 @@ Experience Design pillar says when its findings are code-derived.
   independent keys.
 - **It does not share the `chrome-devtools-mcp` browser profile.** The auditor starts the daemon
   with `--isolated`, so it never contends for the profile lock a registered MCP server holds, and
-  stops it when the capture ends.
+  stops it when the capture ends — under an `EXIT` trap, so an aborted audit still stops it.
+- **It does not let the driver write outside the capture directory.** The daemon starts with
+  `--workspace` set to the run's `interaction/` directory; that is the only place its file-writing
+  verbs may land.
 - **It does not wait on selectors.** `wait_for` is MCP-only; the auditor polls
   `document.readyState` through `evaluate_script` where a state needs settling.
 

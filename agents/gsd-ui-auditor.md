@@ -145,15 +145,14 @@ Try port 3000 first, then 5173 (Vite default), then 8080.
 
 ### Interaction capture (default-off — `workflow.ui_interaction_capture`)
 
-The static captures show the first paint of `/` and nothing after it: `npx playwright screenshot` has no click, fill, hover, press, snapshot, console or network verb, so a hover state, an open menu, a focus ring or a form's validation state never appears in them — while the Experience Design pillar is scored on exactly that evidence. When the `<config>` block carries `interaction_capture: true` (the `workflow.ui_interaction_capture` key, read by `/gsd:ui-review` and handed down because this agent has no `gsd_run` resolver) **and** a Chrome binary resolves, the `chrome-devtools` CLI from the `chrome-devtools-mcp` package adds post-interaction captures on top of the static ones. It is daemon-backed and needs only `Bash`: no MCP server, no `tools:` change. Key off, or no Chrome: one status line, and the audit proceeds exactly as before.
+The static captures show the first paint of `/` and nothing after it: `npx playwright screenshot` has no click, fill, hover, press, snapshot or console verb, yet the Experience Design pillar is scored on exactly that. When the `<config>` block carries `interaction_capture: true` (the `workflow.ui_interaction_capture` key, read by `/gsd:ui-review`) **and** a Chrome binary resolves, the `chrome-devtools` CLI (`chrome-devtools-mcp`) adds post-interaction captures over `Bash` alone: no MCP server, no `tools:` change. Key off, or no Chrome: one status line, then the audit as before.
 
 ```bash
-# INTERACTION_CAPTURE: set from the <config> block's `interaction_capture` before running
-# this; absent means off. SCREENSHOT_DIR/DEV_URL come from the static block above.
+# INTERACTION_CAPTURE: the <config> block's `interaction_capture` (absent = off); SCREENSHOT_DIR/DEV_URL: above.
 INTERACTION_CAPTURE="${INTERACTION_CAPTURE:-false}"
 INTERACTION_STATUS="off"
 
-# The driver launches an installed Chrome, never downloads one. CHROME_BIN overrides discovery.
+# An installed Chrome, never a download; CHROME_BIN overrides.
 CHROME_BIN="${CHROME_BIN:-}"
 if [ -z "$CHROME_BIN" ]; then
   for _c in google-chrome google-chrome-stable chromium chromium-browser chrome; do
@@ -167,21 +166,34 @@ if [ -z "$CHROME_BIN" ] && [ -x "${PROGRAMFILES:-/nonexistent}/Google/Chrome/App
   CHROME_BIN="${PROGRAMFILES}/Google/Chrome/Application/chrome.exe"
 fi
 
-# Documented floor, not a pin; -y answers the npx consent prompt. --sessionId keys the
-# daemon socket (hex/dashes only): `start` restarts whatever daemon shares its session and
-# --isolated isolates only the browser profile, so concurrent audits need their own id.
-# BASHPID not $$ (a subshell inherits $$); $RANDOM separates same-second forks.
+# Floor, not a pin (--workspace needs 1.9.0); -y answers npx's prompt. --sessionId (hex/dashes) keys the
+# daemon socket; concurrent audits need their own: BASHPID not $$ (subshells share $$) + $RANDOM.
 CDT_SESSION="$(date +%s)-${BASHPID:-$$}-$RANDOM"
-CDT="npx -y -p chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION:-^1.8.0} chrome-devtools --sessionId $CDT_SESSION"
+CDT="npx -y -p chrome-devtools-mcp@${CHROME_DEVTOOLS_MCP_VERSION:-^1.9.0} chrome-devtools --sessionId $CDT_SESSION"
+# cdt <ceiling-s> <verb> [args...]: every driver call is bounded (no timeout(1) on macOS, no gsd-tools here) by a
+# watchdog killing the job's process group at the ceiling (TERM, KILL 2 s later; npm forwards SIGTERM only to its
+# direct child). An exec'd bash (a subshell keeps the caller's saved stdio open) polling the job's GROUP (a child
+# can outlive the leader holding stdout), standing down once it is empty — never signalled: bash 3.2 may not
+# interrupt `wait` for a trapped signal; Git Bash hangs on a signal to a process still starting up. No sleep, no fire.
+CDT_T_START="${CHROME_DEVTOOLS_START_TIMEOUT:-180}"
+CDT_T_STEP="${CHROME_DEVTOOLS_STEP_TIMEOUT:-60}"
+cdt() {
+  local ceiling="$1" pid wd rc=0; shift
+  set -m; $CDT "$@" & pid=$!; set +m   # -m: job = own process group
+  "${BASH:-bash}" -c 'n=$(($1 * 10)); while kill -0 -- "-$2" 2>/dev/null; do [ "$n" -gt 0 ] || { kill -TERM -- "-$2" 2>/dev/null; sleep 2; kill -0 -- "-$2" 2>/dev/null && kill -KILL -- "-$2" 2>/dev/null; exit 0; }; sleep 0.1 || exit 0; n=$((n - 1)); done' _ "$ceiling" "$pid" >/dev/null 2>&1 & wd=$!
+  wait "$pid" || rc=$?
+  wait "$wd" 2>/dev/null || true
+  return "$rc"
+}
 
 if [ "$INTERACTION_CAPTURE" != "true" ]; then
-  echo "Interaction capture: off (workflow.ui_interaction_capture is false) — static captures only"
+  echo "Interaction capture: off (workflow.ui_interaction_capture is false)"
 elif [ -z "${SCREENSHOT_DIR:-}" ] || [ ! -d "$SCREENSHOT_DIR" ]; then
   INTERACTION_STATUS="skipped (no dev server reached)"
-  echo "Interaction capture: skipped — the static capture above reached no dev server"
+  echo "Interaction capture: skipped — static capture reached no dev server"
 elif [ -z "$CHROME_BIN" ]; then
   INTERACTION_STATUS="skipped (no Chrome binary resolved)"
-  echo "Interaction capture: skipped — no Chrome binary resolved (set CHROME_BIN) — static captures only"
+  echo "Interaction capture: skipped — no Chrome binary resolved (set CHROME_BIN)"
 else
   DEV_URL="${DEV_URL:-http://localhost:3000}"
   INTERACTION_DIR="$SCREENSHOT_DIR/interaction"
@@ -189,10 +201,13 @@ else
   ICAPTURED=0
   IFAILED=0
   PAGE_ID=""
+  # cdt_me: this shell's pid (bash 3.2 has no BASHPID).
+  cdt_me() { exec /bin/sh -c 'echo "$PPID"'; }
+  CDT_STARTED=0; CDT_SHELL=$(cdt_me)
 
-  # ishot <label>: capture the current state; counts only a non-empty file, else removes it.
+  # ishot <label>: count a non-empty file, else remove.
   ishot() {
-    if $CDT take_screenshot "$PAGE_ID" --filePath "$INTERACTION_DIR/$1.png" >/dev/null 2>&1 \
+    if cdt "$CDT_T_STEP" take_screenshot "$PAGE_ID" --filePath "$INTERACTION_DIR/$1.png" >/dev/null 2>&1 \
        && [ -s "$INTERACTION_DIR/$1.png" ]; then
       ICAPTURED=$((ICAPTURED + 1))
     else
@@ -202,52 +217,56 @@ else
     fi
   }
 
-  # --isolated: throwaway profile (no shared profile-lock contention). --allowUnrestrictedPaths:
-  # otherwise every --filePath under .planning/ fails. `stop` is unconditional once `start`
-  # succeeded — the daemon does not self-reap.
-  if $CDT start -e "$CHROME_BIN" --isolated --allowUnrestrictedPaths --usageStatistics=false >/dev/null 2>&1; then
-    # new_page marks the new page `[selected]`; that number is the pageId every later verb
-    # takes first. --timeout (ms) bounds the one verb that accepts one, before the others run.
-    # Exit status is checked before the output is parsed (a page line then a non-zero exit is
-    # a failed navigation), and the `if` keeps `set -e -o pipefail` from skipping the stop.
-    # `tr -d '\r'`: CRLF output (Git Bash) must still match the `$` anchor.
+  # cdt_stop: stop is owed once after a successful start (no self-reap): trapped on EXIT (replaces any earlier
+  # trap), in order, flag-deduped, by the installing shell only (never a subshell copy).
+  cdt_stop() { [ "$CDT_STARTED" = 1 ] && [ "$(cdt_me)" = "$CDT_SHELL" ] || return 0; CDT_STARTED=0; cdt "$CDT_T_STEP" stop >/dev/null 2>&1 || true; }
+
+  # --isolated: throwaway profile. --workspace: writes under the capture dir only — relative like every
+  # --filePath (one cwd, dialect-free on Git Bash); --allowUnrestrictedPaths is deprecated.
+  if cdt "$CDT_T_START" start -e "$CHROME_BIN" --isolated --workspace "$INTERACTION_DIR" --usageStatistics=false >/dev/null 2>&1; then
+    CDT_STARTED=1; trap cdt_stop EXIT
+    # new_page marks the page `[selected]`: the pageId every later verb takes. --timeout (ms) bounds the
+    # navigation inside the ceiling; exit status checked before parsing; tr: CRLF.
     PAGE_ID=""
-    if NEW_PAGE_OUT=$($CDT new_page "$DEV_URL" --timeout 30000 2>/dev/null); then
+    if NEW_PAGE_OUT=$(cdt "$CDT_T_STEP" new_page "$DEV_URL" --timeout 30000 2>/dev/null); then
       PAGE_ID=$(printf '%s\n' "$NEW_PAGE_OUT" | tr -d '\r' | sed -n 's/^\([0-9][0-9]*\): .*\[selected\]$/\1/p' | head -1)
     fi
     if [ -n "$PAGE_ID" ]; then
-      $CDT resize_page "$PAGE_ID" 1440 900 >/dev/null 2>&1
-      # The snapshot lists every element with the uid click/hover/fill take; uids are
-      # per-snapshot, so re-take it after each interaction. A failed snapshot counts.
-      if ! $CDT take_snapshot "$PAGE_ID" --filePath "$INTERACTION_DIR/snapshot.txt" >/dev/null 2>&1; then
-        # Remove what it left, or a stale file from a reused directory: wrong uids, wrong elements.
+      # A failed resize: a failed step, no abort.
+      if ! cdt "$CDT_T_STEP" resize_page "$PAGE_ID" 1440 900 >/dev/null 2>&1; then
+        IFAILED=$((IFAILED + 1))
+        echo "  interaction step FAILED: resize_page"
+      fi
+      # uids are per-snapshot: re-take after each interaction. A failure counts.
+      if ! cdt "$CDT_T_STEP" take_snapshot "$PAGE_ID" --filePath "$INTERACTION_DIR/snapshot.txt" >/dev/null 2>&1; then
+        # Remove what it left, or a stale one (reused dir)
         rm -f "$INTERACTION_DIR/snapshot.txt"
         IFAILED=$((IFAILED + 1))
         echo "  interaction step FAILED: take_snapshot"
       fi
       ishot baseline
-      # Focus ring on the first focusable element — the one interaction every page has.
-      if $CDT press_key "$PAGE_ID" Tab >/dev/null 2>&1; then
+      # Focus ring: first focusable.
+      if cdt "$CDT_T_STEP" press_key "$PAGE_ID" Tab >/dev/null 2>&1; then
         ishot focus-first
       else
         IFAILED=$((IFAILED + 1))
-        echo "  interaction step FAILED: press_key Tab (focus-first not captured)"
+        echo "  interaction step FAILED: press_key Tab"
       fi
-      # --- Drive each interactive component UI-SPEC.md declares (or the snapshot shows); each
-      #     line is a real invocation with a uid from the latest snapshot, named for its state:
-      #   $CDT hover "$PAGE_ID" <uid>              && ishot hover-<label>
-      #   $CDT click "$PAGE_ID" <uid>              && ishot <label>-open
-      #   $CDT fill  "$PAGE_ID" <uid> "<value>"    && ishot <label>-filled
-      #   $CDT press_key "$PAGE_ID" Enter          && ishot <label>-submitted
-      #   $CDT take_snapshot "$PAGE_ID" --filePath "$INTERACTION_DIR/snapshot.txt"
-      # Console output since navigation, for error-state and empty-state findings.
-      $CDT list_console_messages "$PAGE_ID" > "$INTERACTION_DIR/console.txt" 2>/dev/null || true
+      # --- Drive each interactive component UI-SPEC.md declares (or the snapshot shows): real
+      #     calls, a uid from the latest snapshot, one capture each:
+      #   cdt "$CDT_T_STEP" hover "$PAGE_ID" <uid>              && ishot hover-<label>
+      #   cdt "$CDT_T_STEP" click "$PAGE_ID" <uid>              && ishot <label>-open
+      #   cdt "$CDT_T_STEP" fill  "$PAGE_ID" <uid> "<value>"    && ishot <label>-filled
+      #   cdt "$CDT_T_STEP" press_key "$PAGE_ID" Enter          && ishot <label>-submitted
+      #   cdt "$CDT_T_STEP" take_snapshot "$PAGE_ID" --filePath "$INTERACTION_DIR/snapshot.txt"
+      # Console output since navigation.
+      cdt "$CDT_T_STEP" list_console_messages "$PAGE_ID" > "$INTERACTION_DIR/console.txt" 2>/dev/null || true
     else
       echo "  new_page FAILED: $DEV_URL"
     fi
-    $CDT stop >/dev/null 2>&1
+    cdt_stop
   else
-    echo "  chrome-devtools start FAILED (npx could not fetch the driver, or Chrome did not launch from $CHROME_BIN)"
+    echo "  start FAILED (npx fetch, Chrome at $CHROME_BIN, or the ${CDT_T_START}s ceiling)"
   fi
 
   if [ "$ICAPTURED" -gt 0 ]; then
@@ -259,9 +278,9 @@ else
 fi
 ```
 
-`wait_for` is MCP-only: where a state needs settling, poll `$CDT evaluate_script "() => document.readyState" --pageId "$PAGE_ID"` for `complete`. The driver is Chromium-only; Firefox and WebKit stay on `npx playwright screenshot -b firefox|webkit`, which this section never replaces.
+`wait_for` is MCP-only: where a state needs settling, poll `cdt "$CDT_T_STEP" evaluate_script "() => document.readyState" --pageId "$PAGE_ID"` for `complete`. The driver is Chromium-only; Firefox and WebKit stay on `npx playwright screenshot -b firefox|webkit`.
 
-Carry `$INTERACTION_STATUS` into the report as the `**Interaction captures:**` field and the `<audit_pillars>` Experience Design evidence. **Never report an interaction state you did not capture** — with the key off, or the section skipped, interaction findings are code-derived and say so.
+Carry `$INTERACTION_STATUS` into the report's `**Interaction captures:**` field. **Never report an interaction state you did not capture** — key off or section skipped, interaction findings are code-derived and say so.
 
 <!-- /gsd:ui-interaction-capture -->
 
