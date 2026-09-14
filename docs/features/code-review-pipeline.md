@@ -165,6 +165,13 @@ renumbered finding shows under both IDs until the old row is decided; the marker
 A run that changes nothing rewrites nothing, so a re-executed phase does not produce a docs commit
 with no content.
 
+One residual is concurrency: the ledger is read, rebuilt and written whole, with no lock. Two
+dispatchers can run this step (`code_review_gate` and `code-review-fix`'s `record_disposition`) and
+a human is invited to hand-edit the file, so two writers overlapping would lose one's update. This is
+the shape #3780 reported for `WINDOWS.md` under parallel executors, closed there by a cross-process
+lock (#4681); the disposition step does not take that lock. No lost update has been reproduced; the
+window is stated so it is not mistaken for a guarantee.
+
 The record is a sibling artifact rather than a section inside REVIEW.md because `--auto`'s
 re-review loop rewrites REVIEW.md on every iteration — a ledger kept inside it would not survive
 the next pass — and because REVIEW.md has a single writer (`gsd-code-reviewer`) that the gate is
