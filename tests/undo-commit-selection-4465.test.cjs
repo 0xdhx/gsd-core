@@ -78,12 +78,31 @@ describe('#4465: undo commit selection is bounded', () => {
 
   test('C: both modes anchor on the phase directory via PHASE_START', () => {
     assert.ok(
-      /PHASE_START=\$\(git log --format="%H" --diff-filter=A -- "\$\{PHASE_DIR\}"/.test(bash),
-      'undo.md must derive PHASE_START from the phase directory (the #3995 anchor)',
+      /PHASE_START=\$\(git -C "\$\{PROJECT_ROOT:-\.\}" log --format="%H" --diff-filter=A -- "\$\{PHASE_DIR\}"/.test(bash),
+      'undo.md must derive PHASE_START from the phase directory (the #3995 anchor), from the project root',
     );
     // Two derivations: one for MODE=phase, one for MODE=plan.
     const anchors = (bash.match(/--diff-filter=A -- "\$\{PHASE_DIR\}"/g) || []).length;
     assert.equal(anchors, 2, 'both --phase and --plan must anchor on PHASE_DIR (#4465)');
+  });
+
+  test('O: every PHASE_DIR-scoped git call runs from the project root find-phase answers against', () => {
+    // find-phase prints a path relative to the PROJECT ROOT (gsd-tools resolves it before
+    // dispatch), while the workflow's shell stays wherever the user invoked it. A pathspec is
+    // read relative to git's cwd, so from a subdirectory a bare `git log -- "${PHASE_DIR}"`
+    // matches nothing: the anchor comes back empty and a legitimate undo is refused, and the
+    // collision check comes back empty and never fires (review round 5, self-found).
+    const roots = (bash.match(/PROJECT_ROOT=\$\(gsd_run query planning inspect --pick generated_from\.cwd --raw/g) || []).length;
+    assert.equal(roots, 2, 'both modes must take PROJECT_ROOT from the same owner as find-phase (#4465)');
+    const code = bash.split('\n').filter((l) => !/^\s*#/.test(l));
+    const scoped = code.filter((l) => /\bgit\b.*-- "\$\{PHASE_DIR\}"/.test(l));
+    // Per mode: the collision log, the collision ls-tree, the anchor.
+    assert.equal(scoped.length, 6, `expected three PHASE_DIR-scoped git calls per mode; found:\n${scoped.join('\n')}`);
+    // Count every git on the line: one rooted call must not excuse a second, unrooted one.
+    const unrooted = scoped.filter((l) => (l.match(/\bgit\b/g) || []).length
+      !== (l.match(/\bgit -C "\$\{PROJECT_ROOT:-\.\}" (log|ls-tree)\b/g) || []).length);
+    assert.deepEqual(unrooted, [],
+      'a PHASE_DIR-scoped git call not run as git -C "${PROJECT_ROOT:-.}" misreads the path from a subdirectory (#4465)');
   });
 
   test('D: PHASE_DIR is resolved through find-phase, so it is workstream-correct', () => {
@@ -219,8 +238,8 @@ describe('#4465: undo commit selection is bounded', () => {
     for (const g of guards) {
       const code = g.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
       assert.ok(/PHASE_DIR_REUSED=""/.test(code)
-        && /git log -m --no-renames --diff-filter=D --format=%H -- "\$\{PHASE_DIR\}"/.test(code)
-        && /git ls-tree -d "\$_c" -- "\$\{PHASE_DIR\}"/.test(code),
+        && /git -C "\$\{PROJECT_ROOT:-\.\}" log -m --no-renames --diff-filter=D --format=%H -- "\$\{PHASE_DIR\}"/.test(code)
+        && /git -C "\$\{PROJECT_ROOT:-\.\}" ls-tree -d "\$_c" -- "\$\{PHASE_DIR\}"/.test(code),
         `each guard fence must refuse a path that history shows was vacated (#4465):\n${code}`);
       // No second reader of the archive layout inside the collision check.
       const collision = code.slice(code.indexOf('PHASE_DIR_REUSED=""'));
@@ -314,8 +333,10 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     (b) => b.includes('PHASE_DIR=$(gsd_run query find-phase "${TARGET_PHASE}"'));
   const phaseArchivedGuard = fenceWhere(bodies, 'phase archived guard',
     (b) => b.includes('PHASE_DIR_ARCHIVED=""') && !b.includes('PLAN_PHASE'));
+  // Located loosely on purpose: shape test C pins the anchor's spelling, and a locator that
+  // pinned it too would turn a spelling change into "no such fence" instead of a C failure.
   const phaseAnchor = fenceWhere(bodies, 'phase anchor',
-    (b) => b.includes('PHASE_START=$(git log') && !b.includes('PLAN_PHASE'));
+    (b) => b.includes('PHASE_START=$(') && !b.includes('PLAN_PHASE'));
   const phaseSelect = fenceWhere(bodies, 'phase select',
     (b) => b.includes('grep -E "\\(0*${TARGET_PHASE}'));
   // gather_commits, MODE=plan: resolve+anchor → select
@@ -335,7 +356,9 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
   // logic, not the runtime's variable transport between blocks.
   const GSD_RUN = 'gsd_run() { node "$GSD_TOOLS_BIN" "$@"; }';
 
-  function runFences(cwd, seed, fences, tail = '', extraEnv = {}) {
+  // `runIn` is the directory the shell starts in, when it is not the fixture root: the user
+  // can invoke /gsd:undo from anywhere inside the project.
+  function runFences(cwd, seed, fences, tail = '', extraEnv = {}, runIn = cwd) {
     const script = [seed, GSD_RUN, ...fences, tail].join('\n');
     const env = { ...process.env, GSD_TOOLS_BIN, HOME: cwd };
     // A developer's active workstream must not leak into the fixture; a test that wants
@@ -343,7 +366,7 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     delete env.GSD_WORKSTREAM;
     delete env.GSD_PROJECT;
     Object.assign(env, extraEnv);
-    const r = runHookSeam('-c', [script], { interpreter: 'bash', cwd, env, timeoutMs: PROBE_TIMEOUT_MS });
+    const r = runHookSeam('-c', [script], { interpreter: 'bash', cwd: runIn, env, timeoutMs: PROBE_TIMEOUT_MS });
     throwIfFailed(r, 'bash <undo.md fences>');
     return r.stdout;
   }
@@ -574,11 +597,11 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), ['feat(03-01): add beta feature flag']);
   });
 
-  test('the collision guard reads THIS path\'s history: a same-named archive entry does not refuse', (t) => {
-    // The evidence the refusal claims is "this exact path was vacated and re-created", and an
-    // entry of the same name elsewhere under milestones/ is not that. Round 2 pinned it for a
-    // stray FILE against the old layout glob; round 4 keys the check on history, so the entry
-    // is irrelevant by construction and this pins that it stays so.
+  test('false-positive control: a same-named entry under milestones/ does not refuse a never-vacated path', (t) => {
+    // A CONTROL, not a proof the collision check works: with the check deleted this still
+    // passes. What it catches is the opposite failure -- a check that refuses on a NAME it
+    // finds under milestones/ rather than on this path's history, which is the layout-keyed
+    // shape round 4 replaced. Round 2 pinned it for a stray FILE against the old glob.
     const cwd = createTempGitProject('gsd-4465-file-twin-');
     t.after(() => cleanup(cwd));
     seedPhase(cwd, '06-live', { '06-01-PLAN.md': '# live\n' });
@@ -598,10 +621,10 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     ], 'the undo must still work');
   });
 
-  test('the collision guard ignores a same-named phase dir under a malformed milestone dir', (t) => {
-    // `vnondigit-phases` is not a milestone either reader of the archive tree admits, and this
-    // live path was never vacated. A refusal here would be keyed on a directory name, which is
-    // the layout-matching the round-4 history check replaced.
+  test('false-positive control: a same-named phase dir under a malformed milestone dir does not refuse', (t) => {
+    // A CONTROL, like the one above: it passes with the collision check deleted, and fails only
+    // if the check starts refusing on a directory name. `vnondigit-phases` is not a milestone
+    // either reader of the archive tree admits, and this live path was never vacated.
     const cwd = createTempGitProject('gsd-4465-malformed-');
     t.after(() => cleanup(cwd));
     seedPhase(cwd, '05-live', { '05-01-PLAN.md': '# live\n' });
@@ -784,26 +807,122 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     assert.ok(out.includes('UNDO_RANGE=[]'), `got:\n${out}`);
   });
 
-  test('the collision check is not tripped by an ordinary deleted file inside a live phase', (t) => {
-    // The vacancy test is on the DIRECTORY (`ls-tree -d` at the deleting commit), so dropping
-    // one plan file from a phase that still exists is not a previous occupant.
+  function droppedPlanFixture() {
     const cwd = createTempGitProject('gsd-4465-dropplan-');
-    t.after(() => cleanup(cwd));
     commitFile(cwd, '.planning/phases/03-auth/03-01-PLAN.md', '# one\n', 'docs(03-01): plan one');
     commitFile(cwd, '.planning/phases/03-auth/03-02-PLAN.md', '# two\n', 'docs(03-02): plan two');
     gitOrThrow(['rm', '-q', '.planning/phases/03-auth/03-02-PLAN.md'], { cwd });
     gitOrThrow(['commit', '-q', '-m', 'docs(03-02): drop plan two'], { cwd });
     commitFile(cwd, 'src/auth.js', 'a\n', 'feat(03-01): auth work');
+    return cwd;
+  }
+  const DROPPED_PLAN_PHASE = [
+    'feat(03-01): auth work',
+    'docs(03-02): drop plan two',
+    'docs(03-02): plan two',
+    'docs(03-01): plan one',
+  ];
+
+  test('the collision check is not tripped by an ordinary deleted file inside a live phase', (t) => {
+    // The vacancy test is on the DIRECTORY (`ls-tree -d` at the deleting commit), so dropping
+    // one plan file from a phase that still exists is not a previous occupant.
+    const cwd = droppedPlanFixture();
+    t.after(() => cleanup(cwd));
     const out = runFences(cwd, 'TARGET_PHASE=03',
       [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
       'echo "REUSED=[${PHASE_DIR_REUSED}]"');
     assert.ok(out.includes('REUSED=[]'), `a dropped plan file is not a vacated phase; got:\n${out}`);
-    assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), [
-      'feat(03-01): auth work',
-      'docs(03-02): drop plan two',
-      'docs(03-02): plan two',
-      'docs(03-01): plan one',
-    ], 'the whole phase must still be selectable');
+    assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), DROPPED_PLAN_PHASE,
+      'the whole phase must still be selectable');
+  });
+
+  // Review round 5, self-found: the user can run /gsd:undo from anywhere inside the project.
+  // find-phase answers relative to the PROJECT ROOT; a pathspec is read relative to git's cwd.
+  // Every test above runs from the fixture root, where the two coincide and the mismatch is
+  // invisible. These run the same fences from `sub/dir`.
+  function fromSubdir(cwd) {
+    const runIn = path.join(cwd, 'sub', 'dir');
+    fs.mkdirSync(runIn, { recursive: true });
+    return (seed, fences, tail = '', extraEnv = {}) =>
+      runFences(cwd, seed, fences, tail, extraEnv, runIn);
+  }
+
+  test('from a subdirectory: --phase and --plan select exactly what they select at the root', (t) => {
+    const cwd = multiMilestoneFixture();
+    t.after(() => cleanup(cwd));
+    const run = fromSubdir(cwd);
+    const report = 'printf "PHASE_DIR=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_DIR" "$UNDO_RANGE"';
+    for (const [seed, fences] of [
+      ['TARGET_PHASE=03', [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect]],
+      ['TARGET_PLAN=03-01', [planAnchor, planSelect]],
+    ]) {
+      const out = run(seed, fences, report);
+      // The resolver half: find-phase did find the project from here, so a failure below is
+      // the git half's, not a lookup that never happened.
+      assert.ok(out.includes('PHASE_DIR=[.planning/phases/03-beta]'), `${seed}: got:\n${out}`);
+      assert.ok(!out.includes('UNDO_RANGE=[]'), `${seed}: the anchor must resolve from a subdirectory; got:\n${out}`);
+      assert.deepEqual(subjects(out.replace(/(PHASE_DIR|UNDO_RANGE)=.*\n?/g, '')),
+        ['feat(03-01): add beta feature flag'], `${seed}: from sub/dir`);
+    }
+  });
+
+  test('from a subdirectory: a re-created path is still refused (both layouts, both modes)', (t) => {
+    const report = 'printf "REUSED=[%s]\\nUNDO_RANGE=[%s]\\n" "$(git log -1 --format=%s "$PHASE_DIR_REUSED" 2>/dev/null)" "$UNDO_RANGE"';
+    for (const [label, build, vacatedBy, env] of [
+      ['flat archive', reusedSlugFixture, 'chore: archive v1.0', {}],
+      ['ws-* archive', () => workstreamArchiveFixture({ recreate: true }), 'chore: complete workstream feat', WS_FEAT],
+    ]) {
+      const cwd = build();
+      t.after(() => cleanup(cwd));
+      const run = fromSubdir(cwd);
+      for (const [seed, fences] of [
+        ['TARGET_PHASE=03', [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect]],
+        ['TARGET_PLAN=03-01', [planAnchor, planSelect]],
+      ]) {
+        const out = run(seed, fences, report, env);
+        assert.ok(out.includes(`REUSED=[${vacatedBy}]`),
+          `${label}, ${seed}: the collision check must see the vacancy from sub/dir; got:\n${out}`);
+        assert.ok(out.includes('UNDO_RANGE=[]'), `${label}, ${seed}: got:\n${out}`);
+        assert.deepEqual(subjects(out.replace(/(REUSED|UNDO_RANGE)=.*\n?/g, '')), [], `${label}, ${seed}`);
+      }
+    }
+  });
+
+  test('from a subdirectory: a dropped plan file still does not refuse (both modes)', (t) => {
+    // The other direction. An `ls-tree` that misreads the path lists nothing, and "lists nothing"
+    // is exactly what the check reads as "the directory went away": a mis-rooted ls-tree does not
+    // miss the collision, it refuses every phase that ever lost a file.
+    const cwd = droppedPlanFixture();
+    t.after(() => cleanup(cwd));
+    const run = fromSubdir(cwd);
+    for (const [seed, fences, expected] of [
+      ['TARGET_PHASE=03', [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect], DROPPED_PLAN_PHASE],
+      ['TARGET_PLAN=03-02', [planAnchor, planSelect], ['docs(03-02): drop plan two', 'docs(03-02): plan two']],
+    ]) {
+      const out = run(seed, fences, 'echo "REUSED=[${PHASE_DIR_REUSED}]"');
+      assert.ok(out.includes('REUSED=[]'), `${seed}: a dropped plan file is not a vacated phase; got:\n${out}`);
+      assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), expected, `${seed}: from sub/dir`);
+    }
+  });
+
+  test('control: the root is the PROJECT root, not the repository top level', (t) => {
+    // A project need not sit at the top of its repository. find-phase answers relative to the
+    // directory holding .planning/, so `git rev-parse --show-toplevel` would be the wrong -C
+    // here; generated_from.cwd is the directory find-phase itself resolved against. Run from the
+    // project root, so this pins the choice of root, not the subdirectory case above.
+    const repo = createFixture({ prefix: 'gsd-4465-nested-', planning: false, git: true, projectDoc: false });
+    t.after(() => cleanup(repo));
+    const project = path.join(repo, 'app');
+    commitFile(repo, 'app/.planning/phases/03-auth/03-01-PLAN.md', '# nested\n', 'docs(03-01): nested plan');
+    commitFile(repo, 'app/src/a.js', 'a\n', 'feat(03-01): nested work');
+    const out = runFences(repo, 'TARGET_PHASE=03',
+      [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
+      'printf "PROJECT_ROOT=[%s]\\n" "$PROJECT_ROOT"', {}, project);
+    assert.ok(/PROJECT_ROOT=\[.*[\\/]app\]/.test(out), `expected the nested project's root; got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/PROJECT_ROOT=.*\n?/, '')), [
+      'feat(03-01): nested work',
+      'docs(03-01): nested plan',
+    ]);
   });
 
   test('single-milestone selection is unchanged: every phase commit, none from a later phase', (t) => {

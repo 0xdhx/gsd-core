@@ -84,6 +84,11 @@ phase directory — not the root's same-numbered one.
 
 ```bash
 PHASE_DIR=$(gsd_run query find-phase "${TARGET_PHASE}" --raw 2>/dev/null)
+# find-phase answers relative to the PROJECT ROOT -- gsd-tools resolves it before dispatch --
+# not to this shell's cwd, so from a subdirectory a bare `git log -- "${PHASE_DIR}"` looks in
+# the wrong place and every path-scoped git call below comes back empty. Take the root from the
+# same owner and run those calls there. Unresolved, `.` keeps the behaviour at the root.
+PROJECT_ROOT=$(gsd_run query planning inspect --pick generated_from.cwd --raw 2>/dev/null)
 ```
 
 If `PHASE_DIR` is empty, the phase does not exist in the active scope:
@@ -141,8 +146,8 @@ esac
 # what separates "the directory went away" from an ordinary deleted plan file.
 PHASE_DIR_REUSED=""; PHASE_DIR_LIVE=""
 if [ -n "${PHASE_DIR}" ]; then
-  for _c in $(git log -m --no-renames --diff-filter=D --format=%H -- "${PHASE_DIR}" 2>/dev/null); do
-    if [ -z "$(git ls-tree -d "$_c" -- "${PHASE_DIR}" 2>/dev/null)" ]; then
+  for _c in $(git -C "${PROJECT_ROOT:-.}" log -m --no-renames --diff-filter=D --format=%H -- "${PHASE_DIR}" 2>/dev/null); do
+    if [ -z "$(git -C "${PROJECT_ROOT:-.}" ls-tree -d "$_c" -- "${PHASE_DIR}" 2>/dev/null)" ]; then
       PHASE_DIR_LIVE="${PHASE_DIR}"; PHASE_DIR_REUSED="$_c"; PHASE_DIR=""; break
     fi
   done
@@ -170,7 +175,7 @@ Derive the selection window from `PHASE_DIR` (the `#3995` anchor, shared with
 the phase's own directory, and the tip is `HEAD`.
 
 ```bash
-PHASE_START=$(git log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
+PHASE_START=$(git -C "${PROJECT_ROOT:-.}" log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
 UNDO_RANGE=""
 if [ -n "$PHASE_START" ]; then
   if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
@@ -222,6 +227,8 @@ phase number only within its milestone and workstream.
 ```bash
 PLAN_PHASE="${TARGET_PLAN%%-*}"
 PHASE_DIR=$(gsd_run query find-phase "${PLAN_PHASE}" --raw 2>/dev/null)
+# Project-root-relative, exactly as in MODE=phase: path-scoped git calls run from the root.
+PROJECT_ROOT=$(gsd_run query planning inspect --pick generated_from.cwd --raw 2>/dev/null)
 # Same archived-resolution refusal as MODE=phase, and for the same reason — an archived
 # anchor selects a LATER milestone's same-numbered phase. Blanking PHASE_DIR keeps the
 # fail-closed rule below load-bearing.
@@ -235,13 +242,13 @@ esac
 # whatever vacated it. Ask git, not a layout glob. Fail closed; `--last N` is the route.
 PHASE_DIR_REUSED=""; PHASE_DIR_LIVE=""
 if [ -n "${PHASE_DIR}" ]; then
-  for _c in $(git log -m --no-renames --diff-filter=D --format=%H -- "${PHASE_DIR}" 2>/dev/null); do
-    if [ -z "$(git ls-tree -d "$_c" -- "${PHASE_DIR}" 2>/dev/null)" ]; then
+  for _c in $(git -C "${PROJECT_ROOT:-.}" log -m --no-renames --diff-filter=D --format=%H -- "${PHASE_DIR}" 2>/dev/null); do
+    if [ -z "$(git -C "${PROJECT_ROOT:-.}" ls-tree -d "$_c" -- "${PHASE_DIR}" 2>/dev/null)" ]; then
       PHASE_DIR_LIVE="${PHASE_DIR}"; PHASE_DIR_REUSED="$_c"; PHASE_DIR=""; break
     fi
   done
 fi
-PHASE_START=$(git log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
+PHASE_START=$(git -C "${PROJECT_ROOT:-.}" log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
 UNDO_RANGE=""
 if [ -n "$PHASE_START" ]; then
   if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
