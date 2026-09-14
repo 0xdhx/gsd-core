@@ -386,10 +386,10 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
   const ID_RE = /^###\s+((?:CR|BL|WR|IN)-\d+)\s*:\s*(.*)\$/;
   // BL- is Critical-tier-equivalent to CR- (gsd-code-reviewer.md 'Label equivalence').
   const sectionSev = new Map();
-  // PREFIX severity -- the fallback, used when the finding sat under no recognized section (a
-  // carried row from an earlier review, or a review that does not use the documented headings).
+  // PREFIX severity -- the LAST resort, an inference from the id alone. Used only when neither
+  // the current review's section nor a severity this ledger already RECORDED is available; the
+  // precedence and the reason for it are stated at sev(), defined below once identity is known.
   const prefixSev = (id) => ({ CR: 'critical', BL: 'critical', WR: 'warning' }[id.split('-')[0]] || 'info');
-  const sev = (id) => sectionSev.get(id) || prefixSev(id);
   const headings = (text) => {
     // Fenced blocks are skipped: review and fix bodies quote example findings, and a heading
     // inside a fence is an illustration, not a finding.
@@ -425,7 +425,8 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
   // with the
   // ledger untouched -- the freeze the reconciliation path exists to prevent.
   const reviewText = fs.existsSync(process.env.REVIEW_FILE) ? fs.readFileSync(process.env.REVIEW_FILE, 'utf-8') : '';
-  // SEVERITY COMES FROM THE SECTION FIRST, the id prefix second. The section heading is the
+  // SEVERITY COMES FROM THE SECTION FIRST, the recorded ledger value second, the id prefix
+  // third (the full precedence is at sev(), below the identity check). The section heading is the
   // reviewer's OWN statement of a finding's severity -- gsd-code-reviewer.md emits findings under
   // '## Critical Issues' / '## Warnings' / '## Info' -- and this walker already visits every line,
   // so the signal was in hand and discarded. Deriving from the prefix alone means a reviewer who
@@ -488,6 +489,22 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
   // does not identify a finding: driven, a prior 'CR-01 fixed' rendered a brand-new CR-01 'fixed'.
   // Not a fifth table column -- the Source cell is already the hand-edited, pipe-escaping one.
   const priorTitle = new Map();
+  // SEVERITY, READ BACK. The ledger has always WRITTEN a severity for every row -- in the table's
+  // Severity cell and in the frontmatter's 'severity:' key -- and until this map existed nothing
+  // read either back: the row regex discarded the cell as [^|]*, the frontmatter walk collected
+  // only titles, and a CARRIED row was rebuilt through sev() from the id prefix, because
+  // sectionSev holds only findings the CURRENT review reports. So a WR-04 the reviewer filed under
+  // '## Critical Issues' was recorded 'critical', a human deferred it, and the next run -- the
+  // review no longer reporting it -- silently re-recorded it 'warning'. The one artifact whose
+  // purpose is remembering a finding's severity lost it on the second run, in the unsafe
+  // direction. Driven by executing the shipped script twice (round 11).
+  // The table cell is read first (it is the human-facing surface, and the one the disposition
+  // already comes from); the frontmatter key is the fallback for a hand-mangled cell. Both are
+  // ENUM-validated -- a value outside critical|warning|info is not a severity and is ignored, so
+  // the row falls through to inference rather than carrying garbage (ADR-227, the same rule the
+  // disposition column takes).
+  const SEV_VOCAB = ['critical', 'warning', 'info'];
+  const priorSev = new Map();
   // Ids whose decision could not be carried: the id now names a DIFFERENT finding. REPORTED, not
   // re-homed -- rows key on the id, and two under one id is an ambiguity. The note does NOT claim the
   // old row is in git: committing is gated on commit_docs. See docs/features/code-review-pipeline.md.
@@ -510,7 +527,9 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
       // to open -- safe. A typo INSIDE [a-z] was unsafe. The parser failed open in the one
       // direction that matters. A row that does not match now yields no prior entry, so the row
       // falls back to 'open' -- the safe default, by the same path the capital-D case took.
-      const m = l.match(/^\|\s*((?:CR|BL|WR|IN)-\d+)\s*\|[^|]*\|\s*(open|fixed|skipped|deferred)\s*\|\s*(.*?)\s*\|?\s*\$/);
+      // The Severity cell is CAPTURED, not skipped: it is the value the carry-forward below has to
+      // preserve, and skipping it (the previous [^|]*) is how a carried row lost its tier.
+      const m = l.match(/^\|\s*((?:CR|BL|WR|IN)-\d+)\s*\|\s*([^|]*?)\s*\|\s*(open|fixed|skipped|deferred)\s*\|\s*(.*?)\s*\|?\s*\$/);
       // Strip the carried marker before storing: it is rendered from the carried flag, so
       // leaving it on the stored value would re-append it every run — the cell grows without
       // bound AND the file changes on every run, defeating the unchanged-run check below.
@@ -523,13 +542,21 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
       // costs nothing real: on a carried row the render puts the phrase straight back, and on a
       // current row the phrase was self-contradictory to begin with. The unbounded quantifier is
       // what had to go, not the strip itself.
-      if (m) prior.set(m[1], { d: m[2], src: m[3].replace(/\s*\(not in the current review\)\s*\$/, '') });
+      if (m) {
+        prior.set(m[1], { d: m[3], src: m[4].replace(/\s*\(not in the current review\)\s*\$/, '') });
+        // The table wins over the frontmatter (set unconditionally here, only-if-absent below),
+        // whichever order the two appear in the file.
+        if (SEV_VOCAB.indexOf(m[2]) !== -1) priorSev.set(m[1], m[2]);
+      }
       // Frontmatter is walked in the same pass, as a SECTIONED list rather than by one line shape.
       if (/^titles: json\s*\$/.test(l)) { _fmJson = true; continue; }
       var msec = l.match(/^(findings):\s*\$/);
       if (msec) { _fmSec = msec[1]; _fmId = null; continue; }
       var mi = l.match(/^  - id: ((?:CR|BL|WR|IN)-\d+)\s*\$/);
       if (mi && _fmSec) { _fmId = mi[1]; continue; }
+      // The frontmatter's own copy of the severity -- the fallback when the table cell is unusable.
+      var msv = l.match(/^    severity: (critical|warning|info)\s*\$/);
+      if (msv && _fmId && _fmSec === 'findings') { if (!priorSev.has(_fmId)) priorSev.set(_fmId, msv[1]); continue; }
       var mkv = l.match(/^    title: (.*)\$/);
       if (mkv && _fmId && _fmSec === 'findings') {
         var _v = mkv[1];
@@ -590,6 +617,15 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
   // Inherited only while the id names the SAME finding. An ABSENT prior title inherits: a
   // pre-titles ledger has none, and refusing would reset every decision in it.
   const sameFinding = (id) => !priorTitle.has(id) || !title.has(id) || sameTitle(priorTitle.get(id), title.get(id));
+  // SEVERITY PRECEDENCE: the current review's SECTION (the reviewer's own statement, this run),
+  // then the severity this ledger RECORDED (an earlier reviewer's statement, persisted), then the
+  // id PREFIX (an inference). A recorded value is inherited only while the id still names the
+  // SAME finding -- the identity rule the disposition already obeys -- so a reused id starts from
+  // its own review's section or its prefix, never from the finding it replaced. A carried row is
+  // absent from the current review, so sameFinding() is true for it by construction and its
+  // recorded severity is what it keeps. Defined here, below the identity check, because it
+  // depends on it.
+  const sev = (id) => sectionSev.get(id) || (priorSev.has(id) && sameFinding(id) ? priorSev.get(id) : prefixSev(id));
   const row = (id) => {
     if (applied.has(id)) { const a = applied.get(id); return { id, sev: sev(id), d: a.d, src: a.src, t: title.has(id) ? title.get(id) : a.t }; }
     const was = prior.get(id);
