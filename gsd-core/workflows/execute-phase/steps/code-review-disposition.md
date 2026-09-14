@@ -751,6 +751,14 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
     console.log('Code review disposition unchanged: ' + open + ' of ' + rows.length + ' finding(s) open' + staleNote + unparsedNote + reusedNote);
     return;
   }
+  // READ-MODIFY-WRITE, NO LOCK. The ledger is rendered whole from a read taken above, and nothing
+  // serializes two writers: this step has two dispatchers (execute-phase's gate and
+  // code-review-fix's record_disposition) plus a human the legend invites to hand-edit, so a
+  // lost update is a real window, not a theoretical one. Same shape as #3780 (WINDOWS.md
+  // append under parallel executors), which #4681 closed with a cross-process lock in
+  // src/broken-windows.cts. NOT taken here: this is a shell-embedded script with no build
+  // dependency on the compiled tree, and adopting the lock module is its own change. Residual,
+  // stated in docs/features/code-review-pipeline.md; not reproduced as a lost update.
   fs.writeFileSync(process.env.DISPOSITION_FILE, render(new Date().toISOString()));
   console.log('Code review disposition recorded: ' + open + ' of ' + rows.length + ' finding(s) open' + staleNote + unparsedNote + reusedNote + ' — ' + process.env.DISPOSITION_FILE);
   })();
