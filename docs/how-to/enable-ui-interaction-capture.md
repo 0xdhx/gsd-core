@@ -59,7 +59,10 @@ The audit's static captures land where they always did. With the key on and a Ch
 resolved, an `interaction/` directory beside them holds `baseline.png`, `focus-first.png`
 (focus ring on the first focusable element), one capture per interaction the auditor drove
 from your UI-SPEC's interactive components, the accessibility snapshot it used for element
-ids, and the page's console output. `UI-REVIEW.md` carries the outcome on its own line:
+ids, and the page's console output. The audit's `.gitignore` gate covers that `interaction/`
+directory as a whole — the snapshot carries whatever was typed into forms and the console output
+can carry tokens — so a `git add .` never commits it, and a project whose `.gitignore` predates
+the directory is upgraded on the next audit. `UI-REVIEW.md` carries the outcome on its own line:
 
 ```
 **Interaction captures:** captured (4 state(s), 0 failed) in .planning/ui-reviews/03-.../interaction

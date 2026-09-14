@@ -24,6 +24,8 @@
  *      npx fetch or Chrome launch cannot wedge the audit), and the driver may
  *      write only under the capture directory (--workspace, never
  *      --allowUnrestrictedPaths).
+ *   5. The gitignore gate covers the capture directory as a whole, and an
+ *      existing .gitignore is upgraded rather than left as written.
  *
  * The auditor carries no gsd_run resolver, so the key travels through the
  * <config> block /gsd-ui-review builds; the fence under test consumes the
@@ -679,6 +681,75 @@ describe('interaction fence (bash, stub driver)', { skip: HAS_BASH ? false : 'ba
   });
 });
 
+// ---------------------------------------------------------------------------
+// The gitignore gate: run it under bash against a fresh and a pre-existing file.
+// ---------------------------------------------------------------------------
+
+function gitignoreGateFence() {
+  const lines = splitLines(fs.readFileSync(AUDITOR_PATH, 'utf8'));
+  const out = [];
+  let inSection = false;
+  let inFence = false;
+  for (const line of lines) {
+    if (!inSection) { if (line.includes('<gitignore_gate>')) inSection = true; continue; }
+    if (line.includes('</gitignore_gate>')) break;
+    if (!inFence) { if (line.trim() === `${FENCE}bash`) inFence = true; continue; }
+    if (line.trim() === FENCE) break;
+    out.push(line);
+  }
+  assert.ok(out.length > 0, '<gitignore_gate> must carry a bash fence');
+  return out;
+}
+
+function runGitignoreGate(t, seed) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ui-gitignore-'));
+  t.after(() => cleanup(tmp));
+  if (seed !== undefined) {
+    fs.mkdirSync(path.join(tmp, '.planning', 'ui-reviews'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.planning', 'ui-reviews', '.gitignore'), seed);
+  }
+  const script = path.join(tmp, 'gate.sh');
+  fs.writeFileSync(script, ['#!/bin/bash', 'set -e', ...gitignoreGateFence(), ''].join('\n'));
+  const run = () => spawnSync('bash', [script], { encoding: 'utf8', timeout: FENCE_RUN_TIMEOUT_MS, cwd: tmp });
+  const read = () => splitLines(fs.readFileSync(path.join(tmp, '.planning', 'ui-reviews', '.gitignore'), 'utf8')).filter(Boolean);
+  return { tmp, run, read };
+}
+
+describe('gitignore gate (bash)', { skip: HAS_BASH ? false : 'bash not on PATH' }, () => {
+  const REQUIRED = ['*.png', '*.webp', '*.jpg', '*.jpeg', '*.gif', '*.bmp', '*.tiff', 'interaction/'];
+
+  test('aFreshFileCoversTheImagesAndTheCaptureDirectory', (t) => {
+    const g = runGitignoreGate(t);
+    const r = g.run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Created \.planning\/ui-reviews\/\.gitignore/);
+    const lines = g.read();
+    for (const p of REQUIRED) assert.ok(lines.includes(p), `${p} must be ignored`);
+    assert.ok(lines.includes('interaction/'), 'snapshot.txt and console.txt are covered by the directory, not by an extension');
+  });
+
+  test('anExistingImageOnlyFileGainsTheCaptureDirectoryAndKeepsItsOwnLines', (t) => {
+    // The shape every project that ran an audit before interaction capture existed has on disk.
+    const seed = '# Screenshot files — never commit binary assets\n*.png\n*.webp\n*.jpg\n*.jpeg\n*.gif\n*.bmp\n*.tiff\n';
+    const g = runGitignoreGate(t, seed);
+    const r = g.run();
+    assert.equal(r.status, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, /Created/, 'an existing file is upgraded in place, never recreated');
+    const lines = g.read();
+    assert.equal(lines[0], '# Screenshot files — never commit binary assets', 'the user\'s file keeps its own header');
+    assert.ok(lines.includes('interaction/'), 'a pre-existing file must not stay image-only');
+    assert.equal(lines.filter((l) => l === '*.png').length, 1, 'present patterns are not duplicated');
+  });
+
+  test('theGateIsIdempotent', (t) => {
+    const g = runGitignoreGate(t);
+    assert.equal(g.run().status, 0);
+    const once = g.read();
+    assert.equal(g.run().status, 0);
+    assert.deepEqual(g.read(), once, 'a second run appends nothing');
+  });
+});
+
 describe('documentation', () => {
   test('configurationMdDocumentsTheKeyAsDefaultOff', () => {
     const row = splitLines(fs.readFileSync(DOCS_CONFIG_PATH, 'utf8'))
@@ -696,11 +767,12 @@ describe('documentation', () => {
     assert.ok(src.includes('CHROME_BIN'));
   });
 
-  test('howToNamesTheFloorAndTheCeilings', () => {
+  test('howToNamesTheFloorTheCeilingsAndTheGitignoreCoverage', () => {
     const src = fs.readFileSync(HOWTO_PATH, 'utf8');
     assert.ok(src.includes('`^1.9.0`'), 'the floor the fence resolves by default');
     assert.ok(!src.includes('^1.8.0'), 'no stale floor');
     assert.ok(src.includes('CHROME_DEVTOOLS_START_TIMEOUT'));
     assert.ok(src.includes('CHROME_DEVTOOLS_STEP_TIMEOUT'));
+    assert.ok(src.includes('`interaction/`'), 'the directory the gitignore gate covers');
   });
 });

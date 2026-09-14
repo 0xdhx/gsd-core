@@ -78,29 +78,21 @@ If no UI-SPEC exists: audit against abstract 6-pillar standards.
 
 ## Screenshot Storage Safety
 
-**MUST run before any screenshot capture.** Prevents binary files from reaching git history.
+**MUST run before any screenshot capture.** Prevents capture output from reaching git history.
 
 ```bash
 # Ensure directory exists
 mkdir -p .planning/ui-reviews
 
-# Write .gitignore if not present
-if [ ! -f .planning/ui-reviews/.gitignore ]; then
-  cat > .planning/ui-reviews/.gitignore << 'GITIGNORE'
-# Screenshot files — never commit binary assets
-*.png
-*.webp
-*.jpg
-*.jpeg
-*.gif
-*.bmp
-*.tiff
-GITIGNORE
-  echo "Created .planning/ui-reviews/.gitignore"
-fi
+# Append any pattern the file lacks — an older .gitignore is still covered; never rewritten.
+[ -f .planning/ui-reviews/.gitignore ] \
+  || { printf '# UI-audit captures — never commit\n' > .planning/ui-reviews/.gitignore; echo "Created .planning/ui-reviews/.gitignore"; }
+for p in '*.png' '*.webp' '*.jpg' '*.jpeg' '*.gif' '*.bmp' '*.tiff' 'interaction/'; do
+  grep -qxF -- "$p" .planning/ui-reviews/.gitignore || printf '%s\n' "$p" >> .planning/ui-reviews/.gitignore
+done
 ```
 
-This gate runs unconditionally on every audit. The .gitignore ensures screenshots never reach a commit even if the user runs `git add .` before cleanup.
+It keeps capture output out of a commit even after `git add .`: static screenshots by extension, and the `interaction/` directory as a whole (its snapshot carries form values; its console output can carry tokens); a directory pattern covers the next artifact type by construction.
 
 </gitignore_gate>
 
