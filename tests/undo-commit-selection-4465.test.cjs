@@ -116,13 +116,18 @@ describe('#4465: undo commit selection is bounded', () => {
     // the same-repository refusal, and an anchor that must be a commit in this repository.
     const code = extractBashBlocks(content)
       .map((b) => b.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n'));
+    // The COMMON git directory is the repository's identity: a linked worktree has its own per-worktree
+    // git dir but shares the object database, and gsd-tools maps its planning to the MAIN worktree, so a
+    // per-worktree comparison refuses a legitimate undo there (review round 5, third pass).
     const gates = code.filter((b) => /PHASE_DIR_FOREIGN=""/.test(b)
-      && /git rev-parse --absolute-git-dir/.test(b)
-      && /git -C "\$\{PROJECT_ROOT\}" rev-parse --absolute-git-dir/.test(b)
+      && /_gd_here=\$\(_d=\$\(git rev-parse --git-common-dir 2>\/dev\/null\)/.test(b)
+      && /_gd_root=\$\(cd "\$\{PROJECT_ROOT\}" 2>\/dev\/null && _d=\$\(git rev-parse --git-common-dir 2>\/dev\/null\)/.test(b)
       && /PHASE_DIR_FOREIGN="\$\{PROJECT_ROOT\}"; PHASE_DIR=""/.test(b));
     assert.equal(gates.length, 2, `both modes must refuse a phase directory in another repository; found ${gates.length}`);
-    const hardened = (bash.match(/! git cat-file -e "\$\{PHASE_START\}\^\{commit\}" 2>\/dev\/null; then PHASE_START=""; fi/g) || []).length;
-    assert.equal(hardened, 2, 'both modes must blank a PHASE_START this repository does not hold before the root-commit arm');
+    assert.ok(!/--absolute-git-dir/.test(code.join('\n')),
+      'the repository gate must not compare per-worktree git dirs: it refuses a linked worktree');
+    const hardened = (bash.match(/! git merge-base --is-ancestor "\$PHASE_START" HEAD 2>\/dev\/null; then PHASE_START=""; fi/g) || []).length;
+    assert.equal(hardened, 2, 'both modes must blank a PHASE_START outside HEAD\'s own history before the root-commit arm');
     assert.equal((content.match(/PHASE_DIR_FOREIGN/g) || []).length >= 6, true,
       'the refusal must be documented, not only computed');
   });
@@ -990,6 +995,69 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
       'printf "PHASE_START=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_START" "$UNDO_RANGE"', env, child);
     assert.ok(out.includes('PHASE_START=[]') && out.includes('UNDO_RANGE=[]'), `got:\n${out}`);
     assert.deepEqual(subjects(out.replace(/(PHASE_START|UNDO_RANGE)=.*\n?/g, '')), []);
+  });
+
+  // Review round 5, third pass: a LINKED worktree. gsd-tools maps a linked worktree with no
+  // .planning/ of its own to the MAIN worktree (resolveMainWorktreeCwd), so PROJECT_ROOT is the main
+  // checkout while the shell sits in the linked one: two worktrees, one repository. The anchor then
+  // comes from the main branch's history, which the linked HEAD may or may not contain.
+  function linkedWorktreeFixture(t, { branchAfterPhase }) {
+    const main = createTempGitProject('gsd-4465-wt-main-');
+    t.after(() => cleanup(main));
+    const linked = createFixture({ prefix: 'gsd-4465-wt-linked-', planning: false, git: false });
+    t.after(() => cleanup(linked));
+    const phase = () => {
+      seedPhase(main, '03-auth', { '03-01-PLAN.md': '# plan\n' });
+      gitOrThrow(['add', '-A'], { cwd: main });
+      gitOrThrow(['commit', '-q', '-m', 'docs(03-01): phase plan'], { cwd: main });
+      commitFile(main, 'src/a.js', 'a\n', 'feat(03-01): main work');
+    };
+    if (branchAfterPhase) phase();
+    gitOrThrow(['worktree', 'add', '-q', '-b', 'feature', linked], { cwd: main });
+    if (!branchAfterPhase) phase();
+    // No .planning/ in the linked checkout: that is what sends gsd-tools to the main worktree.
+    gitOrThrow(['rm', '-rq', '.planning'], { cwd: linked });
+    gitOrThrow(['commit', '-q', '-m', 'chore: executor worktree without planning'], { cwd: linked });
+    commitFile(linked, 'src/b.js', 'b\n', 'feat(03-01): linked work');
+    return { main, linked };
+  }
+  const LINKED_REPORT = 'printf "ROOT=[%s]\\nFOREIGN=[%s]\\nUNDO_RANGE=[%s]\\n" "$PROJECT_ROOT" "$PHASE_DIR_FOREIGN" "$UNDO_RANGE"';
+  const assertMappedToMain = (out, main, seed) => {
+    // The mapping is what makes this case: were PROJECT_ROOT the linked checkout, nothing would
+    // compare two worktrees and the test would pass vacuously.
+    const root = /ROOT=\[(.*)\]/.exec(out);
+    assert.ok(root && root[1] !== '' && fs.realpathSync(root[1]) === fs.realpathSync(main),
+      `${seed}: planning must resolve to the MAIN worktree from the linked one; got:\n${out}`);
+  };
+
+  test('linked worktree: the main worktree\'s planning is the same repository, and is not refused (both modes)', (t) => {
+    const { main, linked } = linkedWorktreeFixture(t, { branchAfterPhase: true });
+    for (const [seed, fences] of [
+      ['TARGET_PHASE=03', [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect]],
+      ['TARGET_PLAN=03-01', [planAnchor, planSelect]],
+    ]) {
+      const out = runFences(main, seed, fences, LINKED_REPORT, {}, linked);
+      assertMappedToMain(out, main, seed);
+      assert.ok(out.includes('FOREIGN=[]'), `${seed}: a linked worktree is the same repository; got:\n${out}`);
+      assert.deepEqual(subjects(out.replace(/(ROOT|FOREIGN|UNDO_RANGE)=.*\n?/g, '')),
+        ['feat(03-01): linked work', 'feat(03-01): main work', 'docs(03-01): phase plan'], `${seed}`);
+    }
+  });
+
+  test('linked worktree branched BEFORE the phase: an anchor outside HEAD\'s history resolves no range (both modes)', (t) => {
+    // Same repository, so the gate passes -- but the phase started on the main branch after this
+    // branch left it, so the anchor is not in the linked HEAD's history and bounds nothing on it.
+    // Without the ancestry check the window would be every linked commit since the fork.
+    const { main, linked } = linkedWorktreeFixture(t, { branchAfterPhase: false });
+    for (const [seed, fences] of [
+      ['TARGET_PHASE=03', [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect]],
+      ['TARGET_PLAN=03-01', [planAnchor, planSelect]],
+    ]) {
+      const out = runFences(main, seed, fences, LINKED_REPORT, {}, linked);
+      assertMappedToMain(out, main, seed);
+      assert.ok(out.includes('FOREIGN=[]') && out.includes('UNDO_RANGE=[]'), `${seed}: got:\n${out}`);
+      assert.deepEqual(subjects(out.replace(/(ROOT|FOREIGN|UNDO_RANGE)=.*\n?/g, '')), [], `${seed}: nothing may be selected`);
+    }
   });
 
   test('control: the root is the PROJECT root, not the repository top level', (t) => {

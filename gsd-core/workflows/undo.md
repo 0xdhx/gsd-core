@@ -138,11 +138,13 @@ esac
 # The phase directory must live in the SAME repository as the commits this workflow reverts. In a
 # `sub_repos` project, .planning/ sits in a parent repository and the code in child ones; from a
 # child, PROJECT_ROOT is the parent, and an anchor read there is a commit the child has never seen.
-# Compare the two git directories, physically resolved; a different one refuses.
+# Compare the COMMON git directories -- the object database -- physically resolved; a different one
+# refuses. Common, not per-worktree: gsd-tools maps a linked worktree's planning to the MAIN
+# worktree, which is the same repository and holds every commit the linked one does.
 PHASE_DIR_FOREIGN=""
 if [ -n "${PHASE_DIR}" ] && [ -n "${PROJECT_ROOT}" ]; then
-  _gd_here=$(git rev-parse --absolute-git-dir 2>/dev/null) && _gd_here=$(cd "$_gd_here" && pwd -P) || _gd_here=""
-  _gd_root=$(git -C "${PROJECT_ROOT}" rev-parse --absolute-git-dir 2>/dev/null) && _gd_root=$(cd "$_gd_root" && pwd -P) || _gd_root=""
+  _gd_here=$(_d=$(git rev-parse --git-common-dir 2>/dev/null) && [ -n "$_d" ] && cd "$_d" && pwd -P) || _gd_here=""
+  _gd_root=$(cd "${PROJECT_ROOT}" 2>/dev/null && _d=$(git rev-parse --git-common-dir 2>/dev/null) && [ -n "$_d" ] && cd "$_d" && pwd -P) || _gd_root=""
   if [ -z "$_gd_here" ] || [ "$_gd_here" != "$_gd_root" ]; then
     PHASE_DIR_FOREIGN="${PROJECT_ROOT}"; PHASE_DIR=""
   fi
@@ -195,9 +197,10 @@ the phase's own directory, and the tip is `HEAD`.
 
 ```bash
 PHASE_START=$(git -C "${PROJECT_ROOT:-.}" log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
-# Only a commit THIS repository holds may anchor. Any other SHA also has no resolvable parent
-# here, and the root-commit arm below would read that as "no parent" and select all of HEAD.
-if [ -n "$PHASE_START" ] && ! git cat-file -e "${PHASE_START}^{commit}" 2>/dev/null; then PHASE_START=""; fi
+# Only a commit in HEAD's own history may anchor. A SHA from another repository has no resolvable
+# parent here, which the root-commit arm below would read as "root commit" and select all of HEAD;
+# one from another worktree's branch that HEAD does not contain bounds nothing on this branch.
+if [ -n "$PHASE_START" ] && ! git merge-base --is-ancestor "$PHASE_START" HEAD 2>/dev/null; then PHASE_START=""; fi
 UNDO_RANGE=""
 if [ -n "$PHASE_START" ]; then
   if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
@@ -262,8 +265,8 @@ esac
 # Same-repository refusal as MODE=phase: a phase planned in another repository cannot anchor here.
 PHASE_DIR_FOREIGN=""
 if [ -n "${PHASE_DIR}" ] && [ -n "${PROJECT_ROOT}" ]; then
-  _gd_here=$(git rev-parse --absolute-git-dir 2>/dev/null) && _gd_here=$(cd "$_gd_here" && pwd -P) || _gd_here=""
-  _gd_root=$(git -C "${PROJECT_ROOT}" rev-parse --absolute-git-dir 2>/dev/null) && _gd_root=$(cd "$_gd_root" && pwd -P) || _gd_root=""
+  _gd_here=$(_d=$(git rev-parse --git-common-dir 2>/dev/null) && [ -n "$_d" ] && cd "$_d" && pwd -P) || _gd_here=""
+  _gd_root=$(cd "${PROJECT_ROOT}" 2>/dev/null && _d=$(git rev-parse --git-common-dir 2>/dev/null) && [ -n "$_d" ] && cd "$_d" && pwd -P) || _gd_root=""
   if [ -z "$_gd_here" ] || [ "$_gd_here" != "$_gd_root" ]; then
     PHASE_DIR_FOREIGN="${PROJECT_ROOT}"; PHASE_DIR=""
   fi
@@ -280,8 +283,8 @@ if [ -n "${PHASE_DIR}" ]; then
   done
 fi
 PHASE_START=$(git -C "${PROJECT_ROOT:-.}" log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
-# As in MODE=phase: a SHA this repository does not hold never reaches the root-commit arm.
-if [ -n "$PHASE_START" ] && ! git cat-file -e "${PHASE_START}^{commit}" 2>/dev/null; then PHASE_START=""; fi
+# As in MODE=phase: an anchor outside HEAD's own history never reaches the root-commit arm.
+if [ -n "$PHASE_START" ] && ! git merge-base --is-ancestor "$PHASE_START" HEAD 2>/dev/null; then PHASE_START=""; fi
 UNDO_RANGE=""
 if [ -n "$PHASE_START" ]; then
   if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
