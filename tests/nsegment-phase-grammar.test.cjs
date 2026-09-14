@@ -181,8 +181,8 @@ describe('#4568 — plan-phase.md captures the full N-segment --research-phase v
 // ---------------------------------------------------------------------------
 // #4660 — the LETTER axis. #4568 widened the six sites on the segment-count
 // axis only; the canonical grammar also admits an optional single uppercase
-// letter after the leading digits (`12A`, `3A`, `23A.1.2` — documented in
-// docs/CONFIGURATION.md and relied on by `renameIntegerPhases` in
+// letter after the leading digits (`12A`, `3A`, `23A.1.2` — a documented
+// phase-number shape in CONFIGURATION.md, relied on by renameIntegerPhases in
 // src/phase.cts). These tests prove each site's live pattern and the canonical
 // source AGREE on that axis, in both directions, rather than each merely
 // "looking right" in isolation.
