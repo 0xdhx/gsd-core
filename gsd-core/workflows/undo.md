@@ -105,45 +105,47 @@ milestone — where the subject grep matches *their* same-numbered phase. Driven
 two-archived-milestone fixture, `--phase 03` selected v2.0's `feat(03-01): add search index`
 and excluded v1.0's own `feat(03-01): implement auth endpoint`. Feeding that to
 `git revert` is the cross-milestone contamination this workflow exists to close, so it
-fails closed:
+fails closed.
+
+**Two archive layouts exist, and `find-phase` searches only one of them.** The phase locator
+(`listArchiveVersionDirs`, `src/phase-locator.cts`) enumerates both the flat
+`milestones/v<X.Y>-phases/<phase>/` archive and the workstream archive
+`milestones/ws-<name>-<date>/phases/<phase>/` that `workstream complete` writes. `cmdFindPhase`
+builds its own search list and admits only the first (`/^v\d+.*-phases$/`), so a phase that lives
+*only* in a `ws-*` archive resolves to nothing today and the not-found rule above fails closed.
+The refusal below still names both layouts, so it keeps holding if `find-phase` is ever taught the
+second one:
 
 ```bash
-# Match the ARCHIVE LAYOUT, never the bare token `milestones`. cmdFindPhase only ever
-# creates these dirs from /^v\d+.*-phases$/, so `v*-phases` is the discriminator -- and a
-# bare `*/milestones/*` REFUSES A LIVE PHASE whenever a workstream or project is itself
-# named `milestones` (driven: GSD_WORKSTREAM=milestones resolves
-# `.planning/workstreams/milestones/phases/03-live`, which that pattern classifies as
-# archived). Blanking PHASE_DIR is deliberate: the fail-closed rule below then also holds,
-# so no path reaches selection even if this refusal's prose is not honored.
+# Match the ARCHIVE LAYOUTS, never the bare token `milestones`. A bare `*/milestones/*`
+# REFUSES A LIVE PHASE whenever a workstream or project is itself named `milestones`
+# (driven: GSD_WORKSTREAM=milestones resolves `.planning/workstreams/milestones/phases/03-live`,
+# which that pattern classifies as archived). The two shapes are the locator's two:
+# `v<X.Y>-phases/<phase>` and `ws-<name>-<date>/phases/<phase>`. Blanking PHASE_DIR is
+# deliberate: the fail-closed rule below then also holds, so no path reaches selection even if
+# this refusal's prose is not honored.
 PHASE_DIR_ARCHIVED=""
 case "${PHASE_DIR}" in
-  */milestones/v[0-9]*-phases/*|milestones/v[0-9]*-phases/*) PHASE_DIR_ARCHIVED="${PHASE_DIR}"; PHASE_DIR="" ;;
+  */milestones/v[0-9]*-phases/*|milestones/v[0-9]*-phases/*|*/milestones/ws-*/phases/*|milestones/ws-*/phases/*)
+    PHASE_DIR_ARCHIVED="${PHASE_DIR}"; PHASE_DIR="" ;;
 esac
 # A LIVE path can still be a previous occupant's. `--diff-filter=A` does not follow renames,
-# so a later milestone re-creating the same literal directory anchors on the OLDER milestone's
-# add. Nothing is under milestones/ to refuse -- find-phase returned the live dir -- so key on
-# the collision instead: the same basename present under an archived milestone means this path
-# has been used before and the anchor cannot be trusted. Fail closed; `--last N` is the route.
+# so re-creating a literal directory that an earlier milestone or workstream used anchors on
+# the EARLIER occupant's add. Nothing is under milestones/ to refuse -- find-phase returned the
+# live dir -- so ask the question the anchor depends on instead: did this exact path go EMPTY
+# somewhere in HEAD's history and come back? Git history owns that answer for every way a path
+# can be vacated -- a flat milestone archive, `workstream complete` moving the workstream into
+# milestones/ws-<name>-<date>/, a removed phase re-added under the same slug -- where a layout
+# glob answers only for the layouts it spells. `--no-renames` so a move-out reads as the deletion
+# it is at this path; `-m` so a merge that emptied it is seen too; `ls-tree` at that commit is
+# what separates "the directory went away" from an ordinary deleted plan file.
 PHASE_DIR_REUSED=""; PHASE_DIR_LIVE=""
 if [ -n "${PHASE_DIR}" ]; then
-  _pd_base=$(basename "${PHASE_DIR}")
-  _pd_root=${PHASE_DIR%/phases/*}
-  # The suffix strip must actually have fired. A path with no `/phases/` segment is not a
-  # live phase directory this resolver produces, and scanning its own subtree would look in
-  # the wrong place while reading as a clean pass.
-  if [ "$_pd_root" != "${PHASE_DIR}" ]; then
-    for _arch in "${_pd_root}"/milestones/v[0-9]*-phases/"${_pd_base}"; do
-      # `-d`, not `-e`: only a real archived phase DIRECTORY is evidence of prior use, and a
-      # stray regular file must not block a legitimate undo. `v[0-9]*-phases` TRACKS
-      # cmdFindPhase's own /^v\d+.*-phases$/ filter closely enough to reject the malformed
-      # siblings that matter, without claiming to be equivalent to it -- the glob's `*` matches
-      # a newline where the regex's `.` does not, so the shell set is marginally wider. An
-      # unmatched glob stays literal and fails `-d`, which is why no nullglob is needed. See
-      # the shell-state residual below for what this scan does NOT survive.
-      [ -d "$_arch" ] || continue
-      PHASE_DIR_LIVE="${PHASE_DIR}"; PHASE_DIR_REUSED="$_arch"; PHASE_DIR=""; break
-    done
-  fi
+  for _c in $(git log -m --no-renames --diff-filter=D --format=%H -- "${PHASE_DIR}" 2>/dev/null); do
+    if [ -z "$(git ls-tree -d "$_c" -- "${PHASE_DIR}" 2>/dev/null)" ]; then
+      PHASE_DIR_LIVE="${PHASE_DIR}"; PHASE_DIR_REUSED="$_c"; PHASE_DIR=""; break
+    fi
+  done
 fi
 ```
 
@@ -156,9 +158,9 @@ Use /gsd:undo --last N and select commits explicitly.
 ```
 And if `PHASE_DIR_REUSED` is non-empty, stop with its own message:
 ```
-Phase ${TARGET_PHASE} resolves to ${PHASE_DIR_LIVE}, but that directory name is also archived
-at ${PHASE_DIR_REUSED}. Refusing: the first commit adding this path belongs to the earlier
-occupant, so the window would open there and select that milestone's commits too.
+Phase ${TARGET_PHASE} resolves to ${PHASE_DIR_LIVE}, but that path was emptied by commit
+${PHASE_DIR_REUSED} and re-created later. Refusing: the first commit adding this path belongs
+to the earlier occupant, so the window would open there and select its commits too.
 Use /gsd:undo --last N and select commits explicitly.
 ```
 Exit cleanly in both cases.
@@ -225,33 +227,19 @@ PHASE_DIR=$(gsd_run query find-phase "${PLAN_PHASE}" --raw 2>/dev/null)
 # fail-closed rule below load-bearing.
 PHASE_DIR_ARCHIVED=""
 case "${PHASE_DIR}" in
-  */milestones/v[0-9]*-phases/*|milestones/v[0-9]*-phases/*) PHASE_DIR_ARCHIVED="${PHASE_DIR}"; PHASE_DIR="" ;;
+  */milestones/v[0-9]*-phases/*|milestones/v[0-9]*-phases/*|*/milestones/ws-*/phases/*|milestones/ws-*/phases/*)
+    PHASE_DIR_ARCHIVED="${PHASE_DIR}"; PHASE_DIR="" ;;
 esac
-# A LIVE path can still be a previous occupant's. `--diff-filter=A` does not follow renames,
-# so a later milestone re-creating the same literal directory anchors on the OLDER milestone's
-# add. Nothing is under milestones/ to refuse -- find-phase returned the live dir -- so key on
-# the collision instead: the same basename present under an archived milestone means this path
-# has been used before and the anchor cannot be trusted. Fail closed; `--last N` is the route.
+# A LIVE path can still be a previous occupant's -- same question, same answer as MODE=phase:
+# a path that went EMPTY in HEAD's history and came back anchors on the earlier occupant's add,
+# whatever vacated it. Ask git, not a layout glob. Fail closed; `--last N` is the route.
 PHASE_DIR_REUSED=""; PHASE_DIR_LIVE=""
 if [ -n "${PHASE_DIR}" ]; then
-  _pd_base=$(basename "${PHASE_DIR}")
-  _pd_root=${PHASE_DIR%/phases/*}
-  # The suffix strip must actually have fired. A path with no `/phases/` segment is not a
-  # live phase directory this resolver produces, and scanning its own subtree would look in
-  # the wrong place while reading as a clean pass.
-  if [ "$_pd_root" != "${PHASE_DIR}" ]; then
-    for _arch in "${_pd_root}"/milestones/v[0-9]*-phases/"${_pd_base}"; do
-      # `-d`, not `-e`: only a real archived phase DIRECTORY is evidence of prior use, and a
-      # stray regular file must not block a legitimate undo. `v[0-9]*-phases` TRACKS
-      # cmdFindPhase's own /^v\d+.*-phases$/ filter closely enough to reject the malformed
-      # siblings that matter, without claiming to be equivalent to it -- the glob's `*` matches
-      # a newline where the regex's `.` does not, so the shell set is marginally wider. An
-      # unmatched glob stays literal and fails `-d`, which is why no nullglob is needed. See
-      # the shell-state residual below for what this scan does NOT survive.
-      [ -d "$_arch" ] || continue
-      PHASE_DIR_LIVE="${PHASE_DIR}"; PHASE_DIR_REUSED="$_arch"; PHASE_DIR=""; break
-    done
-  fi
+  for _c in $(git log -m --no-renames --diff-filter=D --format=%H -- "${PHASE_DIR}" 2>/dev/null); do
+    if [ -z "$(git ls-tree -d "$_c" -- "${PHASE_DIR}" 2>/dev/null)" ]; then
+      PHASE_DIR_LIVE="${PHASE_DIR}"; PHASE_DIR_REUSED="$_c"; PHASE_DIR=""; break
+    fi
+  done
 fi
 PHASE_START=$(git log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
 UNDO_RANGE=""
@@ -321,29 +309,31 @@ rather than mis-selects — and untested: constructing the evil-merge fixture co
 the branch is worth while the failure mode is a refusal. `/gsd:undo --last N` is the route
 if it is ever hit.
 
-**A later milestone reusing BOTH the number and the slug is REFUSED, not a residual.** The
+**A re-created directory — same number AND same slug — is REFUSED, not a residual.** The
 anchor is the *current path*, and `--diff-filter=A` does not follow renames, so re-creating
-the same literal directory (`03-auth` again, not merely phase `03` again) makes the oldest add
-at that path the **previous occupant's**. The archived refusal above cannot reach it —
-`find-phase` returns the **live** directory, so nothing is under `milestones/` to refuse.
-Driven before the guard: two milestones both using `.planning/phases/03-auth` anchored on the
-v1 plan commit and selected all four v1+v2 phase-03 commits. The collision check closes it
-without needing a phase identity a directory name does not carry: the same basename present
-under an archived milestone means the path has been used before, so the anchor is untrustworthy
-and both modes refuse. `code-review.md` carries the same weakness on the same anchor, where it
-is read-only and merely widens a review scope; here it reverts, which is why this one is a
-refusal rather than a note.
+a literal directory an earlier occupant used (`03-auth` again, not merely phase `03` again)
+makes the oldest add at that path the **previous occupant's**. The archived refusal above
+cannot reach it — `find-phase` returns the **live** directory, so nothing is under
+`milestones/` to refuse. Driven before the guard: two milestones both using
+`.planning/phases/03-auth` anchored on the v1 plan commit and selected all four v1+v2 phase-03
+commits; a workstream completed into `milestones/ws-feat-<date>/` and then re-created as `feat`
+with the same `03-auth` did the same across the two workstream generations. The collision check
+closes both without a phase identity a directory name does not carry, and without restating any
+archive layout: a path that went empty in `HEAD`'s history and came back has had a previous
+occupant, so the anchor is untrustworthy and both modes refuse. `code-review.md` carries the
+same weakness on the same anchor, where it is read-only and merely widens a review scope; here
+it reverts, which is why this one is a refusal rather than a note.
 
-**Known residual — the reused-path scan assumes default shell options.** The collision check
-is the only fence here that relies on **pathname expansion**; every other one uses `case`
-patterns, which `set -f` does not affect. So a runtime that has disabled globbing skips the
-scan silently and the refusal fails **open** on a genuine collision, and one with
-`shopt -s failglob` aborts the fence on a *non*-match instead of passing. Both are outside the
-shell state this workflow otherwise assumes, and neither is defended against here rather than
-being hidden. Relatedly, the check is deliberately **conservative** at two edges: `[ -d ]`
-follows symlinks, and an empty directory of the right name counts — either will refuse an undo
-that a stricter ownership test might have allowed. Refusing too often costs a `--last N`;
-refusing too rarely reverts another milestone's work.
+**Known residual — the collision check reads history, so it sees only what history shows.**
+Two edges, in opposite directions. It **misses** a single commit that both moves the directory
+away *and* re-creates it at the same path: the path is never empty in any commit's tree, so the
+history carries no vacancy to find, and the anchor opens on the earlier occupant. That takes a
+hand-assembled commit — it is not the shape of an archive followed by later planning — and the
+over-selection it allows still has to pass `confirm_revert`. It **over-refuses** when a side
+branch emptied the directory and the merge kept it: the vacancy is real in that branch's
+history, so the path reads as reused. Refusing too often costs a `--last N`; refusing too
+rarely reverts another occupant's work, which is why the check is keyed on the vacancy itself
+rather than on any narrower proof of ownership.
 
 **Known residual — concurrent workstreams.** The window above is scoped to the target
 phase's own directory, which is workstream-correct, but the commit subjects it filters

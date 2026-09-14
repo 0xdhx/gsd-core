@@ -203,20 +203,29 @@ describe('#4465: undo commit selection is bounded', () => {
     // find-phase falls back to archived milestone dirs, and its ambiguity check does
     // not span them; anchoring there selects a LATER milestone's same-numbered phase.
     // Two guards, one per mode — a single one would leave the other selecting.
+    // BOTH archive layouts the phase locator enumerates (listArchiveVersionDirs): the flat
+    // `v<X.Y>-phases/<phase>` and the workstream archive `ws-<name>-<date>/phases/<phase>`.
     const guards = extractBashBlocks(content).filter(
       (b) => /PHASE_DIR_ARCHIVED=""/.test(b)
-        && /\*\/milestones\/v\[0-9\]\*-phases\/\*\|milestones\/v\[0-9\]\*-phases\/\*/.test(b),
+        && /\*\/milestones\/v\[0-9\]\*-phases\/\*\|milestones\/v\[0-9\]\*-phases\/\*/.test(b)
+        && /\*\/milestones\/ws-\*\/phases\/\*\|milestones\/ws-\*\/phases\/\*/.test(b),
     );
     assert.equal(guards.length, 2,
-      `undo.md must refuse an archived resolution in BOTH modes; found ${guards.length} guard(s)`);
-    // The same fence carries the reused-path collision check: an archived twin of a LIVE
-    // directory name means the anchor belongs to the earlier occupant.
+      `undo.md must refuse BOTH archive layouts in BOTH modes; found ${guards.length} guard(s)`);
+    // The same fence carries the reused-path collision check, and it asks HISTORY, not a
+    // layout: a path that went empty in HEAD's history and came back anchors on the earlier
+    // occupant's add, whatever vacated it (review round 4: a layout glob missed the ws-*
+    // archive and would miss the next layout too).
     for (const g of guards) {
       const code = g.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
-      assert.ok(/PHASE_DIR_REUSED=""/.test(code) && /milestones\/v\[0-9\]\*-phases\//.test(code),
-        `each guard fence must also refuse a reused directory name (#4465):\n${code}`);
-      assert.ok(/\[ -d "\$_arch" \]/.test(code),
-        `the collision check must require a DIRECTORY, not any entry (#4465):\n${code}`);
+      assert.ok(/PHASE_DIR_REUSED=""/.test(code)
+        && /git log -m --no-renames --diff-filter=D --format=%H -- "\$\{PHASE_DIR\}"/.test(code)
+        && /git ls-tree -d "\$_c" -- "\$\{PHASE_DIR\}"/.test(code),
+        `each guard fence must refuse a path that history shows was vacated (#4465):\n${code}`);
+      // No second reader of the archive layout inside the collision check.
+      const collision = code.slice(code.indexOf('PHASE_DIR_REUSED=""'));
+      assert.ok(!/milestones/.test(collision),
+        `the collision check must not re-derive the archive layout from a glob (#4465):\n${collision}`);
     }
     // The pattern must key on the ARCHIVE LAYOUT. A bare `*/milestones/*` also matches a
     // workstream or project legitimately named `milestones` and refuses a LIVE phase.
@@ -495,7 +504,8 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
   // Round 2, self-found: a LIVE path can still be a previous occupant's. A later milestone
   // that re-creates the same literal directory (same number AND same slug) anchors on the
   // older milestone's add commit. The archive guard cannot see it -- find-phase returns the
-  // live directory -- so the collision check keys on the archived twin instead.
+  // live directory -- so the collision check asks history whether this exact path was ever
+  // vacated (round 4: it used to look for an archived twin by layout, and missed ws-*).
   function reusedSlugFixture() {
     const cwd = createTempGitProject('gsd-4465-slug-');
     seedPhase(cwd, '03-auth', { '03-01-PLAN.md': '# v1\n' });
@@ -535,9 +545,9 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     t.after(() => cleanup(cwd));
     const out = runFences(cwd, 'TARGET_PHASE=03',
       [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
-      'printf "REUSED=[%s]\\nPHASE_DIR=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_DIR_REUSED" "$PHASE_DIR" "$UNDO_RANGE"');
-    assert.ok(out.includes('REUSED=[.planning/milestones/v1.0-phases/03-auth]'),
-      `the refusal must name the archived twin it collided with; got:\n${out}`);
+      'printf "REUSED=[%s]\\nPHASE_DIR=[%s]\\nUNDO_RANGE=[%s]\\n" "$(git log -1 --format=%s "$PHASE_DIR_REUSED" 2>/dev/null)" "$PHASE_DIR" "$UNDO_RANGE"');
+    assert.ok(out.includes('REUSED=[chore: archive v1.0]'),
+      `the refusal must name the commit that vacated the path; got:\n${out}`);
     assert.ok(out.includes('UNDO_RANGE=[]'), `UNDO_RANGE must stay empty; got:\n${out}`);
     assert.deepEqual(subjects(out.replace(/(REUSED|PHASE_DIR|UNDO_RANGE)=.*\n?/g, '')), [],
       'nothing may be selected once the reused path is refused');
@@ -547,8 +557,8 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     const cwd = reusedSlugFixture();
     t.after(() => cleanup(cwd));
     const out = runFences(cwd, 'TARGET_PLAN=03-01', [planAnchor, planSelect],
-      'printf "REUSED=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_DIR_REUSED" "$UNDO_RANGE"');
-    assert.ok(out.includes('REUSED=[.planning/milestones/v1.0-phases/03-auth]'),
+      'printf "REUSED=[%s]\\nUNDO_RANGE=[%s]\\n" "$(git log -1 --format=%s "$PHASE_DIR_REUSED" 2>/dev/null)" "$UNDO_RANGE"');
+    assert.ok(out.includes('REUSED=[chore: archive v1.0]'),
       `--plan must refuse the same collision; got:\n${out}`);
     assert.ok(out.includes('UNDO_RANGE=[]'), `UNDO_RANGE must stay empty; got:\n${out}`);
   });
@@ -564,10 +574,11 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), ['feat(03-01): add beta feature flag']);
   });
 
-  test('the collision guard needs a real archived DIRECTORY, not merely an entry', (t) => {
-    // `-e` would accept a stray regular file and block a legitimate undo. The evidence the
-    // refusal claims is "this path was used by an earlier milestone", and only a directory
-    // is that. Round-2 audit finding.
+  test('the collision guard reads THIS path\'s history: a same-named archive entry does not refuse', (t) => {
+    // The evidence the refusal claims is "this exact path was vacated and re-created", and an
+    // entry of the same name elsewhere under milestones/ is not that. Round 2 pinned it for a
+    // stray FILE against the old layout glob; round 4 keys the check on history, so the entry
+    // is irrelevant by construction and this pins that it stays so.
     const cwd = createTempGitProject('gsd-4465-file-twin-');
     t.after(() => cleanup(cwd));
     seedPhase(cwd, '06-live', { '06-01-PLAN.md': '# live\n' });
@@ -587,9 +598,10 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     ], 'the undo must still work');
   });
 
-  test('the collision guard mirrors the resolver: a malformed milestone dir does not refuse', (t) => {
-    // cmdFindPhase only admits /^v\d+.*-phases$/, so `vnondigit-phases` is not a milestone
-    // it would ever resolve. A broader glob here refuses over evidence the producer rejects.
+  test('the collision guard ignores a same-named phase dir under a malformed milestone dir', (t) => {
+    // `vnondigit-phases` is not a milestone either reader of the archive tree admits, and this
+    // live path was never vacated. A refusal here would be keyed on a directory name, which is
+    // the layout-matching the round-4 history check replaced.
     const cwd = createTempGitProject('gsd-4465-malformed-');
     t.after(() => cleanup(cwd));
     seedPhase(cwd, '05-live', { '05-01-PLAN.md': '# live\n' });
@@ -602,7 +614,7 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
       [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
       'echo "REUSED=[${PHASE_DIR_REUSED}]"');
     assert.ok(out.includes('REUSED=[]'),
-      `vnondigit-phases is not a milestone cmdFindPhase resolves; got:\n${out}`);
+      `a live path that was never vacated must not refuse; got:\n${out}`);
     assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), [
       'feat(05-01): live work',
       'docs(05-01): live plan',
@@ -626,8 +638,8 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     // The conventional live path above cannot catch this. `milestones` is a legal
     // workstream (and project) name, so a bare `*/milestones/*` pattern classifies
     // .planning/workstreams/milestones/phases/NN-x as archived and refuses a phase that
-    // is live and revertible — a fail-closed bug, but a bug. Only `v*-phases`, the shape
-    // cmdFindPhase actually creates (/^v\d+.*-phases$/), separates the two.
+    // is live and revertible — a fail-closed bug, but a bug. Only the archive LAYOUTS
+    // (`v<X.Y>-phases/<phase>` and `ws-<name>-<date>/phases/<phase>`) separate the two.
     const cwd = createTempGitProject('gsd-4465-wsname-');
     t.after(() => cleanup(cwd));
     const dir = path.join(cwd, '.planning', 'workstreams', 'milestones', 'phases', '03-live');
@@ -692,6 +704,32 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     ], 'the unguarded window must reach back into the archived workstream generation');
   });
 
+  test('--phase REFUSES a path re-created after a workstream archive (the ws-* layout)', (t) => {
+    const cwd = workstreamArchiveFixture({ recreate: true });
+    t.after(() => cleanup(cwd));
+    const out = runFences(cwd, 'TARGET_PHASE=03',
+      [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
+      'printf "REUSED=[%s]\\nLIVE=[%s]\\nUNDO_RANGE=[%s]\\n" "$(git log -1 --format=%s "$PHASE_DIR_REUSED" 2>/dev/null)" "$PHASE_DIR_LIVE" "$UNDO_RANGE"',
+      WS_FEAT);
+    assert.ok(out.includes('REUSED=[chore: complete workstream feat]'),
+      `the refusal must name the workstream archive that vacated the path; got:\n${out}`);
+    assert.ok(out.includes('LIVE=[.planning/workstreams/feat/phases/03-auth]'), `got:\n${out}`);
+    assert.ok(out.includes('UNDO_RANGE=[]'), `UNDO_RANGE must stay empty; got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/(REUSED|LIVE|UNDO_RANGE)=.*\n?/g, '')), [],
+      'nothing may be selected: selection must not cross into the archived generation');
+  });
+
+  test('--plan REFUSES a path re-created after a workstream archive too', (t) => {
+    const cwd = workstreamArchiveFixture({ recreate: true });
+    t.after(() => cleanup(cwd));
+    const out = runFences(cwd, 'TARGET_PLAN=03-01', [planAnchor, planSelect],
+      'printf "REUSED=[%s]\\nUNDO_RANGE=[%s]\\n" "$(git log -1 --format=%s "$PHASE_DIR_REUSED" 2>/dev/null)" "$UNDO_RANGE"',
+      WS_FEAT);
+    assert.ok(out.includes('REUSED=[chore: complete workstream feat]'), `got:\n${out}`);
+    assert.ok(out.includes('UNDO_RANGE=[]'), `UNDO_RANGE must stay empty; got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/(REUSED|UNDO_RANGE)=.*\n?/g, '')), []);
+  });
+
   test('find-phase does not search the ws-* archive: a phase only there resolves to nothing, and nothing is selected', (t) => {
     // The actual resolver contract, pinned: cmdFindPhase admits only /^v\d+.*-phases$/ under
     // milestones/. So the ws-* archive never reaches the archived refusal through find-phase;
@@ -706,6 +744,44 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
     assert.ok(out.includes('UNDO_RANGE=[]'), `no anchor, no range; got:\n${out}`);
     assert.deepEqual(subjects(out.replace(/(PHASE_DIR|ARCHIVED|UNDO_RANGE)=.*\n?/g, '')), [],
       'the later milestone\'s same-numbered commit must not be selected');
+  });
+
+  test('the archived refusal covers the ws-* layout if a resolver ever returns it (both modes)', (t) => {
+    // Stubbed resolver: stands in for a find-phase that has been taught the locator's second
+    // layout. Without the ws-* arm, PHASE_START would be the archival commit and the window
+    // would run forward from it -- the exact contamination the refusal exists for.
+    const cwd = workstreamArchiveFixture({ recreate: false });
+    t.after(() => cleanup(cwd));
+    const stub = 'gsd_run() { echo ".planning/milestones/ws-feat-2026-09-01/phases/03-auth"; }';
+    const report = 'printf "ARCHIVED=[%s]\\nPHASE_DIR=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_DIR_ARCHIVED" "$PHASE_DIR" "$UNDO_RANGE"';
+    for (const [seed, fences] of [
+      ['TARGET_PHASE=03', [stub, phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect]],
+      ['TARGET_PLAN=03-01', [stub, planAnchor, planSelect]],
+    ]) {
+      const out = runFences(cwd, seed, fences, report);
+      assert.ok(out.includes('ARCHIVED=[.planning/milestones/ws-feat-2026-09-01/phases/03-auth]'),
+        `${seed}: a ws-* archive path must be refused; got:\n${out}`);
+      assert.ok(out.includes('PHASE_DIR=[]') && out.includes('UNDO_RANGE=[]'), `${seed}: got:\n${out}`);
+      assert.deepEqual(subjects(out.replace(/(ARCHIVED|PHASE_DIR|UNDO_RANGE)=.*\n?/g, '')), [],
+        `${seed}: nothing may be selected once the resolution is refused`);
+    }
+  });
+
+  test('self-found: a phase REMOVED and re-added under the same slug is refused too', (t) => {
+    // No archive anywhere -- the path was simply deleted and re-created. A layout glob has no
+    // entry to find; the history check sees the vacancy. Same anchor defect, same refusal.
+    const cwd = createTempGitProject('gsd-4465-readd-');
+    t.after(() => cleanup(cwd));
+    commitFile(cwd, '.planning/phases/03-auth/03-01-PLAN.md', '# first\n', 'docs(03-01): first plan');
+    commitFile(cwd, 'src/first.js', 'f\n', 'feat(03-01): first attempt');
+    gitOrThrow(['rm', '-rq', '.planning/phases/03-auth'], { cwd });
+    gitOrThrow(['commit', '-q', '-m', 'chore: remove phase 03'], { cwd });
+    commitFile(cwd, '.planning/phases/03-auth/03-01-PLAN.md', '# second\n', 'docs(03-01): second plan');
+    const out = runFences(cwd, 'TARGET_PHASE=03',
+      [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
+      'printf "REUSED=[%s]\\nUNDO_RANGE=[%s]\\n" "$(git log -1 --format=%s "$PHASE_DIR_REUSED" 2>/dev/null)" "$UNDO_RANGE"');
+    assert.ok(out.includes('REUSED=[chore: remove phase 03]'), `got:\n${out}`);
+    assert.ok(out.includes('UNDO_RANGE=[]'), `got:\n${out}`);
   });
 
   test('the collision check is not tripped by an ordinary deleted file inside a live phase', (t) => {
