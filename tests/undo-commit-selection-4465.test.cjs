@@ -326,12 +326,14 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
   // logic, not the runtime's variable transport between blocks.
   const GSD_RUN = 'gsd_run() { node "$GSD_TOOLS_BIN" "$@"; }';
 
-  function runFences(cwd, seed, fences, tail = '') {
+  function runFences(cwd, seed, fences, tail = '', extraEnv = {}) {
     const script = [seed, GSD_RUN, ...fences, tail].join('\n');
     const env = { ...process.env, GSD_TOOLS_BIN, HOME: cwd };
-    // A developer's active workstream must not leak into the fixture.
+    // A developer's active workstream must not leak into the fixture; a test that wants
+    // one names it through `extraEnv`, applied after the scrub.
     delete env.GSD_WORKSTREAM;
     delete env.GSD_PROJECT;
+    Object.assign(env, extraEnv);
     const r = runHookSeam('-c', [script], { interpreter: 'bash', cwd, env, timeoutMs: PROBE_TIMEOUT_MS });
     throwIfFailed(r, 'bash <undo.md fences>');
     return r.stdout;
@@ -403,6 +405,15 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
   // live `phases/` dir is searched first. So a phase number that is NOT live resolves
   // silently to the OLDEST archived milestone carrying one. Two archived milestones is
   // the reported scenario; the current milestone has not reached phase 03 yet.
+  //
+  // THE RESOLVER CONTRACT, stated precisely because there are TWO readers of the archive
+  // tree and they disagree (review round 4). `find-phase` routes to cmdFindPhase
+  // (src/phase.cts), which builds its OWN search list: the live `phases/` dir, then
+  // `milestones/` entries matching /^v\d+.*-phases$/ — the flat layout ONLY. The phase
+  // locator (listArchiveVersionDirs, src/phase-locator.cts) additionally enumerates the
+  // workstream archive `milestones/ws-<name>-<date>/phases/`, which `workstream complete`
+  // writes; find-phase never searches it. The tests below pin what find-phase actually
+  // returns for BOTH layouts, so a change to either reader shows up here.
   function twoArchivedMilestonesFixture() {
     const cwd = createTempGitProject('gsd-4465-arch-');
     seedPhase(cwd, '03-auth', { '03-01-PLAN.md': '# auth\n' });
@@ -640,6 +651,83 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
       'feat(03-01): workstream work',
       'docs(03-01): workstream phase plan',
     ]);
+  });
+
+  // Round 4: the WORKSTREAM archive layout. `workstream complete` moves
+  // `.planning/workstreams/<name>/` whole into `.planning/milestones/ws-<name>-<date>/`, so an
+  // archived phase's former path is `.planning/workstreams/<name>/phases/<phase>`. Re-creating
+  // the workstream under the same name with the same phase slug re-creates that exact path.
+  function workstreamArchiveFixture({ recreate }) {
+    const cwd = createTempGitProject('gsd-4465-ws-');
+    commitFile(cwd, '.planning/workstreams/feat/phases/03-auth/03-01-PLAN.md', '# gen 1\n',
+      'docs(03-01): feat generation-1 plan');
+    commitFile(cwd, 'src/gen1.js', 'g1\n', 'feat(03-01): feat generation-1 work');
+    fs.mkdirSync(path.join(cwd, '.planning', 'milestones'), { recursive: true });
+    gitOrThrow(['mv', '.planning/workstreams/feat', '.planning/milestones/ws-feat-2026-09-01'], { cwd });
+    gitOrThrow(['commit', '-q', '-m', 'chore: complete workstream feat'], { cwd });
+    if (recreate) {
+      commitFile(cwd, '.planning/workstreams/feat/phases/03-auth/03-01-PLAN.md', '# gen 2\n',
+        'docs(03-01): feat generation-2 plan');
+      commitFile(cwd, 'src/gen2.js', 'g2\n', 'feat(03-01): feat generation-2 work');
+    } else {
+      // A later phase 03 commit in the current scope with no live phase dir behind it.
+      commitFile(cwd, 'src/later.js', 'l\n', 'feat(03-01): later milestone work');
+    }
+    return cwd;
+  }
+  const WS_FEAT = { GSD_WORKSTREAM: 'feat' };
+
+  test('negative control: WITHOUT the collision guard, a re-created workstream selects its archived generation too', (t) => {
+    const cwd = workstreamArchiveFixture({ recreate: true });
+    t.after(() => cleanup(cwd));
+    const out = runFences(cwd, 'TARGET_PHASE=03', [phaseResolve, phaseAnchor, phaseSelect],
+      'echo "PHASE_DIR=${PHASE_DIR}"', WS_FEAT);
+    assert.ok(out.includes('PHASE_DIR=.planning/workstreams/feat/phases/03-auth'),
+      `find-phase must return the LIVE re-created path; got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/PHASE_DIR=.*\n?/, '')), [
+      'feat(03-01): feat generation-2 work',
+      'docs(03-01): feat generation-2 plan',
+      'feat(03-01): feat generation-1 work',
+      'docs(03-01): feat generation-1 plan',
+    ], 'the unguarded window must reach back into the archived workstream generation');
+  });
+
+  test('find-phase does not search the ws-* archive: a phase only there resolves to nothing, and nothing is selected', (t) => {
+    // The actual resolver contract, pinned: cmdFindPhase admits only /^v\d+.*-phases$/ under
+    // milestones/. So the ws-* archive never reaches the archived refusal through find-phase;
+    // the not-found rule fails closed instead. If find-phase is ever taught the ws-* layout this
+    // test goes red, and the stubbed-resolver test below is what keeps the refusal honest then.
+    const cwd = workstreamArchiveFixture({ recreate: false });
+    t.after(() => cleanup(cwd));
+    const out = runFences(cwd, 'TARGET_PHASE=03',
+      [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
+      'printf "PHASE_DIR=[%s]\\nARCHIVED=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_DIR" "$PHASE_DIR_ARCHIVED" "$UNDO_RANGE"');
+    assert.ok(out.includes('PHASE_DIR=[]'), `find-phase must not resolve into ws-*; got:\n${out}`);
+    assert.ok(out.includes('UNDO_RANGE=[]'), `no anchor, no range; got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/(PHASE_DIR|ARCHIVED|UNDO_RANGE)=.*\n?/g, '')), [],
+      'the later milestone\'s same-numbered commit must not be selected');
+  });
+
+  test('the collision check is not tripped by an ordinary deleted file inside a live phase', (t) => {
+    // The vacancy test is on the DIRECTORY (`ls-tree -d` at the deleting commit), so dropping
+    // one plan file from a phase that still exists is not a previous occupant.
+    const cwd = createTempGitProject('gsd-4465-dropplan-');
+    t.after(() => cleanup(cwd));
+    commitFile(cwd, '.planning/phases/03-auth/03-01-PLAN.md', '# one\n', 'docs(03-01): plan one');
+    commitFile(cwd, '.planning/phases/03-auth/03-02-PLAN.md', '# two\n', 'docs(03-02): plan two');
+    gitOrThrow(['rm', '-q', '.planning/phases/03-auth/03-02-PLAN.md'], { cwd });
+    gitOrThrow(['commit', '-q', '-m', 'docs(03-02): drop plan two'], { cwd });
+    commitFile(cwd, 'src/auth.js', 'a\n', 'feat(03-01): auth work');
+    const out = runFences(cwd, 'TARGET_PHASE=03',
+      [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect],
+      'echo "REUSED=[${PHASE_DIR_REUSED}]"');
+    assert.ok(out.includes('REUSED=[]'), `a dropped plan file is not a vacated phase; got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), [
+      'feat(03-01): auth work',
+      'docs(03-02): drop plan two',
+      'docs(03-02): plan two',
+      'docs(03-01): plan one',
+    ], 'the whole phase must still be selectable');
   });
 
   test('single-milestone selection is unchanged: every phase commit, none from a later phase', (t) => {
