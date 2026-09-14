@@ -95,6 +95,10 @@ describe('#4465: undo commit selection is bounded', () => {
     const roots = (bash.match(/PROJECT_ROOT=\$\(gsd_run query planning inspect --pick generated_from\.cwd --raw/g) || []).length;
     assert.equal(roots, 2, 'both modes must take PROJECT_ROOT from the same owner as find-phase (#4465)');
     const code = bash.split('\n').filter((l) => !/^\s*#/.test(l));
+    // And from nowhere else: a rooted call is only as good as the root it is handed, so a later
+    // reassignment would pass every spelling check below (review round 5, claim 8).
+    const assigns = code.filter((l) => /\bPROJECT_ROOT=/.test(l));
+    assert.equal(assigns.length, 2, `PROJECT_ROOT may be assigned only from planning inspect; found:\n${assigns.join('\n')}`);
     const scoped = code.filter((l) => /\bgit\b.*-- "\$\{PHASE_DIR\}"/.test(l));
     // Per mode: the collision log, the collision ls-tree, the anchor.
     assert.equal(scoped.length, 6, `expected three PHASE_DIR-scoped git calls per mode; found:\n${scoped.join('\n')}`);
@@ -103,6 +107,24 @@ describe('#4465: undo commit selection is bounded', () => {
       !== (l.match(/\bgit -C "\$\{PROJECT_ROOT:-\.\}" (log|ls-tree)\b/g) || []).length);
     assert.deepEqual(unrooted, [],
       'a PHASE_DIR-scoped git call not run as git -C "${PROJECT_ROOT:-.}" misreads the path from a subdirectory (#4465)');
+  });
+
+  test('P: a phase planned in another repository refuses, and a foreign anchor never widens to HEAD', () => {
+    // In a sub_repos project the project root is a PARENT repository. An anchor read there is a
+    // commit the caller's repository does not hold, and the root-commit arm reads "no parent" as
+    // "root commit" and selects all of HEAD (review round 5, driven). Two layers, both modes:
+    // the same-repository refusal, and an anchor that must be a commit in this repository.
+    const code = extractBashBlocks(content)
+      .map((b) => b.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n'));
+    const gates = code.filter((b) => /PHASE_DIR_FOREIGN=""/.test(b)
+      && /git rev-parse --absolute-git-dir/.test(b)
+      && /git -C "\$\{PROJECT_ROOT\}" rev-parse --absolute-git-dir/.test(b)
+      && /PHASE_DIR_FOREIGN="\$\{PROJECT_ROOT\}"; PHASE_DIR=""/.test(b));
+    assert.equal(gates.length, 2, `both modes must refuse a phase directory in another repository; found ${gates.length}`);
+    const hardened = (bash.match(/! git cat-file -e "\$\{PHASE_START\}\^\{commit\}" 2>\/dev\/null; then PHASE_START=""; fi/g) || []).length;
+    assert.equal(hardened, 2, 'both modes must blank a PHASE_START this repository does not hold before the root-commit arm');
+    assert.equal((content.match(/PHASE_DIR_FOREIGN/g) || []).length >= 6, true,
+      'the refusal must be documented, not only computed');
   });
 
   test('D: PHASE_DIR is resolved through find-phase, so it is workstream-correct', () => {
@@ -903,6 +925,71 @@ describe('#4465: undo commit selection — executed against a git fixture', { sk
       assert.ok(out.includes('REUSED=[]'), `${seed}: a dropped plan file is not a vacated phase; got:\n${out}`);
       assert.deepEqual(subjects(out.replace(/REUSED=.*\n?/, '')), expected, `${seed}: from sub/dir`);
     }
+  });
+
+  // Review round 5, second pass: a `sub_repos` project keeps .planning/ in a PARENT repository and
+  // the code in child repositories. From a child, findProjectRoot returns the parent, so the project
+  // root and the repository the commits live in are different repositories.
+  function subReposFixture(t) {
+    const parent = createFixture({ prefix: 'gsd-4465-subrepos-', planning: false, git: true, projectDoc: false });
+    t.after(() => cleanup(parent));
+    fs.writeFileSync(path.join(parent, '.gitignore'), 'child/\n');
+    fs.mkdirSync(path.join(parent, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(parent, '.planning', 'config.json'), '{"sub_repos":["child"]}\n');
+    commitFile(parent, '.planning/phases/03-auth/03-01-PLAN.md', '# parent plan\n', 'docs(03-01): parent phase plan');
+    const child = path.join(parent, 'child');
+    fs.mkdirSync(child);
+    const g = (args) => gitOrThrow(args, { cwd: child });
+    g(['init', '-q']); g(['config', 'user.email', 'test@test.com']); g(['config', 'user.name', 'Test']);
+    g(['config', 'commit.gpgsign', 'false']);
+    commitFile(child, 'a.js', 'a\n', 'feat(03-01): old child work');
+    commitFile(child, 'b.js', 'b\n', 'feat(03-01): current child work');
+    // HOME off the parent, so the sub_repos branch of findProjectRoot is the one that resolves.
+    const home = createFixture({ prefix: 'gsd-4465-home-', planning: false, git: false });
+    t.after(() => cleanup(home));
+    return { parent, child, env: { HOME: home } };
+  }
+
+  test('negative control: the pre-hardening root-commit arm widened a foreign anchor to all of HEAD', (t) => {
+    // The anchor's root-commit branch as it stood before this round's hardening, verbatim, fed the
+    // PARENT repository's anchor from inside the child. If it did not widen here, the refusal tests
+    // below would be vacuous.
+    const { parent, child, env } = subReposFixture(t);
+    const foreign = gitOrThrow(['rev-parse', 'HEAD'], { cwd: parent }).trim();
+    const out = runFences(parent, `PHASE_START=${foreign}`, [
+      'UNDO_RANGE=""; if [ -n "$PHASE_START" ]; then if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then UNDO_RANGE="${PHASE_START}^..HEAD"; else UNDO_RANGE="HEAD"; fi; fi',
+      'echo "UNDO_RANGE=${UNDO_RANGE}"',
+      'git log --oneline --no-merges "${UNDO_RANGE}" | grep -E "\\(0*03(-[0-9]+)?\\):" || true',
+    ], '', env, child);
+    assert.ok(out.includes('UNDO_RANGE=HEAD'), `got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/UNDO_RANGE=.*\n?/, '')),
+      ['feat(03-01): current child work', 'feat(03-01): old child work']);
+  });
+
+  test('sub_repos: a phase planned in the parent repository is REFUSED from a child (both modes)', (t) => {
+    const { parent, child, env } = subReposFixture(t);
+    const report = 'printf "FOREIGN=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_DIR_FOREIGN" "$UNDO_RANGE"';
+    for (const [seed, fences] of [
+      ['TARGET_PHASE=03', [phaseResolve, phaseArchivedGuard, phaseAnchor, phaseSelect]],
+      ['TARGET_PLAN=03-01', [planAnchor, planSelect]],
+    ]) {
+      const out = runFences(parent, seed, fences, report, env, child);
+      const foreign = /FOREIGN=\[(.*)\]/.exec(out);
+      assert.ok(foreign && foreign[1] !== '' && fs.realpathSync(foreign[1]) === fs.realpathSync(parent),
+        `${seed}: must refuse, naming the parent repository; got:\n${out}`);
+      assert.ok(out.includes('UNDO_RANGE=[]'), `${seed}: got:\n${out}`);
+      assert.deepEqual(subjects(out.replace(/(FOREIGN|UNDO_RANGE)=.*\n?/g, '')), [], `${seed}: nothing may be selected`);
+    }
+  });
+
+  test('defense in depth: without the repository refusal, a foreign anchor still resolves no range', (t) => {
+    // The repository refusal lives in the guard fence; drop it and the anchor fence's own check --
+    // PHASE_START must be a commit THIS repository holds -- still keeps the window from widening.
+    const { parent, child, env } = subReposFixture(t);
+    const out = runFences(parent, 'TARGET_PHASE=03', [phaseResolve, phaseAnchor, phaseSelect],
+      'printf "PHASE_START=[%s]\\nUNDO_RANGE=[%s]\\n" "$PHASE_START" "$UNDO_RANGE"', env, child);
+    assert.ok(out.includes('PHASE_START=[]') && out.includes('UNDO_RANGE=[]'), `got:\n${out}`);
+    assert.deepEqual(subjects(out.replace(/(PHASE_START|UNDO_RANGE)=.*\n?/g, '')), []);
   });
 
   test('control: the root is the PROJECT root, not the repository top level', (t) => {

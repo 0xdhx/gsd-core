@@ -87,7 +87,8 @@ PHASE_DIR=$(gsd_run query find-phase "${TARGET_PHASE}" --raw 2>/dev/null)
 # find-phase answers relative to the PROJECT ROOT -- gsd-tools resolves it before dispatch --
 # not to this shell's cwd, so from a subdirectory a bare `git log -- "${PHASE_DIR}"` looks in
 # the wrong place and every path-scoped git call below comes back empty. Take the root from the
-# same owner and run those calls there. Unresolved, `.` keeps the behaviour at the root.
+# same owner and run those calls there. Unresolved, `.` keeps the behaviour at the root. A root
+# in a DIFFERENT repository from this shell's is refused below, never used.
 PROJECT_ROOT=$(gsd_run query planning inspect --pick generated_from.cwd --raw 2>/dev/null)
 ```
 
@@ -134,6 +135,18 @@ case "${PHASE_DIR}" in
   */milestones/v[0-9]*-phases/*|milestones/v[0-9]*-phases/*|*/milestones/ws-*/phases/*|milestones/ws-*/phases/*)
     PHASE_DIR_ARCHIVED="${PHASE_DIR}"; PHASE_DIR="" ;;
 esac
+# The phase directory must live in the SAME repository as the commits this workflow reverts. In a
+# `sub_repos` project, .planning/ sits in a parent repository and the code in child ones; from a
+# child, PROJECT_ROOT is the parent, and an anchor read there is a commit the child has never seen.
+# Compare the two git directories, physically resolved; a different one refuses.
+PHASE_DIR_FOREIGN=""
+if [ -n "${PHASE_DIR}" ] && [ -n "${PROJECT_ROOT}" ]; then
+  _gd_here=$(git rev-parse --absolute-git-dir 2>/dev/null) && _gd_here=$(cd "$_gd_here" && pwd -P) || _gd_here=""
+  _gd_root=$(git -C "${PROJECT_ROOT}" rev-parse --absolute-git-dir 2>/dev/null) && _gd_root=$(cd "$_gd_root" && pwd -P) || _gd_root=""
+  if [ -z "$_gd_here" ] || [ "$_gd_here" != "$_gd_root" ]; then
+    PHASE_DIR_FOREIGN="${PROJECT_ROOT}"; PHASE_DIR=""
+  fi
+fi
 # A LIVE path can still be a previous occupant's. `--diff-filter=A` does not follow renames,
 # so re-creating a literal directory that an earlier milestone or workstream used anchors on
 # the EARLIER occupant's add. Nothing is under milestones/ to refuse -- find-phase returned the
@@ -161,6 +174,12 @@ Refusing: the anchor there is the archival commit, so the window would span late
 milestones and select their same-numbered phase instead of this one.
 Use /gsd:undo --last N and select commits explicitly.
 ```
+If `PHASE_DIR_FOREIGN` is non-empty, stop with its own message:
+```
+Phase ${TARGET_PHASE} is planned in the repository at ${PHASE_DIR_FOREIGN}, not the one this
+command is running in. Refusing: that repository's history cannot bound commits in this one.
+Use /gsd:undo --last N here and select commits explicitly.
+```
 And if `PHASE_DIR_REUSED` is non-empty, stop with its own message:
 ```
 Phase ${TARGET_PHASE} resolves to ${PHASE_DIR_LIVE}, but that path was emptied by commit
@@ -168,7 +187,7 @@ ${PHASE_DIR_REUSED} and re-created later. Refusing: the first commit adding this
 to the earlier occupant, so the window would open there and select its commits too.
 Use /gsd:undo --last N and select commits explicitly.
 ```
-Exit cleanly in both cases.
+Exit cleanly in every case.
 
 Derive the selection window from `PHASE_DIR` (the `#3995` anchor, shared with
 `code-review.md`): the base is the parent of the first commit that added anything under
@@ -176,6 +195,9 @@ the phase's own directory, and the tip is `HEAD`.
 
 ```bash
 PHASE_START=$(git -C "${PROJECT_ROOT:-.}" log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
+# Only a commit THIS repository holds may anchor. Any other SHA also has no resolvable parent
+# here, and the root-commit arm below would read that as "no parent" and select all of HEAD.
+if [ -n "$PHASE_START" ] && ! git cat-file -e "${PHASE_START}^{commit}" 2>/dev/null; then PHASE_START=""; fi
 UNDO_RANGE=""
 if [ -n "$PHASE_START" ]; then
   if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
@@ -237,6 +259,15 @@ case "${PHASE_DIR}" in
   */milestones/v[0-9]*-phases/*|milestones/v[0-9]*-phases/*|*/milestones/ws-*/phases/*|milestones/ws-*/phases/*)
     PHASE_DIR_ARCHIVED="${PHASE_DIR}"; PHASE_DIR="" ;;
 esac
+# Same-repository refusal as MODE=phase: a phase planned in another repository cannot anchor here.
+PHASE_DIR_FOREIGN=""
+if [ -n "${PHASE_DIR}" ] && [ -n "${PROJECT_ROOT}" ]; then
+  _gd_here=$(git rev-parse --absolute-git-dir 2>/dev/null) && _gd_here=$(cd "$_gd_here" && pwd -P) || _gd_here=""
+  _gd_root=$(git -C "${PROJECT_ROOT}" rev-parse --absolute-git-dir 2>/dev/null) && _gd_root=$(cd "$_gd_root" && pwd -P) || _gd_root=""
+  if [ -z "$_gd_here" ] || [ "$_gd_here" != "$_gd_root" ]; then
+    PHASE_DIR_FOREIGN="${PROJECT_ROOT}"; PHASE_DIR=""
+  fi
+fi
 # A LIVE path can still be a previous occupant's -- same question, same answer as MODE=phase:
 # a path that went EMPTY in HEAD's history and came back anchors on the earlier occupant's add,
 # whatever vacated it. Ask git, not a layout glob. Fail closed; `--last N` is the route.
@@ -249,6 +280,8 @@ if [ -n "${PHASE_DIR}" ]; then
   done
 fi
 PHASE_START=$(git -C "${PROJECT_ROOT:-.}" log --format="%H" --diff-filter=A -- "${PHASE_DIR}" 2>/dev/null | tail -1)
+# As in MODE=phase: a SHA this repository does not hold never reaches the root-commit arm.
+if [ -n "$PHASE_START" ] && ! git cat-file -e "${PHASE_START}^{commit}" 2>/dev/null; then PHASE_START=""; fi
 UNDO_RANGE=""
 if [ -n "$PHASE_START" ]; then
   if git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
@@ -262,8 +295,8 @@ fi
 ```
 
 Apply the same fail-closed rule as MODE=phase when `PHASE_DIR` or `UNDO_RANGE` is empty —
-and the same two refusals, each with its own message, when `PHASE_DIR_ARCHIVED` or
-`PHASE_DIR_REUSED` is non-empty — then select within the window:
+and the same three refusals, each with its own message, when `PHASE_DIR_ARCHIVED`,
+`PHASE_DIR_FOREIGN` or `PHASE_DIR_REUSED` is non-empty — then select within the window:
 
 ```bash
 # `|| true` for the same reason as MODE=phase: an empty selection is not an error here.
