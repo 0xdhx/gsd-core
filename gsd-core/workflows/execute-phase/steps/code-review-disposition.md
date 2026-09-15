@@ -22,10 +22,10 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 ```bash
 # PADDED must survive a DOTTED phase number, of ANY segment count. This step is dispatched from
 # exactly TWO places: `execute-phase.md` (`code_review_gate`) and `code-review-fix.md`
-# (`record_disposition`). Only the second validates anything -- `code-review-fix.md:39` anchors
-# `^[0-9]+(\.[0-9]+)*$`, an unbounded `*` widened by #4568, so it accepts `03.1` AND `23.1.2`.
+# (`record_disposition`). Only the second validates anything -- `code-review-fix.md`'s PADDED_PHASE validator anchors
+# `^[0-9]+[A-Z]?(\.[0-9]+)*$`, an unbounded `*` widened by #4568 and a letter axis widened by #4744, so it accepts `03.1`, `23.1.2` AND `12A`.
 # `execute-phase.md` applies NO shape gate at all, so this fence is not mirroring an upstream
-# guarantee; it IS the guarantee. (`code-review.md:63` carries an identical validator but never
+# guarantee; it IS the guarantee. (`code-review.md`'s own PADDED_PHASE validator is identical but never
 # dispatches this step. It was cited here as a caller for several rounds and is not one.) And
 # `printf "%02d"` cannot format one: bash prints `invalid number` and exits 1, which under
 # `set -euo pipefail` aborts this step on its FIRST line -- the loudest possible failure from
@@ -47,13 +47,13 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
 # `${PHASE_DIR}/../../etc/passwd-REVIEW.md`, where the old `printf "%02d"` had at least
-# mangled it to `00`. `code-review-fix.md:39` already validates `^[0-9]+(\.[0-9]+)*$` against its
+# mangled it to `00`. `code-review-fix.md`'s PADDED_PHASE validator already checks `^[0-9]+[A-Z]?(\.[0-9]+)*$` against its
 # own PADDED_PHASE -- the padded form, not the raw PHASE_NUMBER this step is handed -- while
 # `execute-phase.md` validates nothing at all; this step has two call sites and validates for
 # itself rather than trusting either. Anything else yields an EMPTY PADDED and the blocks
 # below refuse to build a path from it.
 # PHASE_DIR is checked for NON-EMPTINESS ONLY. Both inputs come from the caller's init query, so
-# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`) to check
+# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+[A-Z]?(\.[0-9]+)*$`) to check
 # against. A filesystem path admits `..` and symlinked parents alike, so a shape
 # check here rejects working setups and proves nothing. Residual: PHASE_DIR may itself be a symlink
 # and the ledger is written through it -- left alone, and not a security boundary.
@@ -62,13 +62,28 @@ _pn="${PHASE_NUMBER:-}"
 _ok=1
 [ -n "$_pd" ] || _ok=0
 case "$_pn" in
-  ''|*[!0-9.]*) _ok=0 ;;   # empty, or any character outside [0-9.] -- this is the traversal fence
-  .*|*.)        _ok=0 ;;   # leading or trailing dot
-  *..*)         _ok=0 ;;   # EMPTY SEGMENT. The three arms together accept exactly
-                           # digits(.digits)* -- byte-congruent with the callers'
-                           # ^[0-9]+(\.[0-9]+)*$ -- rather than merely wider than the
-                           # retired `*.*.*` arity bound, which masked `1..2` by accident.
+  ''|*[!0-9.A-Z]*) _ok=0 ;;   # empty, or any character outside [0-9.A-Z] -- this is the traversal fence
+  .*|*.)           _ok=0 ;;   # leading or trailing dot
+  *..*)            _ok=0 ;;   # EMPTY SEGMENT. The three arms plus the letter-axis block below
+                              # accept exactly digits[LETTER](.digits)* -- byte-congruent with the
+                              # callers' ^[0-9]+[A-Z]?(\.[0-9]+)*$ -- rather than merely wider than
+                              # the retired `*.*.*` arity bound, which masked `1..2` by accident.
 esac
+# THE LETTER AXIS. The canonical grammar (src/phase-id.cts) is digits, an OPTIONAL single uppercase
+# letter, then dotted digit segments -- `12A`, `3A`, `23A.1.2`. #4744 (#4660) widened the six
+# shell/markdown mirrors to it after this branch was cut, and its lint ratchet then flagged this
+# step as the one letterless mirror left. The character class above admits the letter; these
+# arms pin WHERE it may sit -- only as the last character of the integer part, at most once --
+# so `23a`, `A23`, `2A3`, `23AB` and `23.1A` are all refused.
+if [ "$_ok" = "1" ]; then
+  _int="${_pn%%.*}"
+  case "$_pn" in *.*) _sub=".${_pn#*.}" ;; *) _sub="" ;; esac
+  _let="${_int##*[0-9]}"                              # what trails the last digit: '' or the letter
+  _dig="${_int%"$_let"}"
+  case "$_dig" in ''|*[!0-9]*) _ok=0 ;; esac          # the integer part must be digits first
+  case "$_let" in ''|[A-Z]) ;; *) _ok=0 ;; esac        # at most ONE letter, uppercase
+  case "$_sub" in *[!0-9.]*) _ok=0 ;; esac            # no letter in any later segment
+fi
 # LENGTH-BOUND EACH COMPONENT SEPARATELY. Bash integers wrap at 2^64, so `$((10#$_int))` on a
 # 54-digit value yields -7908320945662590977 SILENTLY and that becomes the padded phase. The
 # bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
@@ -90,14 +105,15 @@ if [ "$_ok" = "1" ]; then
       *.*) _seg="${_rest%%.*}"; _rest="${_rest#*.}" ;;
       *)   _seg="$_rest";       _rest="" ;;
     esac
-    case "$_seg" in ?????????*) _ok=0 ;; esac
+    # The bound is on the DIGITS: a letter suffix is one character the overflow guard has no
+    # stake in, so `12345678A` is within it exactly as `12345678` is.
+    case "${_seg%[A-Z]}" in ?????????*) _ok=0 ;; esac
   done
 fi
 if [ "$_ok" = "1" ]; then
-  _int="${_pn%%.*}"
-  case "$_pn" in *.*) _sub=".${_pn#*.}" ;; *) _sub="" ;; esac
-  # `10#` because bash reads a leading zero as octal, which is what breaks 08 and 09.
-  PADDED="$(printf "%02d" "$((10#$_int))")$_sub"
+  # `10#` because bash reads a leading zero as octal, which is what breaks 08 and 09. The letter is
+  # carried verbatim after the padded digits, as the canonical padder does: `3A` -> `03A`.
+  PADDED="$(printf "%02d" "$((10#$_dig))")$_let$_sub"
 else
   PADDED=""
 fi
@@ -232,10 +248,10 @@ the step — never blocks:
 # for the same reason, and these three belong beside it.
 # PADDED must survive a DOTTED phase number, of ANY segment count. This step is dispatched from
 # exactly TWO places: `execute-phase.md` (`code_review_gate`) and `code-review-fix.md`
-# (`record_disposition`). Only the second validates anything -- `code-review-fix.md:39` anchors
-# `^[0-9]+(\.[0-9]+)*$`, an unbounded `*` widened by #4568, so it accepts `03.1` AND `23.1.2`.
+# (`record_disposition`). Only the second validates anything -- `code-review-fix.md`'s PADDED_PHASE validator anchors
+# `^[0-9]+[A-Z]?(\.[0-9]+)*$`, an unbounded `*` widened by #4568 and a letter axis widened by #4744, so it accepts `03.1`, `23.1.2` AND `12A`.
 # `execute-phase.md` applies NO shape gate at all, so this fence is not mirroring an upstream
-# guarantee; it IS the guarantee. (`code-review.md:63` carries an identical validator but never
+# guarantee; it IS the guarantee. (`code-review.md`'s own PADDED_PHASE validator is identical but never
 # dispatches this step. It was cited here as a caller for several rounds and is not one.) And
 # `printf "%02d"` cannot format one: bash prints `invalid number` and exits 1, which under
 # `set -euo pipefail` aborts this step on its FIRST line -- the loudest possible failure from
@@ -257,13 +273,13 @@ the step — never blocks:
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
 # `${PHASE_DIR}/../../etc/passwd-REVIEW.md`, where the old `printf "%02d"` had at least
-# mangled it to `00`. `code-review-fix.md:39` already validates `^[0-9]+(\.[0-9]+)*$` against its
+# mangled it to `00`. `code-review-fix.md`'s PADDED_PHASE validator already checks `^[0-9]+[A-Z]?(\.[0-9]+)*$` against its
 # own PADDED_PHASE -- the padded form, not the raw PHASE_NUMBER this step is handed -- while
 # `execute-phase.md` validates nothing at all; this step has two call sites and validates for
 # itself rather than trusting either. Anything else yields an EMPTY PADDED and the blocks
 # below refuse to build a path from it.
 # PHASE_DIR is checked for NON-EMPTINESS ONLY. Both inputs come from the caller's init query, so
-# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+(\.[0-9]+)*$`) to check
+# neither is raw user input; only PHASE_NUMBER has a SHAPE (`^[0-9]+[A-Z]?(\.[0-9]+)*$`) to check
 # against. A filesystem path admits `..` and symlinked parents alike, so a shape
 # check here rejects working setups and proves nothing. Residual: PHASE_DIR may itself be a symlink
 # and the ledger is written through it -- left alone, and not a security boundary.
@@ -272,13 +288,28 @@ _pn="${PHASE_NUMBER:-}"
 _ok=1
 [ -n "$_pd" ] || _ok=0
 case "$_pn" in
-  ''|*[!0-9.]*) _ok=0 ;;   # empty, or any character outside [0-9.] -- this is the traversal fence
-  .*|*.)        _ok=0 ;;   # leading or trailing dot
-  *..*)         _ok=0 ;;   # EMPTY SEGMENT. The three arms together accept exactly
-                           # digits(.digits)* -- byte-congruent with the callers'
-                           # ^[0-9]+(\.[0-9]+)*$ -- rather than merely wider than the
-                           # retired `*.*.*` arity bound, which masked `1..2` by accident.
+  ''|*[!0-9.A-Z]*) _ok=0 ;;   # empty, or any character outside [0-9.A-Z] -- this is the traversal fence
+  .*|*.)           _ok=0 ;;   # leading or trailing dot
+  *..*)            _ok=0 ;;   # EMPTY SEGMENT. The three arms plus the letter-axis block below
+                              # accept exactly digits[LETTER](.digits)* -- byte-congruent with the
+                              # callers' ^[0-9]+[A-Z]?(\.[0-9]+)*$ -- rather than merely wider than
+                              # the retired `*.*.*` arity bound, which masked `1..2` by accident.
 esac
+# THE LETTER AXIS. The canonical grammar (src/phase-id.cts) is digits, an OPTIONAL single uppercase
+# letter, then dotted digit segments -- `12A`, `3A`, `23A.1.2`. #4744 (#4660) widened the six
+# shell/markdown mirrors to it after this branch was cut, and its lint ratchet then flagged this
+# step as the one letterless mirror left. The character class above admits the letter; these
+# arms pin WHERE it may sit -- only as the last character of the integer part, at most once --
+# so `23a`, `A23`, `2A3`, `23AB` and `23.1A` are all refused.
+if [ "$_ok" = "1" ]; then
+  _int="${_pn%%.*}"
+  case "$_pn" in *.*) _sub=".${_pn#*.}" ;; *) _sub="" ;; esac
+  _let="${_int##*[0-9]}"                              # what trails the last digit: '' or the letter
+  _dig="${_int%"$_let"}"
+  case "$_dig" in ''|*[!0-9]*) _ok=0 ;; esac          # the integer part must be digits first
+  case "$_let" in ''|[A-Z]) ;; *) _ok=0 ;; esac        # at most ONE letter, uppercase
+  case "$_sub" in *[!0-9.]*) _ok=0 ;; esac            # no letter in any later segment
+fi
 # LENGTH-BOUND EACH COMPONENT SEPARATELY. Bash integers wrap at 2^64, so `$((10#$_int))` on a
 # 54-digit value yields -7908320945662590977 SILENTLY and that becomes the padded phase. The
 # bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
@@ -300,14 +331,15 @@ if [ "$_ok" = "1" ]; then
       *.*) _seg="${_rest%%.*}"; _rest="${_rest#*.}" ;;
       *)   _seg="$_rest";       _rest="" ;;
     esac
-    case "$_seg" in ?????????*) _ok=0 ;; esac
+    # The bound is on the DIGITS: a letter suffix is one character the overflow guard has no
+    # stake in, so `12345678A` is within it exactly as `12345678` is.
+    case "${_seg%[A-Z]}" in ?????????*) _ok=0 ;; esac
   done
 fi
 if [ "$_ok" = "1" ]; then
-  _int="${_pn%%.*}"
-  case "$_pn" in *.*) _sub=".${_pn#*.}" ;; *) _sub="" ;; esac
-  # `10#` because bash reads a leading zero as octal, which is what breaks 08 and 09.
-  PADDED="$(printf "%02d" "$((10#$_int))")$_sub"
+  # `10#` because bash reads a leading zero as octal, which is what breaks 08 and 09. The letter is
+  # carried verbatim after the padded digits, as the canonical padder does: `3A` -> `03A`.
+  PADDED="$(printf "%02d" "$((10#$_dig))")$_let$_sub"
 else
   PADDED=""
 fi
