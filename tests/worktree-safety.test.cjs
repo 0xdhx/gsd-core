@@ -2210,6 +2210,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
           // repoRoot is NOT mid-merge — the ref simply doesn't exist.
           return { exitCode: 1, stdout: '', stderr: '' };
         }
+        if (key === 'diff --cached --name-only') {
+          // #4721: nothing staged — the refused merge never touched the index.
+          return { exitCode: 0, stdout: '', stderr: '' };
+        }
         // Entry 2 must still be evaluated independently.
         if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') {
           return { exitCode: 0, stdout: 'worktree-agent-a2', stderr: '' };
@@ -2290,6 +2294,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'rev-parse --verify -q MERGE_HEAD') {
           // abort succeeded — repoRoot is no longer mid-merge.
           return { exitCode: 1, stdout: '', stderr: '' };
+        }
+        if (key === 'diff --cached --name-only') {
+          // #4721: nothing staged — the abort restored the index.
+          return { exitCode: 0, stdout: '', stderr: '' };
         }
         // Entry 2 must still be evaluated independently after recovery.
         if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') {
@@ -2508,6 +2516,273 @@ describe('executeWorktreeWaveCleanupPlan', () => {
     assert.equal(result.entries[0].reason, 'merge_failed');
     assert.equal(result.entries.length, 1, 'entry 2 must not have been evaluated — state is unverified, fail closed');
     assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
+  });
+
+  // #4721: the wave's `git merge --no-ff` is the one call in the gauntlet that runs
+  // user hooks, and it used to inherit the module's 10 s plumbing timeout. A repo
+  // whose `pre-merge-commit` hook is a test-suite gate lost every executor merge:
+  // the kill was reported as a plain `merge_failed` carrying the hook's partial
+  // stdout, and — the dangerous half — it landed after git had staged the merged
+  // tree but before it wrote MERGE_HEAD, so the #2852 mid-merge check read the
+  // primary as clean while the executor's whole diff sat staged against the old
+  // HEAD. Committing from that state squashes the executor's history.
+
+  const fs = require('node:fs');
+  const WAVE_WARNING = require(WORKTREE_SAFETY_PATH).WAVE_CLEANUP_WARNING;
+  const MERGE_BUDGET_DEFAULT = require(WORKTREE_SAFETY_PATH).DEFAULT_MERGE_TIMEOUT_MS;
+
+  function mergeGauntletStub(overrides = {}) {
+    // A one-entry gauntlet whose every call before the merge succeeds; callers
+    // override the merge and the post-failure calls per row. Unknown calls throw so
+    // a row cannot pass by accident on a call it never modelled.
+    return (args) => {
+      const key = args.join(' ');
+      if (Object.prototype.hasOwnProperty.call(overrides, key)) return overrides[key](args);
+      for (const prefix of Object.keys(overrides)) {
+        if (prefix.endsWith('*') && key.startsWith(prefix.slice(0, -1))) return overrides[prefix](args);
+      }
+      if (key === '-C /repo/.claude/worktrees/agent-a1 rev-parse --abbrev-ref HEAD') return { exitCode: 0, stdout: 'worktree-agent-a1', stderr: '' };
+      if (key === 'merge-base HEAD worktree-agent-a1') return { exitCode: 0, stdout: 'abc123', stderr: '' };
+      if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a1') return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === '-C /repo/.claude/worktrees/agent-a1 status --porcelain --untracked-files=all') return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') return { exitCode: 0, stdout: 'worktree-agent-a2', stderr: '' };
+      if (key === 'merge-base HEAD worktree-agent-a2') return { exitCode: 0, stdout: 'abc123', stderr: '' };
+      if (key === 'diff --diff-filter=D --name-only HEAD...worktree-agent-a2') return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === '-C /repo/.claude/worktrees/agent-a2 status --porcelain --untracked-files=all') return { exitCode: 0, stdout: '', stderr: '' };
+      if (key.startsWith('merge worktree-agent-a2')) return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === 'worktree remove /repo/.claude/worktrees/agent-a2 --force') return { exitCode: 0, stdout: '', stderr: '' };
+      if (key === 'branch -D worktree-agent-a2') return { exitCode: 0, stdout: '', stderr: '' };
+      throw new Error(`unexpected git call: ${key}`);
+    };
+  }
+
+  const twoEntryPlan = () => ({
+    ok: true,
+    repoRoot: '/repo/main',
+    action: 'cleanup_wave',
+    discovery: 'manifest',
+    entries: [
+      { agent_id: 'a1', worktree_path: '/repo/.claude/worktrees/agent-a1', branch: 'worktree-agent-a1', expected_base: 'abc123' },
+      { agent_id: 'a2', worktree_path: '/repo/.claude/worktrees/agent-a2', branch: 'worktree-agent-a2', expected_base: 'abc123' },
+    ],
+  });
+
+  // The kill lands after the merged tree is staged and before MERGE_HEAD is written,
+  // so `git merge --abort` finds nothing and the MERGE_HEAD probe says "clean".
+  const killedMidHook = {
+    'merge worktree-agent-a1*': () => ({
+      exitCode: null,
+      stdout: 'pre-merge-commit: slow gate starting (sleep 15)\n',
+      stderr: '',
+      timedOut: true,
+      signal: 'SIGTERM',
+      error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+    }),
+    'merge --abort': () => ({ exitCode: 128, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' }),
+    'rev-parse --verify -q MERGE_HEAD': () => ({ exitCode: 1, stdout: '', stderr: '' }),
+  };
+
+  test('#4721: the merge carries its own budget; every other call in the gauntlet keeps the module default', () => {
+    const seen = [];
+    const plan = twoEntryPlan();
+    plan.entries.pop();
+    executeWorktreeWaveCleanupPlan(plan, {
+      execGit: (args, opts) => {
+        seen.push({ key: args.join(' '), timeout: opts && opts.timeout });
+        return mergeGauntletStub({
+          'merge worktree-agent-a1*': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          'worktree remove /repo/.claude/worktrees/agent-a1 --force': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          'branch -D worktree-agent-a1': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        })(args);
+      },
+    });
+    const merge = seen.filter((c) => c.key.startsWith('merge worktree-agent-a1'));
+    assert.equal(merge.length, 1);
+    assert.equal(merge[0].timeout, MERGE_BUDGET_DEFAULT, 'the merge must pass an explicit budget, not inherit the plumbing default');
+    assert.ok(MERGE_BUDGET_DEFAULT >= 60_000, 'the merge budget is sized for a hook, not for plumbing');
+    for (const other of seen.filter((c) => !c.key.startsWith('merge worktree-agent-a1'))) {
+      assert.equal(other.timeout, undefined, `${other.key} must keep the module default — only the merge runs hooks`);
+    }
+
+    // And the budget is a dep, so a caller can size it to its hooks.
+    const seenOverride = [];
+    executeWorktreeWaveCleanupPlan(plan, {
+      mergeTimeoutMs: 4242,
+      execGit: (args, opts) => {
+        seenOverride.push({ key: args.join(' '), timeout: opts && opts.timeout });
+        return mergeGauntletStub({
+          'merge worktree-agent-a1*': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          'worktree remove /repo/.claude/worktrees/agent-a1 --force': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          'branch -D worktree-agent-a1': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        })(args);
+      },
+    });
+    assert.equal(seenOverride.find((c) => c.key.startsWith('merge worktree-agent-a1')).timeout, 4242);
+  });
+
+  test('#4721: a merge killed at its budget is blocked as merge_timed_out, its staged residue is restored, and the wave continues', () => {
+    const calls = [];
+    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
+      execGit: (args) => {
+        calls.push(args.join(' '));
+        let cachedReads = 0;
+        return mergeGauntletStub({
+          ...killedMidHook,
+          'diff --cached --name-only': () => {
+            // First read: the executor's tree, staged against the old HEAD. Second
+            // read (after `reset --merge`): clean.
+            cachedReads = calls.filter((c) => c === 'diff --cached --name-only').length;
+            return cachedReads === 1
+              ? { exitCode: 0, stdout: 'a.txt\nb.txt\n', stderr: '' }
+              : { exitCode: 0, stdout: '', stderr: '' };
+          },
+          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        })(args);
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.entries[0].status, 'blocked');
+    assert.equal(result.entries[0].reason, 'merge_timed_out', 'a timeout is not a merge_failed');
+    assert.notEqual(result.entries[0].reason, 'merge_failed');
+    assert.deepEqual(
+      result.entries[0].warnings,
+      [
+        { code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'a.txt' },
+        { code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'b.txt' },
+      ],
+      'every path the killed merge left staged is named as restored',
+    );
+    assert.equal(result.warnings.length, 2, 'residue warnings are aggregated on the wave result too');
+    assert.ok(calls.includes('reset --merge'), 'the staged residue is undone with git reset --merge');
+    assert.ok(calls.indexOf('reset --merge') > calls.indexOf('rev-parse --verify -q MERGE_HEAD'), 'the residue check runs only once the repo is known not to be mid-merge');
+    assert.equal(result.entries[1].status, 'merged_removed', 'entry 2 still merges — repoRoot was restored to clean');
+    assert.deepEqual(result.pending, []);
+  });
+
+  test('#4721: an ordinary merge_failed with a clean index never runs a reset', () => {
+    const calls = [];
+    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
+      execGit: (args) => {
+        calls.push(args.join(' '));
+        return mergeGauntletStub({
+          'merge worktree-agent-a1*': () => ({ exitCode: 1, stdout: '', stderr: 'error: Your local changes to the following files would be overwritten by merge' }),
+          'merge --abort': () => ({ exitCode: 128, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' }),
+          'rev-parse --verify -q MERGE_HEAD': () => ({ exitCode: 1, stdout: '', stderr: '' }),
+          'diff --cached --name-only': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        })(args);
+      },
+    });
+    assert.equal(result.entries[0].reason, 'merge_failed');
+    assert.deepEqual(result.entries[0].warnings, []);
+    assert.equal(calls.includes('reset --merge'), false, 'nothing staged, nothing to reset');
+    assert.equal(result.entries[1].status, 'merged_removed');
+  });
+
+  test('#4721: residue that git reset --merge cannot clear is reported as left staged and halts the wave', () => {
+    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
+      execGit: (args) => mergeGauntletStub({
+        ...killedMidHook,
+        // Still `b.txt` on both reads: the reset refused (an unstaged edit overlaps),
+        // or ran but left it.
+        'diff --cached --name-only': () => ({ exitCode: 0, stdout: 'b.txt\n', stderr: '' }),
+        'reset --merge': () => ({ exitCode: 1, stdout: '', stderr: 'error: Entry \'b.txt\' not uptodate. Cannot merge.' }),
+      })(args),
+    });
+    assert.equal(result.entries[0].reason, 'merge_timed_out');
+    assert.deepEqual(
+      result.entries[0].warnings,
+      [{ code: WAVE_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch: 'worktree-agent-a1', path: 'b.txt' }],
+    );
+    assert.equal(result.entries.length, 1, 'entry 2 must not be evaluated against a dirty index');
+    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
+  });
+
+  test('#4721: an unverifiable index after merge_failed fails closed — null path, wave halted', () => {
+    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
+      execGit: (args) => mergeGauntletStub({
+        ...killedMidHook,
+        'diff --cached --name-only': makeTimeoutStub(),
+      })(args),
+    });
+    assert.deepEqual(
+      result.entries[0].warnings,
+      [{ code: WAVE_WARNING.MERGE_RESIDUE_LEFT_STAGED, branch: 'worktree-agent-a1', path: null }],
+      'a null path marks "the check itself could not run", as scope_check_unavailable does',
+    );
+    assert.equal(result.entries.length, 1);
+    assert.deepEqual(result.pending.map((entry) => entry.branch), ['worktree-agent-a2']);
+  });
+
+  describe('#4721: real git — a pre-merge-commit hook slower than the merge budget', { skip: isWindows ? 'POSIX sh hook' : false }, () => {
+    const { gitOrThrow: gitFixture } = require('./helpers/git-fixture.cjs');
+    const HOOK_SLEEP_S = 3;
+
+    function buildRepoWithSlowHook() {
+      const root = createTempDir('gsd-4721-');
+      const repo = path.join(root, 'rr');
+      const wt = path.join(root, 'rr-wt');
+      const git = (args, cwd = repo) => gitFixture(args, { cwd, timeoutMs: SUBPROCESS_TIMEOUT_MS });
+      fs.mkdirSync(repo);
+      git(['init', '-q', '-b', 'main']);
+      git(['config', 'user.email', 'test@example.com']);
+      git(['config', 'user.name', 'test']);
+      git(['config', 'commit.gpgsign', 'false']);
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
+      git(['add', 'a.txt']);
+      git(['commit', '-q', '-m', 'base']);
+      const hook = path.join(repo, '.git', 'hooks', 'pre-merge-commit');
+      fs.writeFileSync(hook, `#!/bin/sh\necho "pre-merge-commit: slow gate starting"\nsleep ${HOOK_SLEEP_S}\nexit 0\n`, { mode: 0o755 });
+      git(['worktree', 'add', '-q', '-b', 'agent-repro1', wt]);
+      fs.writeFileSync(path.join(wt, 'b.txt'), 'change\n');
+      fs.appendFileSync(path.join(wt, 'a.txt'), 'executor line\n');
+      git(['add', 'a.txt', 'b.txt'], wt);
+      git(['commit', '-q', '-m', 'executor: add b.txt'], wt);
+      const base = git(['rev-parse', 'HEAD']).trim();
+      const plan = {
+        ok: true,
+        repoRoot: repo,
+        action: 'cleanup_wave',
+        discovery: 'manifest',
+        entries: [{ agent_id: 'repro1', worktree_path: wt, branch: 'agent-repro1', expected_base: base }],
+      };
+      return { root, repo, wt, base, plan, git };
+    }
+
+    test('is blocked as merge_timed_out, leaves no MERGE_HEAD, and repoRoot ends with a clean index at the old HEAD', () => {
+      const fx = buildRepoWithSlowHook();
+      try {
+        const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: 1000 });
+        assert.equal(result.ok, false);
+        assert.equal(result.entries[0].reason, 'merge_timed_out');
+        assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base, 'HEAD unmoved');
+        assert.equal(fx.git(['diff', '--cached', '--name-only']).trim(), '', 'the killed merge\'s staged tree was restored');
+        assert.equal(fx.git(['status', '--porcelain']).trim(), '', 'worktree clean too');
+        assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\n');
+        assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false, 'the merge-added file is gone from the primary');
+        assert.deepEqual(
+          result.entries[0].warnings.map((w) => w.code),
+          [WAVE_WARNING.MERGE_RESIDUE_RESTORED, WAVE_WARNING.MERGE_RESIDUE_RESTORED],
+        );
+        assert.deepEqual(result.entries[0].warnings.map((w) => w.path).sort(), ['a.txt', 'b.txt']);
+        assert.equal(fs.existsSync(path.join(fx.wt, 'b.txt')), true, 'the executor branch and its worktree are untouched');
+      } finally {
+        cleanup(fx.root);
+      }
+    });
+
+    test('negative control: the same hook under the default budget merges cleanly', () => {
+      const fx = buildRepoWithSlowHook();
+      try {
+        const result = executeWorktreeWaveCleanupPlan(fx.plan);
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.entries[0].status, 'merged_removed');
+        assert.deepEqual(result.entries[0].warnings, []);
+        assert.equal(fx.git(['rev-list', '--count', 'HEAD']).trim(), '3', 'base + executor + merge commit: history preserved, not squashed');
+        assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
+      } finally {
+        cleanup(fx.root);
+      }
+    });
   });
 
   test('#3804: rescues uncommitted SUMMARY.md from worktree .planning/ before dirty check', () => {
@@ -7331,7 +7606,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
   test('WAVE_CLEANUP_WARNING is a frozen, locked code set', () => {
     assert.deepEqual(
       Object.keys(WAVE_CLEANUP_WARNING).sort(),
-      ['SCOPE_CHECK_UNAVAILABLE', 'SCOPE_OUT_OF_DECLARED'],
+      ['MERGE_RESIDUE_LEFT_STAGED', 'MERGE_RESIDUE_RESTORED', 'SCOPE_CHECK_UNAVAILABLE', 'SCOPE_OUT_OF_DECLARED'],
     );
     assert.equal(Object.isFrozen(WAVE_CLEANUP_WARNING), true);
   });

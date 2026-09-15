@@ -1358,6 +1358,14 @@ This is advisory: it does not change `ok`, `reason`, the per-entry `status`, or 
 
 Two deliberate limits keep it from crying wolf. `.planning/**/*SUMMARY.md` paths are always exempt — the executor writes a SUMMARY by orchestration contract and no plan declares it. Glob patterns are matched by their literal prefix only, so `src/**/*.ts` covers everything under `src/`, and a pattern with no literal prefix (`*.md`) suppresses warnings for that entry rather than reporting every file.
 
+**Merge timeout and a killed merge's residue (#4721)**
+
+The merge step is the one git call in `cleanup-wave` that runs user hooks (`pre-merge-commit`, `prepare-commit-msg`, `commit-msg`, `post-merge`), so it runs under its own budget — 10 minutes by default (`DEFAULT_MERGE_TIMEOUT_MS`; `deps.mergeTimeoutMs` for callers of the module) — rather than the 10-second timeout every other git call in the wave keeps. A repo whose pre-merge hook is a test-suite gate therefore merges instead of being killed mid-hook.
+
+When the merge does exceed its budget the entry blocks on `reason: "merge_timed_out"`, and its `stderr` names the budget and says the hook may still be running, instead of the old `merge_failed` carrying whatever the hook had printed before git was killed. `merge_failed` is now reserved for a merge git itself refused or that conflicted.
+
+A merge killed while its hook runs has already staged the merged tree into the primary checkout's index but never wrote `MERGE_HEAD`, so `git merge --abort` finds nothing and the mid-merge check (#2852) reads the primary as clean. Left there, a plain `git commit` from the primary would squash the executor's history into a single-parent commit. `cleanup-wave` now checks the index after any failed merge and, if anything is staged, runs `git reset --merge` — which restores exactly the paths the merge staged and keeps unrelated unstaged edits — and then re-reads the index. Each restored path is reported as a `code: "merge_residue_restored"` warning and the wave continues. If the index is still dirty afterwards, or cannot be read at all, each remaining path (or a single `path: null` when the read itself failed) is reported as `code: "merge_residue_left_staged"` and the remaining entries are moved to `pending` — the same repo-level halt an unfinished merge triggers, because every later merge would run against that dirty index. The staged set is attributable to the merge because git refuses to start a merge when the index already differs from `HEAD`.
+
 ---
 
 ## Graphify
