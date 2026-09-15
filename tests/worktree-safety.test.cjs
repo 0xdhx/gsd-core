@@ -2210,10 +2210,6 @@ describe('executeWorktreeWaveCleanupPlan', () => {
           // repoRoot is NOT mid-merge — the ref simply doesn't exist.
           return { exitCode: 1, stdout: '', stderr: '' };
         }
-        if (key === 'diff --cached --name-only') {
-          // #4721: nothing staged — the refused merge never touched the index.
-          return { exitCode: 0, stdout: '', stderr: '' };
-        }
         // Entry 2 must still be evaluated independently.
         if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') {
           return { exitCode: 0, stdout: 'worktree-agent-a2', stderr: '' };
@@ -2294,10 +2290,6 @@ describe('executeWorktreeWaveCleanupPlan', () => {
         if (key === 'rev-parse --verify -q MERGE_HEAD') {
           // abort succeeded — repoRoot is no longer mid-merge.
           return { exitCode: 1, stdout: '', stderr: '' };
-        }
-        if (key === 'diff --cached --name-only') {
-          // #4721: nothing staged — the abort restored the index.
-          return { exitCode: 0, stdout: '', stderr: '' };
         }
         // Entry 2 must still be evaluated independently after recovery.
         if (key === '-C /repo/.claude/worktrees/agent-a2 rev-parse --abbrev-ref HEAD') {
@@ -2580,6 +2572,7 @@ describe('executeWorktreeWaveCleanupPlan', () => {
     }),
     'merge --abort': () => ({ exitCode: 128, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' }),
     'rev-parse --verify -q MERGE_HEAD': () => ({ exitCode: 1, stdout: '', stderr: '' }),
+    'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 1, stdout: '', stderr: '' }),
   };
 
   test('#4721: the merge carries its own budget; every other call in the gauntlet keeps the module default', () => {
@@ -2659,23 +2652,70 @@ describe('executeWorktreeWaveCleanupPlan', () => {
     assert.deepEqual(result.pending, []);
   });
 
-  test('#4721: an ordinary merge_failed with a clean index never runs a reset', () => {
+  test('#4721: a merge git REFUSED never reads or resets the index — a pre-existing dirty index is the operator\'s work', () => {
+    // Caught in review: a refusal ("your local changes would be overwritten") is
+    // exactly what a pre-existing dirty index earns, and it leaves that index as it
+    // was. Attributing it to the merge and running `reset --merge` would discard
+    // the operator's staged work. The residue path is gated on the TIMEOUT.
     const calls = [];
     const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
       execGit: (args) => {
         calls.push(args.join(' '));
         return mergeGauntletStub({
-          'merge worktree-agent-a1*': () => ({ exitCode: 1, stdout: '', stderr: 'error: Your local changes to the following files would be overwritten by merge' }),
+          'merge worktree-agent-a1*': () => ({ exitCode: 1, stdout: '', stderr: 'error: Your local changes to the following files would be overwritten by merge:\n  d.txt' }),
           'merge --abort': () => ({ exitCode: 128, stdout: '', stderr: 'fatal: There is no merge to abort (MERGE_HEAD missing)?' }),
           'rev-parse --verify -q MERGE_HEAD': () => ({ exitCode: 1, stdout: '', stderr: '' }),
-          'diff --cached --name-only': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          // The stub throws on any call not modelled here — so a `diff --cached`
+          // or `reset --merge` on this path fails the test loudly.
         })(args);
       },
     });
     assert.equal(result.entries[0].reason, 'merge_failed');
     assert.deepEqual(result.entries[0].warnings, []);
-    assert.equal(calls.includes('reset --merge'), false, 'nothing staged, nothing to reset');
+    assert.equal(calls.some((c) => c.startsWith('diff --cached')), false, 'a refused merge does not read the index');
+    assert.equal(calls.includes('reset --merge'), false, 'and never resets it');
     assert.equal(result.entries[1].status, 'merged_removed');
+  });
+
+  test('#4721: a killed merge that had autostashed pre-existing work re-applies it after the reset', () => {
+    const calls = [];
+    const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
+      execGit: (args) => {
+        calls.push(args.join(' '));
+        return mergeGauntletStub({
+          ...killedMidHook,
+          // merge.autoStash parked the operator's staged edit here and started anyway.
+          'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 0, stdout: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\n', stderr: '' }),
+          'diff --cached --name-only': () => (calls.filter((c) => c === 'diff --cached --name-only').length === 1
+            ? { exitCode: 0, stdout: 'b.txt\n', stderr: '' }
+            : { exitCode: 0, stdout: '', stderr: '' }),
+          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: 'Autostash exists; creating a new stash entry.' }),
+          'stash pop --index': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+        })(args);
+      },
+    });
+    assert.equal(result.entries[0].reason, 'merge_timed_out');
+    assert.deepEqual(result.entries[0].warnings, [{ code: WAVE_WARNING.MERGE_RESIDUE_RESTORED, branch: 'worktree-agent-a1', path: 'b.txt' }]);
+    assert.ok(calls.indexOf('stash pop --index') > calls.indexOf('reset --merge'), 'the autostash is re-applied AFTER the reset parks it in the stash list');
+    assert.equal(result.entries[1].status, 'merged_removed');
+
+    // Clean index, autostash present (killed before the index was populated): still reset + pop.
+    const calls2 = [];
+    const result2 = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
+      execGit: (args) => {
+        calls2.push(args.join(' '));
+        return mergeGauntletStub({
+          ...killedMidHook,
+          'rev-parse --verify -q MERGE_AUTOSTASH': () => ({ exitCode: 0, stdout: 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00\n', stderr: '' }),
+          'diff --cached --name-only': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          'reset --merge': () => ({ exitCode: 0, stdout: '', stderr: '' }),
+          'stash pop --index': () => ({ exitCode: 1, stdout: '', stderr: 'error: could not restore untracked files from stash' }),
+        })(args);
+      },
+    });
+    assert.ok(calls2.includes('reset --merge') && calls2.includes('stash pop --index'));
+    assert.deepEqual(result2.entries[0].warnings, [{ code: WAVE_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch: 'worktree-agent-a1', path: null }], 'a failed pop is reported, never silent');
+    assert.equal(result2.entries[1].status, 'merged_removed', 'the index is clean, so the wave continues');
   });
 
   test('#4721: residue that git reset --merge cannot clear is reported as left staged and halts the wave', () => {
@@ -2715,9 +2755,10 @@ describe('executeWorktreeWaveCleanupPlan', () => {
 
   describe('#4721: real git — a pre-merge-commit hook slower than the merge budget', { skip: isWindows ? 'POSIX sh hook' : false }, () => {
     const { gitOrThrow: gitFixture } = require('./helpers/git-fixture.cjs');
-    const HOOK_SLEEP_S = 3;
+    const HOOK_SLEEP_S = 4;
+    const KILL_BUDGET_MS = 1500;
 
-    function buildRepoWithSlowHook() {
+    function buildRepoWithSlowHook({ hook = true, autoStash = false, prestage = false } = {}) {
       const root = createTempDir('gsd-4721-');
       const repo = path.join(root, 'rr');
       const wt = path.join(root, 'rr-wt');
@@ -2730,14 +2771,23 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       fs.writeFileSync(path.join(repo, 'a.txt'), 'base\n');
       git(['add', 'a.txt']);
       git(['commit', '-q', '-m', 'base']);
-      const hook = path.join(repo, '.git', 'hooks', 'pre-merge-commit');
-      fs.writeFileSync(hook, `#!/bin/sh\necho "pre-merge-commit: slow gate starting"\nsleep ${HOOK_SLEEP_S}\nexit 0\n`, { mode: 0o755 });
+      if (hook) {
+        const hookPath = path.join(repo, '.git', 'hooks', 'pre-merge-commit');
+        fs.writeFileSync(hookPath, `#!/bin/sh\necho "pre-merge-commit: slow gate starting"\nsleep ${HOOK_SLEEP_S}\nexit 0\n`, { mode: 0o755 });
+      }
+      if (autoStash) git(['config', 'merge.autoStash', 'true']);
       git(['worktree', 'add', '-q', '-b', 'agent-repro1', wt]);
       fs.writeFileSync(path.join(wt, 'b.txt'), 'change\n');
       fs.appendFileSync(path.join(wt, 'a.txt'), 'executor line\n');
       git(['add', 'a.txt', 'b.txt'], wt);
       git(['commit', '-q', '-m', 'executor: add b.txt'], wt);
       const base = git(['rev-parse', 'HEAD']).trim();
+      if (prestage) {
+        // The operator's own staged work in the primary, unrelated to the branch.
+        fs.appendFileSync(path.join(repo, 'a.txt'), 'operator staged line\n');
+        fs.writeFileSync(path.join(repo, 'ops.txt'), 'precious\n');
+        git(['add', 'a.txt', 'ops.txt']);
+      }
       const plan = {
         ok: true,
         repoRoot: repo,
@@ -2751,7 +2801,7 @@ describe('executeWorktreeWaveCleanupPlan', () => {
     test('is blocked as merge_timed_out, leaves no MERGE_HEAD, and repoRoot ends with a clean index at the old HEAD', (t) => {
       const fx = buildRepoWithSlowHook();
       t.after(() => cleanup(fx.root));
-      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: 1000 });
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
       assert.equal(result.ok, false);
       assert.equal(result.entries[0].reason, 'merge_timed_out');
       assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base, 'HEAD unmoved');
@@ -2776,6 +2826,34 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       assert.deepEqual(result.entries[0].warnings, []);
       assert.equal(fx.git(['rev-list', '--count', 'HEAD']).trim(), '3', 'base + executor + merge commit: history preserved, not squashed');
       assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
+    });
+
+    test('a merge git refuses because the primary index is dirty leaves the operator\'s staged work exactly as it was', (t) => {
+      // The review-caught case, on real git: no hook, pre-existing staged work in the
+      // primary. git refuses instantly; nothing may be reset.
+      const fx = buildRepoWithSlowHook({ hook: false, prestage: true });
+      t.after(() => cleanup(fx.root));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
+      assert.equal(result.entries[0].reason, 'merge_failed');
+      assert.deepEqual(result.entries[0].warnings, []);
+      assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'ops.txt'], 'the operator\'s staged set is untouched');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'ops.txt'), 'utf8'), 'precious\n');
+      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false);
+    });
+
+    test('a killed merge under merge.autoStash restores the executor residue AND re-applies the operator\'s autostashed work', (t) => {
+      const fx = buildRepoWithSlowHook({ autoStash: true, prestage: true });
+      t.after(() => cleanup(fx.root));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: KILL_BUDGET_MS });
+      assert.equal(result.entries[0].reason, 'merge_timed_out');
+      assert.deepEqual(result.entries[0].warnings.map((w) => w.code), [WAVE_WARNING.MERGE_RESIDUE_RESTORED, WAVE_WARNING.MERGE_RESIDUE_RESTORED], 'no autostash warning — the pop succeeded');
+      assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base);
+      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false, 'executor residue gone');
+      assert.deepEqual(fx.git(['diff', '--cached', '--name-only']).trim().split('\n').sort(), ['a.txt', 'ops.txt'], 'the operator\'s staged work is back in the index');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'ops.txt'), 'utf8'), 'precious\n');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\noperator staged line\n', 'a.txt carries the operator line, not the executor line');
+      assert.equal(fx.git(['stash', 'list']).trim(), '', 'nothing left parked in the stash');
+      assert.equal(fs.existsSync(path.join(fx.repo, '.git', 'MERGE_AUTOSTASH')), false);
     });
   });
 
@@ -7600,7 +7678,7 @@ describe('#2596 scope conformance — executeWorktreeWaveCleanupPlan integration
   test('WAVE_CLEANUP_WARNING is a frozen, locked code set', () => {
     assert.deepEqual(
       Object.keys(WAVE_CLEANUP_WARNING).sort(),
-      ['MERGE_RESIDUE_LEFT_STAGED', 'MERGE_RESIDUE_RESTORED', 'SCOPE_CHECK_UNAVAILABLE', 'SCOPE_OUT_OF_DECLARED'],
+      ['MERGE_AUTOSTASH_UNRESTORED', 'MERGE_RESIDUE_LEFT_STAGED', 'MERGE_RESIDUE_RESTORED', 'SCOPE_CHECK_UNAVAILABLE', 'SCOPE_OUT_OF_DECLARED'],
     );
     assert.equal(Object.isFrozen(WAVE_CLEANUP_WARNING), true);
   });
