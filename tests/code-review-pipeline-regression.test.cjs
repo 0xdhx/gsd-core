@@ -3169,10 +3169,10 @@ describe('#3861 round 2 — the ledger write refuses a non-regular file', () => 
 
 describe('#3861 round 2 — a DOTTED phase number does not break the step', () => {
   // Found by the round's own adversarial review, in its MISSED section -- no finding asked about
-  // it. Both of this step's call sites accept `03.1` -- `code-review-fix.md:39` validates
+  // it. Both of this step's call sites accept `03.1` -- `code-review-fix.md`'s PADDED_PHASE validator accepts
   // ^[0-9]+(\.[0-9]+)*$ (widened from `?` to `*` by #4568; this comment named the pre-#4568 form
-  // until round 11) and `execute-phase.md` applies no shape gate at all. (`code-review.md:63`
-  // carries an identical validator but never dispatches this step; it was cited here as a caller
+  // until round 11) and `execute-phase.md` applies no shape gate at all. (`code-review.md`'s
+  // own PADDED_PHASE validator is identical but never dispatches this step; it was cited here as a caller
   // for several rounds and is not one.) The step reconstructed the path with `printf "%02d"`, which cannot
   // format one: bash prints `invalid number` and exits 1. Under `set -euo pipefail` that aborts
   // the step on its FIRST line -- the loudest possible failure from a gate that promises never to
@@ -3229,13 +3229,16 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     // reachable where the old `printf "%02d"` had at least mangled it to `00` -- a regression
     // introduced by the fix, found by adversarially reviewing it. Both call sites accept
     // ^[0-9]+(\.[0-9]+)*$ -- an UNBOUNDED segment count since #4568, anchored at
-    // `code-review-fix.md:39` and ungated at `execute-phase.md` -- and this step has two
+    // `code-review-fix.md`'s PADDED_PHASE validator and ungated at `execute-phase.md` -- and this step has two
     // call sites and validates for itself.
     // `1.2.3` LEFT THIS LIST in round 11. It is a legal N-segment id at the current base, and
     // asserting its refusal here is precisely what held the step narrower than both of them;
     // the positive case is its own test below. What remains here is SHAPE, not arity, so the
     // two malformed-dot cases that the arity guard used to mask are added explicitly.
-    for (const bad of ['../../etc/passwd', 'abc', '', '-1', '3.', '.1', '+1', '3 1', '1..2', '1.2.']) {
+    // The LETTER AXIS joined in round 12 (#4744 / #4660): a single uppercase letter is legal only as
+    // the last character of the integer part, so every other placement is shape, not arity.
+    for (const bad of ['../../etc/passwd', 'abc', '', '-1', '3.', '.1', '+1', '3 1', '1..2', '1.2.',
+                       '23a', 'A23', '2A3', '23AB', '23.1A']) {
       const out = runShippedGateCounts({ reviewText: '', writeReview: false, phaseNumber: bad });
       assert.strictEqual(out.exitCode, 0, 'advisory: `' + bad + '` must not abort the step');
       assert.match(out.stdout, /skipped \(unusable phase number/,
@@ -3247,7 +3250,7 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
 
   test('an N-SEGMENT phase number reports counts, exactly as its callers accept it', { skip: !HAS_BASH }, () => {
     // #3861 round 11. Found by this round's own adversarial review, not by the maintainer's.
-    // The base range widened `code-review-fix.md:39` to `^[0-9]+(\\.[0-9]+)*$` (#4568), matching the
+    // The base range widened `code-review-fix.md`'s PADDED_PHASE validator to `^[0-9]+(\\.[0-9]+)*$` (#4568), matching the
     // segment-count freedom the canonical grammar in src/phase-id.cts has carried since
     // #2128. This step still carried
     // `*.*.*) _ok=0` -- "more than one dot: not the documented shape" -- so `23.1.2` took the
@@ -3277,6 +3280,26 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     }
   });
 
+  test('a LETTER-VARIANT phase number reports counts, padded as the canonical grammar pads it', { skip: !HAS_BASH }, () => {
+    // #3861 round 12. #4744 (#4660) widened the six shell/markdown phase mirrors to the canonical
+    // grammar's letter axis after this branch was cut, and its `lint-phase-id-drift` ratchet then
+    // flagged this step as the one digit-only mirror left -- found by running the base range's
+    // modified gates against the rebased tree, not by the review. `12A` and `23A.1.2` were refused
+    // by name; `3A` must pad to `03A`, the letter carried verbatim after the padded digits exactly as
+    // src/phase-id.cts pads it.
+    for (const [phase, padded] of [['12A', '12A'], ['3A', '03A'], ['23A.1.2', '23A.1.2'], ['12345678A', '12345678A']]) {
+      const review = ['---', 'phase: ' + phase, 'status: issues_found', 'findings:',
+        '  critical: 1', '  warning: 0', '  info: 0', '  total: 1', '---', '',
+        '### CR-01: a finding'].join('\n');
+      const out = runShippedGateCounts({ reviewText: review, padded, phaseNumber: phase });
+      assert.strictEqual(out.exitCode, 0, phase + ': advisory -- must not abort the step');
+      assert.doesNotMatch(out.stdout, /skipped \(unusable phase number/,
+        phase + ': must NOT be refused -- its dispatcher accepts it since #4744');
+      assert.match(out.stdout, /^Code review: 1 findings — 1 critical, 0 warning, 0 info\.$/m,
+        phase + ': the review must be found at the ' + padded + ' path and reported');
+    }
+  });
+
   test('the fence agrees with its callers across a probed set spanning both boundaries', { skip: !HAS_BASH }, () => {
     // #3861 round 11. The first cut of this test was named "congruence, not merely wider" and
     // probed 14 ids, none of them near the length bound. It passed, and the property it named
@@ -3298,7 +3321,8 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     //       PRE-EXISTING and untouched by this round (the bound predates the N-segment work
     //       and guards `$((10#...))` against bash's 2^64 wrap); it is pinned here so it stays
     //       a KNOWN narrowing rather than drifting back into an accidental one.
-    const CALLER_RE = /^[0-9]+(\.[0-9]+)*$/;
+    // The callers' regex since #4744: the letter axis is part of the agreement now.
+    const CALLER_RE = /^[0-9]+[A-Z]?(\.[0-9]+)*$/;
     const refused = (v) => {
       const out = runShippedGateCounts({ reviewText: '', writeReview: false, phaseNumber: v });
       assert.strictEqual(out.exitCode, 0, v + ': advisory -- must not abort');
@@ -3308,6 +3332,7 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     // (1) agreement, for every id whose components are each within the bound
     for (const v of ['1', '03', '03.1', '23.1.2', '1.2.3.4', '12345678', '1.12345678',
                      '1.1234567.1', '12345678.12345678', '1.1.1.1.1.1.1.1.1.1',
+                     '12A', '3A', '23A.1.2', '12345678A', '23a', 'A23', '2A3', '23AB', '23.1A',
                      '1..2', '1.2.', '.1', '3.', 'abc', '-1', '+1', '3 1', '../../etc/passwd']) {
       assert.strictEqual(refused(v), !CALLER_RE.test(v),
         v + ': with every component within the bound, step and callers must agree');
@@ -3317,7 +3342,7 @@ describe('#3861 round 2 — a DOTTED phase number does not break the step', () =
     // This is the `$((10#...))` overflow guard and it is NOT a congruence defect -- bash
     // integers wrap at 2^64, so an unbounded integer segment silently becomes a negative
     // padded phase. Pinned so the narrowing stays known rather than drifting back.
-    for (const v of ['123456789', '1.999999999']) {
+    for (const v of ['123456789', '1.999999999', '123456789A']) {
       assert.ok(CALLER_RE.test(v), v + ': precondition -- the callers do accept this');
       assert.ok(refused(v),
         v + ': the per-component 8-char bound must keep refusing this; if this flips, the '
