@@ -2746,16 +2746,18 @@ describe('executeWorktreeWaveCleanupPlan', () => {
   });
 
   test('#4721: a merge killed by an external signal (no timedOut) takes the same restore path as a timeout', () => {
-    // The seam reports an externally delivered SIGTERM as exitCode null + signal,
-    // timedOut false. The index state it leaves is identical to the timeout's, so
-    // the residue path keys on "killed", not on "timed out" (caught in review).
+    // The seam (`_spawnResult`) normalizes a signal death to exitCode 1 and carries
+    // the signal alongside, timedOut false — so the exit code is NOT the tell, the
+    // signal is (a refused merge has none). The index state a SIGTERM leaves is
+    // identical to the timeout's, so the residue path keys on "killed", not on
+    // "timed out" (caught in review, twice: first the gate, then the shape).
     const calls = [];
     const result = executeWorktreeWaveCleanupPlan(twoEntryPlan(), {
       execGit: (args) => {
         calls.push(args.join(' '));
         return mergeGauntletStub({
           ...killedMidHook,
-          'merge worktree-agent-a1*': () => ({ exitCode: null, stdout: '', stderr: '', timedOut: false, signal: 'SIGTERM' }),
+          'merge worktree-agent-a1*': () => ({ exitCode: 1, stdout: '', stderr: '', timedOut: false, signal: 'SIGTERM', error: null }),
           'diff --cached --name-only': () => (calls.filter((c) => c === 'diff --cached --name-only').length === 1
             ? { exitCode: 0, stdout: 'b.txt\n', stderr: '' }
             : { exitCode: 0, stdout: '', stderr: '' }),

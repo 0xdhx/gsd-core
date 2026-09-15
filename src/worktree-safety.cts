@@ -117,8 +117,8 @@ interface WorktreeDeps {
   parseWorktreePorcelain?: (porcelain: string) => WorktreeBranchEntry[];
   /**
    * #4721: budget for the wave's `git merge --no-ff` — the one call that runs
-   * user hooks. Defaults to DEFAULT_MERGE_TIMEOUT_MS; every other git call in
-   * the wave keeps the module default.
+   * the commit-family hooks. Defaults to DEFAULT_MERGE_TIMEOUT_MS; every other
+   * git call in the wave keeps the module default.
    */
   mergeTimeoutMs?: number;
 }
@@ -1002,23 +1002,26 @@ const WAVE_CLEANUP_WARNING = Object.freeze({
   /** The scope diff could not be computed, so conformance is unknown. */
   SCOPE_CHECK_UNAVAILABLE: 'scope_check_unavailable',
   /**
-   * #4721: a merge killed at its budget left this path staged in repoRoot's
-   * index with no MERGE_HEAD, and `git reset --merge` restored it to HEAD.
-   * Informational — repoRoot is clean again.
+   * #4721: a killed merge (at its budget, or by a signal) left this path
+   * staged in repoRoot's index with no MERGE_HEAD, and `git reset --merge`
+   * restored it to HEAD. Informational — repoRoot is clean again.
    */
   MERGE_RESIDUE_RESTORED: 'merge_residue_restored',
   /**
-   * #4721: a merge killed at its budget left this path staged in repoRoot's
-   * index with no MERGE_HEAD and it could NOT be restored (null path: the
-   * index could not be read at all). repoRoot is dirty; committing from it
-   * would squash the executor's history into one parent. The wave halts.
+   * #4721: a killed merge left this path staged in repoRoot's index with no
+   * MERGE_HEAD and it could NOT be restored (null path: the index could not
+   * be read at all) — or a failed autostash pop left it unmerged. repoRoot is
+   * dirty; committing from it would squash the executor's history into one
+   * parent. The wave halts.
    */
   MERGE_RESIDUE_LEFT_STAGED: 'merge_residue_left_staged',
   /**
    * #4721: the killed merge had parked pre-existing work in MERGE_AUTOSTASH
    * (`merge.autoStash`), and re-applying it failed or could not be verified.
-   * The work is in the stash list, not lost; repoRoot's index is clean. Path is
-   * always null.
+   * The work is in the stash list, not lost. Path is always null. On its own
+   * the index is clean and the wave continues; when a failed pop left
+   * unmerged entries it is accompanied by MERGE_RESIDUE_LEFT_STAGED rows and
+   * the wave halts.
    */
   MERGE_AUTOSTASH_UNRESTORED: 'merge_autostash_unrestored',
 });
@@ -1354,9 +1357,10 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       // staged is the operator's own work and must not be touched (caught in
       // review). A kill is the one shape that stages a tree git never finished
       // with, and an external SIGTERM produces the same state as the timeout
-      // without `timedOut` (caught in review too) — the seam reports it as an
-      // exit with no code and a signal.
-      const mergeKilled = !!merge?.timedOut || (merge?.exitCode === null && !!merge?.signal);
+      // without `timedOut` (caught in review too). The seam normalizes a
+      // signal death to exitCode 1 and carries the signal alongside, so the
+      // signal — never the exit code — is the tell; a refused merge has none.
+      const mergeKilled = !!merge?.timedOut || !!merge?.signal;
       if (mergeKilled) {
         const residue = restoreMergeResidue(execGit, plan.repoRoot, entry.branch);
         result.warnings.push(...residue.warnings);
