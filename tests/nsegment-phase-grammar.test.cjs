@@ -473,6 +473,14 @@ describe('#4748 — execute-phase.md resolves the REVIEW.md path from init\'s pa
   test('regression control: the lookup line itself is unchanged', () => {
     assert.equal(lines[i].trim(), 'REVIEW_FILE="${PHASE_DIR}/${PADDED}-REVIEW.md"');
   });
+
+  test('the workflow\'s init parse list names padded_phase, so the binding is not a literal (fails before the fix)', () => {
+    // A `{field}` token is substituted from the init JSON only for fields the
+    // workflow tells the model to parse; `phase_number` is on that list and
+    // `padded_phase` was not (adversarial review, claim 2).
+    const [p] = findAnchoredLineIndexes(lines, 'Parse JSON for: `executor_model`', 1);
+    assert.match(lines[p], /`phase_number`, `padded_phase`,/);
+  });
 });
 
 describe('#4748 — autonomous.md --from/--to/--only and plan-review-convergence.md extract the full letter-suffixed phase', () => {

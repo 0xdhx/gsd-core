@@ -92,7 +92,7 @@ if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 AGENT_SKILLS=$(gsd_run query agent-skills gsd-executor)
 ```
 
-Parse JSON for: `executor_model`, `verifier_model`, `commit_docs`, `parallelization`, `branching_strategy`, `branch_name`, `phase_found`, `phase_dir`, `phase_number`, `phase_name`, `phase_slug`, `plans`, `incomplete_plans`, `plan_count`, `incomplete_count`, `state_exists`, `roadmap_exists`, `phase_req_ids`, `response_language`, `requirements_path`, `section_manifest`.
+Parse JSON for: `executor_model`, `verifier_model`, `commit_docs`, `parallelization`, `branching_strategy`, `branch_name`, `phase_found`, `phase_dir`, `phase_number`, `padded_phase`, `phase_name`, `phase_slug`, `plans`, `incomplete_plans`, `plan_count`, `incomplete_count`, `state_exists`, `roadmap_exists`, `phase_req_ids`, `response_language`, `requirements_path`, `section_manifest`.
 
 `section_manifest` (#2932) gates the three `steps/*.md` reads below: read a step file only when its `id` is in `section_manifest.included` (equivalently, its path is in `section_manifest.read`); skip it — without reading — when its `id` is in `section_manifest.excluded`. When `section_manifest` is `null` (degraded: manifest artifact missing/unreadable), read all three unconditionally — the safe superset.
 
