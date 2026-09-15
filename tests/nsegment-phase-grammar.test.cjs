@@ -474,7 +474,7 @@ describe('#4748 — execute-phase.md resolves the REVIEW.md path from init\'s pa
     assert.equal(lines[i].trim(), 'REVIEW_FILE="${PHASE_DIR}/${PADDED}-REVIEW.md"');
   });
 
-  test('composition: the value init emits, substituted into the live lookup lines, resolves the letter phase\'s own REVIEW.md', () => {
+  test('composition: the value init emits, substituted into the live lookup lines, resolves the letter phase\'s own REVIEW.md', (t) => {
     // The model substitutes `{padded_phase}` from the init JSON, which is
     // `normalizePhaseName(phase_number)` (src/init.cts). Do that substitution
     // here and run the three live lines against a fixture, so the emitted
@@ -483,24 +483,21 @@ describe('#4748 — execute-phase.md resolves the REVIEW.md path from init\'s pa
     const { normalizePhaseName } = require('../gsd-core/bin/lib/phase-id.cjs');
     const { createTempDir, cleanup } = require('./helpers.cjs');
     const dir = createTempDir();
-    try {
-      for (const [id, status] of [['3A', 'clean'], ['8', 'issues'], ['9', 'skipped']]) {
-        const emitted = normalizePhaseName(id);
-        fs.writeFileSync(path.join(dir, `${emitted}-REVIEW.md`), `---\nstatus: ${status}\n---\n# review\n`);
-        const script = [
-          'set -e',
-          paddedLine.replace('{padded_phase}', emitted),
-          lines[i].trim(),
-          lines[i + 1].trim(),
-          'printf \'%s %s\' "$PADDED" "$REVIEW_STATUS"',
-        ].join('\n');
-        assert.ok(lines[i + 1].includes('REVIEW_STATUS='), `line after the lookup must extract REVIEW_STATUS: ${lines[i + 1]}`);
-        const r = runBash(script, { PHASE_DIR: dir });
-        assert.equal(r.status, 0, `bash exited ${r.status}: ${r.stderr}`);
-        assert.equal(r.stdout, `${emitted} ${status}`);
-      }
-    } finally {
-      cleanup(dir);
+    t.after(() => cleanup(dir));
+    for (const [id, status] of [['3A', 'clean'], ['8', 'issues'], ['9', 'skipped']]) {
+      const emitted = normalizePhaseName(id);
+      fs.writeFileSync(path.join(dir, `${emitted}-REVIEW.md`), `---\nstatus: ${status}\n---\n# review\n`);
+      const script = [
+        'set -e',
+        paddedLine.replace('{padded_phase}', emitted),
+        lines[i].trim(),
+        lines[i + 1].trim(),
+        'printf \'%s %s\' "$PADDED" "$REVIEW_STATUS"',
+      ].join('\n');
+      assert.ok(lines[i + 1].includes('REVIEW_STATUS='), `line after the lookup must extract REVIEW_STATUS: ${lines[i + 1]}`);
+      const r = runBash(script, { PHASE_DIR: dir });
+      assert.equal(r.status, 0, `bash exited ${r.status}: ${r.stderr}`);
+      assert.equal(r.stdout, `${emitted} ${status}`);
     }
   });
 
