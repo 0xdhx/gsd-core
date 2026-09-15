@@ -475,12 +475,15 @@ function scanMarkdownLetterlessPhaseMirror(root) {
 // the nearest preceding non-blank line. Same documented limit: a per-line
 // textual scan for the common accidental shape, not an obfuscated one.
 
-// a. `${<phase-carrying>%%.*}` assigned to ANY name — capture the source variable
-//    so the phase-carrying test keys on what is being split, not on the line's
-//    prose or on the destination's name (a split into `PHASE_PREFIX` is the same
-//    defect as one into `PHASE_INT`; keying on `_INT` was the first draft's
-//    false negative, caught at the pre-file adversarial review).
-const DOT_ONLY_INT_SPLIT_DRIFT_RE = /[A-Za-z0-9_]+=\$\{([A-Za-z0-9_]+)%%\\?\.\*\}/;
+// a. `<name>_INT=${<phase-carrying>%%.*}` — the `_INT` destination is the
+//    discriminator, deliberately: it is the name the shell-arithmetic rule
+//    trusts as "already a safe integer", so a dot-only split INTO it is the
+//    exact promise this rule exists to check. A dot-only split into any other
+//    name is a different, legitimate operation — `PARENT_PHASE="${PHASE_NUMBER%%.*}"`
+//    (gap-closure-artifacts.md) wants everything before the first dot, letter
+//    included, and is correct. Widening to any destination was tried and flagged
+//    that site. The optional quote after `=` is the one spelling that site uses.
+const DOT_ONLY_INT_SPLIT_DRIFT_RE = /[A-Za-z0-9_]*_INT="?\$\{([A-Za-z0-9_]+)%%\\?\.\*\}/i;
 
 /**
  * Pure: find every unsanctioned dot-only integer split of a phase-carrying

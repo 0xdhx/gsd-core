@@ -234,9 +234,15 @@ test('findDotOnlyIntegerSplitDrift flags the prefixed SPOT_ variant and the bare
   assert.equal(findDotOnlyIntegerSplitDrift('PHASE_INT=${PHASE%%.*}; PHASE_FRAC=${PHASE#"$PHASE_INT"}').length, 1);
 });
 
-test('findDotOnlyIntegerSplitDrift keys on the SOURCE, so a split into a non-_INT name is still flagged', () => {
-  assert.equal(findDotOnlyIntegerSplitDrift('PHASE_PREFIX=${PHASE_NUMBER%%.*}').length, 1);
-  assert.equal(findDotOnlyIntegerSplitDrift('X=${PHASE_NUMBER%%.*}').length, 1);
+test('findDotOnlyIntegerSplitDrift flags the quoted spelling of an _INT split', () => {
+  assert.equal(findDotOnlyIntegerSplitDrift('PHASE_INT="${PHASE_NUMBER%%.*}"').length, 1);
+});
+
+test('findDotOnlyIntegerSplitDrift is SILENT on a dot split into a non-_INT name (a parent-phase derivation is correct as-is)', () => {
+  // gap-closure-artifacts.md: the parent of `03A.1` is `03A` — everything before
+  // the first dot, letter included. Not an integer, not fed to $((10#…)).
+  assert.deepEqual(findDotOnlyIntegerSplitDrift('PARENT_PHASE="${PHASE_NUMBER%%.*}"'), []);
+  assert.deepEqual(findDotOnlyIntegerSplitDrift('PHASE_PREFIX=${PHASE_NUMBER%%.*}'), []);
 });
 
 test('findDotOnlyIntegerSplitDrift is SILENT on the fixed first-non-digit split', () => {
