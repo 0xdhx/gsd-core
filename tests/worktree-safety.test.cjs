@@ -2748,40 +2748,34 @@ describe('executeWorktreeWaveCleanupPlan', () => {
       return { root, repo, wt, base, plan, git };
     }
 
-    test('is blocked as merge_timed_out, leaves no MERGE_HEAD, and repoRoot ends with a clean index at the old HEAD', () => {
+    test('is blocked as merge_timed_out, leaves no MERGE_HEAD, and repoRoot ends with a clean index at the old HEAD', (t) => {
       const fx = buildRepoWithSlowHook();
-      try {
-        const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: 1000 });
-        assert.equal(result.ok, false);
-        assert.equal(result.entries[0].reason, 'merge_timed_out');
-        assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base, 'HEAD unmoved');
-        assert.equal(fx.git(['diff', '--cached', '--name-only']).trim(), '', 'the killed merge\'s staged tree was restored');
-        assert.equal(fx.git(['status', '--porcelain']).trim(), '', 'worktree clean too');
-        assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\n');
-        assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false, 'the merge-added file is gone from the primary');
-        assert.deepEqual(
-          result.entries[0].warnings.map((w) => w.code),
-          [WAVE_WARNING.MERGE_RESIDUE_RESTORED, WAVE_WARNING.MERGE_RESIDUE_RESTORED],
-        );
-        assert.deepEqual(result.entries[0].warnings.map((w) => w.path).sort(), ['a.txt', 'b.txt']);
-        assert.equal(fs.existsSync(path.join(fx.wt, 'b.txt')), true, 'the executor branch and its worktree are untouched');
-      } finally {
-        cleanup(fx.root);
-      }
+      t.after(() => cleanup(fx.root));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan, { mergeTimeoutMs: 1000 });
+      assert.equal(result.ok, false);
+      assert.equal(result.entries[0].reason, 'merge_timed_out');
+      assert.equal(fx.git(['rev-parse', 'HEAD']).trim(), fx.base, 'HEAD unmoved');
+      assert.equal(fx.git(['diff', '--cached', '--name-only']).trim(), '', 'the killed merge\'s staged tree was restored');
+      assert.equal(fx.git(['status', '--porcelain']).trim(), '', 'worktree clean too');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'a.txt'), 'utf8'), 'base\n');
+      assert.equal(fs.existsSync(path.join(fx.repo, 'b.txt')), false, 'the merge-added file is gone from the primary');
+      assert.deepEqual(
+        result.entries[0].warnings.map((w) => w.code),
+        [WAVE_WARNING.MERGE_RESIDUE_RESTORED, WAVE_WARNING.MERGE_RESIDUE_RESTORED],
+      );
+      assert.deepEqual(result.entries[0].warnings.map((w) => w.path).sort(), ['a.txt', 'b.txt']);
+      assert.equal(fs.existsSync(path.join(fx.wt, 'b.txt')), true, 'the executor branch and its worktree are untouched');
     });
 
-    test('negative control: the same hook under the default budget merges cleanly', () => {
+    test('negative control: the same hook under the default budget merges cleanly', (t) => {
       const fx = buildRepoWithSlowHook();
-      try {
-        const result = executeWorktreeWaveCleanupPlan(fx.plan);
-        assert.equal(result.ok, true, JSON.stringify(result));
-        assert.equal(result.entries[0].status, 'merged_removed');
-        assert.deepEqual(result.entries[0].warnings, []);
-        assert.equal(fx.git(['rev-list', '--count', 'HEAD']).trim(), '3', 'base + executor + merge commit: history preserved, not squashed');
-        assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
-      } finally {
-        cleanup(fx.root);
-      }
+      t.after(() => cleanup(fx.root));
+      const result = executeWorktreeWaveCleanupPlan(fx.plan);
+      assert.equal(result.ok, true, JSON.stringify(result));
+      assert.equal(result.entries[0].status, 'merged_removed');
+      assert.deepEqual(result.entries[0].warnings, []);
+      assert.equal(fx.git(['rev-list', '--count', 'HEAD']).trim(), '3', 'base + executor + merge commit: history preserved, not squashed');
+      assert.equal(fs.readFileSync(path.join(fx.repo, 'b.txt'), 'utf8'), 'change\n');
     });
   });
 
