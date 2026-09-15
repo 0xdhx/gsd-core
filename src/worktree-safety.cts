@@ -664,17 +664,20 @@ function repoRootStillMidMerge(execGit: ExecGitFn, repoRoot: string): boolean {
 }
 
 /**
- * #4721: after a merge that was KILLED at its budget (and did not leave
- * MERGE_HEAD behind), undo whatever it staged in repoRoot's index and re-apply
- * any work it had autostashed.
+ * #4721: after a merge that was KILLED — at its budget or by a signal — and
+ * did not leave MERGE_HEAD behind, undo whatever it staged in repoRoot's index
+ * and re-apply any work it had autostashed. (A kill that lands once MERGE_HEAD
+ * exists — inside `commit-msg`, say — is the ordinary #2852 path: `git merge
+ * --abort` restores the tree and re-applies an autostash itself, unstaged, as
+ * it does for any aborted autostashed merge.)
  *
  * Why the staged set is attributable to the merge — on this path only: `git
  * merge` refuses to start when the index already differs from HEAD ("your
  * local changes … would be overwritten", even for paths the branch never
- * touches), and a refusal is an immediate exit, never a timeout. The one way
- * for a TIMED-OUT merge to leave a dirty index with no MERGE_HEAD is a kill
- * between populating the index and writing MERGE_HEAD — i.e. during a merge
- * hook. The exception is `merge.autoStash`: git then parks the pre-existing
+ * touches), and a refusal is an immediate exit with a code, never a kill. The
+ * one way for a KILLED merge to leave a dirty index with no MERGE_HEAD is a
+ * kill between populating the index and writing MERGE_HEAD — i.e. during a
+ * merge hook. The exception is `merge.autoStash`: git then parks the pre-existing
  * work in MERGE_AUTOSTASH and starts anyway, and a killed merge never
  * re-applies it. Handled below; it is why the reset runs even on a clean
  * index.
@@ -735,12 +738,24 @@ function restoreMergeResidue(
   const warnings: WaveCleanupWarning[] = before.map((p) => ({ code: WAVE_CLEANUP_WARNING.MERGE_RESIDUE_RESTORED, branch, path: p }));
   if (hadAutostash) {
     const pop = execGit(['stash', 'pop', '--index'], { cwd: repoRoot });
-    if (!gitResultOk(pop)) warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
+    if (!gitResultOk(pop)) {
+      warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
+      // A failed pop keeps the stash entry, but it can leave conflict entries
+      // (`UU`) and partially applied paths behind it — and the next merge then
+      // fails with "you have unmerged files" (caught in review). Re-read rather
+      // than assume: a dirty index here halts exactly as an unrestorable
+      // residue does.
+      const afterPop = execGit(['diff', '--cached', '--name-only'], { cwd: repoRoot });
+      if (!gitResultOk(afterPop)) return { halt: true, warnings: [...warnings, ...leftStaged([null]).warnings] };
+      const dirty = stagedPaths(afterPop.stdout || '');
+      if (dirty.length > 0) return { halt: true, warnings: [...warnings, ...leftStaged(dirty).warnings] };
+    }
   } else if (autostashUnknown) {
     warnings.push({ code: WAVE_CLEANUP_WARNING.MERGE_AUTOSTASH_UNRESTORED, branch, path: null });
   }
-  // Not a halt: the index is verified clean (or holds only the operator's own
-  // re-applied work, which the next merge autostashes again).
+  // Not a halt: the index is verified clean, or holds only the operator's own
+  // re-applied work (a successful `--index` pop), which the next merge
+  // autostashes again under the same config.
   return { halt: false, warnings };
 }
 
@@ -1332,13 +1347,17 @@ function executeWorktreeWaveCleanupPlan(plan: WaveCleanupPlan | null, deps: Work
       // squashes the executor's history into one parent. Restore it; if that
       // cannot be verified, halt the wave exactly as the mid-merge case does.
       //
-      // ONLY on a timeout. A merge git REFUSED (no MERGE_HEAD either) leaves
-      // the index exactly as it found it — and "your local changes would be
-      // overwritten" is precisely the refusal a pre-existing dirty index earns,
-      // so on that path anything staged is the operator's own work and must not
-      // be touched (caught in review). The kill is the one shape that stages a
-      // tree git never finished with.
-      if (merge?.timedOut) {
+      // ONLY when git was KILLED — at its budget, or by a signal from outside.
+      // A merge git REFUSED (no MERGE_HEAD either) leaves the index exactly as
+      // it found it — and "your local changes would be overwritten" is precisely
+      // the refusal a pre-existing dirty index earns, so on that path anything
+      // staged is the operator's own work and must not be touched (caught in
+      // review). A kill is the one shape that stages a tree git never finished
+      // with, and an external SIGTERM produces the same state as the timeout
+      // without `timedOut` (caught in review too) — the seam reports it as an
+      // exit with no code and a signal.
+      const mergeKilled = !!merge?.timedOut || (merge?.exitCode === null && !!merge?.signal);
+      if (mergeKilled) {
         const residue = restoreMergeResidue(execGit, plan.repoRoot, entry.branch);
         result.warnings.push(...residue.warnings);
         allWarnings.push(...residue.warnings);
