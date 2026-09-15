@@ -234,6 +234,11 @@ test('findDotOnlyIntegerSplitDrift flags the prefixed SPOT_ variant and the bare
   assert.equal(findDotOnlyIntegerSplitDrift('PHASE_INT=${PHASE%%.*}; PHASE_FRAC=${PHASE#"$PHASE_INT"}').length, 1);
 });
 
+test('findDotOnlyIntegerSplitDrift keys on the SOURCE, so a split into a non-_INT name is still flagged', () => {
+  assert.equal(findDotOnlyIntegerSplitDrift('PHASE_PREFIX=${PHASE_NUMBER%%.*}').length, 1);
+  assert.equal(findDotOnlyIntegerSplitDrift('X=${PHASE_NUMBER%%.*}').length, 1);
+});
+
 test('findDotOnlyIntegerSplitDrift is SILENT on the fixed first-non-digit split', () => {
   const text = 'PHASE_INT=${PHASE_NUMBER%%[!0-9]*}; PHASE_REST=${PHASE_NUMBER#"$PHASE_INT"}';
   assert.deepEqual(findDotOnlyIntegerSplitDrift(text), []);
@@ -293,6 +298,11 @@ test('findShellPhasePrintfPadDrift flags `printf "%02d"` of a phase variable, br
   assert.equal(found[0].found, 'printf "%0…d" …$PHASE_NUMBER');
   assert.equal(findShellPhasePrintfPadDrift('PHASE=$(printf "%02d" "$PHASE")').length, 1);
   assert.equal(findShellPhasePrintfPadDrift('PHASE=$(printf "%02d.%s" "${PHASE_MAJOR}" "${PHASE_MINOR}")').length, 1);
+});
+
+test('findShellPhasePrintfPadDrift flags the single-quoted format and a width without the zero flag', () => {
+  assert.equal(findShellPhasePrintfPadDrift("PADDED=$(printf '%02d' \"$PHASE_NUMBER\")").length, 1);
+  assert.equal(findShellPhasePrintfPadDrift('PADDED=$(printf "%2d" "$PHASE_NUMBER")').length, 1);
 });
 
 test('findShellPhasePrintfPadDrift is SILENT on a pad of an _INT via $((10#…)) and on init\'s padded_phase binding', () => {

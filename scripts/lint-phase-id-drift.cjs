@@ -475,9 +475,12 @@ function scanMarkdownLetterlessPhaseMirror(root) {
 // the nearest preceding non-blank line. Same documented limit: a per-line
 // textual scan for the common accidental shape, not an obfuscated one.
 
-// a. `<name>_INT=${<phase-carrying>%%.*}` — capture the source variable so the
-//    phase-carrying test keys on what is being split, not on the line's prose.
-const DOT_ONLY_INT_SPLIT_DRIFT_RE = /[A-Za-z0-9_]*_INT=\$\{([A-Za-z0-9_]+)%%\\?\.\*\}/i;
+// a. `${<phase-carrying>%%.*}` assigned to ANY name — capture the source variable
+//    so the phase-carrying test keys on what is being split, not on the line's
+//    prose or on the destination's name (a split into `PHASE_PREFIX` is the same
+//    defect as one into `PHASE_INT`; keying on `_INT` was the first draft's
+//    false negative, caught at the pre-file adversarial review).
+const DOT_ONLY_INT_SPLIT_DRIFT_RE = /[A-Za-z0-9_]+=\$\{([A-Za-z0-9_]+)%%\\?\.\*\}/;
 
 /**
  * Pure: find every unsanctioned dot-only integer split of a phase-carrying
@@ -522,10 +525,13 @@ function findLooseDottedPhaseRegexDrift(text) {
   return out;
 }
 
-// c. `printf "%0Nd" …` whose argument list names a phase-carrying variable
-//    that is NOT an `_INT` (the `$((10#$PHASE_INT))` pad is the sanctioned
-//    shape). Captures the first such name so the report says what was padded.
-const SHELL_PHASE_PRINTF_PAD_RE = /printf\s+"%0\d*d[^"]*"\s+(.*)$/;
+// c. `printf "%Nd" …` / `printf '%0Nd' …` — any integer conversion, either
+//    quote, with or without the zero flag — whose argument list names a
+//    phase-carrying variable that is NOT an `_INT` (the `$((10#$PHASE_INT))`
+//    pad is the sanctioned shape). `%d` cannot parse a letter id under any
+//    width, so the flag is not the discriminator. Captures the first such name
+//    so the report says what was padded.
+const SHELL_PHASE_PRINTF_PAD_RE = /printf\s+(?:"%0?\d*d[^"]*"|'%0?\d*d[^']*')\s+(.*)$/;
 const SHELL_VAR_NAME_RE = /\$\{?([A-Za-z_][A-Za-z0-9_]*)/g;
 
 /**
