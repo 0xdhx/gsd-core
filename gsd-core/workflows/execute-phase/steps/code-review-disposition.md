@@ -149,7 +149,7 @@ REVIEW_FM=""
 REVIEW_READ=0
 if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   REVIEW_READ=1
-  REVIEW_FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
+  REVIEW_FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | LC_ALL=C awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
 fi
 # `|| true` on every read: under `pipefail` a non-matching `grep` exits 1, and an assignment
 # whose command substitution fails aborts the step under `set -e`. An advisory gate must survive
@@ -170,7 +170,7 @@ REVIEW_STATUS=$(echo "$REVIEW_FM" | LC_ALL=C grep -m1 "^status:" | cut -d: -f2- 
 # only see keys nested under it. Block 2 derives REVIEW_TOTAL through the same filter.
 # `blocker:` is the documented tier-equivalent of `critical:` (gsd-code-reviewer.md § "Label
 # equivalence") — accept either, exactly as code-review.md's present_results already does.
-REVIEW_FINDINGS_FM=$(echo "$REVIEW_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
+REVIEW_FINDINGS_FM=$(echo "$REVIEW_FM" | LC_ALL=C awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
 REVIEW_CRITICAL=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
 REVIEW_WARNING=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
 REVIEW_INFO=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
@@ -383,7 +383,7 @@ REVIEW_TOTAL=""
 REVIEW_READ=0   # block 1's distinction, re-derived here: read-but-unparseable is not absent
 if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   REVIEW_READ=1
-  _FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
+  _FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | LC_ALL=C awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
   REVIEW_STATUS=$(echo "$_FM" | LC_ALL=C grep -m1 "^status:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   # The frontmatter total is carried into the script so the two parsers in this step can be
   # RECONCILED. The counts come from the frontmatter; the rows come from `### <ID>:` heading
@@ -393,7 +393,7 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # over a set strictly smaller than the console line had just reported. Anchored inside the
   # `findings:` mapping — see the anchoring note in block 1 — and digit-only, because a
   # non-numeric total is not a number to reconcile against.
-  _FINDINGS_FM=$(echo "$_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
+  _FINDINGS_FM=$(echo "$_FM" | LC_ALL=C awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
   # ONE PARSER FOR EVERY COUNT THIS BLOCK READS, and both halves of it are load-bearing.
   # `-f2-` keeps everything AFTER the first colon: `-f2` alone takes only the SECOND FIELD, so the
   # malformed `critical: 1: junk` arrives as the perfectly numeric `1`. And the ends are trimmed
