@@ -373,7 +373,18 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # `findings:` mapping — see the anchoring note in block 1 — and digit-only, because a
   # non-numeric total is not a number to reconcile against.
   _FINDINGS_FM=$(echo "$_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
-  REVIEW_TOTAL=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2 | tr -d ' ' || true)
+  # ONE PARSER FOR EVERY COUNT THIS BLOCK READS, and both halves of it are load-bearing.
+  # `-f2-` keeps everything AFTER the first colon: `-f2` alone takes only the SECOND FIELD, so the
+  # malformed `critical: 1: junk` arrives as the perfectly numeric `1`. And the ends are trimmed
+  # rather than `tr -d ' '`-ed, which would delete INTERNAL spaces and turn `1 0` into `10`.
+  # Both quirks are long-standing in the sibling reads and both were INERT here until this block
+  # began reconciling; each one repairs a malformed scalar into a number that then decides whether a
+  # shortfall is reported. An adversarial pass drove both: `critical: 1: junk` wrongly suppressed a
+  # real `unparsed: 2`, and a LENIENT total beside a STRICT severity was worse still -- `critical: 5 0`
+  # with `total: 1 0` repaired only the total, rejected the severity, skipped the contradiction check
+  # and INVENTED `unparsed: 7`. A field is either trustworthy or it is not; parsing one leniently and
+  # its sibling strictly is the shape that fabricates.
+  REVIEW_TOTAL=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   case "$REVIEW_TOTAL" in ''|*[!0-9]*) REVIEW_TOTAL="" ;; ?????????*) REVIEW_TOTAL="" ;; esac
   # ONE FIELD, ONE TRUST MODEL, ACROSS BOTH FENCES. Block 1 withholds the whole breakdown unless the
   # four counts are numeric AND `critical + warning + info == total`; this fence used to bound `total`
@@ -394,9 +405,9 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # behaviour, so the admission test for it is strict -- an internal space survives the trim, fails the
   # digit `case` below, and the shortfall is reported. Fail-safe in the only direction that matters:
   # when the frontmatter is malformed we decline to suppress, rather than trusting a repaired number.
-  _c_crit=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-  _c_warn=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-  _c_info=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_crit=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_warn=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_info=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   # THE CHECK IS NARROWER THAN BLOCK 1'S, DELIBERATELY, AND THE DIFFERENCE IS NOT AN OVERSIGHT.
   # Block 1 withholds on `REVIEW_COUNTS_OK`, which demands ALL FOUR counts be numeric -- because it
   # DISPLAYS all four, and `6 findings --  critical` is the half-filled line that rule exists to

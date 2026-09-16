@@ -3698,6 +3698,27 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
     assert.match(out.ledger, /^unparsed: 2$/m, 'a malformed severity must not license suppression');
   });
 
+  test('a scalar with a SECOND COLON is malformed, and the well-formed total still reconciles', { skip: !HAS_BASH }, () => {
+    // Second adversarial pass. `cut -d: -f2` takes only the SECOND FIELD, so `critical: 1: junk`
+    // arrived as the perfectly numeric `1` -- 1+0+0 != 5 read as a contradiction and SUPPRESSED a
+    // shortfall that was genuinely owed. `-f2-` keeps everything after the first colon, so the
+    // malformed scalar stays malformed, no contradiction is claimed, and `total: 5` still reconciles.
+    const out = drive(['findings:', '  critical: 1: junk', '  warning: 0', '  info: 0', '  total: 5']);
+    assert.match(out.ledger, /^unparsed: 2$/m, 'a malformed severity must not license suppression');
+  });
+
+  test('a malformed TOTAL is not repaired into a fabricated shortfall', { skip: !HAS_BASH }, () => {
+    // Second adversarial pass, and the sharper of the two. The first version of this fix parsed the
+    // severities strictly and left `total` lenient -- so `critical: 5 0` with `total: 1 0` repaired
+    // ONLY the total to `10`, rejected the severity, skipped the contradiction check, and INVENTED
+    // `unparsed: 7` against three parsed headings. A field is either trustworthy or it is not:
+    // parsing one leniently and its sibling strictly is the shape that fabricates. Every count this
+    // block reads now goes through one parser.
+    const out = drive(['findings:', '  critical: 5 0', '  warning: 0', '  info: 0', '  total: 1 0']);
+    assert.doesNotMatch(out.ledger, /^unparsed:/m, 'a malformed total is not a number to reconcile against');
+    assert.doesNotMatch(out.stdout, /recorded NOWHERE/);
+  });
+
   test('a zero-padded breakdown does not take the advisory step down', { skip: !HAS_BASH }, () => {
     // `10#` on every operand: bash reads a leading zero as octal, so `critical: 08` would make
     // $(( )) fail with "value too great for base" and, under `set -e`, abort a step that
