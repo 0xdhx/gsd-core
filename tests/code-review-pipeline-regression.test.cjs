@@ -1684,8 +1684,14 @@ function parseGateCounts(reviewText) {
   {
     let inBlock = false;
     for (const line of fm) {
-      if (/^findings:\s*$/.test(line)) { inBlock = true; continue; }
-      if (inBlock && /^\S/.test(line)) break;
+      // The BLOCK BOUNDARY takes the literal class too, and it is not decoration: the shipped
+      // selector is an `awk` whose `/^findings:[[:space:]]*$/` and `/^[^[:space:]]/` resolve
+      // through the ambient locale exactly as grep's and sed's did. Pass 6 found the awk had been
+      // left unpinned while grep and sed were fixed -- `findings:<U+2003>` opened the block under
+      // C.UTF-8 and did not under C, so the SAME review reported a breakdown on one machine and
+      // the countless message on another. `\s`/`\S` here would model neither pinned side.
+      if (/^findings:[ \t\n\v\f\r]*$/.test(line)) { inBlock = true; continue; }
+      if (inBlock && /^[^ \t\n\v\f\r]/.test(line)) break;
       if (inBlock) findingsBlock.push(line);
     }
   }
@@ -3449,6 +3455,8 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
       REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: clean\u2003'),
     'a count with a trailing unicode space':
       REVIEW_WITH_FINDINGS.replace('  critical: 1', '  critical: 1\u2003'),
+    'a findings: opener with a trailing unicode space':
+      REVIEW_WITH_FINDINGS.replace('findings:', 'findings:\u2003'),
     'a value containing a second colon': REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: issues:found'),
     // POSIX [[:space:]] covers form feed and vertical tab; a [ \t] mirror does not, so the
     // shipped grep matches a line the mirror rejects outright. Third counterexample, same class.
@@ -3491,6 +3499,12 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
       REVIEW_WITH_FINDINGS.replace('  critical: 1', '  critical: 1\u2003'),
     'a unicode-space indented count key':
       REVIEW_WITH_FINDINGS.replace('  critical: 1', '\u2003critical: 1'),
+    // Pass 6's finding, and the one input that proves the awk was missed: the BLOCK OPENER. Under
+    // C.UTF-8 `findings:<U+2003>` matched `/^findings:[[:space:]]*$/` and opened the mapping, under
+    // C it did not -- so the same review rendered a full breakdown on one machine and the countless
+    // message on another, with every grep and sed already pinned.
+    'a findings: opener with a trailing unicode space':
+      REVIEW_WITH_FINDINGS.replace('findings:', 'findings:\u2003'),
     'the documented review': REVIEW_WITH_FINDINGS,
   })) {
     test('the shipped reads are locale-invariant on ' + name, { skip: !HAS_BASH }, () => {
@@ -3505,6 +3519,34 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
         'the mirror must model the locale-pinned shipped read');
     });
   }
+
+  test('every locale-sensitive tool in the step is pinned to LC_ALL=C', () => {
+    // THE CHECK THAT WOULD HAVE CAUGHT THE LAST MISS. `grep`, `sed` and `awk` all resolve
+    // [[:space:]] / [[:blank:]] through the ambient locale, and glibc's C.UTF-8 classifies U+2003
+    // as both where C and en_US.UTF-8 classify it as neither. Pass 5 pinned the grep and sed reads
+    // and the round then CLAIMED the parser was locale-independent; pass 6 found the two `awk`
+    // mapping selectors still unpinned, because that census searched for the tools it expected
+    // rather than the tools that were there. Asserting the invariant over the file is the version
+    // of that census a future edit cannot fool.
+    // `splitLines`, not `split('\n')`: the repo's own lint bans the latter on readFileSync content
+    // (DEFECT.WINDOWS-CRLF-TEST-PORTABILITY), and a CRLF checkout would otherwise leave a stray
+    // `\r` on every line here.
+    const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
+    const step = fs.readFileSync(DISPOSITION_STEP_PATH, 'utf8');
+    const offenders = [];
+    splitLines(step).forEach((line, i) => {
+      if (/^\s*#/.test(line)) return;   // prose may name an unpinned form while explaining it
+      const calls = line.match(/\|\s*(?:LC_ALL=C\s+)?(?:grep|sed|awk)\b/g) || [];
+      for (const c of calls) if (!/LC_ALL=C/.test(c)) offenders.push(`${i + 1}: ${c.trim()}`);
+    });
+    assert.deepStrictEqual(offenders, [],
+      'every grep/sed/awk in the step must be LC_ALL=C-pinned; an unpinned one makes the parse '
+      + 'depend on the machine, which is what pass 5 and pass 6 each found');
+    // `cut -d: -f2-` and `tr -d '\r'` are deliberately NOT pinned, and the exemption is principled
+    // rather than an oversight: neither resolves a character class or a collation. One splits on a
+    // single ASCII byte, the other deletes one literal byte.
+    assert.ok(/\|\s*cut -d: -f2-/.test(step), 'the cut reads are still the class-free shape');
+  });
 
   test('a zero-finding review reports a real breakdown, not the countless fallback', { skip: !HAS_BASH }, () => {
     // Minor 6. `0` is a number, so the gate must state `0 findings — 0 critical, …`
