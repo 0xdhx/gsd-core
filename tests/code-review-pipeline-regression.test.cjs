@@ -3529,14 +3529,27 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     // rather than the tools that were there. Asserting the invariant over the file is that census
     // in a form a future edit is far less likely to slip past.
     //
-    // ITS LIMIT, STATED RATHER THAN IMPLIED (pass 7). This scans TEXT, not shell or JS command
-    // structure, so it cannot resolve a tool name that is not written literally: `$AWK "$f"`, or a
-    // command name computed inside the embedded `node -e` block, both evade it. Those are accepted
-    // residuals rather than oversights — the pass that found them also showed that widening the
-    // regex further only trades them for false positives on quoted strings and awk program text.
-    // What it DOES catch, driven: unpinned, `env`-prefixed, wrongly-pinned (`LC_ALL=C.UTF-8`),
-    // path-qualified, line-initial, and literal-in-Node calls. Loud false positives (a trailing
-    // comment naming a tool, a tool name inside an awk program) are the acceptable direction.
+    // WHAT THIS IS, AND WHAT IT IS NOT. It is a REGRESSION GUARD against the accident that has now
+    // happened twice — a read added or edited without its pin, in a file where every existing read
+    // has one. It is NOT a proof, and it is deliberately not written as one. It scans TEXT, so it
+    // cannot see shell or JS command structure: a name that is not written literally (`$AWK "$f"`,
+    // a command composed as `a''wk`, a command name computed inside the embedded `node -e` block)
+    // is invisible to it, and so is an executable command substitution on a physical line that
+    // begins with `#` inside a multiline quoted argument, which the comment exemption below skips.
+    //
+    // Earlier versions of this comment tried to ENUMERATE those residuals. Three adversarial passes
+    // in a row then found one more each time, which is the actual lesson: the list cannot be closed,
+    // so a comment promising a closed list is false the moment someone is cleverer than it. The
+    // examples above are illustrations, not an inventory. Treat anything this guard reports as real,
+    // and never treat its silence as proof that a new read is pinned — read the diff.
+    //
+    // Driven, it does catch: unpinned, `env`-prefixed, wrongly-pinned (`LC_ALL=C.UTF-8`),
+    // path-qualified, line-initial, and literal-in-Node calls. Its false answers run loud rather
+    // than quiet — a trailing comment naming a tool, a tool name inside an awk program, or a path
+    // whose component starts with one (`bin/grep-wrapper`) would all trip it. That direction is the
+    // right one for a guard, and none of those shapes exists in the step today. (The illustration
+    // is deliberately not a `docs/`-prefixed path: lint-docs-guard-registration reads one of those
+    // as a real docs reference from this file and demands a baseline entry for it.)
     // `splitLines`, not `split('\n')`: the repo's own lint bans the latter on readFileSync content
     // (DEFECT.WINDOWS-CRLF-TEST-PORTABILITY), and a CRLF checkout would otherwise leave a stray
     // `\r` on every line here.
