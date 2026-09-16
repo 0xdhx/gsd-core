@@ -4688,3 +4688,150 @@ describe('#3861 round 1 — fence closers and one-letter prefixes', () => {
     assert.deepStrictEqual(oneLetter, ['C'], 'the scan must admit a single-letter prefix');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The REVIEW.md lookup's phase-id handling, tested at the step file that owns it.
+//
+// These four tests used to live in `tests/nsegment-phase-grammar.test.cjs`, inside the
+// `#4748` describe block, because that is where the lookup's gate was when #3829 moved the
+// lookup out of `execute-phase.md`. #4781 (#4628) then removed #4748's letter-axis work from
+// the grammar file, so the block that hosted them no longer exists. They are re-homed here
+// unchanged in substance: they assert properties of THIS PR's step file, not of #4748's sites,
+// and keeping them beside the step they guard is what stops an unrelated upstream revert from
+// silently deleting this PR's own coverage.
+//
+// One test did NOT come along: the assertion that `execute-phase.md`'s init parse list names
+// `padded_phase`. That is a property of #4748's site, not of this step — #4781 removed the
+// field from that list, and carrying the assertion here would only pin someone else's revert.
+//
+// The MECHANISM differs from the pre-move one and the PROPERTY does not. `execute-phase.md`
+// bound init's `{padded_phase}`; the step validates PHASE_NUMBER for shape and traversal and
+// pads the DIGIT RUN through `10#`, carrying an optional letter verbatim. Both refuse exactly
+// the two shapes #4748 named: `printf "%02d"` cannot pad `03A` (prints `03`, exits 1) and reads
+// an already-padded `08` as octal (prints `00`). The last test drives that equivalence against
+// the canonical normalizer rather than asserting it.
+// ---------------------------------------------------------------------------
+describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phase without a shell re-pad', () => {
+  const { execFileSync } = require('node:child_process');
+  const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
+  const { normalizePhaseName } = require('../gsd-core/bin/lib/phase-id.cjs');
+
+  /**
+   * Pure: the indexes of every line containing `anchor`. Asserts the count so a site that is
+   * added, removed or renamed breaks this test loudly instead of silently narrowing what it
+   * covers (the step carries each anchor TWICE — one per markdown fence, each a fresh shell).
+   */
+  function findAnchoredLineIndexes(lines, anchor, expectedCount) {
+    const idx = [];
+    lines.forEach((l, i) => { if (l.includes(anchor)) idx.push(i); });
+    assert.equal(
+      idx.length,
+      expectedCount,
+      `expected ${expectedCount} line(s) containing ${JSON.stringify(anchor)}, found ${idx.length}`,
+    );
+    return idx;
+  }
+
+  /** Run `script` in bash with `env` merged in; never throws — returns { status, stdout, stderr }. */
+  function runBash(script, env) {
+    try {
+      const stdout = execFileSync('bash', [], {
+        input: script,
+        encoding: 'utf8',
+        timeout: PROBE_TIMEOUT_MS,
+        env: { ...process.env, ...env },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      return { status: 0, stdout: stdout.trim(), stderr: '' };
+    } catch (e) {
+      return { status: e.status, stdout: String(e.stdout || '').trim(), stderr: String(e.stderr || '').trim() };
+    }
+  }
+
+  const stepLines = splitLines(fs.readFileSync(DISPOSITION_STEP_PATH, 'utf8'));
+  // TWO fences — each markdown fence is a fresh shell, so each derives and looks up for itself.
+  const lookups = findAnchoredLineIndexes(stepLines, 'REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"', 2);
+  // The derivation slice each fence runs before its lookup, taken by CONTENT rather than by a
+  // line number that every edit to the file would drift.
+  const derivStarts = findAnchoredLineIndexes(stepLines, '_pd="${PHASE_DIR:-}"', 2);
+  const derivations = derivStarts.map((d, n) => stepLines.slice(d, lookups[n] + 1).join('\n'));
+
+  test('no fence re-pads the phase number with printf (fails before the fix)', () => {
+    // The defect shape, not the remedy: `printf "%0Nd"` applied to PHASE_NUMBER itself.
+    const offenders = stepLines
+      .map((l, n) => [n + 1, l])
+      .filter(([, l]) => !/^\s*#/.test(l) && /printf\s+"%0\d*d"\s+"?\$\{?PHASE_NUMBER/.test(l));
+    assert.deepEqual(offenders, [], `the step must not re-pad PHASE_NUMBER in shell: ${JSON.stringify(offenders)}`);
+    // And the padding it does perform forces base 10, which is what makes `08`/`09` survive.
+    for (const d of derivations) {
+      assert.match(d, /PADDED="\$\(printf "%02d" "\$\(\(10#\$_dig\)\)"\)\$_let\$_sub"/);
+    }
+  });
+
+  test('regression control: both lookup lines are unchanged', () => {
+    for (const i of lookups) {
+      assert.equal(stepLines[i].trim(), 'REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"');
+    }
+  });
+
+  test('nothing REBINDS REVIEW_FILE after the lookup', () => {
+    // The slices above stop AT the first anchored assignment, so on their own they cannot see a
+    // later line overwriting the path the fence actually consumes. Driven by an adversarial pass
+    // on this very test: inserting the expected lookup and then overriding it with
+    // REVIEW_FILE="${_pd}/WRONG-REVIEW.md" left every other assertion here green. Pin the whole
+    // file rather than the slice -- the only REVIEW_FILE= bindings permitted are the canonical
+    // lookup (once per fence) and the identity pass-through that hands it to the embedded node
+    // script as an env prefix.
+    // The predicate is deliberately wider than `^REVIEW_FILE=`: a second adversarial pass drove an
+    // INDENTED assignment and an `export REVIEW_FILE=...` straight through that anchor, both of
+    // which execute exactly like a bare one. Leading whitespace and an optional `export` are
+    // absorbed here so the accept-list below is what decides, not the spelling of the line.
+    // `+=` too: `REVIEW_FILE+=-wrong` APPENDS and executes (driven: `REVIEW_FILE=good;
+    // REVIEW_FILE+=-wrong` prints `good-wrong`), so an assignment-operator match that only sees
+    // `=` lets a real rebinding through. Third spelling found by a third adversarial pass.
+    const BIND_RE = /^\s*(?:export\s+)?REVIEW_FILE\+?=/;
+    const binds = stepLines.filter((l) => BIND_RE.test(l)).map((l) => l.replace(/^\s*(?:export\s+)?/, ''));
+    assert.equal(binds.filter((l) => l.startsWith('REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"')).length, 2,
+      'each fence must bind the canonical lookup exactly once');
+    for (const b of binds) {
+      const ok = b.startsWith('REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"')
+        || b.startsWith('REVIEW_FILE="${REVIEW_FILE}"');
+      assert.ok(ok, `REVIEW_FILE is rebound to something other than the canonical lookup: ${b}`);
+    }
+  });
+
+  test('composition: the live derivation and lookup resolve the letter phase\'s own REVIEW.md', (t) => {
+    // The executable half: run the SHIPPED lines against a fixture so the validation, the padding,
+    // the letter carry and the path construction are exercised together.
+    const dir = createTempDir();
+    t.after(() => cleanup(dir));
+    for (const [id, status] of [['3A', 'clean'], ['8', 'issues'], ['9', 'skipped']]) {
+      const emitted = normalizePhaseName(id);
+      fs.writeFileSync(path.join(dir, `${emitted}-REVIEW.md`), `---\nstatus: ${status}\n---\n# review\n`);
+      for (const deriv of derivations) {
+        const script = [
+          'set -e',
+          deriv,
+          'test -f "$REVIEW_FILE" || { echo "MISSING $REVIEW_FILE"; exit 3; }',
+          'printf \'%s %s\' "$PADDED" "$(grep -m1 "^status:" "$REVIEW_FILE" | cut -d: -f2 | tr -d " ")"',
+        ].join('\n');
+        const r = runBash(script, { PHASE_DIR: dir, PHASE_NUMBER: id });
+        assert.equal(r.status, 0, `bash exited ${r.status}: ${r.stdout} ${r.stderr}`);
+        assert.equal(r.stdout, `${emitted} ${status}`);
+      }
+    }
+  });
+
+  test('the step\'s padding agrees with the canonical normalizer across the letter matrix', (t) => {
+    // Driven, not argued: every shape #4748's own tests named, plus its stated regression controls.
+    const dir = createTempDir();
+    t.after(() => cleanup(dir));
+    for (const id of ['3A', '8', '9', '08', '09', '12A', '4B', '23.1.2', '03A.1.2', '1', '06', '36.14', '08.5']) {
+      for (const deriv of derivations) {
+        const r = runBash(`set -e\n${deriv}\nprintf '%s' "$PADDED"`, { PHASE_DIR: dir, PHASE_NUMBER: id });
+        assert.equal(r.status, 0, `bash exited ${r.status} on ${id}: ${r.stderr}`);
+        assert.equal(r.stdout, normalizePhaseName(id), `padding drifted from the canonical normalizer on ${id}`);
+      }
+    }
+  });
+});
