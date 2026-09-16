@@ -1683,10 +1683,16 @@ function parseGateCounts(reviewText) {
       if (inBlock) findingsBlock.push(line);
     }
   }
+  // SAME pipeline as `first` above, and the duplication is the point: BOTH helpers model the shipped
+  // reads, and the counts go through THIS one. A previous edit updated `first` and the comment above
+  // it while leaving this body on the retired `split(':')[1].replace(/ /g,'')` — the shipped block had
+  // moved to `-f2-` + end-trim and the mirror had not, which the parity fixtures could not see because
+  // both parsers landed on the countless arm for every fixture that then existed. The
+  // `a self-consistent repaired breakdown` fixture below is what separates them.
   const firstIn = (lines, re) => {
     for (const line of lines) {
       const m = line.match(re);
-      if (m) return line.split(':')[1].replace(/ /g, '');
+      if (m) return line.slice(line.indexOf(':') + 1).replace(TRIM, '');
     }
     return '';
   };
@@ -3407,6 +3413,19 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     // a trim keeps `1 0`, and truncates at a second colon where a tail capture keeps it. Neither
     // is reachable from the well-formed fixtures above, which is exactly why they are here.
     'a count with an internal space': REVIEW_WITH_FINDINGS.replace('  critical: 1', '  critical: 1 0'),
+    // The fixture that can actually SEE a mirror/shipped parser divergence. The two above cannot:
+    // on them both parsers reach the countless arm, so the parity assertion holds either way. Here
+    // the repaired numbers are SELF-CONSISTENT (10 == 10 + 0 + 0), so the retired parser renders a
+    // full breakdown from a `findings:` block containing no such numbers while the shipped one
+    // withholds it.
+    'a self-consistent repaired breakdown':
+      ['---', 'phase: 01', 'status: issues_found', 'findings:', '  critical: 1 0',
+        '  warning: 0', '  info: 0', '  total: 1 0', '---', '', '### CR-01: a'].join('\n'),
+    // Tab-separated scalars are valid YAML. The retired `tr -d ' '` left the tab in place and made
+    // every count non-numeric; the shipped trim reads them, so this fixture also pins that change.
+    'tab-separated counts':
+      ['---', 'phase: 01', 'status: issues_found', 'findings:', '  critical:\t1',
+        '  warning:\t1', '  info:\t1', '  total:\t3', '---', '', '### CR-01: a'].join('\n'),
     'a value containing a second colon': REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: issues:found'),
     // POSIX [[:space:]] covers form feed and vertical tab; a [ \t] mirror does not, so the
     // shipped grep matches a line the mirror rejects outright. Third counterexample, same class.
@@ -3636,10 +3655,12 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
       env: { ...process.env, PHASE_DIR: dir, PHASE_NUMBER: '1' },
     });
   };
-  const drive = (fm) => {
+  const drive = (fm, status) => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3861-r12-'));
     try {
-      fs.writeFileSync(path.join(dir, '01-REVIEW.md'), review(fm));
+      const body = status === undefined ? review(fm)
+        : review(fm).replace('status: issues_found', 'status: ' + status);
+      fs.writeFileSync(path.join(dir, '01-REVIEW.md'), body);
       const res = runBlock2(dir);
       assert.strictEqual(res.exitCode, 0, 'the fence is advisory and must never abort: ' + res.stderr);
       const p = path.join(dir, '01-REVIEW-DISPOSITION.md');
@@ -3743,6 +3764,15 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
     assert.doesNotMatch(shipped.stdout, /10 findings/, 'a repaired number must not be reported as a count');
     assert.doesNotMatch(shipped.stdout, /10 critical/);
     assert.match(shipped.stdout, /^Code review found issues\./m, 'the countless arm is the honest one here');
+  });
+
+  test('a status scalar carrying a second colon does not silently take the clean arm', { skip: !HAS_BASH }, () => {
+    // Fourth adversarial pass, MISSED. `status:` kept the retired `cut -d: -f2` after the counts moved
+    // off it, and it is the read where truncation costs most: the valid YAML scalar `status: clean:junk`
+    // arrived as the bare `clean`, so an unusable status took the CLEAN arm and suppressed both the
+    // report and the ledger. The whole scalar matches no arm, so the step reports instead.
+    const out = drive(['findings:', '  critical: 1', '  warning: 0', '  info: 0', '  total: 1'], 'clean:junk');
+    assert.ok(out.ledger !== null, 'an unusable status must not suppress the ledger');
   });
 
   test('the parser is symmetric across all four count fields', { skip: !HAS_BASH }, () => {
