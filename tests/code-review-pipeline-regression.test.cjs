@@ -3609,6 +3609,93 @@ describe('#3861 round 11 — a malformed report does not read as clean in the co
   });
 });
 
+describe('#3861 round 12 — block 2 does not compute a shortfall from a self-contradicting findings block', () => {
+  // Round 12, Minor. Block 1 withholds the severity breakdown unless the four counts are numeric
+  // AND `critical + warning + info == total`; block 2 bounded `total` for digits and length only
+  // and then handed it to the `unparsed:` reconciliation. So a REVIEW.md whose `findings:` block
+  // disagrees with itself made block 1 print the countless form -- breakdown suppressed as
+  // untrustworthy -- while block 2 still computed a shortfall from that same untrusted number.
+  // Two trust models for one field, one fence apart, with the weaker one downstream.
+  //
+  // The fix is NARROWER than "re-apply block 1's check", deliberately: block 1 demands all four
+  // counts because it DISPLAYS all four. Block 2 uses `total` alone. Applying the all-four rule
+  // here would blank a perfectly usable `total: 5` on a review carrying no severity keys and
+  // SILENTLY DROP a shortfall the step reports correctly today -- trading a safe-direction
+  // over-report for a silent under-report. Only the CONTRADICTION ports.
+  const headings = ['', '### CR-01: a conforming finding', '### WR-01: another', '### WR-02: a third'];
+  const review = (fm) => ['---', 'phase: 01', 'status: issues_found', ...fm, '---', ...headings].join('\n');
+
+  const runBlock2 = (dir) => {
+    const script = bashFences(fs.readFileSync(DISPOSITION_STEP_PATH, 'utf8'))[1];
+    return runHook('-c', ['set -euo pipefail\n' + script + '\n'], {
+      interpreter: 'bash', timeoutMs: PROBE_TIMEOUT_MS,
+      env: { ...process.env, PHASE_DIR: dir, PHASE_NUMBER: '1' },
+    });
+  };
+  const drive = (fm) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3861-r12-'));
+    try {
+      fs.writeFileSync(path.join(dir, '01-REVIEW.md'), review(fm));
+      const res = runBlock2(dir);
+      assert.strictEqual(res.exitCode, 0, 'the fence is advisory and must never abort: ' + res.stderr);
+      const p = path.join(dir, '01-REVIEW-DISPOSITION.md');
+      return { stdout: res.stdout, ledger: fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null };
+    } finally {
+      cleanup(dir);
+    }
+  };
+
+  test('a contradicting findings block yields no shortfall (fails before the fix)', { skip: !HAS_BASH }, () => {
+    // total: 10 against 1 + 1 + 1. Three headings parse. Before the fix this rendered
+    // `unparsed: 7` from a number block 1 had already judged untrustworthy.
+    const out = drive(['findings:', '  critical: 1', '  warning: 1', '  info: 1', '  total: 10']);
+    assert.doesNotMatch(out.ledger, /^unparsed:/m, 'a self-contradicting total is not a number to reconcile against');
+    assert.doesNotMatch(out.stdout, /recorded NOWHERE/);
+    assert.match(out.ledger, /^total: 3$/m, 'and the rows it does have are still reported');
+  });
+
+  test('a CONSISTENT total still reconciles — the check narrows nothing it should not', { skip: !HAS_BASH }, () => {
+    // 1 + 2 + 2 == 5, three headings parse, so two are recorded nowhere and must be said.
+    const out = drive(['findings:', '  critical: 1', '  warning: 2', '  info: 2', '  total: 5']);
+    assert.match(out.ledger, /^unparsed: 2$/m);
+    assert.match(out.stdout, /2 finding\(s\) recorded NOWHERE/);
+  });
+
+  test('a total with NO severity keys still reconciles — absent is not a contradiction', { skip: !HAS_BASH }, () => {
+    // The over-reach control. There is nothing for `total: 5` to disagree WITH here, so the
+    // shortfall this step reports correctly today must survive the new check.
+    const out = drive(['findings:', '  total: 5']);
+    assert.match(out.ledger, /^unparsed: 2$/m, 'absent counts must not suppress a real shortfall');
+  });
+
+  test('a partial or non-numeric breakdown is likewise not a contradiction', { skip: !HAS_BASH }, () => {
+    for (const fm of [
+      ['findings:', '  critical: 1', '  total: 5'],
+      ['findings:', '  critical: x', '  warning: 1', '  info: 1', '  total: 5'],
+    ]) {
+      assert.match(drive(fm).ledger, /^unparsed: 2$/m, JSON.stringify(fm));
+    }
+  });
+
+  test('`blocker:` is read as the critical tier, exactly as block 1 reads it', { skip: !HAS_BASH }, () => {
+    // A mirror that dropped the documented alternation would diverge from block 1 on precisely
+    // the reviews that use it: 1 + 1 + 1 == 3 here, so the sum agrees and nothing is suppressed.
+    const out = drive(['findings:', '  blocker: 1', '  warning: 1', '  info: 1', '  total: 3']);
+    assert.doesNotMatch(out.ledger, /^unparsed:/m, 'blocker counted as critical => the sum agrees');
+    // And the contradicting twin, to prove the alternation is load-bearing rather than inert.
+    const bad = drive(['findings:', '  blocker: 1', '  warning: 1', '  info: 1', '  total: 9']);
+    assert.doesNotMatch(bad.ledger, /^unparsed:/m);
+  });
+
+  test('a zero-padded breakdown does not take the advisory step down', { skip: !HAS_BASH }, () => {
+    // `10#` on every operand: bash reads a leading zero as octal, so `critical: 08` would make
+    // $(( )) fail with "value too great for base" and, under `set -e`, abort a step that
+    // promises never to block. 8 + 1 + 1 == 10, so the sum agrees and the shortfall is reported.
+    const out = drive(['findings:', '  critical: 08', '  warning: 01', '  info: 01', '  total: 10']);
+    assert.match(out.ledger, /^unparsed: 7$/m, 'octal-looking counts are read as decimal, not as an abort');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // #3861 round 1 — Minor 5, and the finding-id census the review did not ask for
 // ---------------------------------------------------------------------------

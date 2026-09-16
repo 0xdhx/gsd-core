@@ -372,8 +372,49 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # over a set strictly smaller than the console line had just reported. Anchored inside the
   # `findings:` mapping — see the anchoring note in block 1 — and digit-only, because a
   # non-numeric total is not a number to reconcile against.
-  REVIEW_TOTAL=$(echo "$_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2 | tr -d ' ' || true)
+  _FINDINGS_FM=$(echo "$_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
+  REVIEW_TOTAL=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2 | tr -d ' ' || true)
   case "$REVIEW_TOTAL" in ''|*[!0-9]*) REVIEW_TOTAL="" ;; ?????????*) REVIEW_TOTAL="" ;; esac
+  # ONE FIELD, ONE TRUST MODEL, ACROSS BOTH FENCES. Block 1 withholds the whole breakdown unless the
+  # four counts are numeric AND `critical + warning + info == total`; this fence used to bound `total`
+  # for digits and length only and then hand it to the `unparsed:` reconciliation, so a REVIEW.md whose
+  # `findings:` block is internally inconsistent (`total: 10` beside `critical: 1, warning: 1, info: 1`)
+  # made block 1 print the countless form -- breakdown suppressed as untrustworthy -- while this block
+  # still computed an `unparsed:` shortfall from that same untrusted number. It fails in the SAFE
+  # direction (over-reports a possible gap rather than hiding one), which is why it is not a blocker;
+  # it is still two trust models for one field, one fence apart, and the weaker one is downstream.
+  # `blocker:` is the documented tier-equivalent of `critical:` (gsd-code-reviewer.md 'Label
+  # equivalence') -- the same alternation block 1 reads, because a mirror that drops it would diverge
+  # on exactly the reviews that use it.
+  _c_crit=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2 | tr -d ' ' || true)
+  _c_warn=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2 | tr -d ' ' || true)
+  _c_info=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2 | tr -d ' ' || true)
+  # THE CHECK IS NARROWER THAN BLOCK 1'S, DELIBERATELY, AND THE DIFFERENCE IS NOT AN OVERSIGHT.
+  # Block 1 withholds on `REVIEW_COUNTS_OK`, which demands ALL FOUR counts be numeric -- because it
+  # DISPLAYS all four, and `6 findings --  critical` is the half-filled line that rule exists to
+  # prevent. This fence displays none of them: it uses `total` alone, to reconcile against the number
+  # of headings the row parser matched. So the all-four rule does not port. Applied verbatim here it
+  # would blank `total` on a REVIEW.md carrying `total: 5` and no severity keys -- a review whose total
+  # is perfectly usable -- and SILENTLY DROP an `unparsed:` shortfall this step reports correctly today.
+  # That trades a safe-direction over-report for a silent under-report, which is the wrong way round
+  # and is the exact failure class the `unparsed:` key was added to close.
+  # What DOES port is the CONTRADICTION: when the three severities are all present and numeric and do
+  # not sum to `total`, the frontmatter disagrees with itself and `total` is not a number to reconcile
+  # against. Block 1 already suppresses its breakdown on that input; this fence now declines to compute
+  # a shortfall from it. Absent counts are not a contradiction -- there is nothing to disagree.
+  _sum_ok=1
+  for _c in "$_c_crit" "$_c_warn" "$_c_info"; do
+    # Present AND numeric AND within the same length bound the total carries -- `10#` below needs
+    # digits, and bash integers wrap at 2^64. Any one missing and there is no sum to compare.
+    case "$_c" in ''|*[!0-9]*) _sum_ok=0 ;; ?????????*) _sum_ok=0 ;; esac
+  done
+  # `10#` on every operand, for block 1's reason: bash infers the base from a leading zero, so
+  # `critical: 08` makes $(( )) fail with "value too great for base" and, under `set -e`, takes the
+  # whole advisory step down -- strictly worse than the stale count this check exists to prevent.
+  if [ "$_sum_ok" = "1" ] && [ -n "$REVIEW_TOTAL" ] \
+     && [ "$((10#$_c_crit + 10#$_c_warn + 10#$_c_info))" -ne "$((10#$REVIEW_TOTAL))" ]; then
+    REVIEW_TOTAL=""
+  fi
 fi
 # Skip a clean/skipped/absent review ONLY when there is nothing to reconcile AT ALL. An EXISTING
 # ledger is still brought up to date -- freezing it would leave findings showing open that the
