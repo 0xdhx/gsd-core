@@ -3526,8 +3526,17 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     // as both where C and en_US.UTF-8 classify it as neither. Pass 5 pinned the grep and sed reads
     // and the round then CLAIMED the parser was locale-independent; pass 6 found the two `awk`
     // mapping selectors still unpinned, because that census searched for the tools it expected
-    // rather than the tools that were there. Asserting the invariant over the file is the version
-    // of that census a future edit cannot fool.
+    // rather than the tools that were there. Asserting the invariant over the file is that census
+    // in a form a future edit is far less likely to slip past.
+    //
+    // ITS LIMIT, STATED RATHER THAN IMPLIED (pass 7). This scans TEXT, not shell or JS command
+    // structure, so it cannot resolve a tool name that is not written literally: `$AWK "$f"`, or a
+    // command name computed inside the embedded `node -e` block, both evade it. Those are accepted
+    // residuals rather than oversights — the pass that found them also showed that widening the
+    // regex further only trades them for false positives on quoted strings and awk program text.
+    // What it DOES catch, driven: unpinned, `env`-prefixed, wrongly-pinned (`LC_ALL=C.UTF-8`),
+    // path-qualified, line-initial, and literal-in-Node calls. Loud false positives (a trailing
+    // comment naming a tool, a tool name inside an awk program) are the acceptable direction.
     // `splitLines`, not `split('\n')`: the repo's own lint bans the latter on readFileSync content
     // (DEFECT.WINDOWS-CRLF-TEST-PORTABILITY), and a CRLF checkout would otherwise leave a stray
     // `\r` on every line here.
@@ -3542,7 +3551,11 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
       // shapes that happen to exist right now" is the exact property that let the awk selectors sit
       // unpinned through a whole commit that claimed otherwise.
       const rest = line.replace(/LC_ALL=C\s+(?:grep|sed|awk)\b/g, '');
-      const leftover = rest.match(/(?:^|[^A-Za-z0-9_./-])(?:grep|sed|awk)\b/g) || [];
+      // The preceding-char class deliberately does NOT shield `/` or `.`: an earlier version did,
+      // and `/usr/bin/awk '...' < "$f"` sailed through it. A path-qualified call is still a call.
+      // `parsed`, `passed` and `awkward` stay unmatched, because their tool substring is preceded
+      // or followed by a word character.
+      const leftover = rest.match(/(?:^|[^A-Za-z0-9_-])(?:grep|sed|awk)\b/g) || [];
       for (const c of leftover) offenders.push(`${i + 1}: ${c.trim()} (unpinned)`);
     });
     assert.deepStrictEqual(offenders, [],
