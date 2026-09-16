@@ -1659,9 +1659,15 @@ function parseGateCounts(reviewText) {
   // malformed scalar into a number twice over -- `tr -d` deleting INTERNAL spaces (`1 0` -> `10`) and
   // `-f2` keeping only the second colon-field (`1: junk` -> `1`). Both were retired from the shipped
   // reads when an adversarial pass showed a repaired number deciding whether a shortfall was reported.
-  // `-f2-` keeps the whole scalar and only the ends are trimmed; the trim class is POSIX
-  // [[:space:]] (space, tab, newline, VT, FF, CR), spelled explicitly rather than as JS `\s`, which
-  // also matches unicode spaces the shipped sed does not.
+  // `-f2-` keeps the whole scalar and only the ends are trimmed. The class below is POSIX
+  // [[:space:]] AS THE C LOCALE DEFINES IT -- space, tab, newline, VT, FF, CR -- spelled out
+  // literally rather than as JS `\s`, which also matches the unicode spaces C does not. That is an
+  // equivalence, not an approximation, ONLY because the shipped reads pin LC_ALL=C: glibc's C.UTF-8
+  // classifies U+2003 as [[:space:]] and as [[:blank:]], so an unpinned shipped read trimmed a
+  // character this mirror keeps, and the divergence was invisible here because both sides still
+  // landed on the same arm for every fixture that existed. The anchors below are spelled with the
+  // same literal class, for the same reason -- `\s` there would match a U+2003 indent the pinned
+  // shipped grep does not.
   const TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
   const first = (re) => {
     for (const line of fm) {
@@ -1698,10 +1704,10 @@ function parseGateCounts(reviewText) {
   };
   return {
     status: first(/^status:(.*)$/),
-    critical: firstIn(findingsBlock, /^\s*(?:critical|blocker):(.*)$/),
-    warning: firstIn(findingsBlock, /^\s*warning:(.*)$/),
-    info: firstIn(findingsBlock, /^\s*info:(.*)$/),
-    total: firstIn(findingsBlock, /^\s*total:(.*)$/),
+    critical: firstIn(findingsBlock, /^[ \t\n\v\f\r]*(?:critical|blocker):(.*)$/),
+    warning: firstIn(findingsBlock, /^[ \t\n\v\f\r]*warning:(.*)$/),
+    info: firstIn(findingsBlock, /^[ \t\n\v\f\r]*info:(.*)$/),
+    total: firstIn(findingsBlock, /^[ \t\n\v\f\r]*total:(.*)$/),
   };
 }
 
@@ -2995,7 +3001,7 @@ describe('#3861 round 2 — the shell-sharing guard, EXECUTED', () => {
 // and only the `-r` leg is defeated by running as root. A directory fails the `-f` leg on
 // every lane and euid, so it reaches the same non-reporting arm without depending on
 // permission bits at all. See the two tests at the end of this describe.
-function runShippedGateCounts({ reviewText, padded = '01', writeReview = true, mode, phaseNumber, plantDir = false }) {
+function runShippedGateCounts({ reviewText, padded = '01', writeReview = true, mode, phaseNumber, plantDir = false, extraEnv = {} }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-3861-'));
   try {
     const reviewPath = path.join(dir, padded + '-REVIEW.md');
@@ -3020,6 +3026,9 @@ function runShippedGateCounts({ reviewText, padded = '01', writeReview = true, m
         ...process.env,
         PHASE_DIR: dir,
         PHASE_NUMBER: phaseNumber === undefined ? String(Number(padded)) : phaseNumber,
+        // `extraEnv` exists for ONE property: the reads pin LC_ALL=C, and a test that cannot set
+        // the ambient locale cannot prove the pin is doing anything.
+        ...extraEnv,
       },
     });
     assert.strictEqual(res.outcome, OUTCOME.EXITED, 'the counts block must run to completion');
@@ -3426,6 +3435,20 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     'tab-separated counts':
       ['---', 'phase: 01', 'status: issues_found', 'findings:', '  critical:\t1',
         '  warning:\t1', '  info:\t1', '  total:\t3', '---', '', '### CR-01: a'].join('\n'),
+    // The STATUS axis of the same class, and the fixture that pins the `first` helper. Every
+    // pre-existing status fixture left both parsers on the SAME arm -- `issues:found` truncates to
+    // `issues`, which is no more `clean` than `issues:found` is -- so the mirror's status read could
+    // drift from the shipped one unseen, exactly as `firstIn` did. Here truncation FLIPS the arm:
+    // `clean:junk` cut at the second colon is the silent `clean`, whole it reports.
+    'a status whose truncation would flip the arm':
+      REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: clean:junk'),
+    // Unicode whitespace is NOT trimmed, because the reads pin LC_ALL=C. Unpinned under glibc's
+    // C.UTF-8 the shipped sed trimmed U+2003 and this took the silent clean arm on some machines
+    // and not others; the mirror never trims it. Same class as the fixture above, locale axis.
+    'a status with a trailing unicode space':
+      REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: clean\u2003'),
+    'a count with a trailing unicode space':
+      REVIEW_WITH_FINDINGS.replace('  critical: 1', '  critical: 1\u2003'),
     'a value containing a second colon': REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: issues:found'),
     // POSIX [[:space:]] covers form feed and vertical tab; a [ \t] mirror does not, so the
     // shipped grep matches a line the mirror rejects outright. Third counterexample, same class.
@@ -3452,6 +3475,34 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
         renderGateMessage(parseGateCounts(reviewText), 1),
         'the mirror has drifted from the shipped awk/grep block'
       );
+    });
+  }
+
+  // The parity fixtures above run under whatever locale the suite inherits, so they can only catch a
+  // locale bug on a machine that happens to have it. This drives the SAME input under both locales and
+  // asserts the shipped fence does not care -- which is the actual property LC_ALL=C buys. Found by the
+  // round's fifth adversarial pass: glibc's C.UTF-8 classifies U+2003 as [[:space:]] AND [[:blank:]]
+  // where C and en_US.UTF-8 classify it as neither, so before the pin `status: clean<U+2003>` trimmed
+  // to the silent `clean` on some machines and reported on others.
+  for (const [name, reviewText] of Object.entries({
+    'a status with a trailing unicode space':
+      REVIEW_WITH_FINDINGS.replace('status: issues_found', 'status: clean\u2003'),
+    'a count with a trailing unicode space':
+      REVIEW_WITH_FINDINGS.replace('  critical: 1', '  critical: 1\u2003'),
+    'a unicode-space indented count key':
+      REVIEW_WITH_FINDINGS.replace('  critical: 1', '\u2003critical: 1'),
+    'the documented review': REVIEW_WITH_FINDINGS,
+  })) {
+    test('the shipped reads are locale-invariant on ' + name, { skip: !HAS_BASH }, () => {
+      const c = runShippedGateCounts({ reviewText, extraEnv: { LC_ALL: 'C', LANG: 'C' } });
+      const utf8 = runShippedGateCounts({ reviewText, extraEnv: { LC_ALL: 'C.UTF-8', LANG: 'C.UTF-8' } });
+      assert.strictEqual(c.exitCode, 0, 'advisory: must not abort under any locale');
+      assert.strictEqual(utf8.exitCode, 0, 'advisory: must not abort under any locale');
+      assert.strictEqual(utf8.stdout, c.stdout,
+        'the shipped reads must not depend on the ambient locale; drop LC_ALL=C and this reds');
+      // And the mirror predicts that one locale-independent answer.
+      assert.strictEqual(c.stdout, renderGateMessage(parseGateCounts(reviewText), 1),
+        'the mirror must model the locale-pinned shipped read');
     });
   }
 
@@ -3773,6 +3824,14 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
     // report and the ledger. The whole scalar matches no arm, so the step reports instead.
     const out = drive(['findings:', '  critical: 1', '  warning: 0', '  info: 0', '  total: 1'], 'clean:junk');
     assert.ok(out.ledger !== null, 'an unusable status must not suppress the ledger');
+  });
+
+  test('a status with trailing unicode whitespace does not silently take the clean arm', { skip: !HAS_BASH }, () => {
+    // Fifth adversarial pass. The ledger half of the locale finding: unpinned, glibc's C.UTF-8 trimmed
+    // U+2003 and `status: clean<U+2003>` suppressed the ledger on exactly the machines whose locale
+    // said so. Pinned to C the scalar stays unusable, matches no arm, and the ledger is written.
+    const out = drive(['findings:', '  critical: 1', '  warning: 0', '  info: 0', '  total: 1'], 'clean\u2003');
+    assert.ok(out.ledger !== null, 'an unusable status must not suppress the ledger under any locale');
   });
 
   test('the parser is symmetric across all four count fields', { skip: !HAS_BASH }, () => {
