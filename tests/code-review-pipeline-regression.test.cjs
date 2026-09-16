@@ -3541,8 +3541,10 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     // in a row then found one more each time, which is the actual lesson: the list cannot be closed,
     // so a comment promising a closed list is false the moment someone is cleverer than it. The
     // examples above are illustrations, not an inventory. Its two directions are NOT symmetric, and
-    // that asymmetry is the whole operating instruction: a report is cheap to adjudicate (read the
-    // line — a trailing comment or a path is obvious prose), whereas SILENCE proves nothing at all,
+    // that asymmetry is the whole operating instruction: a report is ADJUDICABLE — read the reported
+    // line together with what precedes it, since the same text can be a command or an argument to one
+    // (`  grep` is a call after `:` and a string after `printf '%s\n' \`), so the line alone does not
+    // always settle it — whereas SILENCE proves nothing at all,
     // because the evasions above are silent and so is any evasion no one has thought of yet. So:
     // investigate every report, and never read silence as proof that a new read is pinned.
     //
