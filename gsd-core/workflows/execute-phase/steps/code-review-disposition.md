@@ -154,7 +154,12 @@ fi
 # `|| true` on every read: under `pipefail` a non-matching `grep` exits 1, and an assignment
 # whose command substitution fails aborts the step under `set -e`. An advisory gate must survive
 # a REVIEW.md with no frontmatter at all.
-REVIEW_STATUS=$(echo "$REVIEW_FM" | grep -m1 "^status:" | cut -d: -f2 | tr -d ' ' || true)
+# STATUS TAKES THE SAME PARSER AS THE COUNTS, and it is the read where truncation costs most. Under
+# `cut -d: -f2` the valid YAML scalar `status: clean:junk` arrived as the bare `clean` -- so an
+# unusable status SILENTLY took the clean arm, suppressing both the report and the ledger. `-f2-`
+# keeps the whole scalar, `clean:junk` matches no arm, and the step reports. Found by the round's
+# fourth adversarial pass as a sibling of the count-parser class, in the same file.
+REVIEW_STATUS=$(echo "$REVIEW_FM" | grep -m1 "^status:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
 # The counts belong to the `findings:` MAPPING, not merely to the frontmatter, and the scoping now
 # goes all the way there. `^[[:space:]]*total:` matches any indented key anywhere in the block, so
 # a top-level key later named `total:`, `info:` or `critical:` was picked up ahead of the nested
@@ -371,7 +376,7 @@ REVIEW_READ=0   # block 1's distinction, re-derived here: read-but-unparseable i
 if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   REVIEW_READ=1
   _FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
-  REVIEW_STATUS=$(echo "$_FM" | grep -m1 "^status:" | cut -d: -f2 | tr -d ' ' || true)
+  REVIEW_STATUS=$(echo "$_FM" | grep -m1 "^status:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   # The frontmatter total is carried into the script so the two parsers in this step can be
   # RECONCILED. The counts come from the frontmatter; the rows come from `### <ID>:` heading
   # matches against a closed CR|BL|WR|IN alternation. They are two independent numbers produced
