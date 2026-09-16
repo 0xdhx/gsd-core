@@ -3540,8 +3540,11 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     // Earlier versions of this comment tried to ENUMERATE those residuals. Three adversarial passes
     // in a row then found one more each time, which is the actual lesson: the list cannot be closed,
     // so a comment promising a closed list is false the moment someone is cleverer than it. The
-    // examples above are illustrations, not an inventory. Treat anything this guard reports as real,
-    // and never treat its silence as proof that a new read is pinned — read the diff.
+    // examples above are illustrations, not an inventory. Its two directions are NOT symmetric, and
+    // that asymmetry is the whole operating instruction: a report is cheap to adjudicate (read the
+    // line — a trailing comment or a path is obvious prose), whereas SILENCE proves nothing at all,
+    // because the evasions above are silent and so is any evasion no one has thought of yet. So:
+    // investigate every report, and never read silence as proof that a new read is pinned.
     //
     // Driven, it does catch: unpinned, `env`-prefixed, wrongly-pinned (`LC_ALL=C.UTF-8`),
     // path-qualified, line-initial, and literal-in-Node calls. Its false answers run loud rather
