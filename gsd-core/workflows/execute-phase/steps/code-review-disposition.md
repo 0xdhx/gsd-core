@@ -166,10 +166,18 @@ REVIEW_STATUS=$(echo "$REVIEW_FM" | grep -m1 "^status:" | cut -d: -f2 | tr -d ' 
 # `blocker:` is the documented tier-equivalent of `critical:` (gsd-code-reviewer.md § "Label
 # equivalence") — accept either, exactly as code-review.md's present_results already does.
 REVIEW_FINDINGS_FM=$(echo "$REVIEW_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
-REVIEW_CRITICAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2 | tr -d ' ' || true)
-REVIEW_WARNING=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2 | tr -d ' ' || true)
-REVIEW_INFO=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2 | tr -d ' ' || true)
-REVIEW_TOTAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2 | tr -d ' ' || true)
+REVIEW_CRITICAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_WARNING=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_INFO=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_TOTAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+# ONE PARSER FOR THE WHOLE STEP. These reads used `cut -d: -f2 | tr -d ' '`, which repairs a
+# malformed scalar into a number twice over: `tr -d` deletes INTERNAL spaces (`1 0` -> `10`) and
+# `-f2` keeps only the SECOND FIELD (`1: junk` -> `1`). Block 2 was tightened first, which left the
+# two fences disagreeing about the same bytes -- driven: `critical: 1 0` made this block print
+# `10 findings -- 10 critical` while the ledger recorded three rows and no shortfall. A console line
+# and a ledger contradicting each other is the exact confusion this PR exists to remove, so the fix
+# is one parser rather than a disclosed divergence. `-f2-` keeps the whole scalar; only the ends are
+# trimmed. A repaired number is not a number.
 # The breakdown is reportable only when ALL FOUR counts are numbers. Deciding on REVIEW_TOTAL
 # alone would still emit `6 findings —  critical` for a review carrying a total and nothing else.
 REVIEW_COUNTS_OK=1
@@ -421,18 +429,35 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # not sum to `total`, the frontmatter disagrees with itself and `total` is not a number to reconcile
   # against. Block 1 already suppresses its breakdown on that input; this fence now declines to compute
   # a shortfall from it. Absent counts are not a contradiction -- there is nothing to disagree.
-  _sum_ok=1
+  # AN ABSENT SEVERITY STILL BOUNDS THE SUM FROM BELOW, and that is enough to prove a contradiction
+  # in one direction. Counts are non-negative, so a missing one can only ADD: if the severities that
+  # ARE present and numeric already sum to MORE than `total`, the block disagrees with itself whatever
+  # the missing value is. Requiring all three before comparing missed that -- driven by an adversarial
+  # pass: `critical: 4`, `warning: 4`, no `info:`, `total: 5` reconciled against a total the present
+  # counts had already refuted. So the comparison is two-armed: EQUALITY when all three are known,
+  # and a LOWER BOUND when they are not. `_p_sum` accumulates only the present-and-numeric ones.
+  _sum_ok=1; _p_sum=0
   for _c in "$_c_crit" "$_c_warn" "$_c_info"; do
     # Present AND numeric AND within the same length bound the total carries -- `10#` below needs
-    # digits, and bash integers wrap at 2^64. Any one missing and there is no sum to compare.
-    case "$_c" in ''|*[!0-9]*) _sum_ok=0 ;; ?????????*) _sum_ok=0 ;; esac
+    # digits, and bash integers wrap at 2^64.
+    case "$_c" in
+      ''|*[!0-9]*) _sum_ok=0 ;;
+      ?????????*)  _sum_ok=0 ;;
+      *)           _p_sum=$(( _p_sum + 10#$_c )) ;;
+    esac
   done
   # `10#` on every operand, for block 1's reason: bash infers the base from a leading zero, so
   # `critical: 08` makes $(( )) fail with "value too great for base" and, under `set -e`, takes the
   # whole advisory step down -- strictly worse than the stale count this check exists to prevent.
-  if [ "$_sum_ok" = "1" ] && [ -n "$REVIEW_TOTAL" ] \
-     && [ "$((10#$_c_crit + 10#$_c_warn + 10#$_c_info))" -ne "$((10#$REVIEW_TOTAL))" ]; then
-    REVIEW_TOTAL=""
+  if [ -n "$REVIEW_TOTAL" ]; then
+    _t=$(( 10#$REVIEW_TOTAL ))
+    if [ "$_sum_ok" = "1" ]; then
+      # All three known: the sum must match exactly.
+      if [ "$_p_sum" -ne "$_t" ]; then REVIEW_TOTAL=""; fi
+    elif [ "$_p_sum" -gt "$_t" ]; then
+      # Not all known: only an OVERSHOOT is provable. An undershoot is the absent count's job.
+      REVIEW_TOTAL=""
+    fi
   fi
 fi
 # Skip a clean/skipped/absent review ONLY when there is nothing to reconcile AT ALL. An EXISTING

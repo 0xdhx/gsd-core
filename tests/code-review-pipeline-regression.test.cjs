@@ -1654,15 +1654,19 @@ function parseGateCounts(reviewText) {
     }
     if (closed) fm = buf;
   }
-  // The shipped reads are `grep -m1 <key> | cut -d: -f2 | tr -d ' '`, and BOTH stages matter.
-  // `.trim()` was wrong twice over: `tr -d ' '` removes INTERNAL spaces (`1 0` -> `10`), and
-  // `cut -d: -f2` takes only the second colon-field, so a value containing a colon is truncated
-  // where a `(.*)$` capture keeps the tail. Modelling the pipeline is the only way the parity
-  // assertion below can mean anything.
+  // The shipped reads are `grep -m1 <key> | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//'`,
+  // and BOTH stages matter. This mirror previously modelled `cut -d: -f2 | tr -d ' '`, which REPAIRED a
+  // malformed scalar into a number twice over -- `tr -d` deleting INTERNAL spaces (`1 0` -> `10`) and
+  // `-f2` keeping only the second colon-field (`1: junk` -> `1`). Both were retired from the shipped
+  // reads when an adversarial pass showed a repaired number deciding whether a shortfall was reported.
+  // `-f2-` keeps the whole scalar and only the ends are trimmed; the trim class is POSIX
+  // [[:space:]] (space, tab, newline, VT, FF, CR), spelled explicitly rather than as JS `\s`, which
+  // also matches unicode spaces the shipped sed does not.
+  const TRIM = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
   const first = (re) => {
     for (const line of fm) {
       const m = line.match(re);
-      if (m) return line.split(':')[1].replace(/ /g, '');
+      if (m) return line.slice(line.indexOf(':') + 1).replace(TRIM, '');
     }
     return '';
   };
@@ -3717,6 +3721,58 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
     const out = drive(['findings:', '  critical: 5 0', '  warning: 0', '  info: 0', '  total: 1 0']);
     assert.doesNotMatch(out.ledger, /^unparsed:/m, 'a malformed total is not a number to reconcile against');
     assert.doesNotMatch(out.stdout, /recorded NOWHERE/);
+  });
+
+  test('BLOCK 1 withholds a breakdown built from REPAIRED counts', { skip: !HAS_BASH }, () => {
+    // The one input that distinguishes block 1's old parser from its new one, and the reason this
+    // test exists: the round's first negative control for the block-1 change was VACUOUS. Reverting
+    // block 1 to `cut -d: -f2 | tr -d ' '` left the whole suite green, because on every fixture that
+    // existed both parsers landed on the SAME arm -- the countless form -- so a parity assertion
+    // could not see the difference.
+    //
+    // A SELF-CONSISTENT repaired breakdown separates them. `critical: 1 0` / `total: 1 0` repairs to
+    // 10 and 10, which SUM, so the old parser reported `10 findings -- 10 critical, 0 warning,
+    // 0 info.` from a `findings:` block that contains no such numbers. The new parser rejects the
+    // scalars and takes the countless arm, which is also what block 2 does with the same bytes --
+    // a console line and a ledger can no longer contradict each other on this input.
+    const repaired = ['---', 'phase: 01', 'status: issues_found', 'findings:',
+      '  critical: 1 0', '  warning: 0', '  info: 0', '  total: 1 0', '---', '',
+      '### CR-01: a', '### WR-01: b', '### WR-02: c'].join('\n');
+    const shipped = runShippedGateCounts({ reviewText: repaired });
+    assert.strictEqual(shipped.exitCode, 0, 'advisory: never abort');
+    assert.doesNotMatch(shipped.stdout, /10 findings/, 'a repaired number must not be reported as a count');
+    assert.doesNotMatch(shipped.stdout, /10 critical/);
+    assert.match(shipped.stdout, /^Code review found issues\./m, 'the countless arm is the honest one here');
+  });
+
+  test('the parser is symmetric across all four count fields', { skip: !HAS_BASH }, () => {
+    // Third adversarial pass, MISSED: the fixtures exercised malformed `critical` and `total` only,
+    // so they did not actually pin the four-field symmetry the fix claims. Each field in turn gets
+    // each malformed shape; none may license suppression, because a malformed severity is not a
+    // disagreement and `total: 5` stays usable.
+    for (const key of ['critical', 'blocker', 'warning', 'info']) {
+      for (const bad of ['1 0', '1: junk']) {
+        const fm = ['findings:', '  total: 5'];
+        for (const k of ['critical', 'warning', 'info']) {
+          if (k === key || (key === 'blocker' && k === 'critical')) continue;
+          fm.push(`  ${k}: 0`);
+        }
+        fm.push(`  ${key}: ${bad}`);
+        assert.match(drive(fm).ledger, /^unparsed: 2$/m, `${key}: '${bad}' must not license suppression`);
+      }
+    }
+  });
+
+  test('an absent severity still proves a contradiction when the known ones OVERSHOOT', { skip: !HAS_BASH }, () => {
+    // Third adversarial pass. Counts are non-negative, so a missing one can only ADD: when the
+    // present severities already sum to MORE than `total`, the block disagrees with itself whatever
+    // the absent value is. Requiring all three before comparing reconciled against a total the
+    // present counts had already refuted.
+    const over = drive(['findings:', '  critical: 4', '  warning: 4', '  total: 5']);
+    assert.doesNotMatch(over.ledger, /^unparsed:/m, '4 + 4 > 5 is a contradiction with or without info:');
+    // The other direction stays reconcilable: an UNDERshoot is exactly what the absent count explains.
+    const under = drive(['findings:', '  critical: 1', '  warning: 1', '  total: 5']);
+    assert.match(under.ledger, /^unparsed: 2$/m, 'an undershoot is the absent count\'s job, not a contradiction');
   });
 
   test('a zero-padded breakdown does not take the advisory step down', { skip: !HAS_BASH }, () => {
