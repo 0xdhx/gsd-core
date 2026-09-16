@@ -159,7 +159,7 @@ fi
 # unusable status SILENTLY took the clean arm, suppressing both the report and the ledger. `-f2-`
 # keeps the whole scalar, `clean:junk` matches no arm, and the step reports. Found by the round's
 # fourth adversarial pass as a sibling of the count-parser class, in the same file.
-REVIEW_STATUS=$(echo "$REVIEW_FM" | grep -m1 "^status:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_STATUS=$(echo "$REVIEW_FM" | LC_ALL=C grep -m1 "^status:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
 # The counts belong to the `findings:` MAPPING, not merely to the frontmatter, and the scoping now
 # goes all the way there. `^[[:space:]]*total:` matches any indented key anywhere in the block, so
 # a top-level key later named `total:`, `info:` or `critical:` was picked up ahead of the nested
@@ -171,10 +171,10 @@ REVIEW_STATUS=$(echo "$REVIEW_FM" | grep -m1 "^status:" | cut -d: -f2- | sed -E 
 # `blocker:` is the documented tier-equivalent of `critical:` (gsd-code-reviewer.md § "Label
 # equivalence") — accept either, exactly as code-review.md's present_results already does.
 REVIEW_FINDINGS_FM=$(echo "$REVIEW_FM" | awk '/^findings:[[:space:]]*$/{f=1; next} f&&/^[^[:space:]]/{exit} f' || true)
-REVIEW_CRITICAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-REVIEW_WARNING=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-REVIEW_INFO=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-REVIEW_TOTAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_CRITICAL=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_WARNING=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_INFO=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+REVIEW_TOTAL=$(echo "$REVIEW_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
 # ONE PARSER FOR THE WHOLE STEP. These reads used `cut -d: -f2 | tr -d ' '`, which repairs a
 # malformed scalar into a number twice over: `tr -d` deletes INTERNAL spaces (`1 0` -> `10`) and
 # `-f2` keeps only the SECOND FIELD (`1: junk` -> `1`). Block 2 was tightened first, which left the
@@ -183,6 +183,14 @@ REVIEW_TOTAL=$(echo "$REVIEW_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | 
 # and a ledger contradicting each other is the exact confusion this PR exists to remove, so the fix
 # is one parser rather than a disclosed divergence. `-f2-` keeps the whole scalar; only the ends are
 # trimmed. A repaired number is not a number.
+# LC_ALL=C ON EVERY `grep`/`sed` IN THESE READS, and it is load-bearing rather than cosmetic: the
+# POSIX classes are LOCALE-DEFINED, and glibc's C.UTF-8 puts U+2003 (and U+1680, U+2000-U+200A,
+# U+205F, U+3000) in BOTH [[:space:]] and [[:blank:]], where C and en_US.UTF-8 put them in neither.
+# Unpinned, `status: clean<U+2003>` trimmed to `clean` under one locale and stayed unusable under
+# another -- the same silent suppression as the `clean:junk` truncation, reachable only on some
+# machines. Pinned to C the class is exactly {space, tab, NL, VT, FF, CR}, which is what the mirror
+# in tests/code-review-pipeline-regression.test.cjs spells out literally, so the two agree by
+# construction rather than by coincidence of locale.
 # The breakdown is reportable only when ALL FOUR counts are numbers. Deciding on REVIEW_TOTAL
 # alone would still emit `6 findings —  critical` for a review carrying a total and nothing else.
 REVIEW_COUNTS_OK=1
@@ -376,7 +384,7 @@ REVIEW_READ=0   # block 1's distinction, re-derived here: read-but-unparseable i
 if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   REVIEW_READ=1
   _FM=$(tr -d '\r' < "$REVIEW_FILE" 2>/dev/null | awk 'NR==1{if($0!="---") exit; next} /^---$/{closed=1; exit} {buf = buf $0 "\n"} END{if (closed) printf "%s", buf}' || true)
-  REVIEW_STATUS=$(echo "$_FM" | grep -m1 "^status:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  REVIEW_STATUS=$(echo "$_FM" | LC_ALL=C grep -m1 "^status:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   # The frontmatter total is carried into the script so the two parsers in this step can be
   # RECONCILED. The counts come from the frontmatter; the rows come from `### <ID>:` heading
   # matches against a closed CR|BL|WR|IN alternation. They are two independent numbers produced
@@ -397,7 +405,7 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # with `total: 1 0` repaired only the total, rejected the severity, skipped the contradiction check
   # and INVENTED `unparsed: 7`. A field is either trustworthy or it is not; parsing one leniently and
   # its sibling strictly is the shape that fabricates.
-  REVIEW_TOTAL=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  REVIEW_TOTAL=$(echo "$_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*total:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   case "$REVIEW_TOTAL" in ''|*[!0-9]*) REVIEW_TOTAL="" ;; ?????????*) REVIEW_TOTAL="" ;; esac
   # ONE FIELD, ONE TRUST MODEL, ACROSS BOTH FENCES. Block 1 withholds the whole breakdown unless the
   # four counts are numeric AND `critical + warning + info == total`; this fence used to bound `total`
@@ -410,17 +418,18 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # `blocker:` is the documented tier-equivalent of `critical:` (gsd-code-reviewer.md 'Label
   # equivalence') -- the same alternation block 1 reads, because a mirror that drops it would diverge
   # on exactly the reviews that use it.
-  # TRIM THE ENDS, NEVER `tr -d ' '`, AND THE DIFFERENCE DECIDES A SUPPRESSION. The sibling reads use
-  # `tr -d`, which deletes INTERNAL spaces too, so a malformed `critical: 1 0` arrives as the perfectly
-  # numeric `10`. That is a long-standing property of those reads (its mirror is pinned as a fixture),
-  # and it was inert here until this block started reading the severities: a value that LOOKS numeric
-  # can now satisfy the sum test and SUPPRESS a real `unparsed:` shortfall. Suppression is the new
+  # TRIM THE ENDS, NEVER `tr -d ' '`, AND THE DIFFERENCE DECIDES A SUPPRESSION. `tr -d` deletes
+  # INTERNAL spaces too, so a malformed `critical: 1 0` would arrive as the perfectly numeric `10`.
+  # Every read in this step now takes the end-trim instead -- the sibling reads were moved off `tr -d`
+  # in the same round, so this is no longer a divergence between blocks -- and the reason it matters
+  # HERE is that a value which LOOKS numeric can satisfy the sum test and SUPPRESS a real
+  # `unparsed:` shortfall. Suppression is the new
   # behaviour, so the admission test for it is strict -- an internal space survives the trim, fails the
   # digit `case` below, and the shortfall is reported. Fail-safe in the only direction that matters:
   # when the frontmatter is malformed we decline to suppress, rather than trusting a repaired number.
-  _c_crit=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-  _c_warn=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
-  _c_info=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_crit=$(echo "$_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_warn=$(echo "$_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_info=$(echo "$_FINDINGS_FM" | LC_ALL=C grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2- | LC_ALL=C sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   # THE CHECK IS NARROWER THAN BLOCK 1'S, DELIBERATELY, AND THE DIFFERENCE IS NOT AN OVERSIGHT.
   # Block 1 withholds on `REVIEW_COUNTS_OK`, which demands ALL FOUR counts be numeric -- because it
   # DISPLAYS all four, and `6 findings --  critical` is the half-filled line that rule exists to
