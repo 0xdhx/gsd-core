@@ -386,9 +386,17 @@ if [ -f "$REVIEW_FILE" ] && [ -r "$REVIEW_FILE" ]; then
   # `blocker:` is the documented tier-equivalent of `critical:` (gsd-code-reviewer.md 'Label
   # equivalence') -- the same alternation block 1 reads, because a mirror that drops it would diverge
   # on exactly the reviews that use it.
-  _c_crit=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2 | tr -d ' ' || true)
-  _c_warn=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2 | tr -d ' ' || true)
-  _c_info=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2 | tr -d ' ' || true)
+  # TRIM THE ENDS, NEVER `tr -d ' '`, AND THE DIFFERENCE DECIDES A SUPPRESSION. The sibling reads use
+  # `tr -d`, which deletes INTERNAL spaces too, so a malformed `critical: 1 0` arrives as the perfectly
+  # numeric `10`. That is a long-standing property of those reads (its mirror is pinned as a fixture),
+  # and it was inert here until this block started reading the severities: a value that LOOKS numeric
+  # can now satisfy the sum test and SUPPRESS a real `unparsed:` shortfall. Suppression is the new
+  # behaviour, so the admission test for it is strict -- an internal space survives the trim, fails the
+  # digit `case` below, and the shortfall is reported. Fail-safe in the only direction that matters:
+  # when the frontmatter is malformed we decline to suppress, rather than trusting a repaired number.
+  _c_crit=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*(critical|blocker):" | cut -d: -f2 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_warn=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*warning:" | cut -d: -f2 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
+  _c_info=$(echo "$_FINDINGS_FM" | grep -E -m1 "^[[:space:]]*info:" | cut -d: -f2 | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' || true)
   # THE CHECK IS NARROWER THAN BLOCK 1'S, DELIBERATELY, AND THE DIFFERENCE IS NOT AN OVERSIGHT.
   # Block 1 withholds on `REVIEW_COUNTS_OK`, which demands ALL FOUR counts be numeric -- because it
   # DISPLAYS all four, and `6 findings --  critical` is the half-filled line that rule exists to

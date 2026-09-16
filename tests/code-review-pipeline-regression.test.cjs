@@ -3687,6 +3687,17 @@ describe('#3861 round 12 — block 2 does not compute a shortfall from a self-co
     assert.doesNotMatch(bad.ledger, /^unparsed:/m);
   });
 
+  test('a severity with an INTERNAL space is malformed, and does not suppress the shortfall', { skip: !HAS_BASH }, () => {
+    // Found by the round's own adversarial pass, against the first version of this fix. The sibling
+    // reads use `cut -d: -f2 | tr -d ' '`, which deletes INTERNAL spaces too, so `critical: 1 0`
+    // arrives as the perfectly numeric `10`. That is long-standing in those reads and was INERT here
+    // until this block started reading the severities -- at which point a repaired number could
+    // satisfy the sum test and SUPPRESS a real `unparsed:` shortfall. The severity reads now trim the
+    // ends only, so the space survives, the digit check rejects it, and nothing is suppressed.
+    const out = drive(['findings:', '  critical: 1 0', '  warning: 0', '  info: 0', '  total: 5']);
+    assert.match(out.ledger, /^unparsed: 2$/m, 'a malformed severity must not license suppression');
+  });
+
   test('a zero-padded breakdown does not take the advisory step down', { skip: !HAS_BASH }, () => {
     // `10#` on every operand: bash reads a leading zero as octal, so `critical: 08` would make
     // $(( )) fail with "value too great for base" and, under `set -e`, abort a step that
