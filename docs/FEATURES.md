@@ -2512,7 +2512,12 @@ severities — like its decisions — inherit on the ID alone.
 If the review's `total:` exceeds the number of findings whose headings the gate could parse, the
 shortfall is stated — on the console and as an `unparsed:` key in the ledger's frontmatter. A
 finding the gate cannot record is the one a human most needs to see, so it is never dropped
-silently. `deferred` is the one disposition the gate never writes: it is recorded by hand, and the
+silently. The one input that produces no shortfall is a `findings:` block that disagrees with
+itself: where `critical` (or `blocker`), `warning` and `info` are all present, numeric and do not
+sum to `total`, the gate has no trustworthy number to reconcile against and withholds the key
+rather than reporting a figure derived from one — the same input on which the console line
+already withholds the severity breakdown. Counts that are merely absent, partial or non-numeric
+are not a disagreement, and the shortfall is still reported from `total` alone. `deferred` is the one disposition the gate never writes: it is recorded by hand, and the
 reason recorded beside it in the Source cell is preserved across re-runs, a literal `|` included
 once escaped. One exception, because it cannot be resolved: a reason ending in the literal phrase
 *(not in the current review)* loses that trailing phrase, since it is indistinguishable from the
