@@ -3536,8 +3536,14 @@ describe('#3861 round 1 — the counts mirror is asserted against the shipped sh
     const offenders = [];
     splitLines(step).forEach((line, i) => {
       if (/^\s*#/.test(line)) return;   // prose may name an unpinned form while explaining it
-      const calls = line.match(/\|\s*(?:LC_ALL=C\s+)?(?:grep|sed|awk)\b/g) || [];
-      for (const c of calls) if (!/LC_ALL=C/.test(c)) offenders.push(`${i + 1}: ${c.trim()}`);
+      // Blank out the PINNED calls first, then anything left naming one of these tools is unpinned.
+      // Deliberately NOT keyed on a leading `|`: every call is piped today, but a guard that only
+      // sees pipes would wave through `awk '...' < "$f"` or `$(grep ...)`, and "correct for the
+      // shapes that happen to exist right now" is the exact property that let the awk selectors sit
+      // unpinned through a whole commit that claimed otherwise.
+      const rest = line.replace(/LC_ALL=C\s+(?:grep|sed|awk)\b/g, '');
+      const leftover = rest.match(/(?:^|[^A-Za-z0-9_./-])(?:grep|sed|awk)\b/g) || [];
+      for (const c of leftover) offenders.push(`${i + 1}: ${c.trim()} (unpinned)`);
     });
     assert.deepStrictEqual(offenders, [],
       'every grep/sed/awk in the step must be LC_ALL=C-pinned; an unpinned one makes the parse '
