@@ -11,10 +11,10 @@ restores parallel execution on both isolation models: GSD-created worktrees (Cod
 Kimi, Kimi Code) fork from the orchestrator HEAD by construction, and harness-created ones do so
 where the harness honors the setting — measured on Claude Code from all three settings layers
 (#4588; #48's earlier finding that it did not predates upstream claude-code#54940), unmeasured on
-Cursor. On a harness-created run, a Claude Code `WorktreeCreate` hook in any of those three
-settings files, or one of them that does not parse, withholds that trust and the check compares
-against `origin/HEAD` as before. A supplied `--observed-fork-base` is never trusted either: HEAD
-is compared against the observation, in both modes. Without the setting the fork
+Cursor. On a harness-created run with no observation, a Claude Code `WorktreeCreate` hook in any
+of those three settings files, or one of them that does not parse, withholds that trust and the
+check compares against `origin/HEAD` as before. A supplied `--observed-fork-base` is never trusted
+either: HEAD is compared against the observation, in both modes. Without the setting the fork
 base is `origin/HEAD` and parallel execution returns once HEAD is merged/pushed so it matches
 (#3659). The `worktree-branch-check` exit-42 guard inside each executor remains in place as the
 backstop on a host that does not honor the setting; step 0.5 of
