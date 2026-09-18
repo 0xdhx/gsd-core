@@ -1926,5 +1926,30 @@ describe('execute-plan Pattern A: pre-dispatch worktree base-check (#2649)', () 
   });
 });
 
+// The base-check prose moved out of execute-phase.md into its own step file
+// (#4683/#4828) while this fix was in review, and the move carried the retired
+// claim that harness-isolated runtimes ignore worktree.baseRef. Pin the step
+// file itself, so a later extraction cannot quietly bring the claim back.
+const WORKTREE_BASE_CHECK_STEP_PATH = path.join(
+  __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'worktree-base-check.md',
+);
+
+describe('execute-phase worktree_base_check step prose (#4588)', () => {
+  test('cites #4588 and names both exceptions to the baseRef:"head" trust', () => {
+    const content = fs.readFileSync(WORKTREE_BASE_CHECK_STEP_PATH, 'utf-8');
+    assert.ok(content.includes('#4588'), 'the step must cite #4588');
+    assert.ok(content.includes('WorktreeCreate'),
+      'the step must name the WorktreeCreate-hook exception that withholds the "head" trust');
+    assert.ok(content.includes('--observed-fork-base'),
+      'the step must say a supplied observation is compared against HEAD, not trusted');
+  });
+
+  test('does not claim harness-isolated runtimes ignore the setting', () => {
+    const content = fs.readFileSync(WORKTREE_BASE_CHECK_STEP_PATH, 'utf-8');
+    assert.ok(!/harness-isolated runtimes[^.]{0,200}do\s+not\s+read\s+the\s+setting/i.test(content.replace(/\s+/g, ' ')),
+      'the step must not carry the retired #48 claim that harness-isolated runtimes do not read baseRef');
+  });
+});
+
   });
 }
