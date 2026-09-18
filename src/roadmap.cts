@@ -1235,9 +1235,17 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
     }
 
     // Mark completed plan checkboxes (e.g. "- [ ] 50-01-PLAN.md", "- [ ] 50-01:", or "- [ ] **50-01**")
-    for (const summaryFile of phaseInfo!.summaries) {
-      const planId = summaryFile.replace('-SUMMARY.md', '').replace('SUMMARY.md', '');
-      if (!planId) continue;
+    // #4741: tick only plans the phase's own COUNT still counts. `plans` is the
+    // superseded-filtered set (#2349 via scanPhasePlans) while `summaries` is
+    // the raw *-SUMMARY.md listing — a superseded plan can carry a SUMMARY
+    // (e.g. `status: halted`), and ticking it read as "executed" right under a
+    // count line that excludes it. The prefix match mirrors the checkbox regex
+    // below (rows match by planId prefix, which the PLAN-01.md naming shape
+    // relies on), so non-superseded plans tick exactly as before.
+    const tickableSummaries = phaseInfo!.summaries
+      .map((summaryFile) => ({ summaryFile, planId: summaryFile.replace('-SUMMARY.md', '').replace('SUMMARY.md', '') }))
+      .filter(({ planId }) => planId !== '' && phaseInfo!.plans.some((planFile) => planFile.startsWith(planId)));
+    for (const { planId } of tickableSummaries) {
       const planEscaped = escapeRegex(planId);
       const planCheckboxPattern = new RegExp(
         `(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${planEscaped}(?:\\*\\*)?)`,
@@ -1319,9 +1327,9 @@ function cmdRoadmapUpdatePlanProgress(cwd: string, phaseNum: string | null | und
       if (withRows !== roadmapContent) {
         roadmapContent = withRows;
         // Mark any newly-inserted rows that already have summaries as complete
-        for (const summaryFile of phaseInfo!.summaries) {
-          const planId = summaryFile.replace('-SUMMARY.md', '').replace('SUMMARY.md', '');
-          if (!planId) continue;
+        // (#4741: same superseded-filtered tick list as the loop above — a
+        // pre-existing superseded row must stay unchecked on this path too).
+        for (const { planId } of tickableSummaries) {
           const planEscaped = escapeRegex(planId);
           const planCheckboxPattern = new RegExp(
             `(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${planEscaped}(?:\\*\\*)?)`,
