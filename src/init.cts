@@ -39,6 +39,8 @@ type Scope = planningScopeMod.Scope;
 import { maskIfSecret } from './secrets.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- plan-scan.cjs is an export= CommonJS module
 import scanPhasePlans = require('./plan-scan.cjs');
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- plan-document.cjs is an export= CommonJS module
+import planDocument = require('./plan-document.cjs');
 import { stateExtractField } from './state-document.cjs';
 import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
 import { resolveReportedRuntime } from './host-runtime-detection.cjs';
@@ -103,6 +105,7 @@ const {
   matchPhaseDirs,
   stripProjectCodePrefix,
   PHASE_NUMBER_TOKEN_SOURCE,
+  PHASE_DEP_REF_SOURCE,
   isForeignPrefixedPhaseQuery,
   isSentinelPhaseId,
   extractPhaseToken,
@@ -141,7 +144,6 @@ const { resolveCapabilityRuntimeState } = capabilityStateMod;
 void stripShippedMilestones;
 
 // Accept all bold/colon variants of the Requirements header (#2769)
-const REQUIREMENTS_HEADER_RE = /^\*\*Requirements:?\*\*[^\S\n]*:?[^\S\n]*([^\n]*)$/m;
 
 // #2056/#2104: isForeignPrefixedPhaseQuery is imported from phase-id.cts
 // (the canonical predicate). parsePhasePrefix is no longer needed locally.
@@ -895,6 +897,50 @@ function milestoneRecord(cwd: string): Record<string, unknown> {
   return (getMilestoneInfo(cwd).value ?? {}) as unknown as Record<string, unknown>;
 }
 
+/**
+ * #4683 — threat IDs claimed by more than one of the phase's live PLAN files.
+ * `scanPhasePlans().planFiles` is the right input set twice over: it excludes
+ * derivative files (OUTLINE / PLAN-REVIEW / pre-bounce) AND `status: superseded`
+ * plans (#2349) — a superseded plan's IDs were deliberately reassigned to its
+ * replacement, so they must not hold against it. The per-document row parse is
+ * planDocument.extractThreatRegisterIds; only `<threat_model>` register rows
+ * count, and the reserved `T-{phase}-SC` shape is excluded there by grammar
+ * (every plan keeps that row by design). A missing/unreadable phase directory
+ * degrades to "no duplicates" — planning a brand-new phase has nothing to
+ * collide with.
+ */
+function findDuplicateThreatIds(cwd: string, phaseDirRel: string | null | undefined): Array<{ id: string; plans: string[] }> {
+  if (!phaseDirRel) return [];
+  const phaseDir = path.join(cwd, phaseDirRel);
+  let planFiles: string[];
+  try {
+    planFiles = scanPhasePlans(phaseDir).planFiles;
+  } catch {
+    return [];
+  }
+  const owners = new Map<string, string[]>();
+  for (const planFile of planFiles) {
+    let content: string;
+    try {
+      content = fs.readFileSync(path.join(phaseDir, planFile), 'utf-8');
+    } catch {
+      continue;
+    }
+    for (const id of planDocument.extractThreatRegisterIds(content)) {
+      const claimed = owners.get(id);
+      if (claimed) {
+        if (!claimed.includes(planFile)) claimed.push(planFile);
+      } else {
+        owners.set(id, [planFile]);
+      }
+    }
+  }
+  return [...owners.entries()]
+    .filter(([, claims]) => claims.length > 1)
+    .map(([id, plans]) => ({ id, plans: [...plans].sort() }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
 function cmdInitExecutePhase(
   cwd: string,
   phase: string,
@@ -939,9 +985,14 @@ function cmdInitExecutePhase(
       has_reviews: false,
     };
   });
-  const reqMatch = (roadmapPhase?.['section'] as string | undefined)?.match(REQUIREMENTS_HEADER_RE);
-  const reqExtracted = reqMatch
-    ? reqMatch[1].replace(/[\[\]]/g, '').split(',').map((s) => s.trim()).filter(Boolean).join(', ')
+  // #4731: multiline-aware — the Requirements field may hard-wrap, so the
+  // value is extracted past the line break before the ID scan.
+  const phaseSection = roadmapPhase?.['section'] as string | undefined;
+  const reqLine = phaseSection
+    ? roadmapParser.extractPhaseFieldMultiline(phaseSection, 'Requirements')
+    : null;
+  const reqExtracted = reqLine
+    ? reqLine.replace(/[\[\]]/g, '').split(',').map((s) => s.trim()).filter(Boolean).join(', ')
     : null;
   const phase_req_ids = reqExtracted && reqExtracted !== 'TBD' ? reqExtracted : null;
 
@@ -952,6 +1003,9 @@ function cmdInitExecutePhase(
   const statePath = path.join(planningDir(cwd), 'STATE.md');
   const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
   const requirementsPath = path.join(planningDir(cwd), 'REQUIREMENTS.md');
+
+  // #4683: computed once — see the threat_id_duplicates fields in the payload.
+  const threatIdDuplicates = findDuplicateThreatIds(cwd, phaseInfo?.['directory'] as string | undefined);
 
   const result: Record<string, unknown> = {
     executor_model: resolveModelInternal(cwd, 'gsd-executor'),
@@ -974,6 +1028,13 @@ function cmdInitExecutePhase(
       ? toPosixPath(path.join(cwd, phaseInfo['directory'] as string))
       : null,
     phase_number: phaseInfo?.['phase_number'] || null,
+    // #4748: the disk path hands back the directory's padded number (`03A`)
+    // but the ROADMAP fallback above hands back the heading's bare one (`3A`),
+    // and execute-phase.md's review lookup needs the padded form for
+    // `{PADDED}-REVIEW.md`. It used to re-pad in shell with `printf "%02d"`,
+    // which cannot pad a letter id and reads an already-padded `08` as octal.
+    // Emit the canonical normalization, as the plan-phase/code-review inits do.
+    padded_phase: phaseInfo?.['phase_number'] ? normalizePhaseName(phaseInfo['phase_number']) : null,
     // #3171: prefer the ROADMAP's curated display name for `phase_name`. When
     // the phase directory already exists on disk, the disk-lookup path
     // (searchPhaseInDir) derives phase_name from the directory-name remainder
@@ -993,6 +1054,13 @@ function cmdInitExecutePhase(
     incomplete_plans: phaseInfo?.['incomplete_plans'] || [],
     plan_count: (phaseInfo?.['plans'] as unknown[] | undefined)?.length || 0,
     incomplete_count: (phaseInfo?.['incomplete_plans'] as unknown[] | undefined)?.length || 0,
+
+    // #4683: cross-plan threat-ID collisions (gap-closure plans renumbering
+    // from T-{phase}-01 again). execute-phase.md hard-stops on a non-empty
+    // list BEFORE any dispatch — SECURITY.md rows and VALIDATION.md's Threat
+    // Ref column key on this ID, so a reused ID is ambiguous downstream.
+    threat_id_duplicates: threatIdDuplicates,
+    threat_id_duplicate_count: threatIdDuplicates.length,
 
     // #2830: the halt-aware view, forwarded from the shared computation in
     // phase-locator. Additive — `incomplete_plans`/`incomplete_count` above keep
@@ -1109,9 +1177,14 @@ function cmdInitPlanPhase(
       has_reviews: false,
     };
   });
-  const reqMatch = (roadmapPhase?.['section'] as string | undefined)?.match(REQUIREMENTS_HEADER_RE);
-  const reqExtracted = reqMatch
-    ? reqMatch[1].replace(/[\[\]]/g, '').split(',').map((s) => s.trim()).filter(Boolean).join(', ')
+  // #4731: multiline-aware — the Requirements field may hard-wrap, so the
+  // value is extracted past the line break before the ID scan.
+  const phaseSection = roadmapPhase?.['section'] as string | undefined;
+  const reqLine = phaseSection
+    ? roadmapParser.extractPhaseFieldMultiline(phaseSection, 'Requirements')
+    : null;
+  const reqExtracted = reqLine
+    ? reqLine.replace(/[\[\]]/g, '').split(',').map((s) => s.trim()).filter(Boolean).join(', ')
     : null;
   const phase_req_ids = reqExtracted && reqExtracted !== 'TBD' ? reqExtracted : null;
 
@@ -1133,6 +1206,9 @@ function cmdInitPlanPhase(
 
   const granularityOverride = options['granularity'] as string | undefined;
   assertValidGranularityOverride(granularityOverride, error);
+
+  // #4683: computed once — see the threat_id_duplicates fields in the payload.
+  const threatIdDuplicatesPlan = findDuplicateThreatIds(cwd, phaseDirPlan);
   const granularity = resolveGranularityInternal(cwd, 'planning', granularityOverride || undefined);
 
   // #3188: see cmdInitExecutePhase — null when absent, parity with the
@@ -1188,6 +1264,12 @@ function cmdInitPlanPhase(
     has_reviews: phaseInfo?.['has_reviews'] || false,
     has_plans: ((phaseInfo?.['plans'] as unknown[] | undefined)?.length || 0) > 0,
     plan_count: (phaseInfo?.['plans'] as unknown[] | undefined)?.length || 0,
+
+    // #4683: the same cross-plan threat-ID duplicate list execute-phase gates
+    // on, surfaced at PLAN time so the checker/reviewer catches the collision
+    // before the plans are approved — not just before execution.
+    threat_id_duplicates: threatIdDuplicatesPlan,
+    threat_id_duplicate_count: threatIdDuplicatesPlan.length,
 
     planning_exists: fs.existsSync(planningDir(cwd)),
     roadmap_exists: fs.existsSync(path.join(planningDir(cwd), 'ROADMAP.md')),
@@ -2841,8 +2923,7 @@ function cmdInitManager(cwd: string, raw: boolean): void {
       : content.length;
     const section = content.slice(sectionStart, sectionEnd);
 
-    const goalMatch = section.match(/\*\*Goal(?::\*\*|\*\*:)\s*([^\n]+)/i);
-    const goal = goalMatch ? goalMatch[1].trim() : null;
+    const goal = roadmapParser.extractPhaseFieldMultiline(section, 'Goal');
 
     const dependsMatch = section.match(/\*\*Depends on(?::\*\*|\*\*:)\s*([^\n]+)/i);
     const depends_on = dependsMatch ? dependsMatch[1].trim() : null;
@@ -3032,6 +3113,23 @@ function cmdInitManager(cwd: string, raw: boolean): void {
     return reaches(numA, numB) || reaches(numB, numA);
   }
 
+  // #4764: a phase reference in depends_on prose is a PHASE-SHAPED token in
+  // context — directly following "Phase"/"Phases" — never a bare digit run.
+  // The previous whole-field scrape matched the token grammar against every
+  // digit run, so calendar dates ("2026-09-14" → 2026, 09, 14), git shas
+  // ("8bf403100d" → 8b, 403100d, …), bracketed ledger ids (WINDOWS #1843) and
+  // the row's OWN number all became "dependencies", and deps_satisfied came
+  // back false for phases whose prose declares none (50 of 92 phases in the
+  // reporter's milestone). The anchored grammar (owned by phase-id.cts as
+  // PHASE_DEP_REF_SOURCE, shared with planning-inspect's dependencies) keeps
+  // lists fully extracted ("Phases 601 and 602", "Phase 601, 602, and 603",
+  // "Phase 1-3") — silently dropping a REAL dependency would clear
+  // deps_satisfied prematurely, the dangerous direction. Negation prose
+  // ("dropped the dependency on Phase 654") is NOT detected: the issue's own
+  // minimum keeps such tokens.
+  const depPhaseRefRe = new RegExp(`${PHASE_DEP_REF_SOURCE}`, 'gi');
+  const depTokenRe = new RegExp(`${PHASE_NUMBER_TOKEN_SOURCE}`, 'gi');
+
   for (const phase of phases) {
     if (
       !phase['depends_on'] ||
@@ -3039,7 +3137,23 @@ function cmdInitManager(cwd: string, raw: boolean): void {
     ) {
       phase['deps_satisfied'] = true;
     } else {
-      const depNums = (phase['depends_on'] as string).match(new RegExp(`${PHASE_NUMBER_TOKEN_SOURCE}`, 'gi')) || [];
+      const prose = phase['depends_on'] as string;
+      const ownNumber = normalizePhaseNumber(phase['number'] as string);
+      const depNums: string[] = [];
+      const seen = new Set<string>();
+      let refMatch: RegExpExecArray | null;
+      depPhaseRefRe.lastIndex = 0;
+      while ((refMatch = depPhaseRefRe.exec(prose)) !== null) {
+        let tok: RegExpExecArray | null;
+        depTokenRe.lastIndex = 0;
+        while ((tok = depTokenRe.exec(refMatch[1])) !== null) {
+          const normalized = normalizePhaseNumber(tok[0]);
+          if (normalized === ownNumber) continue; // #4764: never the row's own phase
+          if (seen.has(normalized)) continue;
+          seen.add(normalized);
+          depNums.push(tok[0]);
+        }
+      }
       phase['deps_satisfied'] = depNums.every((n) => completedNums.has(normalizePhaseNumber(n)));
       phase['dep_phases'] = depNums;
     }
