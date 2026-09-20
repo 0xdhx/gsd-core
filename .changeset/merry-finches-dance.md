@@ -1,0 +1,5 @@
+---
+type: Fixed
+pr: 0
+---
+**Installed agents no longer cite reference files at a path that does not exist** — 11 `@gsd-core/references/<x>.md` pointers in `gsd-debugger`, `gsd-planner`, `gsd-plan-checker` and `gsd-verifier` now use the installed-path form the installer rewrites, so the 8 references they address (planner, verifier, plan-checker and debugger guidance) load after install; a test refuses the bare form in `agents/`, and `check-contract-drift` follows both spellings. (#4841)

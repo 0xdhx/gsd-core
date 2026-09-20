@@ -130,3 +130,124 @@ describe('#3576 gate: shipped reference citations resolve', () => {
     assert.deepEqual(findBareCites('Read @~/gsd-core/references/tdd.md now'), [], 'a lone @~/ include line is clean after stripping');
   });
 });
+
+// ─── #4841: bare `@gsd-core/references/…` includes in agents/ ─────────────────
+//
+// The @-include twin of the #3576 bare cite. `@gsd-core/references/<x>.md` is
+// repo-relative to the SOURCE tree: the installer's agent path rewrite
+// (`applyAgentPathRewritesInner`) is anchored on `~/.claude` / `$HOME/.claude`
+// and never touches it, so after install it addresses
+// `<project>/gsd-core/references/<x>.md` — a directory no consuming project has —
+// while the file it means sits at `~/.claude/gsd-core/references/<x>.md`, where
+// the corpus's other 137 pointers already point. Eleven of these accumulated
+// across four agents over three months because `check-contract-drift.cjs`'s
+// reference-follower was equally blind to the spelling.
+//
+// Scope is agents/ ONLY. The workflow tree carries the same spelling, but whether
+// an @-path in a workflow body is client-resolved at all is unmeasured (#4841
+// § Evidence 5), so this gate takes no position there.
+
+// A reference name is one or more path segments, each starting with a non-dot character, so
+// a `.` or `..` segment is never a name and no include can resolve outside gsd-core/references/.
+const BARE_INCLUDE_RE = /@gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
+const INSTALLED_INCLUDE_RE = /@~\/\.claude\/gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
+
+/** Bare `@gsd-core/references/<name>` includes — the form no installer rewrite reaches. */
+function findBareIncludes(text) {
+  const found = [];
+  let m;
+  while ((m = BARE_INCLUDE_RE.exec(text)) !== null) found.push(m[0]);
+  return found;
+}
+
+/** Installed-path `@~/.claude/gsd-core/references/<name>` includes — target names. */
+function findInstalledIncludes(text) {
+  const found = [];
+  let m;
+  while ((m = INSTALLED_INCLUDE_RE.exec(text)) !== null) found.push(m[1]);
+  return found;
+}
+
+function walkAgentMarkdown() {
+  return walkShippedMarkdown().filter(({ rel }) => rel.startsWith('agents/'));
+}
+
+describe('#4841 gate: agent @-includes use the installed-path form', () => {
+  test('#4841 gate: no bare @gsd-core/references/ includes in agents/', () => {
+    const offenders = [];
+    for (const { rel, abs } of walkAgentMarkdown()) {
+      // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
+      const text = fs.readFileSync(abs, 'utf-8');
+      for (const inc of findBareIncludes(text)) {
+        offenders.push(
+          `${rel}: ${inc} — no installer rewrite reaches this spelling on any profile; `
+            + `use @~/.claude/${inc.slice(1)}`,
+        );
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'Bare `@gsd-core/references/<name>.md` includes address a path no consuming project has (#4841). '
+        + 'Rewrite to the installed-path `@~/.claude/gsd-core/references/<name>.md` form:\n'
+        + offenders.join('\n'),
+    );
+  });
+
+  test('#4841 gate: every installed-path @-include in agents/ names a reference that exists', () => {
+    const missing = [];
+    for (const { rel, abs } of walkAgentMarkdown()) {
+      // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
+      const text = fs.readFileSync(abs, 'utf-8');
+      for (const name of findInstalledIncludes(text)) {
+        if (!fs.existsSync(path.join(REPO_ROOT, 'gsd-core', 'references', name))) {
+          missing.push(`${rel}: @~/.claude/gsd-core/references/${name} — target does not exist`);
+        }
+      }
+    }
+    assert.deepEqual(missing, [], 'Installed-path includes must name files that exist:\n' + missing.join('\n'));
+  });
+
+  test('#4841 gate: the agents/ scan is not vacuous — it reaches the four agents the defect lived in', () => {
+    const rels = new Set(walkAgentMarkdown().map(({ rel }) => rel));
+    for (const agent of ['gsd-debugger', 'gsd-planner', 'gsd-plan-checker', 'gsd-verifier']) {
+      assert.ok(rels.has(`agents/${agent}.md`), `agents/${agent}.md must be in the scanned set`);
+    }
+  });
+
+  test('#4841 gate unit: the matcher flags the bare form only', () => {
+    assert.deepEqual(
+      findBareIncludes('recipes: @gsd-core/references/verifier-wiring-patterns.md'),
+      ['@gsd-core/references/verifier-wiring-patterns.md'],
+      'the bare include is flagged',
+    );
+    assert.deepEqual(
+      findBareIncludes('recipes: @~/.claude/gsd-core/references/verifier-wiring-patterns.md'),
+      [],
+      'the installed-path include is not flagged (the slash before gsd-core is not an @)',
+    );
+    assert.deepEqual(findBareIncludes('see `gsd-core/references/tdd.md`'), [], 'a backticked cite is not an @-include');
+    assert.deepEqual(
+      findBareIncludes('@gsd-core/references/a.md then @gsd-core/references/b.md.'),
+      ['@gsd-core/references/a.md', '@gsd-core/references/b.md'],
+      'every occurrence on a line is reported, and a trailing period is not part of the name',
+    );
+    assert.deepEqual(findInstalledIncludes('x @~/.claude/gsd-core/references/tdd.md y'), ['tdd.md']);
+    assert.deepEqual(
+      findBareIncludes('@gsd-core/references/few-shot-examples/verifier.md'),
+      ['@gsd-core/references/few-shot-examples/verifier.md'],
+      'a nested bare include is flagged too (the corpus carries nested installed-path includes)',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('@~/.claude/gsd-core/references/few-shot-examples/verifier.md'),
+      ['few-shot-examples/verifier.md'],
+      'a nested installed-path include is existence-checked by its nested name',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('@~/.claude/gsd-core/references/../../README.md'),
+      [],
+      'a traversal segment is not a reference name — it must never resolve outside gsd-core/references/',
+    );
+    assert.deepEqual(findBareIncludes('@gsd-core/references/./x.md'), [], 'a dot segment is not a reference name');
+  });
+});

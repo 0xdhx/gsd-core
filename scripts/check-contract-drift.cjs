@@ -92,8 +92,9 @@ function toRepoRelative(absPath) {
 /**
  * referenceIncludes(content)
  *
- * Plain scan for `@~/.claude/gsd-core/references/*.md` tokens anywhere in an
- * agent file's content -- inside an `<execution_context>` block (already
+ * Plain scan for `@~/.claude/gsd-core/references/*.md` tokens (and the bare
+ * `@gsd-core/references/*.md` spelling, #4841) anywhere in an agent file's
+ * content -- inside an `<execution_context>` block (already
  * covered structurally by `executionContextRefs` in command-contract-helpers,
  * but a raw regex over the whole string picks those up too) and, just as
  * importantly, OUTSIDE one: agents frequently point at a reference doc from
@@ -109,11 +110,17 @@ function toRepoRelative(absPath) {
  */
 function referenceIncludes(content) {
   const seen = new Set();
-  const re = /@~\/\.claude\/gsd-core\/references\/[A-Za-z0-9._-]+\.md/g;
+  // Both spellings the agent corpus has carried: the installed-path form the
+  // installer rewrites per profile, and the bare repo-relative `@gsd-core/…`
+  // form (#4841) that it does not. The bare form is now refused in agents/ by
+  // tests/shipped-reference-cites.test.cjs; it is followed here so a pointer
+  // that slips past that gate is still scanned rather than silently dropped.
+  // Nested names are allowed (`few-shot-examples/verifier.md`); every segment starts with a
+  // non-dot character, so a `.`/`..` segment is never a name and nothing resolves outside references/.
+  const re = /@(?:~\/\.claude\/)?gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
   let m;
   while ((m = re.exec(content)) !== null) {
-    const relPath = 'gsd-core/references/' + m[0].slice('@~/.claude/gsd-core/references/'.length);
-    seen.add(relPath);
+    seen.add('gsd-core/references/' + m[1]);
   }
   return [...seen];
 }
