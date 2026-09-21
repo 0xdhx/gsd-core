@@ -6,7 +6,8 @@
  * GSD Tools Tests — Codebase Drift Detection (#2003)
  *
  * Unit tests for bin/lib/drift.cjs plus CLI surface via verify codebase-drift.
- * Exercises the four drift categories (new dir, barrel, migration, route),
+ * Exercises the six drift categories (new dir, barrel, migration, route,
+ * modified, deleted — the last two since #4886),
  * threshold gating, warn vs. auto-remap, last_mapped_commit round-trip,
  * config validation, mapper --paths passthrough, and graceful failure paths.
  */
@@ -253,6 +254,196 @@ describe('detectDrift — threshold gating', () => {
   });
 });
 
+// ─── Unit: modified / deleted files in mapped territory (#4886) ──────────────
+//
+// Before #4886 the only element-producing loop in detectDrift iterated
+// `addedFiles`; `modifiedFiles` and `deletedFiles` reached the `counts` object
+// and nothing else. A map could go arbitrarily stale through edits — the common
+// change class on a mature repo — and the gate reported `actionRequired: false`
+// at every threshold. Every test below except the over-reach guard ("a change
+// in territory the map never described is not drift") fails on the pre-fix
+// module; that one passes both ways by design and pins the boundary.
+
+describe('detectDrift — modified and deleted files in mapped territory (#4886)', () => {
+  // The normal state of a mapped repo: STRUCTURE.md lists the directories the
+  // changes land in. Verbatim from the issue's reproduction.
+  const structureMd = [
+    '# Structure',
+    '',
+    '- `src/app/` — application modules',
+    '- `src/lib/` — shared helpers',
+    '- `docs/` — documentation',
+    '',
+  ].join('\n');
+
+  test('modified files inside a mapped directory register as drift', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/app/main.py', 'src/lib/util.py'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+    });
+    assert.strictEqual(result.skipped, false);
+    assert.deepStrictEqual(result.elements, [
+      { category: 'modified', path: 'src/app/main.py' },
+      { category: 'modified', path: 'src/lib/util.py' },
+    ]);
+    assert.strictEqual(result.actionRequired, true);
+    assert.strictEqual(result.directive, 'warn');
+    assert.deepStrictEqual(result.affectedPaths, ['src'],
+      'the remap hint must point the mapper at the subtree the edits landed in');
+  });
+
+  test('deleted files inside a mapped directory register as drift', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: [],
+      deletedFiles: ['src/app/old.py'],
+      structureMd,
+      threshold: 1,
+    });
+    assert.deepStrictEqual(result.elements, [{ category: 'deleted', path: 'src/app/old.py' }]);
+    assert.strictEqual(result.actionRequired, true);
+    assert.deepStrictEqual(result.affectedPaths, ['src']);
+  });
+
+  test("the issue's scenario A: three edits and one deletion in mapped dirs at threshold 1", () => {
+    // Reported: elements [] / actionRequired false. `.planning/codebase/…` is
+    // not in the map's territory (the CLI caller filters planning artifacts
+    // before the library ever sees them), so it must not count either way.
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/app/main.py', 'src/lib/util.py', '.planning/codebase/ARCHITECTURE.md'],
+      deletedFiles: ['src/app/old.py'],
+      structureMd,
+      threshold: 1,
+    });
+    assert.deepStrictEqual(
+      result.elements.map((e) => `${e.category}:${e.path}`).sort(),
+      ['deleted:src/app/old.py', 'modified:src/app/main.py', 'modified:src/lib/util.py'],
+    );
+    assert.strictEqual(result.actionRequired, true);
+    assert.deepStrictEqual(result.counts, { added: 0, modified: 3, deleted: 1 },
+      'counts stay per-list and unfiltered — they report the diff, not the drift');
+  });
+
+  test("the issue's scenario D: 100 edits and 50 additions inside mapped dirs at the default threshold", () => {
+    // Reported: elements [] / actionRequired false with counts {50, 100, 0}.
+    // The 50 ordinary additions land in mapped directories, so they are still
+    // not drift — the added-file rule is untouched. The 100 edits now are.
+    const modifiedFiles = Array.from({ length: 100 }, (_, i) => `src/app/m${i}.py`);
+    const addedFiles = Array.from({ length: 50 }, (_, i) => `src/lib/a${i}.py`);
+    const result = detectDrift({ addedFiles, modifiedFiles, deletedFiles: [], structureMd, threshold: 3 });
+    assert.strictEqual(result.elements.length, 100);
+    assert.ok(result.elements.every((e) => e.category === 'modified'));
+    assert.strictEqual(result.actionRequired, true);
+    assert.deepStrictEqual(result.counts, { added: 50, modified: 100, deleted: 0 });
+  });
+
+  test('a change in territory the map never described is not drift', () => {
+    // The map never covered these directories, so their edits are not a
+    // divergence from the map. Symmetric with the added-file rule: an
+    // addition is drift OUTSIDE mapped territory, an edit is drift INSIDE it.
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['scratch/notes.txt', 'tools/gen.py'],
+      deletedFiles: ['tools/old.py'],
+      structureMd,
+      threshold: 1,
+    });
+    assert.deepStrictEqual(result.elements, []);
+    assert.strictEqual(result.actionRequired, false);
+    assert.deepStrictEqual(result.counts, { added: 0, modified: 2, deleted: 1 });
+  });
+
+  test('the threshold gates modified elements like any other', () => {
+    const under = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/app/a.py', 'src/app/b.py'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 3,
+    });
+    assert.strictEqual(under.elements.length, 2);
+    assert.strictEqual(under.actionRequired, false, '2 < 3: reported, not actioned');
+    assert.strictEqual(under.directive, 'none');
+
+    const at = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/app/a.py', 'src/app/b.py'],
+      deletedFiles: ['src/lib/c.py'],
+      structureMd,
+      threshold: 3,
+    });
+    assert.strictEqual(at.actionRequired, true, '2 modified + 1 deleted = 3 ≥ 3');
+  });
+
+  test('added-file classification is unchanged when edits are present in the same diff', () => {
+    const result = detectDrift({
+      addedFiles: ['newpkg/thing.py', 'src/lib/added.py', 'prisma/migrations/0001_init/migration.sql'],
+      modifiedFiles: ['src/app/main.py'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+    });
+    assert.deepStrictEqual(
+      result.elements.map((e) => `${e.category}:${e.path}`).sort(),
+      [
+        'migration:prisma/migrations/0001_init/migration.sql',
+        'modified:src/app/main.py',
+        'new_dir:newpkg/thing.py',
+      ],
+      'src/lib/added.py is an ordinary addition in mapped territory and stays out, as before',
+    );
+  });
+
+  test('the warn message lists modified and deleted files under their own headings and names the affected paths', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/app/main.py'],
+      deletedFiles: ['src/lib/gone.py'],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.match(result.message, /^Codebase drift detected: 2 structural element\(s\) since last mapping\./);
+    assert.match(result.message, /Modified mapped files:\n {2}- src\/app\/main\.py/);
+    assert.match(result.message, /Deleted mapped files:\n {2}- src\/lib\/gone\.py/);
+    assert.match(result.message, /--paths src /);
+  });
+
+  test('auto-remap scopes the mapper to the subtrees the edits landed in', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/app/main.py', 'docs/guide.md'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.spawnMapper, true);
+    assert.deepStrictEqual(result.affectedPaths, ['docs', 'src']);
+    assert.deepStrictEqual(sanitizePaths(result.affectedPaths), ['docs', 'src']);
+  });
+
+  test('non-string entries in modifiedFiles / deletedFiles are ignored, never thrown on', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: [null, 42, 'src/app/main.py', undefined],
+      deletedFiles: [{}, 'src/lib/gone.py'],
+      structureMd,
+      threshold: 1,
+    });
+    assert.strictEqual(result.skipped, false);
+    assert.deepStrictEqual(
+      result.elements.map((e) => `${e.category}:${e.path}`).sort(),
+      ['deleted:src/lib/gone.py', 'modified:src/app/main.py'],
+    );
+    assert.deepStrictEqual(result.counts, { added: 0, modified: 1, deleted: 1 });
+  });
+});
+
 // ─── Unit: action routing ────────────────────────────────────────────────────
 
 describe('detectDrift — action routing', () => {
@@ -452,7 +643,7 @@ describe('detectDrift — defensive paths', () => {
     assert.ok(Array.isArray(DRIFT_CATEGORIES));
     assert.deepStrictEqual(
       [...DRIFT_CATEGORIES].sort(),
-      ['barrel', 'migration', 'new_dir', 'route'],
+      ['barrel', 'deleted', 'migration', 'modified', 'new_dir', 'route'],
     );
   });
 });
@@ -1378,5 +1569,92 @@ describe('verify codebase-drift: an absent baseline is not total drift (#3418)',
     assert.strictEqual(data.block, false);
     assert.strictEqual(data.last_mapped_commit, tree);
     assert.deepStrictEqual(data.elements, []);
+  });
+});
+
+describe('verify codebase-drift: a map that goes stale through edits is flagged (#4886)', () => {
+  let tmp;
+  let structure;
+
+  beforeEach(() => {
+    tmp = createTempGitProject('gsd-drift-4886-');
+    fs.mkdirSync(path.join(tmp, '.planning', 'codebase'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, 'src', 'app'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, 'src', 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'src', 'app', 'main.py'), 'print(1)\n');
+    fs.writeFileSync(path.join(tmp, 'src', 'app', 'old.py'), 'print(0)\n');
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'util.py'), 'x = 1\n');
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'more.py'), 'y = 2\n');
+    structure = path.join(tmp, '.planning', 'codebase', 'STRUCTURE.md');
+    fs.writeFileSync(structure, '# Codebase Structure\n\n- `src/app/` — application modules\n- `src/lib/` — shared helpers\n');
+    fs.writeFileSync(
+      path.join(tmp, '.planning', 'config.json'),
+      JSON.stringify({ workflow: { drift_threshold: 3, drift_action: 'warn' } }),
+    );
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'map codebase');
+    writeMappedCommit(structure, git(tmp, 'rev-parse', 'HEAD'), '2026-09-20');
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'stamp the map');
+  });
+  afterEach(() => cleanup(tmp));
+
+  test('edits and a deletion inside mapped directories, no additions, reach the threshold', () => {
+    // Nothing is added and no directory appears — the change class the
+    // detector could not see before #4886.
+    fs.writeFileSync(path.join(tmp, 'src', 'app', 'main.py'), 'print(2)\n');
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'util.py'), 'x = 2\n');
+    fs.unlinkSync(path.join(tmp, 'src', 'app', 'old.py'));
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'edit two files, delete one');
+
+    const r = runGsdTools(['verify', 'codebase-drift'], tmp);
+    assert.strictEqual(r.success, true, r.error);
+    const data = JSON.parse(r.output);
+
+    assert.strictEqual(data.skipped, false);
+    assert.strictEqual(data.action_required, true,
+      'action_required:false here is the reported bug — a stale map read as current (#4886)');
+    assert.strictEqual(data.block, true);
+    assert.strictEqual(data.directive, 'warn');
+    assert.strictEqual(data.spawn_mapper, false);
+    assert.deepStrictEqual(
+      data.elements.map((e) => `${e.category}:${e.path}`).sort(),
+      ['deleted:src/app/old.py', 'modified:src/app/main.py', 'modified:src/lib/util.py'],
+    );
+    assert.deepStrictEqual(data.affected_paths, ['src']);
+    assert.match(data.message, /Modified mapped files:/);
+    assert.match(data.message, /Deleted mapped files:/);
+  });
+
+  test('a single edit stays under the default threshold — reported as an element, not actioned', () => {
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'more.py'), 'y = 3\n');
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'edit one file');
+
+    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output);
+    assert.strictEqual(data.skipped, false);
+    assert.deepStrictEqual(data.elements, [{ category: 'modified', path: 'src/lib/more.py' }]);
+    assert.strictEqual(data.action_required, false);
+    assert.strictEqual(data.block, false);
+  });
+
+  test('re-stamping the map after a remap returns the gate to quiet', () => {
+    fs.writeFileSync(path.join(tmp, 'src', 'app', 'main.py'), 'print(2)\n');
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'util.py'), 'x = 2\n');
+    fs.unlinkSync(path.join(tmp, 'src', 'app', 'old.py'));
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'edit two files, delete one');
+    assert.strictEqual(JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output).action_required, true);
+
+    const r = runGsdTools(['stamp-codebase-map', '--files', 'STRUCTURE.md'], tmp);
+    assert.strictEqual(r.success, true, r.error);
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'remap');
+
+    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output);
+    assert.strictEqual(data.skipped, false);
+    assert.deepStrictEqual(data.elements, []);
+    assert.strictEqual(data.action_required, false);
   });
 });

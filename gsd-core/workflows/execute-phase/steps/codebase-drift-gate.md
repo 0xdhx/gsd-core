@@ -45,6 +45,10 @@ New migrations:
   - {path}
 New route modules:
   - {path}
+Modified mapped files:
+  - {path}
+Deleted mapped files:
+  - {path}
 
 Run /gsd:map-codebase --paths {affected_paths} to refresh planning context.
 ```

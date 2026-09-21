@@ -773,13 +773,15 @@ Equivalent paths for other runtimes:
 After the last wave of `/gsd-execute-phase` commits, the workflow runs a
 non-blocking `codebase_drift_gate` step (between `schema_drift_gate` and
 `verify_phase_goal`). It compares the diff `last_mapped_commit..HEAD`
-against `.planning/codebase/STRUCTURE.md` and counts four kinds of
+against `.planning/codebase/STRUCTURE.md` and counts six kinds of
 structural elements:
 
 1. New directories outside mapped paths
 2. New barrel exports at `(packages|apps)/<name>/src/index.*`
 3. New migration files
 4. New route modules under `routes/` or `api/`
+5. Modified files inside directories `STRUCTURE.md` already describes (#4886)
+6. Deleted files inside directories `STRUCTURE.md` already describes (#4886)
 
 If the count meets `workflow.drift_threshold` (default 3), the gate either
 **warns** (default) with the suggested `/gsd-map-codebase --paths …` command,

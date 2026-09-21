@@ -4,7 +4,7 @@
  * Detects structural drift between a committed codebase and the
  * `.planning/codebase/STRUCTURE.md` map produced by `gsd-codebase-mapper`.
  *
- * Four categories of drift element:
+ * Six categories of drift element:
  *   - new_dir    → a newly-added file whose directory prefix does not appear
  *                  in STRUCTURE.md
  *   - barrel     → a newly-added barrel export at
@@ -12,9 +12,20 @@
  *   - migration  → a newly-added migration file under one of the recognized
  *                  migration directories (supabase, prisma, drizzle, src/migrations, …)
  *   - route      → a newly-added route module under a `routes/` or `api/` dir
+ *   - modified   → a modified file whose directory prefix DOES appear in
+ *                  STRUCTURE.md — the map describes it, and what it describes
+ *                  has changed (#4886)
+ *   - deleted    → a deleted file whose directory prefix appears in
+ *                  STRUCTURE.md — the map describes something that is gone (#4886)
  *
  * Each file is counted at most once; when a file matches multiple categories
- * the most specific category wins (migration > route > barrel > new_dir).
+ * the most specific category wins (migration > route > barrel > new_dir >
+ * modified = deleted). The added-file categories and the modified/deleted
+ * categories are mirror images of one rule: drift is divergence between the
+ * map and the tree. An ordinary added file diverges when the map does NOT
+ * know its directory (a barrel, migration or route addition is drift wherever
+ * it lands); a modified or deleted file diverges when the map DOES. An edit
+ * in territory the map never described was never covered, so it is not drift.
  *
  * Design decisions (see PR for full rubber-duck):
  *   - The library is pure. It takes parsed git diff output and returns a
@@ -40,11 +51,11 @@ import { formatGsdSlash } from './runtime-slash.cjs';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const DRIFT_CATEGORIES = Object.freeze(['new_dir', 'barrel', 'migration', 'route']);
+const DRIFT_CATEGORIES = Object.freeze(['new_dir', 'barrel', 'migration', 'route', 'modified', 'deleted']);
 
 // Category priority when a single file matches multiple rules.
 // Higher index = more specific = wins.
-const CATEGORY_PRIORITY: Record<string, number> = { new_dir: 0, barrel: 1, route: 2, migration: 3 };
+const CATEGORY_PRIORITY: Record<string, number> = { modified: 0, deleted: 0, new_dir: 1, barrel: 2, route: 3, migration: 4 };
 
 const BARREL_RE = /^(packages|apps)\/[^/]+\/src\/index\.(ts|tsx|js|mjs|cjs)$/;
 
@@ -183,8 +194,8 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
     }
 
     const added = Array.isArray(addedFiles) ? addedFiles.filter((x): x is string => typeof x === 'string') : [];
-    const modified = Array.isArray(modifiedFiles) ? modifiedFiles : [];
-    const deleted = Array.isArray(deletedFiles) ? deletedFiles : [];
+    const modified = Array.isArray(modifiedFiles) ? modifiedFiles.filter((x): x is string => typeof x === 'string') : [];
+    const deleted = Array.isArray(deletedFiles) ? deletedFiles.filter((x): x is string => typeof x === 'string') : [];
 
     // Build elements. One element per file, highest-priority category wins.
     const elements: DriftElement[] = [];
@@ -205,6 +216,25 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       const prior = seen.get(file);
       if (prior && CATEGORY_PRIORITY[prior] >= CATEGORY_PRIORITY[category]) continue;
       seen.set(file, category);
+    }
+
+    // #4886: until this loop existed, `modified` and `deleted` reached only
+    // `counts`, so a map could go arbitrarily stale through edits — the common
+    // change class on a mature repo — and never be flagged at any threshold.
+    // The qualifying predicate is the inverse of the added-file rule above:
+    // an ordinary added file is drift when the map does NOT know its directory
+    // (barrel / migration / route additions count wherever they land); a
+    // modified or deleted file is drift when the map DOES, because the map's
+    // description of it is now unverified. A change in territory the map
+    // never described is not divergence from the map and stays out, as before.
+    for (const [list, category] of [[modified, 'modified'], [deleted, 'deleted']] as const) {
+      for (const rawFile of list) {
+        const file = posixNormalize(rawFile);
+        if (!isPathMapped(file, structureMd)) continue;
+        const prior = seen.get(file);
+        if (prior && CATEGORY_PRIORITY[prior] >= CATEGORY_PRIORITY[category]) continue;
+        seen.set(file, category);
+      }
     }
 
     for (const [file, category] of seen.entries()) {
@@ -284,8 +314,10 @@ function buildMessage(elements: DriftElement[], affectedPaths: string[], action:
     barrel: 'New barrel exports',
     migration: 'New migrations',
     route: 'New route modules',
+    modified: 'Modified mapped files',
+    deleted: 'Deleted mapped files',
   };
-  for (const cat of ['new_dir', 'barrel', 'migration', 'route']) {
+  for (const cat of ['new_dir', 'barrel', 'migration', 'route', 'modified', 'deleted']) {
     if (byCat[cat]) {
       lines.push(`${labels[cat]}:`);
       for (const p of byCat[cat]) lines.push(`  - ${p}`);
