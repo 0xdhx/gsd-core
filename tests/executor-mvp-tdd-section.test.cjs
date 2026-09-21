@@ -631,6 +631,8 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
       1,
       'the ordered event scan must use POSIX-portable bracket expressions',
     );
+    assert.ok(!guard.includes('sed -E "s#^${_ENV}${_EVAL}'), 'classification must not expand composed EREs into BSD sed');
+    assert.match(guard, /_P=\$\(printf '%s' "\$BODY" \| grep -oE "\^\$\{_ENV\}\$\{_EVAL\}"\)/, 'classification should reuse portable grep and strip its match literally');
     assert.match(guard, /_resets_cwd "\$BFR" \|\| _resets_cwd "\$RAW"/, 'the event scan must retain resets across intervening unrecognized commands');
   });
 

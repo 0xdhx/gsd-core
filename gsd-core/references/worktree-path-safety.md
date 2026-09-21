@@ -306,7 +306,7 @@ _EVAL='eval[[:space:]]+'
 # `exit 1`, never a return code, so a halt inside a payload is exactly as fatal as one outside; and it
 # ends `return 0` so a trailing non-`C` target cannot make the function itself look failed under `set -e`.
 CUR=$WT_ROOT
-_scan(){ local CMD=$1 D=$2 L RAW BODY BFR REST K Q T R P S PREFIX LDS LD _T
+_scan(){ local CMD=$1 D=$2 RAW BODY BFR REST K Q T R P S PREFIX LDS LD _T _P
   _T=$( printf '%s' "$CMD" | grep -oE "${_OPEN}(${_ENV}${_EXEC}|${_ENV}${_VERB}[[:space:]]+|${_DIR})${_TOK}" \
         | sed '/^$/d' )
   # 1. Every relocating target, relative or absolute, resolved from the cwd the command has reached
@@ -322,8 +322,16 @@ _scan(){ local CMD=$1 D=$2 L RAW BODY BFR REST K Q T R P S PREFIX LDS LD _T
     BFR=${REST%%"$RAW"*}; REST=${REST#*"$RAW"}
     if _resets_cwd "$BFR" || _resets_cwd "$RAW"; then CUR=$WT_ROOT; fi
     BODY=$(printf '%s' "$RAW" | sed -E "s/^(&&|&|;|[|][|]|[|]|[(]|[{])?[[:space:]]*//")
-    L=$(printf '%s' "$BODY" | sed -E "s#^${_ENV}${_EVAL}#E #; s#^${_ENV}${_EXEC}#W #; s#^${_DIR}#N #; s#^${_ENV}${_VERB}[[:space:]]+#C #")
-    K=${L%% *}; Q=${L#* }; T=$(_unquote "$Q")
+    # Classify with the same grep implementation that produced the event and
+    # remove the matched prefix literally. Expanding these composed EREs into a
+    # multi-expression BSD sed program fails with "unbalanced brackets" on
+    # macOS even though BSD grep accepts the event expression (#4767).
+    if _P=$(printf '%s' "$BODY" | grep -oE "^${_ENV}${_EVAL}"); then K=E
+    elif _P=$(printf '%s' "$BODY" | grep -oE "^${_ENV}${_EXEC}"); then K=W
+    elif _P=$(printf '%s' "$BODY" | grep -oE "^${_DIR}"); then K=N
+    else _P=$(printf '%s' "$BODY" | grep -oE "^${_ENV}${_VERB}[[:space:]]+"); K=C
+    fi
+    Q=${BODY#"$_P"}; T=$(_unquote "$Q")
     case "$K" in
       E) [ "$D" -ge 4 ] || _walk "$T" "$((D+1))" ;;
       W) if [ "$D" -lt 4 ]; then
