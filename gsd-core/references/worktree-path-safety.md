@@ -352,3 +352,80 @@ format naming the task and the offending command verbatim, and stop. The plan-ch
 probe (`check verify-command-paths`) warns on the *outside-orchestrator-root* case before
 execution; this guard is the one that sees the executor's actual root.
 
+### What this guard does NOT see — step 0c's stated boundary
+
+The two scans recognize **fixed sets** — relocating verbs, directory flags, interpreters, launchers,
+command boundaries — and the domain they act on, shell a planner may write, can acquire a member without
+this file changing. So the boundary is written out rather than left to be rediscovered, and each entry
+says what follows from it.
+
+**The largest one first, because it is the one a reader will otherwise assume away:**
+
+- **A RELATIVE path argument to a command that is not a recognized relocating verb.**
+  `python3 -m pytest ../main/tests`, `node ../main/test.js`, `make -f ../main/Makefile`, a redirect from
+  `../main/file` — all pass. The catch-all scan evaluates only words that begin with `/`, so it never
+  resolves a relative one, and the verb scan does not fire because none of these relocates. This is the
+  widest gap in the guard and it is not new. Closing it means resolving every relative word in the
+  command against the reached cwd, which halts on ordinary in-worktree arguments unless it can tell a
+  path from a flag value from a bare string — a much larger change than this guard is, and one that
+  fails toward false positives, which is the direction that gets a guard deleted.
+
+The rest, in descending order of how likely a planner is to reach them:
+
+- **Spellings that hide the verb from a text scan.** `cd$IFS/x` and its relatives split at run time, so
+  no static tokenizer sees a `cd` at a boundary. Deliberate: the guard's domain is what a planner
+  plausibly writes, not an adversary.
+- **Anything the shell builds at run time.** `cd $VAR`, `cd "$(…)"`, `~`, and equally `bash -c "$CMD"` —
+  the payload is not a literal token, so there is nothing to unwrap. These pass through by design;
+  `check verify-command-paths` reports them as `dynamic_path` before execution, and
+  `$(git rev-parse --show-toplevel)` is the form step 0b recommends.
+- **A command boundary outside `$_OPEN`'s set — and the set is matched against RAW TEXT.** `&&` `&`
+  `;` `|` `(` `{` open a command. Control keywords (`if cd ../main; then …`) are deliberately NOT in
+  the set: these operators have no awareness of quoting, so a keyword that is also an ordinary English
+  word turns prose inside a quoted argument into a boundary — `grep -F 'if cd ../main; then' README.md`
+  halted on a command that relocates nothing. The same quote-blindness is why
+  `echo 'note; bash -c "cd ../main"'` halts on its `;`: an over-halt on quoted data is the standing
+  cost of scanning text, and it is paid in the loud direction.
+- **A launcher outside `$_LAUNCH`'s set**, and therefore an interpreter or directory flag behind it.
+  `env` `timeout` `nohup` `stdbuf` `nice` `ionice` `setsid` are recognized, named by bare word or
+  absolute path, with options that take a separate operand (`env -u FOO`, `timeout --signal TERM`).
+  The set is named rather than a catch-all deliberately: a catch-all also unwrapped interpreter text
+  that was merely an *argument* (`echo bash -c '…'`), and halting on a command that executes nothing
+  is the false-positive direction. `command` and `exec` are excluded for that same reason —
+  `command -v bash` is a name probe.
+- **An interpreter option that takes an operand.** `bash --noprofile -c` is recognized;
+  `bash -O extglob -c` is not, because `_EXEC` admits long options without values, and widening it to
+  consume operands risks swallowing the `-c` it is looking for.
+- **A genuine `command bash -c …` or `exec bash -c …` is not unwrapped.** Those two words were removed
+  from `$_LAUNCH` to stop `command -v bash` — a name probe that executes nothing — from halting. A
+  deliberate trade of a rare false negative for a common false positive, recorded so it reads as a
+  decision rather than an omission.
+- **A payload behind a RELOCATING launcher is scanned from the command's cwd, not the launcher's.**
+  `env -C scripts bash -c 'cd ..'` lands back inside the worktree in reality, and halts here, because
+  the `-C` target is checked but is not threaded into the payload's starting cwd. An over-halt, in the
+  loud direction, on a shape a planner is unlikely to write.
+- **An operand-taking option ordering outside the grammar.** Options that take a separate operand
+  are matched interleaved with ordinary ones, so `env -u FOO --debug -u BAR -C ../main` is seen; a
+  spelling outside each tool's own list still is not.
+- **A launcher form outside the grammar**: `env -S 'cmd args'`, a launcher named through a quoted
+  string, or an option-with-operand spelling not in the tool's list. Which options take an operand is
+  TOOL-SCOPED (`-i` takes one on `stdbuf`, none on `env`); a flat list consumed the command itself
+  after an operandless flag.
+- **`_DIR`'s tool-to-flag run is still a catch-all**, so a pass-through argument that happens to spell
+  a directory flag can over-halt: `npm run package -- --prefix=../main/` halts although the flag goes
+  to the script, not to npm. Pre-existing, and again in the loud direction.
+- **A non-shell payload whose path is computed.** `python3 -c` / `node -e` payloads are scanned *as
+  shell text*, which catches a path written as a literal word (`os.chdir('/main')`) and not one the
+  program assembles (`os.path.join(root, '..')`).
+- **Wrapping nested more than four deep.** `_walk` bounds its own recursion.
+- **A directory flag on a tool outside the recognized set.** `--prefix`/`--cwd`/`--dir`/`-C` on `npm`
+  `npx` `pnpm` `yarn`, `-C`/`--directory` on `make` `git`, and `--chdir`/`-C` on `env` itself — the
+  last because `env` is not only a launcher, it relocates — including behind a launcher. The
+  scoping is per-tool because the same spelling is not the same flag everywhere: `git archive
+  --prefix=` names archive members and changes no directory. For an unrecognized tool the **absolute**
+  form of its flag is still caught by the catch-all; what is uncovered is the **relative** form.
+
+The enumerations are the parts that rot: they mirror a toolchain this file does not own. Adding a tool
+is one alternation in `_DIR` plus a row in each of the two tables in
+`tests/executor-mvp-tdd-section.test.cjs`. The guard is the executor's last containment check, not its
+only one — a halt it misses still has to get past `check verify-command-paths` at plan time.
