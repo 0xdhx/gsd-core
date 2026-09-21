@@ -41,8 +41,11 @@ and REVIEW.md has a single writer, `gsd-code-reviewer`, which this step is not.
 # `00` to stdout BEFORE it fails, so a `$(printf ... || printf %s ...)` fallback CONCATENATES
 # the two and yields `00abc`; `08` fails the same way as invalid octal, giving `0008.1` for a
 # legitimate `08.1`. Both were driven. `${PHASE_NUMBER:-}` because an UNSET input must not trip
-# `set -u` in a step that promises not to abort, and `10#` because bash reads a leading zero as
-# octal, which is what breaks 08 and 09.
+# `set -u` in a step that promises not to abort. Those printf failures are why this block VALIDATES
+# instead of formatting; the pad itself performs NO arithmetic since round 14 (see the
+# `case "${#_dig}"` line below), so it has no octal hazard to guard and needs no `10#`. `10#`
+# survives in this step only where it still belongs -- on the severity COUNTS, which really are
+# numbers being added.
 # VALIDATE THE WHOLE VALUE, then format -- and on failure build NO path at all.
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
@@ -84,8 +87,12 @@ if [ "$_ok" = "1" ]; then
   case "$_let" in ''|[A-Z]) ;; *) _ok=0 ;; esac        # at most ONE letter, uppercase
   case "$_sub" in *[!0-9.]*) _ok=0 ;; esac            # no letter in any later segment
 fi
-# LENGTH-BOUND EACH COMPONENT SEPARATELY. Bash integers wrap at 2^64, so `$((10#$_int))` on a
-# 54-digit value yields -7908320945662590977 SILENTLY and that becomes the padded phase. The
+# LENGTH-BOUND EACH COMPONENT SEPARATELY -- and the REASON changed at round 14, so read this rather
+# than inherit it. It used to be integer overflow: the pad ran `$((10#$_int))`, bash integers wrap at
+# 2^64, and a 54-digit value yielded -7908320945662590977 SILENTLY as the padded phase. The pad is a
+# string pad now and converts nothing, so that overflow is unreachable here. The bound STAYS for the
+# reason it always also had: every component is interpolated into a FILENAME, and filesystem
+# components are finite. The
 # bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
 # integer part is a legal 8 digits, while accepting `1.123456` -- an accidental bound on the
 # composite that was both too strict and too loose. Every later segment is bounded too, since
@@ -294,8 +301,11 @@ the step — never blocks:
 # `00` to stdout BEFORE it fails, so a `$(printf ... || printf %s ...)` fallback CONCATENATES
 # the two and yields `00abc`; `08` fails the same way as invalid octal, giving `0008.1` for a
 # legitimate `08.1`. Both were driven. `${PHASE_NUMBER:-}` because an UNSET input must not trip
-# `set -u` in a step that promises not to abort, and `10#` because bash reads a leading zero as
-# octal, which is what breaks 08 and 09.
+# `set -u` in a step that promises not to abort. Those printf failures are why this block VALIDATES
+# instead of formatting; the pad itself performs NO arithmetic since round 14 (see the
+# `case "${#_dig}"` line below), so it has no octal hazard to guard and needs no `10#`. `10#`
+# survives in this step only where it still belongs -- on the severity COUNTS, which really are
+# numbers being added.
 # VALIDATE THE WHOLE VALUE, then format -- and on failure build NO path at all.
 # Carrying an unusable value verbatim was the first draft and it was worse than the bug it
 # replaced: PHASE_NUMBER is interpolated into a file path, so `../../etc/passwd` produced
@@ -337,8 +347,12 @@ if [ "$_ok" = "1" ]; then
   case "$_let" in ''|[A-Z]) ;; *) _ok=0 ;; esac        # at most ONE letter, uppercase
   case "$_sub" in *[!0-9.]*) _ok=0 ;; esac            # no letter in any later segment
 fi
-# LENGTH-BOUND EACH COMPONENT SEPARATELY. Bash integers wrap at 2^64, so `$((10#$_int))` on a
-# 54-digit value yields -7908320945662590977 SILENTLY and that becomes the padded phase. The
+# LENGTH-BOUND EACH COMPONENT SEPARATELY -- and the REASON changed at round 14, so read this rather
+# than inherit it. It used to be integer overflow: the pad ran `$((10#$_int))`, bash integers wrap at
+# 2^64, and a 54-digit value yielded -7908320945662590977 SILENTLY as the padded phase. The pad is a
+# string pad now and converts nothing, so that overflow is unreachable here. The bound STAYS for the
+# reason it always also had: every component is interpolated into a FILENAME, and filesystem
+# components are finite. The
 # bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
 # integer part is a legal 8 digits, while accepting `1.123456` -- an accidental bound on the
 # composite that was both too strict and too loose. Every later segment is bounded too, since

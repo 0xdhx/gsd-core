@@ -488,21 +488,42 @@ describe('#4748 — the code-review gate resolves the REVIEW.md path from a lett
     assert.deepEqual(offenders, [], `no fence may printf-pad PHASE_NUMBER: ${JSON.stringify(offenders)}`);
   });
 
-  test('every lookup is preceded by a PADDED binding that pads as a STRING and carries the letter', () => {
-    // The canonical normalizer left-pads the digit run to a MINIMUM of two and otherwise preserves
-    // it (`008` -> `008`), so any ARITHMETIC pad here is wrong by construction: it collapses a
-    // longer leading-zero run. Asserted as the absence of arithmetic plus the presence of both
-    // carried parts, rather than by pinning one spelling of the remedy.
+  test('no lookup pads the phase through arithmetic (fails before the fix)', () => {
+    // THE DEFECT SHAPE, which is what a static gate can actually hold. The canonical normalizer
+    // left-pads the digit run to a MINIMUM of two and otherwise PRESERVES it (`008` -> `008`), so an
+    // arithmetic pad is wrong by construction -- `$((10#$_dig))` collapses every longer leading-zero
+    // run. Deliberately NOT a pin on one spelling of the remedy: an equivalent multi-line string pad
+    // must pass here, and correctness is asserted by execution below rather than by shape.
     for (const i of lookupIdx) {
       const bound = stepLines.slice(0, i).reverse()
         .find((l) => /PADDED=/.test(l) && !/PADDED=""/.test(l));
       assert.ok(bound, `the lookup at line ${i + 1} has no PADDED binding above it`);
       assert.doesNotMatch(bound, /printf|\$\(\(/,
-        `the pad must be a string pad, not arithmetic -- arithmetic collapses 008 to 08: ${bound.trim()}`);
-      assert.ok(bound.includes('${_dig}'),
-        `the pad must carry the digit run verbatim: ${bound.trim()}`);
-      assert.ok(bound.includes('${_let}'),
-        `the pad must carry the letter run verbatim, or 03A truncates to 03: ${bound.trim()}`);
+        `the pad must not be arithmetic -- arithmetic collapses 008 to 08: ${bound.trim()}`);
+    }
+  });
+
+  test('composition: each fence\'s live derivation resolves the id init would emit', () => {
+    // #4748's property, asserted the way it has to be at THIS site. At the original site the gate
+    // could be static because the property was a literal binding of init's own `{padded_phase}`;
+    // here the step derives the value, so the property is behavioural and only execution can hold
+    // it. Runs the SHIPPED derivation slice of BOTH fences against the canonical normalizer.
+    const { normalizePhaseName } = require('../gsd-core/bin/lib/phase-id.cjs');
+    const starts = [];
+    stepLines.forEach((l, n) => { if (l.includes('_pd="${PHASE_DIR:-}"')) starts.push(n); });
+    assert.equal(starts.length, lookupIdx.length, 'each lookup must have its own derivation slice');
+    const derivations = starts.map((d, n) => stepLines.slice(d, lookupIdx[n] + 1).join('\n'));
+    // `008` is the case the arithmetic pad got wrong and no prior fixture covered.
+    for (const id of ['3A', '8', '9', '08', '008', '0008A', '23A.1.2']) {
+      for (const deriv of derivations) {
+        const out = execFileSync('bash', [], {
+          input: `set -e\n${deriv}\nprintf '%s' "$PADDED"`,
+          encoding: 'utf8',
+          timeout: TIMEOUT,
+          env: { ...process.env, PHASE_DIR: '/tmp', PHASE_NUMBER: id },
+        });
+        assert.equal(out, normalizePhaseName(id), `the step disagreed with the normalizer on ${id}`);
+      }
     }
   });
 

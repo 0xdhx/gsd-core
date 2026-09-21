@@ -4767,8 +4767,16 @@ describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phas
     // And the pad it does perform is a STRING pad, not arithmetic: the canonical normalizer
     // left-pads to a MINIMUM of two and otherwise preserves the run, so `$(( ))` is wrong by
     // construction -- it collapsed `008` to `08` until round 14.
+    // Asserted as the PROPERTY, not as one spelling of it: an equivalent multi-line string pad must
+    // pass. What must not pass is arithmetic, or a pad that drops either carried part.
     for (const d of derivations) {
-      assert.match(d, /case "\$\{#_dig\}" in 1\) PADDED="0\$\{_dig\}\$\{_let\}\$\{_sub\}" ;; \*\) PADDED="\$\{_dig\}\$\{_let\}\$\{_sub\}" ;; esac/);
+      const bound = d.split('\n').find((l) => /PADDED=/.test(l) && !/PADDED=""/.test(l));
+      assert.ok(bound, 'the derivation must bind PADDED');
+      assert.doesNotMatch(bound, /printf|\$\(\(/, `the pad must not be arithmetic: ${bound.trim()}`);
+      // What the pad must PRODUCE is asserted by the matrix and the property below, which execute
+      // it. Requiring a particular variable to appear HERE false-positives on an equivalent pad
+      // that routes the digit run through an intermediate -- driven, and it is why this stops at
+      // the defect shape.
     }
   });
 
