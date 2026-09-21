@@ -111,9 +111,15 @@ if [ "$_ok" = "1" ]; then
   done
 fi
 if [ "$_ok" = "1" ]; then
-  # `10#` because bash reads a leading zero as octal, which is what breaks 08 and 09. The letter is
-  # carried verbatim after the padded digits, as the canonical padder does: `3A` -> `03A`.
-  PADDED="$(printf "%02d" "$((10#$_dig))")$_let$_sub"
+  # padStart(2,'0'), EXACTLY, and as a STRING -- the canonical normalizer left-pads the digit run to a
+  # MINIMUM of two and otherwise preserves it, so arithmetic is the wrong tool. `printf "%02d"
+  # "$((10#$_dig))"` agreed on `8`/`08`/`09` and silently DISAGREED on every longer leading-zero run:
+  # `008` -> `08`, `0008A` -> `08A`, resolving a REVIEW.md path init never writes. Driven at round 14
+  # by the property that asserts agreement with `normalizePhaseName` over generated ids; the 13-shape
+  # matrix that preceded it sampled no run longer than two and could not see it. Dropping the
+  # arithmetic also RETIRES the octal hazard `10#` existed to work around, rather than guarding it.
+  # The letter and any dot segments ride along verbatim, as the canonical padder does: `3A` -> `03A`.
+  case "${#_dig}" in 1) PADDED="0${_dig}${_let}${_sub}" ;; *) PADDED="${_dig}${_let}${_sub}" ;; esac
 else
   PADDED=""
 fi
@@ -358,9 +364,15 @@ if [ "$_ok" = "1" ]; then
   done
 fi
 if [ "$_ok" = "1" ]; then
-  # `10#` because bash reads a leading zero as octal, which is what breaks 08 and 09. The letter is
-  # carried verbatim after the padded digits, as the canonical padder does: `3A` -> `03A`.
-  PADDED="$(printf "%02d" "$((10#$_dig))")$_let$_sub"
+  # padStart(2,'0'), EXACTLY, and as a STRING -- the canonical normalizer left-pads the digit run to a
+  # MINIMUM of two and otherwise preserves it, so arithmetic is the wrong tool. `printf "%02d"
+  # "$((10#$_dig))"` agreed on `8`/`08`/`09` and silently DISAGREED on every longer leading-zero run:
+  # `008` -> `08`, `0008A` -> `08A`, resolving a REVIEW.md path init never writes. Driven at round 14
+  # by the property that asserts agreement with `normalizePhaseName` over generated ids; the 13-shape
+  # matrix that preceded it sampled no run longer than two and could not see it. Dropping the
+  # arithmetic also RETIRES the octal hazard `10#` existed to work around, rather than guarding it.
+  # The letter and any dot segments ride along verbatim, as the canonical padder does: `3A` -> `03A`.
+  case "${#_dig}" in 1) PADDED="0${_dig}${_let}${_sub}" ;; *) PADDED="${_dig}${_let}${_sub}" ;; esac
 else
   PADDED=""
 fi

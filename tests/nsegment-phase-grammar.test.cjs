@@ -488,14 +488,20 @@ describe('#4748 — the code-review gate resolves the REVIEW.md path from a lett
     assert.deepEqual(offenders, [], `no fence may printf-pad PHASE_NUMBER: ${JSON.stringify(offenders)}`);
   });
 
-  test('every lookup is preceded by a PADDED binding that carries the letter run', () => {
+  test('every lookup is preceded by a PADDED binding that pads as a STRING and carries the letter', () => {
+    // The canonical normalizer left-pads the digit run to a MINIMUM of two and otherwise preserves
+    // it (`008` -> `008`), so any ARITHMETIC pad here is wrong by construction: it collapses a
+    // longer leading-zero run. Asserted as the absence of arithmetic plus the presence of both
+    // carried parts, rather than by pinning one spelling of the remedy.
     for (const i of lookupIdx) {
       const bound = stepLines.slice(0, i).reverse()
-        .find((l) => /^\s*PADDED=/.test(l) && !/^\s*PADDED=""\s*$/.test(l));
+        .find((l) => /PADDED=/.test(l) && !/PADDED=""/.test(l));
       assert.ok(bound, `the lookup at line ${i + 1} has no PADDED binding above it`);
-      assert.ok(bound.includes('10#$_dig'),
-        `the pad must go through 10# on the digit run, or 08 reads as octal: ${bound.trim()}`);
-      assert.ok(bound.includes('$_let'),
+      assert.doesNotMatch(bound, /printf|\$\(\(/,
+        `the pad must be a string pad, not arithmetic -- arithmetic collapses 008 to 08: ${bound.trim()}`);
+      assert.ok(bound.includes('${_dig}'),
+        `the pad must carry the digit run verbatim: ${bound.trim()}`);
+      assert.ok(bound.includes('${_let}'),
         `the pad must carry the letter run verbatim, or 03A truncates to 03: ${bound.trim()}`);
     }
   });

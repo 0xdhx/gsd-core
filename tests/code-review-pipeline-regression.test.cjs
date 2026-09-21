@@ -4706,10 +4706,12 @@ describe('#3861 round 1 — fence closers and one-letter prefixes', () => {
 //
 // The MECHANISM differs from the pre-move one and the PROPERTY does not. `execute-phase.md`
 // bound init's `{padded_phase}`; the step validates PHASE_NUMBER for shape and traversal and
-// pads the DIGIT RUN through `10#`, carrying an optional letter verbatim. Both refuse exactly
-// the two shapes #4748 named: `printf "%02d"` cannot pad `03A` (prints `03`, exits 1) and reads
-// an already-padded `08` as octal (prints `00`). The last test drives that equivalence against
-// the canonical normalizer rather than asserting it.
+// then pads the DIGIT RUN as a STRING, carrying an optional letter and any dot segments verbatim.
+// Both refuse exactly the two shapes #4748 named: `printf "%02d"` cannot pad `03A` (prints `03`,
+// exits 1) and reads an already-padded `08` as octal (prints `00`) -- and the string pad refuses
+// them by not doing arithmetic at all, which also fixed a THIRD shape the arithmetic form got
+// wrong (`008` -> `08`). The last two tests drive that equivalence against the canonical
+// normalizer rather than asserting it.
 // ---------------------------------------------------------------------------
 describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phase without a shell re-pad', () => {
   const { execFileSync } = require('node:child_process');
@@ -4762,9 +4764,11 @@ describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phas
       .map((l, n) => [n + 1, l])
       .filter(([, l]) => !/^\s*#/.test(l) && /printf\s+"%0\d*d"\s+"?\$\{?PHASE_NUMBER/.test(l));
     assert.deepEqual(offenders, [], `the step must not re-pad PHASE_NUMBER in shell: ${JSON.stringify(offenders)}`);
-    // And the padding it does perform forces base 10, which is what makes `08`/`09` survive.
+    // And the pad it does perform is a STRING pad, not arithmetic: the canonical normalizer
+    // left-pads to a MINIMUM of two and otherwise preserves the run, so `$(( ))` is wrong by
+    // construction -- it collapsed `008` to `08` until round 14.
     for (const d of derivations) {
-      assert.match(d, /PADDED="\$\(printf "%02d" "\$\(\(10#\$_dig\)\)"\)\$_let\$_sub"/);
+      assert.match(d, /case "\$\{#_dig\}" in 1\) PADDED="0\$\{_dig\}\$\{_let\}\$\{_sub\}" ;; \*\) PADDED="\$\{_dig\}\$\{_let\}\$\{_sub\}" ;; esac/);
     }
   });
 
@@ -4847,11 +4851,19 @@ describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phas
     // domain, and are asserted nowhere here rather than silently passed.
     const dir = createTempDir();
     t.after(() => cleanup(dir));
+    // The digit run is generated as a STRING of digits, never as an integer: `String(fc.integer())`
+    // can never produce a LEADING ZERO, so an integer-sourced generator silently loses the `08`/`09`
+    // cases the finite matrix above already covered, and could never have reached `008`. That was
+    // this property's own first cut, and the review that caught it is why the shape is spelled out.
+    // Segment depth goes to four because the repo itself exercises `1.2.3.4`. The step's grammar is
+    // unbounded in depth; four is a bound, stated rather than implied, and it is the residual here.
+    const digitRun = fc.array(fc.integer({ min: 0, max: 9 }), { minLength: 1, maxLength: 8 })
+      .map((ds) => ds.join(''));
     const PHASE_ID = fc.tuple(
-      fc.integer({ min: 0, max: 99999999 }),
+      digitRun,
       fc.option(fc.constantFrom(...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), { nil: '' }),
-      fc.array(fc.integer({ min: 0, max: 99999999 }), { maxLength: 2 }),
-    ).map(([n, letter, segs]) => String(n) + letter + segs.map((s) => '.' + s).join(''));
+      fc.array(digitRun, { maxLength: 4 }),
+    ).map(([run, letter, segs]) => run + letter + segs.map((s) => '.' + s).join(''));
     fc.assert(fc.property(PHASE_ID, (id) => {
       for (const deriv of derivations) {
         const r = runBash(`set -e\n${deriv}\nprintf '%s' "$PADDED"`, { PHASE_DIR: dir, PHASE_NUMBER: id });
