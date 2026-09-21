@@ -465,16 +465,20 @@ describe('#4748 — the code-review gate resolves the REVIEW.md path from a lett
   // parent now clears by 139 bytes, so it cannot be restored in place. #4748's property is
   // unchanged and is asserted here against the site that now performs the lookup.
   //
-  // Two of this block's original four assertions were properties of the INLINE site rather than
-  // of the lookup, and do not survive the move: the `PADDED="{padded_phase}"` literal binding
-  // (the step derives PADDED itself, validating PHASE_NUMBER for shape and traversal before
-  // padding the digit run through `10#` and carrying the letter verbatim), and the composition
-  // run over the three live lines. The step's executable coverage — a composition run plus a
-  // padding-agrees-with-the-canonical-normalizer matrix over letter ids — lives in
-  // `tests/code-review-pipeline-regression.test.cjs`, under "#3829 — the step's REVIEW.md lookup
-  // resolves a letter-suffixed phase without a shell re-pad". Mirroring it here would be a second
-  // implementation of one grammar, which this repo treats as an anti-pattern, so it is cited
-  // rather than copied.
+  // ONE of this block's original four assertions was a property of the INLINE site rather than of
+  // the lookup, and does not survive the move: the `PADDED="{padded_phase}"` literal binding. The
+  // step derives PADDED itself — validating PHASE_NUMBER for shape and traversal, then padding the
+  // digit run as a STRING and carrying the letter and dot segments verbatim — so there is no
+  // literal binding left to pin, and agreement with the canonical normalizer is what replaces it.
+  //
+  // The composition run DID come back, below, and an earlier cut of this block was wrong to drop it
+  // on the grounds that mirroring would duplicate the PR's own coverage. A STATIC assertion cannot
+  // hold a BEHAVIOURAL property; at the original site it could, because the property was a literal
+  // binding. So this block keeps deterministic ownership of #4748 by EXECUTING the step's own
+  // derivation over a fixed id list. The PR's fast-check property in
+  // `tests/code-review-pipeline-regression.test.cjs` is a different instrument over the same
+  // contract — generated ids rather than a fixed list — and it reaches divergences this one does
+  // not: a letter outside the fixed list leaves this block green.
   const stepLines = splitLines(fs.readFileSync(CODE_REVIEW_DISPOSITION, 'utf8'));
   const lookupIdx = findAnchoredLineIndexes(stepLines, 'REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"', 2);
 

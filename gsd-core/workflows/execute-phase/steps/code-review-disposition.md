@@ -90,13 +90,17 @@ fi
 # LENGTH-BOUND EACH COMPONENT SEPARATELY -- and the REASON changed at round 14, so read this rather
 # than inherit it. It used to be integer overflow: the pad ran `$((10#$_int))`, bash integers wrap at
 # 2^64, and a 54-digit value yielded -7908320945662590977 SILENTLY as the padded phase. The pad is a
-# string pad now and converts nothing, so that overflow is unreachable here. The bound STAYS for the
-# reason it always also had: every component is interpolated into a FILENAME, and filesystem
-# components are finite. The
-# bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
-# integer part is a legal 8 digits, while accepting `1.123456` -- an accidental bound on the
-# composite that was both too strict and too loose. Every later segment is bounded too, since
-# each is interpolated into a filename and filesystem components are finite.
+# string pad now and converts nothing, so that overflow is unreachable and its rationale is dead.
+# WHAT THE BOUND STILL DOES, stated narrowly because the obvious wider claim is FALSE: it bounds each
+# SEGMENT, and NOTHING here bounds the COMPOSITE. Every segment is joined into ONE filename
+# component and depth is unbounded, so a per-segment bound does not enforce a filename limit --
+# driven at round 14: thirty 8-digit segments yield a 278-character PADDED and a 294-character name
+# against a NAME_MAX of 255. That is a real residual of this validator, it predates the pad change,
+# and it is named here rather than papered over with a filesystem rationale the bound does not
+# deliver. The bound belongs on the INTEGER PART: applied to the whole value it rejected
+# `12345678.1`, whose integer part is a legal 8 digits, while accepting `1.123456` -- an accidental
+# bound on the composite that was both too strict and too loose. Every later segment is bounded too,
+# on the same narrow reading.
 # THE LOOP IS THE POINT, and it is what makes the heading above TRUE. The earlier form bounded
 # `${_pn#*.}` -- the WHOLE tail after the first dot -- which is one component only while the id
 # has at most two. Once N-segment ids are accepted (see the shape arms), that form rejects
@@ -112,7 +116,7 @@ if [ "$_ok" = "1" ]; then
       *.*) _seg="${_rest%%.*}"; _rest="${_rest#*.}" ;;
       *)   _seg="$_rest";       _rest="" ;;
     esac
-    # The bound is on the DIGITS: a letter suffix is one character the overflow guard has no
+    # The bound is on the DIGITS: a letter suffix is one character the digit bound has no
     # stake in, so `12345678A` is within it exactly as `12345678` is.
     case "${_seg%[A-Z]}" in ?????????*) _ok=0 ;; esac
   done
@@ -218,9 +222,13 @@ done
 # inconsistent breakdown is unavailable for the same reason a partial one is: half-true is worse
 # than withheld, and the countless form is already the documented fallback.
 # `10#` on every operand: bash infers the base from a leading zero, so a review reporting
-# `critical: 08` makes $(( )) fail with "value too great for base" and, under `set -e`, takes
-# the whole advisory step down — strictly worse than the half-rendered line this check exists
-# to prevent. The values are already digit-only by the loop above.
+# `critical: 08` makes $(( )) fail with "value too great for base". The CONSEQUENCE stated here
+# used to be "takes the whole advisory step down under `set -e`", and that is WRONG: the
+# arithmetic sits inside an `if` condition, a TESTED context, where `set -e` is inert. What
+# actually happens is that the consistency check is SKIPPED -- which the regression suite
+# already records. Skipping it is still the wrong outcome for a check whose whole job is
+# refusing a half-true breakdown, so `10#` stays; only the account of what it prevents is
+# corrected. The values are already digit-only by the loop above.
 if [ "$REVIEW_COUNTS_OK" = "1" ] \
    && [ "$((10#$REVIEW_CRITICAL + 10#$REVIEW_WARNING + 10#$REVIEW_INFO))" -ne "$((10#$REVIEW_TOTAL))" ]; then
   REVIEW_COUNTS_OK=0
@@ -350,13 +358,17 @@ fi
 # LENGTH-BOUND EACH COMPONENT SEPARATELY -- and the REASON changed at round 14, so read this rather
 # than inherit it. It used to be integer overflow: the pad ran `$((10#$_int))`, bash integers wrap at
 # 2^64, and a 54-digit value yielded -7908320945662590977 SILENTLY as the padded phase. The pad is a
-# string pad now and converts nothing, so that overflow is unreachable here. The bound STAYS for the
-# reason it always also had: every component is interpolated into a FILENAME, and filesystem
-# components are finite. The
-# bound belongs on the INTEGER PART: applied to the whole value it rejected `12345678.1`, whose
-# integer part is a legal 8 digits, while accepting `1.123456` -- an accidental bound on the
-# composite that was both too strict and too loose. Every later segment is bounded too, since
-# each is interpolated into a filename and filesystem components are finite.
+# string pad now and converts nothing, so that overflow is unreachable and its rationale is dead.
+# WHAT THE BOUND STILL DOES, stated narrowly because the obvious wider claim is FALSE: it bounds each
+# SEGMENT, and NOTHING here bounds the COMPOSITE. Every segment is joined into ONE filename
+# component and depth is unbounded, so a per-segment bound does not enforce a filename limit --
+# driven at round 14: thirty 8-digit segments yield a 278-character PADDED and a 294-character name
+# against a NAME_MAX of 255. That is a real residual of this validator, it predates the pad change,
+# and it is named here rather than papered over with a filesystem rationale the bound does not
+# deliver. The bound belongs on the INTEGER PART: applied to the whole value it rejected
+# `12345678.1`, whose integer part is a legal 8 digits, while accepting `1.123456` -- an accidental
+# bound on the composite that was both too strict and too loose. Every later segment is bounded too,
+# on the same narrow reading.
 # THE LOOP IS THE POINT, and it is what makes the heading above TRUE. The earlier form bounded
 # `${_pn#*.}` -- the WHOLE tail after the first dot -- which is one component only while the id
 # has at most two. Once N-segment ids are accepted (see the shape arms), that form rejects
@@ -372,7 +384,7 @@ if [ "$_ok" = "1" ]; then
       *.*) _seg="${_rest%%.*}"; _rest="${_rest#*.}" ;;
       *)   _seg="$_rest";       _rest="" ;;
     esac
-    # The bound is on the DIGITS: a letter suffix is one character the overflow guard has no
+    # The bound is on the DIGITS: a letter suffix is one character the digit bound has no
     # stake in, so `12345678A` is within it exactly as `12345678` is.
     case "${_seg%[A-Z]}" in ?????????*) _ok=0 ;; esac
   done
