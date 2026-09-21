@@ -618,6 +618,20 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
   const realMain = () => fs.realpathSync(main);
   const realWt = () => fs.realpathSync(wt);
 
+  test('spells literal ERE operators portably for BSD sed and grep', () => {
+    // POSIX does not define backslash-escaping these ERE operators. GNU accepts
+    // the old `\\|` / `\\(` / `\\{` spelling, while macOS BSD sed rejects the
+    // expanded boundary strip with "unbalanced brackets" and disables the scan.
+    assert.ok(!guard.includes("_OPEN='(^|&&|&|;|\\||\\(|\\{)"), 'grep boundary carries GNU-only escaped ERE operators');
+    assert.ok(!guard.includes('sed -E "s/^(&&|&|;|\\||\\(|\\{)?'), 'sed boundary carries GNU-only escaped ERE operators');
+    assert.match(guard, /_OPEN='\(\^\|&&\|&\|;\|\[\|\]\|\[\(\]\|\[\{\]\)/);
+    assert.equal(
+      [...guard.matchAll(/sed -E "s\/\^\(&&\|&\|;\|\[\|\]\|\[\(\]\|\[\{\]\)\?/g)].length,
+      2,
+      'both sed boundary strips must use POSIX-portable bracket expressions',
+    );
+  });
+
   test('halts on a cd into the main checkout (the #4767 shape)', () => {
     const r = run(`cd ${realMain()}/scripts/verify && python3 -m pytest -q`);
     assert.equal(r.status, 1);

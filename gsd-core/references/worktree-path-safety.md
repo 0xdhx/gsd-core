@@ -235,7 +235,10 @@ _ENV='([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
 # command that relocates nothing. That buys a rare false negative (`if cd ../main; then …`) at the
 # cost of a realistic false positive, and this guard's whole posture is that the false-positive
 # direction is the one that gets it routed around. The residual is disclosed instead.
-_OPEN='(^|&&|&|;|\||\(|\{)[[:space:]]*'
+# Spell the literal ERE operators as bracket expressions. `\|` / `\(` / `\{`
+# are GNU-tolerated but undefined by POSIX and BSD sed rejects the same boundary
+# expression with "unbalanced brackets" before the scan can run (#4767).
+_OPEN='(^|&&|&|;|[|]|[(]|[{])[[:space:]]*'
 # LAUNCHERS are a NAMED set, not `[^&;|]*`. A wrapper reached through a launcher is still a wrapper,
 # and the set admits an absolute path (`/usr/bin/env`) and an option with a SEPARATE operand
 # (`env -u FOO`, `timeout --signal TERM`, `stdbuf -o L`). Which options TAKE an operand is
@@ -287,7 +290,7 @@ _EXEC='('"$_LAUNCH"')((/[^[:space:]]*/)?(sh|bash|zsh|dash|ksh)([[:space:]]+--[a-
 CUR=$WT_ROOT
 _scan(){ local CMD=$1 L K T R P _T
   _T=$( printf '%s' "$CMD" | grep -oE "${_OPEN}(${_ENV}${_VERB}[[:space:]]+|${_DIR})${_TOK}" \
-        | sed -E "s/^(&&|&|;|\||\(|\{)?[[:space:]]*//; s#^${_DIR}#N #; s#^${_ENV}${_VERB}[[:space:]]+#C #" | sed '/^$/d' )
+        | sed -E "s/^(&&|&|;|[|]|[(]|[{])?[[:space:]]*//; s#^${_DIR}#N #; s#^${_ENV}${_VERB}[[:space:]]+#C #" | sed '/^$/d' )
   # 1. Every relocating target, relative or absolute, resolved from the cwd the command has reached
   # (chained `cd scripts && cd ..` lands back at the root and passes; `cd scripts && cd ../..` does
   # not): outside the worktree → halt. A target the shell would expand (`~`, `$VAR`, `$(…)`) cannot
@@ -341,7 +344,7 @@ _walk(){ local CMD=$1 D=$2 W
     [ -n "$W" ] || continue
     _walk "$(_unquote "$W")" "$((D+1))"
   done <<EOF_WRAP
-$(printf '%s' "$CMD" | grep -oE "${_OPEN}${_ENV}${_EXEC}${_TOK}" | sed -E "s/^(&&|&|;|\||\(|\{)?[[:space:]]*//; s#^${_ENV}${_EXEC}##")
+$(printf '%s' "$CMD" | grep -oE "${_OPEN}${_ENV}${_EXEC}${_TOK}" | sed -E "s/^(&&|&|;|[|]|[(]|[{])?[[:space:]]*//; s#^${_ENV}${_EXEC}##")
 EOF_WRAP
   return 0; }
 _walk "$AUTOMATED_CMD" 0
