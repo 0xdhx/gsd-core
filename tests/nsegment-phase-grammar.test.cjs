@@ -336,6 +336,9 @@ const EXECUTE_PHASE = path.join(__dirname, '..', 'gsd-core', 'workflows', 'execu
 const COMPLETION_RECONCILIATION = path.join(
   __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'completion-reconciliation.md',
 );
+const CODE_REVIEW_DISPOSITION = path.join(
+  __dirname, '..', 'gsd-core', 'workflows', 'execute-phase', 'steps', 'code-review-disposition.md',
+);
 const TDD_REF = path.join(__dirname, '..', 'gsd-core', 'references', 'tdd.md');
 const AUTONOMOUS = path.join(__dirname, '..', 'gsd-core', 'workflows', 'autonomous.md');
 const PLAN_REVIEW_CONVERGENCE = path.join(__dirname, '..', 'gsd-core', 'workflows', 'plan-review-convergence.md');
@@ -456,55 +459,57 @@ describe('#4748 — the $((10#$PHASE_INT)) split sites carry a letter suffix int
   }
 });
 
-describe('#4748 — execute-phase.md resolves the REVIEW.md path from init\'s padded_phase, not a shell re-pad', () => {
-  const lines = splitLines(fs.readFileSync(EXECUTE_PHASE, 'utf8'));
-  const [i] = findAnchoredLineIndexes(lines, 'REVIEW_FILE="${PHASE_DIR}/${PADDED}-REVIEW.md"', 1);
-  const paddedLine = lines[i - 1].trim();
+describe('#4748 — the code-review gate resolves the REVIEW.md path from a letter-safe padded phase, not a shell re-pad', () => {
+  // #3829 moved this lookup out of `execute-phase.md` and into the lazily-read step file below.
+  // The inline block did not fit under ADR-857's frozen pre-phase-6 ceiling (93600), which the
+  // parent now clears by 139 bytes, so it cannot be restored in place. #4748's property is
+  // unchanged and is asserted here against the site that now performs the lookup.
+  //
+  // Two of this block's original four assertions were properties of the INLINE site rather than
+  // of the lookup, and do not survive the move: the `PADDED="{padded_phase}"` literal binding
+  // (the step derives PADDED itself, validating PHASE_NUMBER for shape and traversal before
+  // padding the digit run through `10#` and carrying the letter verbatim), and the composition
+  // run over the three live lines. The step's executable coverage — a composition run plus a
+  // padding-agrees-with-the-canonical-normalizer matrix over letter ids — lives in
+  // `tests/code-review-pipeline-regression.test.cjs`, under "#3829 — the step's REVIEW.md lookup
+  // resolves a letter-suffixed phase without a shell re-pad". Mirroring it here would be a second
+  // implementation of one grammar, which this repo treats as an anti-pattern, so it is cited
+  // rather than copied.
+  const stepLines = splitLines(fs.readFileSync(CODE_REVIEW_DISPOSITION, 'utf8'));
+  const lookupIdx = findAnchoredLineIndexes(stepLines, 'REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"', 2);
 
-  test('the PADDED binding directly above the lookup reads {padded_phase} (fails before the fix)', () => {
-    // `printf "%02d"` cannot pad `03A` (prints `03`, exits 1) — and cannot
-    // even re-pad an already-padded `08` (bash reads it as octal, prints
-    // `00`). `init execute-phase` now emits `padded_phase` through the
-    // canonical normalizer, so the workflow binds it instead of re-deriving.
-    assert.ok(paddedLine.startsWith('PADDED='), `line above the lookup must bind PADDED: ${paddedLine}`);
-    assert.equal(paddedLine, 'PADDED="{padded_phase}"');
+  test('no fence pads the raw phase number with printf (fails before the fix)', () => {
+    // `printf "%02d"` cannot pad `03A` (prints `03`, exits 1) — and cannot even re-pad an
+    // already-padded `08` (bash reads it as octal, prints `00`). Every binding must pad the
+    // DIGIT RUN, never PHASE_NUMBER itself.
+    const offenders = stepLines
+      .map((l, n) => [n + 1, l])
+      .filter(([, l]) => !/^\s*#/.test(l) && /printf\s+"%0\d*d"\s+"?\$\{?PHASE_NUMBER/.test(l));
+    assert.deepEqual(offenders, [], `no fence may printf-pad PHASE_NUMBER: ${JSON.stringify(offenders)}`);
   });
 
-  test('regression control: the lookup line itself is unchanged', () => {
-    assert.equal(lines[i].trim(), 'REVIEW_FILE="${PHASE_DIR}/${PADDED}-REVIEW.md"');
-  });
-
-  test('composition: the value init emits, substituted into the live lookup lines, resolves the letter phase\'s own REVIEW.md', (t) => {
-    // The model substitutes `{padded_phase}` from the init JSON, which is
-    // `normalizePhaseName(phase_number)` (src/init.cts). Do that substitution
-    // here and run the three live lines against a fixture, so the emitted
-    // value, the binding, the path construction and the status extraction are
-    // exercised together — the executable half of a `{template}` site.
-    const { normalizePhaseName } = require('../gsd-core/bin/lib/phase-id.cjs');
-    const { createTempDir, cleanup } = require('./helpers.cjs');
-    const dir = createTempDir();
-    t.after(() => cleanup(dir));
-    for (const [id, status] of [['3A', 'clean'], ['8', 'issues'], ['9', 'skipped']]) {
-      const emitted = normalizePhaseName(id);
-      fs.writeFileSync(path.join(dir, `${emitted}-REVIEW.md`), `---\nstatus: ${status}\n---\n# review\n`);
-      const script = [
-        'set -e',
-        paddedLine.replace('{padded_phase}', emitted),
-        lines[i].trim(),
-        lines[i + 1].trim(),
-        'printf \'%s %s\' "$PADDED" "$REVIEW_STATUS"',
-      ].join('\n');
-      assert.ok(lines[i + 1].includes('REVIEW_STATUS='), `line after the lookup must extract REVIEW_STATUS: ${lines[i + 1]}`);
-      const r = runBash(script, { PHASE_DIR: dir });
-      assert.equal(r.status, 0, `bash exited ${r.status}: ${r.stderr}`);
-      assert.equal(r.stdout, `${emitted} ${status}`);
+  test('every lookup is preceded by a PADDED binding that carries the letter run', () => {
+    for (const i of lookupIdx) {
+      const bound = stepLines.slice(0, i).reverse()
+        .find((l) => /^\s*PADDED=/.test(l) && !/^\s*PADDED=""\s*$/.test(l));
+      assert.ok(bound, `the lookup at line ${i + 1} has no PADDED binding above it`);
+      assert.ok(bound.includes('10#$_dig'),
+        `the pad must go through 10# on the digit run, or 08 reads as octal: ${bound.trim()}`);
+      assert.ok(bound.includes('$_let'),
+        `the pad must carry the letter run verbatim, or 03A truncates to 03: ${bound.trim()}`);
     }
   });
 
-  test('the workflow\'s init parse list names padded_phase, so the binding is not a literal (fails before the fix)', () => {
-    // A `{field}` token is substituted from the init JSON only for fields the
-    // workflow tells the model to parse; `phase_number` is on that list and
-    // `padded_phase` was not (adversarial review, claim 2).
+  test('regression control: the lookup lines themselves are unchanged', () => {
+    for (const i of lookupIdx) {
+      assert.equal(stepLines[i].trim(), 'REVIEW_FILE="${_pd}/${PADDED}-REVIEW.md"');
+    }
+  });
+
+  test('the workflow\'s init parse list still names padded_phase (fails before the fix)', () => {
+    // A `{field}` token is substituted from the init JSON only for fields the workflow tells the
+    // model to parse. This one is a property of `execute-phase.md` and the move does not touch it.
+    const lines = splitLines(fs.readFileSync(EXECUTE_PHASE, 'utf8'));
     const [p] = findAnchoredLineIndexes(lines, 'Parse JSON for: `executor_model`', 1);
     assert.match(lines[p], /`phase_number`, `padded_phase`,/);
   });
