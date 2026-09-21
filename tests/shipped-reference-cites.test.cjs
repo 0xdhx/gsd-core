@@ -143,9 +143,14 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 // across four agents over three months because `check-contract-drift.cjs`'s
 // reference-follower was equally blind to the spelling.
 //
-// Scope is agents/ ONLY. The workflow tree carries the same spelling, but whether
-// an @-path in a workflow body is client-resolved at all is unmeasured (#4841
-// § Evidence 5), so this gate takes no position there.
+// Scope is agents/ ONLY, and the remainder is TWO trees rather than one: gsd-core/workflows
+// carries the same spelling widely, and gsd-core/references carries it once —
+// nyquist-compliance.md's pointer at failing-direction.md, the lone bare form among that
+// directory's installed-path siblings. This gate takes no position on either, because
+// whether an @-path OUTSIDE an agent body is client-resolved at all is unmeasured (#4841
+// § Evidence 5): refusing the spelling there would assert a resolution semantics this
+// issue never established. Naming both is what keeps the recorded remainder complete —
+// a scope note that names only the workflow tree reads as an exhaustive one.
 
 // A reference name is one or more path segments, each starting with a non-dot character, so
 // a `.` or `..` segment is never a name and no include can resolve outside gsd-core/references/.
