@@ -597,6 +597,7 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     git(['commit', '-q', '--allow-empty', '-m', 'init'], main);
     git(['worktree', 'add', '-q', wt, '-b', 'wt'], main);
     fs.mkdirSync(path.join(wt, 'scripts'), { recursive: true });
+    fs.mkdirSync(path.join(wt, 'scripts dir'), { recursive: true });
     fs.mkdirSync(path.join(main, 'scripts'), { recursive: true });
     // A symlink INSIDE the worktree that lands in the main checkout — lexically contained, really not.
     fs.symlinkSync(main, path.join(wt, 'main-link'));
@@ -624,12 +625,13 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     // expanded boundary strip with "unbalanced brackets" and disables the scan.
     assert.ok(!guard.includes("_OPEN='(^|&&|&|;|\\||\\(|\\{)"), 'grep boundary carries GNU-only escaped ERE operators');
     assert.ok(!guard.includes('sed -E "s/^(&&|&|;|\\||\\(|\\{)?'), 'sed boundary carries GNU-only escaped ERE operators');
-    assert.match(guard, /_OPEN='\(\^\|&&\|&\|;\|\[\|\]\|\[\(\]\|\[\{\]\)/);
+    assert.match(guard, /_OPEN='\(\^\|&&\|&\|;\|\[\|\]\[\|\]\|\[\|\]\|\[\(\]\|\[\{\]\)/);
     assert.equal(
-      [...guard.matchAll(/sed -E "s\/\^\(&&\|&\|;\|\[\|\]\|\[\(\]\|\[\{\]\)\?/g)].length,
-      2,
-      'both sed boundary strips must use POSIX-portable bracket expressions',
+      [...guard.matchAll(/sed -E "s\/\^\(&&\|&\|;\|\[\|\]\[\|\]\|\[\|\]\|\[\(\]\|\[\{\]\)\?/g)].length,
+      1,
+      'the ordered event scan must use POSIX-portable bracket expressions',
     );
+    assert.match(guard, /_resets_cwd "\$BFR" \|\| _resets_cwd "\$RAW"/, 'the event scan must retain resets across intervening unrecognized commands');
   });
 
   test('halts on a cd into the main checkout (the #4767 shape)', () => {
@@ -666,6 +668,20 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     ['a symlinked FILE whose target is in main', () => `cat ${realWt()}/main-head`],
     ['a chained cd whose second hop leaves the worktree', 'cd scripts && cd ../.. && ls'],
     ['a chained cd that reaches main relatively', 'cd scripts && cd ../../main && ls'],
+    ['an interpreter after a backgrounded cd starts from the parent cwd', "cd scripts & bash -c 'cd ..'"],
+    ['an interpreter after a piped cd starts from the parent cwd', "cd scripts | bash -c 'cd ..'"],
+    ['an unrecognized command after a backgrounded cd does not consume the cwd reset', "cd scripts & echo x && bash -c 'cd ..'"],
+    ['an unrecognized command after a piped cd does not consume the cwd reset', "cd scripts | cat && bash -c 'cd ..'"],
+    ['an earlier interpreter payload is not contaminated by a later outer cd', "cd scripts && bash -c 'cd ../.. && test -d main' && cd deeper"],
+    ['a subprocess interpreter cannot relocate its parent shell', "bash -c 'cd scripts' && cd .."],
+    ['a launcher cannot turn eval into a cwd-persistent shell builtin', "env eval 'cd scripts'; cd .."],
+    ['env -C outside is not hidden by its wrapped interpreter', "env -C ../main bash -c 'echo ok'"],
+    ['env --chdir= outside is not hidden by its wrapped interpreter', "env --chdir=../main sh -c 'echo ok'"],
+    ['a timeout wrapper cannot hide env -C outside', "timeout 5 env -C ../main bash -c 'echo ok'"],
+    ['a later env -C cannot hide an earlier outside launcher relocation', "env -C ../main env -C ../wt bash -c 'echo ok'"],
+    ['a quoted env -C launcher target still exposes its payload', "env -C 'scripts dir' bash -c 'cd ../..'"],
+    ['a quoted env --chdir launcher target still exposes its payload', "env --chdir 'scripts dir' sh -c 'cd ../..'"],
+    ['an equals-form quoted env --chdir target still exposes its payload', "env --chdir='scripts dir' sh -c 'cd ../..'"],
     ['npm --prefix ../.. after a cd (resolved from the reached cwd)', 'cd scripts && npm --prefix ../.. test'],
     ['a double-quoted name containing an apostrophe', `cd "O'Reilly" && ls`],
     ['a path containing a literal =', () => `cd ${realWt()}/release=main && ls`],
@@ -764,6 +780,9 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     // ordinary portability wrapper whose payload stays inside the worktree must remain silent.
     ['bash -c wrapping an in-worktree command', "bash -c 'npm test'"],
     ['sh -c wrapping a relative cd that stays inside', "sh -c 'cd scripts && ls'"],
+    ['an eval payload whose cd relocates the current shell', "eval 'cd scripts' && cd .."],
+    ['nested in-worktree env -C launchers resolve sequentially', "env -C scripts env -C .. bash -c 'echo ok'"],
+    ['a quoted in-worktree env -C target with a safe payload', "env -C 'scripts dir' bash -c 'cd ..'"],
     ['make -C inside the worktree', 'make -C scripts test'],
     ['git -C inside the worktree', 'git -C scripts status'],
     ['an interpreter payload the shell would build at run time (dynamic_path)', 'eval "cd $TARGET && ls"'],

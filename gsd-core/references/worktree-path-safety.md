@@ -220,6 +220,17 @@ _unquote(){ local s=$1 out='' q='' c i
     elif [ "$q" = '"' ]; then case "$c" in '"') q='' ;; '\') i=$((i+1)); out+=${s:i:1} ;; *) out+=$c ;; esac
     else case "$c" in "'") q='' ;; *) out+=$c ;; esac; fi
   done; printf '%s' "$out"; }
+# True when raw shell text contains an unquoted single `&` or `|`. `&&` and
+# `||` keep the current shell's cwd; the single forms cross a process boundary.
+_resets_cwd(){ local s=$1 q='' i c p n; for ((i=0;i<${#s};i++)); do c=${s:i:1}
+    if [ -z "$q" ]; then case "$c" in
+      "'"|'"') q=$c ;; '\') i=$((i+1)) ;;
+      '&'|'|') p=''; n=''; [ "$i" -gt 0 ] && p=${s:i-1:1}; [ "$i" -lt $((${#s}-1)) ] && n=${s:i+1:1};
+        [ "$p" = "$c" ] || [ "$n" = "$c" ] || return 0 ;;
+    esac
+    elif [ "$q" = '"' ]; then case "$c" in '"') q='' ;; '\') i=$((i+1)) ;; esac
+    else [ "$c" = "'" ] && q=''; fi
+  done; return 1; }
 # The relocating verbs — `cd` / `pushd` (bare, `builtin`/`command`-prefixed, env-prefixed, or with
 # `--`) and a tool's own directory flag (`npm`/`npx`/`pnpm` `--prefix`, `yarn --cwd`, `pnpm -C`,
 # `make -C`, `git -C`; both `--flag <p>` and `--flag=<p>`) at the start of a segment, including after a
@@ -238,7 +249,7 @@ _ENV='([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
 # Spell the literal ERE operators as bracket expressions. `\|` / `\(` / `\{`
 # are GNU-tolerated but undefined by POSIX and BSD sed rejects the same boundary
 # expression with "unbalanced brackets" before the scan can run (#4767).
-_OPEN='(^|&&|&|;|[|]|[(]|[{])[[:space:]]*'
+_OPEN='(^|&&|&|;|[|][|]|[|]|[(]|[{])[[:space:]]*'
 # LAUNCHERS are a NAMED set, not `[^&;|]*`. A wrapper reached through a launcher is still a wrapper,
 # and the set admits an absolute path (`/usr/bin/env`) and an option with a SEPARATE operand
 # (`env -u FOO`, `timeout --signal TERM`, `stdbuf -o L`). Which options TAKE an operand is
@@ -259,12 +270,12 @@ _LOPT='([[:space:]]+-[^[:space:]]+|[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=[^[:space:
 # env's own separate-operand options, factored out because BOTH consumers need them: $_LAUNCH, so a
 # payload behind `env -u FOO bash -c …` is unwrapped, and $_DIR, so `env -u FOO -C ../main` is still
 # seen as a relocation. Generic $_LOPT cannot consume `FOO`, so without this the option HID the flag.
-_ENVOPT='('"$_LOPT"'[[:space:]]+(-u|--unset)[[:space:]]+[^[:space:]]+)*'"$_LOPT"
+_ENVOPT='('"$_LOPT"'[[:space:]]+(-u|--unset)[[:space:]]+'"$_TOK"')*'"$_LOPT"
 # $_LAUNCH needs a WIDER env group than $_DIR does, and the difference is deliberate. $_DIR must leave
 # `-C`/`--chdir` UNCONSUMED — that flag is the thing it is looking for. $_LAUNCH must consume it, or
 # `env -C scripts bash -c '…'` has its relocation seen and its PAYLOAD never unwrapped, which is the
 # bypass class this whole guard is about. Two groups, one per consumer.
-_ENVOPTL='('"$_LOPT"'[[:space:]]+(-u|--unset|-C|--chdir)[[:space:]]+[^[:space:]]+)*'"$_LOPT"
+_ENVOPTL='('"$_LOPT"'[[:space:]]+((-u|--unset)[[:space:]]+|(-C|--chdir)([[:space:]]+|=))'"$_TOK"')*'"$_LOPT"
 _LAUNCH='((/[^[:space:]]*/)?((env|setsid|nohup)'"$_ENVOPTL"'|timeout('"$_LOPT"'[[:space:]]+(-s|--signal|-k|--kill-after)[[:space:]]+[^[:space:]]+)*'"$_LOPT"'[[:space:]]+[0-9]+[smhd]?|(stdbuf|nice|ionice)('"$_LOPT"'[[:space:]]+(-i|-o|-e|-n|-c)[[:space:]]+[^[:space:]]+)*'"$_LOPT"')[[:space:]]+)*'
 # The directory flags are TOOL-SCOPED, because the same spelling is not the same flag on every tool:
 # `git archive --prefix=../main/ HEAD` names archive MEMBERS and changes no directory, so a flat
@@ -282,29 +293,69 @@ _DIR='(('"$_LAUNCH"')(npm|npx|pnpm|yarn)[[:space:]]+([^&;|]*[[:space:]]+)?(--pre
 # `nohup sh -c` — reach the same unwrap as a bare one, and an absolute or option-bearing
 # interpreter (`/bin/bash -c`, `bash --noprofile -c`) with it.
 _EXEC='('"$_LAUNCH"')((/[^[:space:]]*/)?(sh|bash|zsh|dash|ksh)([[:space:]]+--[a-z-]+)*[[:space:]]+-[a-z]*c|(/[^[:space:]]*/)?(python3?|node|perl|ruby)([[:space:]]+--[a-z-]+)*[[:space:]]+-[a-z]*[ce]|eval)[[:space:]]+'
-# ONE ordered pass per scanned string, each target tagged `C` (a cd/pushd — moves the cwd) or `N` (a
-# tool's directory flag — resolved from the cwd reached so far but does NOT move it). `_scan` is a
-# FUNCTION so an unwrapped payload reaches the SAME two scans as the top-level command; it halts with
+# `eval` runs in the current shell, unlike the other interpreters above; its payload's final cwd must
+# therefore flow into the next event. A subprocess payload is scanned from the reached cwd and then
+# restores its caller's cwd.
+_EVAL='eval[[:space:]]+'
+# ONE ordered pass per scanned string, each event tagged `C` (a cd/pushd — moves the cwd), `N` (a
+# tool's directory flag — resolved from the cwd reached so far but does NOT move it), `E` (`eval`,
+# whose cwd change persists), or `W` (a subprocess interpreter, whose cwd change does not). Ordering
+# is load-bearing: scanning every outer relocation before an earlier payload lets a later `cd` supply
+# that payload with a cwd the shell has not reached yet. `_scan` is a FUNCTION so an unwrapped payload
+# reaches the SAME event scan as the top-level command; it halts with
 # `exit 1`, never a return code, so a halt inside a payload is exactly as fatal as one outside; and it
 # ends `return 0` so a trailing non-`C` target cannot make the function itself look failed under `set -e`.
 CUR=$WT_ROOT
-_scan(){ local CMD=$1 L K T R P _T
-  _T=$( printf '%s' "$CMD" | grep -oE "${_OPEN}(${_ENV}${_VERB}[[:space:]]+|${_DIR})${_TOK}" \
-        | sed -E "s/^(&&|&|;|[|]|[(]|[{])?[[:space:]]*//; s#^${_DIR}#N #; s#^${_ENV}${_VERB}[[:space:]]+#C #" | sed '/^$/d' )
+_scan(){ local CMD=$1 D=$2 L RAW BODY BFR REST K Q T R P S PREFIX LDS LD _T
+  _T=$( printf '%s' "$CMD" | grep -oE "${_OPEN}(${_ENV}${_EXEC}|${_ENV}${_VERB}[[:space:]]+|${_DIR})${_TOK}" \
+        | sed '/^$/d' )
   # 1. Every relocating target, relative or absolute, resolved from the cwd the command has reached
   # (chained `cd scripts && cd ..` lands back at the root and passes; `cd scripts && cd ../..` does
   # not): outside the worktree → halt. A target the shell would expand (`~`, `$VAR`, `$(…)`) cannot
   # be evaluated here and passes through — the plan-checker's probe already reports those as
   # `dynamic_path`, and `$(git rev-parse --show-toplevel)` is the form step 0b itself recommends.
-  while IFS= read -r L; do
-    [ -n "$L" ] || continue
-    K=${L%% *}; T=${L#* }
-    T=$(_unquote "$T"); R=$(_resolve "$T" "$CUR")
-    if _outside_wt "$R"; then
-      echo "FATAL: <automated> command relocates to $T -> $R, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
-      exit 1
-    fi
-    [ "$K" = C ] && CUR=$R
+  REST=$CMD
+  while IFS= read -r RAW; do
+    [ -n "$RAW" ] || continue
+    # Preserve process boundaries even when an unrecognized command sits between
+    # one and the next recognized event (`cd x & echo y && bash -c ...`).
+    BFR=${REST%%"$RAW"*}; REST=${REST#*"$RAW"}
+    if _resets_cwd "$BFR" || _resets_cwd "$RAW"; then CUR=$WT_ROOT; fi
+    BODY=$(printf '%s' "$RAW" | sed -E "s/^(&&|&|;|[|][|]|[|]|[(]|[{])?[[:space:]]*//")
+    L=$(printf '%s' "$BODY" | sed -E "s#^${_ENV}${_EVAL}#E #; s#^${_ENV}${_EXEC}#W #; s#^${_DIR}#N #; s#^${_ENV}${_VERB}[[:space:]]+#C #")
+    K=${L%% *}; Q=${L#* }; T=$(_unquote "$Q")
+    case "$K" in
+      E) [ "$D" -ge 4 ] || _walk "$T" "$((D+1))" ;;
+      W) if [ "$D" -lt 4 ]; then
+           S=$CUR
+           # `_EXEC` is longer than `_DIR`, so a wrapper reached through
+           # `env -C/--chdir` wins grep's leftmost-longest match. Recover that
+           # launcher's relocation here: validate it, start the child there,
+           # then restore the parent cwd when the payload scan returns.
+           PREFIX=${BODY%"$Q"}
+           LDS=$(printf '%s' "$PREFIX" | grep -oE "(^|[[:space:]])(-C|--chdir)([[:space:]]+|=)${_TOK}" \
+             | sed -E 's/^[[:space:]]*(-C|--chdir)([[:space:]]+|=)//' || true)
+           while IFS= read -r LD; do
+             [ -n "$LD" ] || continue
+             LD=$(_unquote "$LD"); R=$(_resolve "$LD" "$CUR")
+             if _outside_wt "$R"; then
+               echo "FATAL: <automated> command relocates to $LD -> $R, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
+               exit 1
+             fi
+             CUR=$R
+           done <<EOF_LAUNCH_DIRS
+$LDS
+EOF_LAUNCH_DIRS
+           _walk "$T" "$((D+1))"; CUR=$S
+         fi ;;
+      C|N)
+        R=$(_resolve "$T" "$CUR")
+        if _outside_wt "$R"; then
+          echo "FATAL: <automated> command relocates to $T -> $R, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
+          exit 1
+        fi
+        [ "$K" = C ] && CUR=$R ;;
+    esac
   done <<EOF_TARGETS
 $_T
 EOF_TARGETS
@@ -333,20 +384,11 @@ EOF_ABS
 # while every command reads as a clean pass. It is written as a rule about ALL of them rather than
 # about the one that had a slash first, because that is exactly how it recurred: $_EXEC was fixed,
 # then $_LAUNCH gained `(/[^[:space:]]*/)?` and took $_DIR down with it. Both driven, not theorised.
-# 3. Scan the command, then unwrap each interpreter payload and scan THAT too, to a bounded depth — a
-# wrapper inside a wrapper is still a wrapper, and the bound is what keeps a pathological nest finite.
+# 3. The ordered event scan unwraps each interpreter payload in place, to a bounded depth — a wrapper
+# inside a wrapper is still a wrapper, and the bound is what keeps a pathological nest finite.
 # A payload the shell would build at run time (`bash -c $CMD`) is not a literal token here and passes
 # through as a dynamic_path, exactly as scan 1 treats an expansion.
-_walk(){ local CMD=$1 D=$2 W
-  _scan "$CMD"
-  [ "$D" -ge 4 ] && return 0
-  while IFS= read -r W; do
-    [ -n "$W" ] || continue
-    _walk "$(_unquote "$W")" "$((D+1))"
-  done <<EOF_WRAP
-$(printf '%s' "$CMD" | grep -oE "${_OPEN}${_ENV}${_EXEC}${_TOK}" | sed -E "s/^(&&|&|;|[|]|[(]|[{])?[[:space:]]*//; s#^${_ENV}${_EXEC}##")
-EOF_WRAP
-  return 0; }
+_walk(){ _scan "$1" "$2"; }
 _walk "$AUTOMATED_CMD" 0
 ```
 
