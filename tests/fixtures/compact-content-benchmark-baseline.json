@@ -18,9 +18,9 @@
       "reductionPct": 16.51
     },
     "execute-phase": {
-      "offTokens": 26167,
-      "onTokens": 23877,
-      "reductionPct": 8.75
+      "offTokens": 26280,
+      "onTokens": 23990,
+      "reductionPct": 8.71
     },
     "new-project": {
       "offTokens": 14308,
@@ -39,8 +39,8 @@
     }
   },
   "aggregate": {
-    "offTokens": 109167,
-    "onTokens": 92480,
-    "reductionPct": 15.29
+    "offTokens": 109280,
+    "onTokens": 92593,
+    "reductionPct": 15.27
   }
 }
