@@ -664,7 +664,19 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
   // showing findings as open that the review no longer reports.
   // A fix report with no ledger is also something to record: a converged '--auto' run has neither,
   // and exiting here recorded nothing for a fully fixed phase.
-  if (order.length === 0 && !fs.existsSync(process.env.DISPOSITION_FILE) && fixReports.length === 0) return;
+  // A review that reports findings NONE of which this parser understood is also something to
+  // record, and it is the case with the least evidence anywhere else. The shortfall is derived
+  // HERE, above the guard, rather than at its old site beside the render: order is final from
+  // the heading walk above and never grows again, so the value is the same either way -- but at
+  // the old site it was computed AFTER this return had already fired, so it could not reach the
+  // one exit that discards it. Partial shortfalls (some findings parsed, some not) always
+  // reported, which is exactly why the total one read as covered.
+  const declaredTotal = /^[0-9]+\$/.test(process.env.REVIEW_TOTAL || '') ? Number(process.env.REVIEW_TOTAL) : null;
+  // Against order.length -- the CURRENT review's findings -- never rows.length, which also counts
+  // rows carried from earlier reviews and would understate the shortfall or invent one.
+  const unparsed = declaredTotal !== null && declaredTotal > order.length ? declaredTotal - order.length : 0;
+  const unparsedNote = unparsed ? ' (' + unparsed + ' finding(s) recorded NOWHERE: the review reports ' + declaredTotal + ', but only ' + order.length + ' matched the expected heading shape \`### <CR|BL|WR|IN>-NN: <title>\`)' : '';
+  if (order.length === 0 && !unparsed && !fs.existsSync(process.env.DISPOSITION_FILE) && fixReports.length === 0) return;
   // Prior rows: keep the disposition AND its source cell — the source is where a human writes
   // the reason a finding was deferred, and rewriting it would discard the very thing the
   // 'set deferred by hand, with the reason' instruction asks for. The Source cell is the LAST
@@ -878,12 +890,15 @@ FIX_REPORT_FILE="${FIX_REPORT_FILE}" node -e "
   // a dropped finding is demoted below every finding that parsed, and an unparseable finding is
   // precisely the one a human most needs to see. Surfaced, not thrown, exactly as the stale
   // fix-report case above is: the gate stays advisory and states the shortfall.
-  const declaredTotal = /^[0-9]+\$/.test(process.env.REVIEW_TOTAL || '') ? Number(process.env.REVIEW_TOTAL) : null;
-  // Against order.length -- the CURRENT review's findings -- never rows.length, which also counts
-  // rows carried from earlier reviews and would understate the shortfall or invent one.
-  const unparsed = declaredTotal !== null && declaredTotal > order.length ? declaredTotal - order.length : 0;
-  const unparsedNote = unparsed ? ' (' + unparsed + ' finding(s) recorded NOWHERE: the review reports ' + declaredTotal + ', but only ' + order.length + ' matched the expected heading shape \`### <CR|BL|WR|IN>-NN: <title>\`)' : '';
-  if (rows.length === 0 && !fs.existsSync(process.env.DISPOSITION_FILE)) return;
+  // The !unparsed conjunct here is the SECOND of the two exits that discarded the shortfall, and
+  // it is not redundant with the one above: that guard keys on order and stands down when a fix
+  // report exists, so a run with a fix report and no parseable finding reaches THIS line with
+  // rows.length 0. Both exits now decline to fire while a shortfall is outstanding, and the
+  // result is a zero-row ledger carrying an unparsed key -- an honest record that the review
+  // declared findings and none of them were understood, which is strictly better than the file
+  // not existing. A genuinely clean review is untouched either way: a declared total of 0 is not
+  // greater than order.length, so unparsed is 0 and both returns still fire.
+  if (rows.length === 0 && !unparsed && !fs.existsSync(process.env.DISPOSITION_FILE)) return;
   // A bare | in a Source cell is escaped on render so the table stays a table. Scanned as PAIRS,
   // not by the preceding character: an escaped pair (backslash + anything) is kept verbatim and only
   // a pipe outside one is escaped. The previous form, /(^|[^\\\\])\|/g, CONSUMED the character before

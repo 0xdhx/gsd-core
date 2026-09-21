@@ -2460,6 +2460,39 @@ describe('#3861 round 2 — a finding the heading parser cannot match is SURFACE
     assert.doesNotMatch(out.ledger, /^unparsed:/m, 'no shortfall when more parsed than declared');
     assert.doesNotMatch(out.ledger, /unparsed: -/);
   });
+
+  test('a review NONE of whose findings parse still records the shortfall on a first run', () => {
+    // The corner every case above misses, and the one carrying the LEAST evidence anywhere else:
+    // every finding in a heading shape the alternation cannot reach, on a phase with no prior
+    // ledger and no fix report. `order` is empty, so the early exit that stands down for "nothing
+    // to record" fired BEFORE the shortfall was computed -- no ledger, no console line, no
+    // diagnostic, for a review that declared two Criticals. A PARTIAL shortfall always reported,
+    // which is exactly why the total one read as covered. The shortfall is now derived above that
+    // exit and both exits decline to fire while one is outstanding.
+    const allUnmatched = ['---', 'phase: 01', 'status: issues_found', 'findings:',
+      '  critical: 2', '  warning: 0', '  info: 0', '  total: 2', '---', '',
+      '## Critical Issues', '',
+      '### SEC-01: a prefix the alternation does not carry',
+      '### SEC-02: and a second one'].join('\n');
+    const out = runShippedDisposition({ reviewText: allUnmatched, reviewTotal: 2 });
+    assert.notStrictEqual(out.ledger, null,
+      'a review whose findings NONE parsed must still leave a record — silence here is the exact silent drop this reconciliation exists to close');
+    assert.match(out.ledger, /^unparsed: 2$/m, 'and must state how many findings reached no row');
+    assert.match(out.ledger, /^total: 0$/m, 'while reporting honestly that it carries no rows');
+    assert.match(out.stdout, /2 finding\(s\) recorded NOWHERE/,
+      'the console line must say so too — the ledger is not the only surface a human reads');
+  });
+
+  test('a genuinely clean review still writes nothing — the relaxed exit is scoped to a shortfall', () => {
+    // Negative control for the fix itself, and the reason it is scoped rather than removed:
+    // relaxing that exit unconditionally would grow a zero-row ledger on every clean phase. With
+    // `total: 0` there is no shortfall to outstand, so both exits still fire exactly as before.
+    const clean = ['---', 'phase: 01', 'status: clean', 'findings:',
+      '  critical: 0', '  warning: 0', '  info: 0', '  total: 0', '---', '', 'No issues.'].join('\n');
+    const out = runShippedDisposition({ reviewText: clean, reviewTotal: 0 });
+    assert.strictEqual(out.ledger, null, 'no findings declared and none parsed — nothing to record');
+    assert.strictEqual(out.stdout.trim(), '', 'and nothing to say');
+  });
 });
 
 describe('#3829 review round 2 — a review that reports nothing still reconciles the ledger', () => {
