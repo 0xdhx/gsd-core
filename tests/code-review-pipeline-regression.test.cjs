@@ -2483,6 +2483,27 @@ describe('#3861 round 2 — a finding the heading parser cannot match is SURFACE
       'the console line must say so too — the ledger is not the only surface a human reads');
   });
 
+  test('a fix report present, nothing parsed, no prior ledger — the SECOND exit records it too', () => {
+    // The two exits that discarded the shortfall are reached by DIFFERENT inputs, so one test
+    // cannot pin both. The earlier one stands down as soon as a fix report exists; this input
+    // therefore sails past it and lands on the later `rows.length === 0` return, which had the
+    // identical hole. Without this case, deleting the later guard's conjunct leaves the pair
+    // above green and the drop returns by the other road — a surviving mutant, not a covered one.
+    const allUnmatched = ['---', 'phase: 01', 'status: issues_found', 'findings:',
+      '  critical: 2', '  warning: 0', '  info: 0', '  total: 2', '---', '',
+      '### SEC-01: a prefix the alternation does not carry',
+      '### SEC-02: and a second one'].join('\n');
+    // The fix report must contribute NO row, or it never reaches the later exit: an id the
+    // alternation CAN match becomes a carried row, rows.length is 1, and the guard under test is
+    // not the one that decides. Mutation-controlled — with a CR-NN id here the later guard's
+    // conjunct could be deleted and this test stayed green.
+    const fixReport = ['## Fixed Issues', '', '### SEC-03: an unmatched id in the fix report too'].join('\n');
+    const out = runShippedDisposition({ reviewText: allUnmatched, fixText: fixReport, reviewTotal: 2 });
+    assert.notStrictEqual(out.ledger, null,
+      'a fix report does not excuse the drop — the shortfall is still two findings recorded nowhere');
+    assert.match(out.ledger, /^unparsed: 2$/m, 'and the count must survive this path too');
+  });
+
   test('a genuinely clean review still writes nothing — the relaxed exit is scoped to a shortfall', () => {
     // Negative control for the fix itself, and the reason it is scoped rather than removed:
     // relaxing that exit unconditionally would grow a zero-row ledger on every clean phase. With
