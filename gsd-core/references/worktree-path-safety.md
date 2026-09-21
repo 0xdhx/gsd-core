@@ -221,55 +221,134 @@ _unquote(){ local s=$1 out='' q='' c i
     else case "$c" in "'") q='' ;; *) out+=$c ;; esac; fi
   done; printf '%s' "$out"; }
 # The relocating verbs — `cd` / `pushd` (bare, `builtin`/`command`-prefixed, env-prefixed, or with
-# `--`) and `npm --prefix` (both `--prefix <p>` and `--prefix=<p>`) at the start of a segment,
-# including after a `(`/`{` opener. Each match is stripped of its prefix with an ANCHORED sed, so
-# the target is taken verbatim, unquoted, and compared LITERALLY — never interpolated into a regex.
+# `--`) and a tool's own directory flag (`npm`/`npx`/`pnpm` `--prefix`, `yarn --cwd`, `pnpm -C`,
+# `make -C`, `git -C`; both `--flag <p>` and `--flag=<p>`) at the start of a segment, including after a
+# `(`/`{` opener or a `&` background operator. Each match is stripped of its prefix with an ANCHORED sed,
+# so the target is taken verbatim, unquoted, and compared LITERALLY — never interpolated into a regex.
 _VERB='((builtin|command)[[:space:]]+)?(cd|pushd)([[:space:]]+--)?'
 _ENV='([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
-_OPEN='(^|&&|;|\||\(|\{)[[:space:]]*'
-_NPM='npm[[:space:]]+(--prefix|run[^&;|]*--prefix)[[:space:]=]+'
-# One ordered pass, each target tagged `C` (a cd/pushd — moves the cwd) or `N` (an npm prefix —
-# resolved from the cwd reached so far but does NOT move it).
-_TARGETS=$( printf '%s' "$AUTOMATED_CMD" | grep -oE "${_OPEN}(${_ENV}${_VERB}[[:space:]]+|${_NPM})${_TOK}" \
-            | sed -E "s/^(&&|;|\||\(|\{)?[[:space:]]*//; s/^${_NPM}/N /; s/^${_ENV}${_VERB}[[:space:]]+/C /" | sed '/^$/d' )
-# 1. Every relocating target, relative or absolute, resolved from the cwd the command has reached
-# (chained `cd scripts && cd ..` lands back at the root and passes; `cd scripts && cd ../..` does
-# not): outside the worktree → halt. A target the shell would expand (`~`, `$VAR`, `$(…)`) cannot
-# be evaluated here and passes through — the plan-checker's probe already reports those as
-# `dynamic_path`, and `$(git rev-parse --show-toplevel)` is the form step 0b itself recommends.
+# `&` joins the operator set; grep is line-oriented, so a newline is already covered by `^`.
+# CONTROL KEYWORDS (`if`, `then`, `do`, …) WERE TRIED HERE AND REVERTED, and the reason is the rule
+# this fence is built on rather than a detail: these operators are matched against RAW TEXT, with no
+# awareness of quoting, so a keyword that is also an ordinary English word turns prose inside a
+# quoted argument into a command boundary — `grep -F 'if cd ../main; then' README.md` halted on a
+# command that relocates nothing. That buys a rare false negative (`if cd ../main; then …`) at the
+# cost of a realistic false positive, and this guard's whole posture is that the false-positive
+# direction is the one that gets it routed around. The residual is disclosed instead.
+_OPEN='(^|&&|&|;|\||\(|\{)[[:space:]]*'
+# LAUNCHERS are a NAMED set, not `[^&;|]*`. A wrapper reached through a launcher is still a wrapper,
+# and the set admits an absolute path (`/usr/bin/env`) and an option with a SEPARATE operand
+# (`env -u FOO`, `timeout --signal TERM`, `stdbuf -o L`). Which options TAKE an operand is
+# TOOL-SCOPED for the same reason `_DIR`'s flags are: `-i` takes one on `stdbuf` and NONE on `env`,
+# so a flat set consumed the COMMAND after an operandless flag and `env -i echo bash -c '…'` —
+# which runs `echo` — halted. `command` and `exec` are deliberately NOT in the set: `command -v
+# bash` is a name PROBE that executes nothing, and halting it is the false-positive direction
+# again. The cost is that a genuine `command bash -c …` is not unwrapped; that is disclosed.
+# but a catch-all leading run also unwraps interpreter TEXT that is merely an argument — `echo bash -c
+# 'cd ../main'` halted on a command that executes nothing. A spurious unwrap is NOT harmless: the scans
+# halt on a path the shell would never visit. Name the launchers instead.
+_LOPT='([[:space:]]+-[^[:space:]]+|[[:space:]]+[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*)*'
+# THE SHAPE IS `(<generic opts> <opt> <operand>)* <generic opts>`, NOT `<generic opts> (<opt>
+# <operand>)* <generic opts>`. The second admits only ONE contiguous run of operand-taking options,
+# so a generic option BETWEEN two of them ends the run and hides everything after it:
+# `env -u FOO --debug -u BAR -C ../main` relocates and passed silently. Interleaving is the normal
+# way these tools are invoked, so the grammar has to allow it. Same shape for timeout and stdbuf.
+# env's own separate-operand options, factored out because BOTH consumers need them: $_LAUNCH, so a
+# payload behind `env -u FOO bash -c …` is unwrapped, and $_DIR, so `env -u FOO -C ../main` is still
+# seen as a relocation. Generic $_LOPT cannot consume `FOO`, so without this the option HID the flag.
+_ENVOPT='('"$_LOPT"'[[:space:]]+(-u|--unset)[[:space:]]+[^[:space:]]+)*'"$_LOPT"
+# $_LAUNCH needs a WIDER env group than $_DIR does, and the difference is deliberate. $_DIR must leave
+# `-C`/`--chdir` UNCONSUMED — that flag is the thing it is looking for. $_LAUNCH must consume it, or
+# `env -C scripts bash -c '…'` has its relocation seen and its PAYLOAD never unwrapped, which is the
+# bypass class this whole guard is about. Two groups, one per consumer.
+_ENVOPTL='('"$_LOPT"'[[:space:]]+(-u|--unset|-C|--chdir)[[:space:]]+[^[:space:]]+)*'"$_LOPT"
+_LAUNCH='((/[^[:space:]]*/)?((env|setsid|nohup)'"$_ENVOPTL"'|timeout('"$_LOPT"'[[:space:]]+(-s|--signal|-k|--kill-after)[[:space:]]+[^[:space:]]+)*'"$_LOPT"'[[:space:]]+[0-9]+[smhd]?|(stdbuf|nice|ionice)('"$_LOPT"'[[:space:]]+(-i|-o|-e|-n|-c)[[:space:]]+[^[:space:]]+)*'"$_LOPT"')[[:space:]]+)*'
+# The directory flags are TOOL-SCOPED, because the same spelling is not the same flag on every tool:
+# `git archive --prefix=../main/ HEAD` names archive MEMBERS and changes no directory, so a flat
+# six-tool `--prefix` halts a legitimate command. `--prefix`/`--cwd`/`--dir`/`-C` belong to the node
+# package managers; `-C`/`--directory` to make and git. $_LAUNCH leads it for $_EXEC's reason — a
+# recognised tool behind `env` is still that tool.
+_DIR='(('"$_LAUNCH"')(npm|npx|pnpm|yarn)[[:space:]]+([^&;|]*[[:space:]]+)?(--prefix|--cwd|--dir|-C)|('"$_LAUNCH"')(make|git)[[:space:]]+([^&;|]*[[:space:]]+)?(-C|--directory)|('"$_LAUNCH"')(/[^[:space:]]*/)?env'"$_ENVOPT"'[[:space:]]+(--chdir|-C))[[:space:]=]+'
+# Command-string interpreters. `eval "cd <main> && x"`, `sh -c "…"`, `bash -c '…'`, `node -e '…'` bury
+# the real command inside ONE opaque quoted token, and that defeats BOTH scans below at once: the
+# relocating verb never sits at a boundary scan 1 recognizes, and scan 2's tokenizer swallows the whole
+# quoted span, which after unquoting does not begin with `/`. These are ordinary portability idioms, not
+# obfuscation — a planner imitating a CI script reaches for one without any adversarial intent — so the
+# payload is UNWRAPPED and re-scanned rather than trusted or rejected wholesale. $_LAUNCH lets the
+# launcher forms a planner actually writes — `env bash -c`, a `timeout`-wrapped `bash -c`,
+# `nohup sh -c` — reach the same unwrap as a bare one, and an absolute or option-bearing
+# interpreter (`/bin/bash -c`, `bash --noprofile -c`) with it.
+_EXEC='('"$_LAUNCH"')((/[^[:space:]]*/)?(sh|bash|zsh|dash|ksh)([[:space:]]+--[a-z-]+)*[[:space:]]+-[a-z]*c|(/[^[:space:]]*/)?(python3?|node|perl|ruby)([[:space:]]+--[a-z-]+)*[[:space:]]+-[a-z]*[ce]|eval)[[:space:]]+'
+# ONE ordered pass per scanned string, each target tagged `C` (a cd/pushd — moves the cwd) or `N` (a
+# tool's directory flag — resolved from the cwd reached so far but does NOT move it). `_scan` is a
+# FUNCTION so an unwrapped payload reaches the SAME two scans as the top-level command; it halts with
+# `exit 1`, never a return code, so a halt inside a payload is exactly as fatal as one outside; and it
+# ends `return 0` so a trailing non-`C` target cannot make the function itself look failed under `set -e`.
 CUR=$WT_ROOT
-while IFS= read -r L; do
-  [ -n "$L" ] || continue
-  K=${L%% *}; T=${L#* }
-  T=$(_unquote "$T"); R=$(_resolve "$T" "$CUR")
-  if _outside_wt "$R"; then
-    echo "FATAL: <automated> command relocates to $T -> $R, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
-    exit 1
-  fi
-  [ "$K" = C ] && CUR=$R
-done <<EOF_TARGETS
-$_TARGETS
+_scan(){ local CMD=$1 L K T R P _T
+  _T=$( printf '%s' "$CMD" | grep -oE "${_OPEN}(${_ENV}${_VERB}[[:space:]]+|${_DIR})${_TOK}" \
+        | sed -E "s/^(&&|&|;|\||\(|\{)?[[:space:]]*//; s#^${_DIR}#N #; s#^${_ENV}${_VERB}[[:space:]]+#C #" | sed '/^$/d' )
+  # 1. Every relocating target, relative or absolute, resolved from the cwd the command has reached
+  # (chained `cd scripts && cd ..` lands back at the root and passes; `cd scripts && cd ../..` does
+  # not): outside the worktree → halt. A target the shell would expand (`~`, `$VAR`, `$(…)`) cannot
+  # be evaluated here and passes through — the plan-checker's probe already reports those as
+  # `dynamic_path`, and `$(git rev-parse --show-toplevel)` is the form step 0b itself recommends.
+  while IFS= read -r L; do
+    [ -n "$L" ] || continue
+    K=${L%% *}; T=${L#* }
+    T=$(_unquote "$T"); R=$(_resolve "$T" "$CUR")
+    if _outside_wt "$R"; then
+      echo "FATAL: <automated> command relocates to $T -> $R, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
+      exit 1
+    fi
+    [ "$K" = C ] && CUR=$R
+  done <<EOF_TARGETS
+$_T
 EOF_TARGETS
-# 2. Any other absolute word that resolves under the MAIN checkout — a file argument, a redirect,
-# an include — is the same defect by a different verb; system paths such as /dev/null or /usr/bin
-# are neither and pass.
-while IFS= read -r P; do
-  [ -n "$P" ] || continue
-  P=$(_unquote "$P"); case "$P" in [A-Za-z_]*=*|--*=*) P=${P#*=} ;; esac   # FOO=/x, --flag=/x
-  case "$P" in /*) ;; *) continue ;; esac
-  R=$(_resolve "$P")
-  _outside_wt "$R" || continue
-  case "$R" in
-    "$MAIN_ROOT"|"$MAIN_ROOT"/*)
-      echo "FATAL: <automated> command names $P (-> $R) inside the main checkout, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
-      exit 1 ;;
-  esac
-done <<EOF_ABS
-$(printf '%s' "$AUTOMATED_CMD" | grep -oE "$_TOK")
+  # 2. Any other absolute word that resolves under the MAIN checkout — a file argument, a redirect,
+  # an include — is the same defect by a different verb; system paths such as /dev/null or /usr/bin
+  # are neither and pass.
+  while IFS= read -r P; do
+    [ -n "$P" ] || continue
+    P=$(_unquote "$P"); case "$P" in [A-Za-z_]*=*|--*=*) P=${P#*=} ;; esac   # FOO=/x, --flag=/x
+    case "$P" in /*) ;; *) continue ;; esac
+    R=$(_resolve "$P")
+    _outside_wt "$R" || continue
+    case "$R" in
+      "$MAIN_ROOT"|"$MAIN_ROOT"/*)
+        echo "FATAL: <automated> command names $P (-> $R) inside the main checkout, outside the worktree ($WT_ROOT) — it would verify the wrong checkout. Rewrite the plan's command root-relative (cwd is the checkout root); do not rewrite it in place." >&2
+        exit 1 ;;
+    esac
+  done <<EOF_ABS
+$(printf '%s' "$CMD" | grep -oE "$_TOK")
 EOF_ABS
+  return 0; }
+# EVERY s-COMMAND THAT INTERPOLATES ONE OF THESE REGEXES USES `#`, NOT `/`. $_EXEC, $_LAUNCH and
+# (through $_LAUNCH) $_DIR all contain a literal `/` from their absolute-path groups, and a `/`
+# inside the pattern closes an `s/…/…/` early: sed dies `unknown option to 's'` on STDERR inside a
+# command substitution, the extracted list comes back EMPTY, and the scan silently stops happening
+# while every command reads as a clean pass. It is written as a rule about ALL of them rather than
+# about the one that had a slash first, because that is exactly how it recurred: $_EXEC was fixed,
+# then $_LAUNCH gained `(/[^[:space:]]*/)?` and took $_DIR down with it. Both driven, not theorised.
+# 3. Scan the command, then unwrap each interpreter payload and scan THAT too, to a bounded depth — a
+# wrapper inside a wrapper is still a wrapper, and the bound is what keeps a pathological nest finite.
+# A payload the shell would build at run time (`bash -c $CMD`) is not a literal token here and passes
+# through as a dynamic_path, exactly as scan 1 treats an expansion.
+_walk(){ local CMD=$1 D=$2 W
+  _scan "$CMD"
+  [ "$D" -ge 4 ] && return 0
+  while IFS= read -r W; do
+    [ -n "$W" ] || continue
+    _walk "$(_unquote "$W")" "$((D+1))"
+  done <<EOF_WRAP
+$(printf '%s' "$CMD" | grep -oE "${_OPEN}${_ENV}${_EXEC}${_TOK}" | sed -E "s/^(&&|&|;|\||\(|\{)?[[:space:]]*//; s#^${_ENV}${_EXEC}##")
+EOF_WRAP
+  return 0; }
+_walk "$AUTOMATED_CMD" 0
 ```
 
 A halt here is a plan defect, not an executor deviation: report it via the checkpoint return
 format naming the task and the offending command verbatim, and stop. The plan-checker's path
 probe (`check verify-command-paths`) warns on the *outside-orchestrator-root* case before
 execution; this guard is the one that sees the executor's actual root.
+

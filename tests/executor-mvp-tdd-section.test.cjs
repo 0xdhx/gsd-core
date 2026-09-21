@@ -606,6 +606,9 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     fs.symlinkSync(main, path.join(wt, 'release=main'));
     fs.symlinkSync(path.join(main, '.git', 'HEAD'), path.join(wt, 'main-head'));
     fs.writeFileSync(path.join(wt, 'README.md'), 'x\n');
+    // #4767 round 2 — a readable file in the MAIN checkout, so an interpreter-wrapped absolute file
+    // argument (`eval "cat <main>/secret.txt"`) names something that really exists outside the worktree.
+    fs.writeFileSync(path.join(main, 'secret.txt'), 'SECRET\n');
   });
   after(() => { if (tmp) cleanup(tmp); });
 
@@ -653,6 +656,65 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     ['a double-quoted name containing an apostrophe', `cd "O'Reilly" && ls`],
     ['a path containing a literal =', () => `cd ${realWt()}/release=main && ls`],
     ['an env assignment whose value is a main-checkout path', () => `FOO=${realMain()}/x env | cat`],
+    // #4767 round 2 — command-string interpreters. `eval`/`sh -c`/`bash -c` bury the relocating verb
+    // inside ONE opaque quoted token, which defeats BOTH scans at once: the verb never sits at a
+    // boundary the relocating-verb scan recognizes, and the catch-all tokenizer swallows the whole
+    // quoted span, which after unquoting does not begin with `/`. Every row below exits 0 against the
+    // round-1 guard (verified as a negative control) and halts against this one.
+    ['eval wrapping a cd into main', () => `eval "cd ${realMain()} && ls"`],
+    ['eval wrapping a RELATIVE cd out of the worktree', "eval 'cd ../main && ls'"],
+    ['sh -c wrapping a cd into main', () => `sh -c "cd ${realMain()} && ls"`],
+    ['bash -c wrapping a cd into main', () => `bash -c 'cd ${realMain()} && ls'`],
+    ['eval wrapping an absolute FILE argument under main', () => `eval "cat ${realMain()}/secret.txt"`],
+    ['sh -c wrapping an absolute FILE argument under main', () => `sh -c "cat ${realMain()}/secret.txt"`],
+    ['zsh -c wrapping a cd into main', () => `zsh -c "cd ${realMain()} && ls"`],
+    ['a clustered short flag (sh -ec)', () => `sh -ec "cd ${realMain()} && ls"`],
+    ['python3 -c relocating via os.chdir', () => `python3 -c "import os;os.chdir('${realMain()}')"`],
+    ['node -e relocating via process.chdir', () => `node -e "process.chdir('${realMain()}')"`],
+    ['a wrapper nested inside a wrapper', () => `eval "sh -c 'cd ${realMain()} && ls'"`],
+    ['an interpreter reached after &&', () => `echo hi && eval "cd ${realMain()} && ls"`],
+    // …and the launcher forms a planner actually writes in front of one. `timeout` in particular is
+    // ordinary in a verify command, and a wrapper is no less a wrapper for having a launcher ahead of it.
+    ['a launcher (timeout) ahead of the interpreter', () => `timeout 60 bash -c "cd ${realMain()} && ls"`],
+    ['env ahead of the interpreter', () => `env bash -c "cd ${realMain()} && ls"`],
+    ['nohup ahead of the interpreter', () => `nohup sh -c "cd ${realMain()} && ls"`],
+    // …and the forms the round-2 adversarial pass found still open: an interpreter named by absolute
+    // path or carrying its own options, a recognised tool behind a launcher, and a shell CONTROL
+    // keyword as the command boundary.
+    ['an interpreter named by absolute path', () => `/bin/bash -c 'cd ${realMain()} && ls'`],
+    ['an interpreter carrying its own long option', () => `bash --noprofile -c 'cd ${realMain()} && ls'`],
+    ['a recognised tool behind a launcher', 'env npm --prefix ../main test'],
+    // …a launcher named by absolute path, or carrying an option with a SEPARATE operand.
+    ['a launcher named by absolute path', () => `/usr/bin/env bash -c "cd ${realMain()} && ls"`],
+    ['a launcher option with a separate operand', () => `env -u FOO bash -c "cd ${realMain()} && ls"`],
+    ['a long launcher option with an operand', () => `timeout --signal TERM 60 bash -c "cd ${realMain()} && ls"`],
+    ['stdbuf with an operand', () => `stdbuf -o L sh -c "cd ${realMain()} && ls"`],
+    // `env` is not only a launcher: --chdir / -C make it a relocating verb in its own right.
+    ['env --chdir, which relocates env itself', 'env --chdir=../main npm test'],
+    ['env -C, the same flag spelled short', 'env -C ../main npm test'],
+    ['env -C reached through a launcher', 'timeout 60 env -C ../main npm test'],
+    // A separate-operand option before the directory flag must not hide it: `-u FOO` consumed `FOO`
+    // generically and left `-C ../main` unseen. The env option grammar is scoped per consumer.
+    ['env -u before -C, which used to hide the flag', 'env -u FOO -C ../main npm test'],
+    ['the same, behind a launcher', 'timeout 60 env -u FOO -C ../main npm test'],
+    ['the long spellings of both', 'env --unset FOO --chdir=../main npm test'],
+    // `env -C <dir>` relocates AND launches: its payload must still be unwrapped.
+    ['a payload behind a relocating launcher', "env -C scripts bash -c 'cd ../../main && ls'"],
+    // Operand-taking options INTERLEAVED with ordinary ones. A grammar that allows only one contiguous
+    // run of them lets a generic option in the middle hide everything after it — including the `-C`.
+    ['interleaved env options hiding a -C', 'env -u FOO --debug -u BAR -C ../main npm test'],
+    ['interleaved env options before an interpreter', "env -u FOO --debug -u BAR bash -c 'cd ../main && ls'"],
+    ['interleaved timeout options', () => `timeout -k 5 --signal TERM 60 bash -c "cd ${realMain()} && ls"`],
+    ['interleaved stdbuf options', () => `stdbuf -o L -e L sh -c "cd ${realMain()} && ls"`],
+    // #4767 round 2 — a tool's own directory flag with a RELATIVE argument. The absolute form was
+    // already caught by the catch-all absolute-word scan; the relative form was invisible to both.
+    ['make -C relative, out of the worktree', 'make -C ../main/scripts test'],
+    ['git -C relative, out of the worktree', 'git -C ../main status'],
+    ['yarn --cwd relative, out of the worktree', 'yarn --cwd ../main test'],
+    ['pnpm -C relative, out of the worktree', 'pnpm -C ../main test'],
+    ['npx --prefix relative, out of the worktree', 'npx --prefix ../main tsc'],
+    // #4767 round 2 — a single `&` is a command boundary too; only `&&` was recognized.
+    ['a relative cd after a background operator', 'ls & cd ../main && ls'],
   ]) {
     test(`halts on ${label}`, () => {
       const c = typeof cmd === 'function' ? cmd() : cmd;
@@ -684,6 +746,30 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     ['a system path that is not a relocating target', 'cat /etc/hosts | grep -c x'],
     ['an absolute file argument outside both checkouts', 'ls /srv/other/plain && cd scripts'],
     ['a redirect to /dev/null', 'test -f /usr/bin/env && echo ok'],
+    // #4767 round 2 — the interpreter class is UNWRAPPED and re-scanned, not rejected wholesale, so an
+    // ordinary portability wrapper whose payload stays inside the worktree must remain silent.
+    ['bash -c wrapping an in-worktree command', "bash -c 'npm test'"],
+    ['sh -c wrapping a relative cd that stays inside', "sh -c 'cd scripts && ls'"],
+    ['make -C inside the worktree', 'make -C scripts test'],
+    ['git -C inside the worktree', 'git -C scripts status'],
+    ['an interpreter payload the shell would build at run time (dynamic_path)', 'eval "cd $TARGET && ls"'],
+    ['node -e naming no path at all', "node -e 'console.log(1)'"],
+    ['a launcher ahead of an interpreter whose payload stays inside', "timeout 60 bash -c 'npm test'"],
+    // Two false positives the round-2 adversarial pass found and this round fixed. `--prefix` on `git`
+    // names archive MEMBERS, not a directory, so the flag set is tool-scoped; and interpreter text that
+    // is merely an ARGUMENT executes nothing, so the launcher set is named rather than a catch-all run.
+    ['git archive --prefix, which is not a directory flag', 'git archive --prefix=../main/ HEAD'],
+    ['interpreter text passed as an argument, not executed', "echo bash -c 'cd ../main && ls'"],
+    // Two more false positives the round-2 pass found. Control keywords are NOT in `_OPEN` precisely
+    // because these operators match raw text with no quote-awareness, and `command -v` is a name probe
+    // that executes nothing. Both rows fail if either widening is re-introduced.
+    ['a control keyword inside a quoted grep argument', "grep -F 'if cd ../main; then' README.md"],
+    ['command -v, a name probe that executes nothing', "command -v bash -c 'cd ../main && ls'"],
+    // A launcher option that takes NO operand must not swallow the command after it: `env -i echo …`
+    // runs echo, not the interpreter text it prints. Which options take an operand is tool-scoped.
+    ['an operandless launcher option before a harmless command', "env -i echo bash -c 'cd ../main && ls'"],
+    ['a launcher -- separator before a harmless command', "nohup -- echo bash -c 'cd ../main && ls'"],
+    ['a directory-flag spelling that is pass-through data', 'env printf -C ../main'],
   ]) {
     test(`passes ${label}`, () => {
       const c = typeof cmd === 'function' ? cmd() : cmd;
