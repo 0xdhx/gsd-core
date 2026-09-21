@@ -4834,4 +4834,30 @@ describe('#3829 — the step\'s REVIEW.md lookup resolves a letter-suffixed phas
       }
     }
   });
+
+  test('property: the step\'s padding agrees with the canonical normalizer on any id it accepts', (t) => {
+    // The matrix above samples 13 shapes. #4748's guarantee at its ORIGINAL site was a DATAFLOW
+    // pin — `execute-phase.md` bound init's own `{padded_phase}`, so the lookup could not disagree
+    // with the canonical normalizer because it never computed anything. This step reconstructs the
+    // value in shell instead, so that pin is not available here and AGREEMENT is what replaces it.
+    // A 13-point sample cannot see a future canonical-grammar change land outside those 13 points;
+    // a generator can, and this is the exact blind spot rounds 3 and 5 of this PR were both about.
+    // Scoped to the ids the step's own guard ACCEPTS: a digit run within its 8-digit bound, an
+    // optional single A-Z, and optional dot segments. Milestone `N-N` forms are outside the step's
+    // domain, and are asserted nowhere here rather than silently passed.
+    const dir = createTempDir();
+    t.after(() => cleanup(dir));
+    const PHASE_ID = fc.tuple(
+      fc.integer({ min: 0, max: 99999999 }),
+      fc.option(fc.constantFrom(...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), { nil: '' }),
+      fc.array(fc.integer({ min: 0, max: 99999999 }), { maxLength: 2 }),
+    ).map(([n, letter, segs]) => String(n) + letter + segs.map((s) => '.' + s).join(''));
+    fc.assert(fc.property(PHASE_ID, (id) => {
+      for (const deriv of derivations) {
+        const r = runBash(`set -e\n${deriv}\nprintf '%s' "$PADDED"`, { PHASE_DIR: dir, PHASE_NUMBER: id });
+        assert.equal(r.status, 0, `bash exited ${r.status} on ${id}: ${r.stderr}`);
+        assert.equal(r.stdout, normalizePhaseName(id), `padding drifted from the canonical normalizer on ${id}`);
+      }
+    }), { numRuns: 25 });
+  });
 });
