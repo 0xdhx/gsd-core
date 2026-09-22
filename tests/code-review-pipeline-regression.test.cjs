@@ -2987,6 +2987,13 @@ describe('#3861 round 16 — the embedded script fits a Windows command line', (
   // is 32728 characters; 32729 fails. The budget below sits well under that so the next
   // addition to the script has somewhere to go — long rationale belongs in the step file's
   // prose, which costs the command line nothing.
+  //
+  // What this guard does NOT establish, stated so it is not read as more than it is. It counts
+  // the extracted JavaScript, not the command line Windows finally serializes: the 32767 cap
+  // applies to the whole line — executable path, quoting and backslash escaping included — so a
+  // quote-heavy payload expands on the way out, and the 32728 figure above is one host's
+  // threshold rather than the CI runner's. The budget is a practical margin with room for both
+  // effects, not a proof that everything it admits will spawn.
   const WINDOWS_CMDLINE_CAP = 32767;
   const CMDLINE_BUDGET = 24576; // 24 KiB — the cap less ~8 KiB of deliberate headroom
 
