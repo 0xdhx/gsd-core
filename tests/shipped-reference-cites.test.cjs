@@ -139,7 +139,7 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 // and never touches it, so after install it addresses
 // `<project>/gsd-core/references/<x>.md` — a directory no consuming project has —
 // while the file it means sits at `~/.claude/gsd-core/references/<x>.md`, where
-// the corpus's other 137 pointers already point. Eleven of these accumulated
+// the corpus's other 143 pointers already point. Eleven of these accumulated
 // across four agents over three months because `check-contract-drift.cjs`'s
 // reference-follower was equally blind to the spelling.
 //
@@ -152,8 +152,49 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 // issue never established. Naming both is what keeps the recorded remainder complete —
 // a scope note that names only the workflow tree reads as an exhaustive one.
 
-// A reference name is one or more path segments, each starting with a non-dot character, so
-// a `.` or `..` segment is never a name and no include can resolve outside gsd-core/references/.
+// A reference name is one or more path segments, each starting with `[A-Za-z0-9_-]` (NOT merely
+// "a non-dot character" — `+x.md` and `é.md` do not match either), so a `.` or `..` segment is never
+// a name: a LEADING traversal (`references/../../README.md`) cannot match.
+//
+// STATED BOUND, because the stronger claim is the tempting one and it is false. These patterns end
+// at `\.md` with no following boundary, so on a longer token they match as far as the name grammar
+// reaches and discard the rest: `…/references/tdd.md/xx/yy` captures `tdd.md`, and the existence
+// check below then validates a file the pointer does not actually name. (The truncation is not
+// unconditional. The capture runs to the FURTHEST `.md` reachable through valid segments, and
+// intermediate segments need NOT end in `.md`: `…/references/a.md/b.md` and `…/tdd.md/xx/yy.md`
+// are both captured WHOLE. It truncates only when no later `.md` is reachable — `tdd.md/xx/yy`
+// gives `tdd.md` because nothing after it can end a name, and `tdd.md/.hidden/y.md` gives `tdd.md`
+// because `.hidden` is not a valid segment.) So this grammar constrains where a name may START, not
+// what the whole token resolves to, and "nothing resolves outside references/" does NOT follow from
+// it. Both consumers are author-time tooling — a lint gate and a drift checker — so nothing here
+// resolves at product runtime. The cost is NOT purely a false GREEN, though:
+// check-contract-drift.cjs READS the matched path (`fs.readFileSync` in its agent loop), so a
+// truncated prefix folds the wrong file's text into the scanned corpus, and because the existence
+// check below proves no containment, a path under references/ that is itself a link to a target
+// outside it would be followed out by that same read. (Phrased without the s-word on purpose:
+// gen-platform-conformance-tier.cjs keys a tier on /\bsymlink/i over whole file CONTENT, so the
+// literal in a prose comment enrols this suite in the cross-platform matrix. It exercises no such
+// behaviour; do not reword it back.)
+// Closing it needs a boundary assertion after the name AND a ruling on that existence check, which
+// establishes neither `regular file` nor containment. A boundary after the name is addable and its
+// corpus cost is measurable; which boundary is CORRECT is not settled here — four attempts to settle
+// it in one sentence were each refuted in review, so what follows is the measurements themselves.
+// What was driven, against the 154 live `agents/` pointers and six continuation probes (`x.md/y`,
+// `x.md./y`, `x.mdx/y`, a backslash, `%2f`, U+2044):
+//   (?![A-Za-z0-9._/-])                  closes 3 of 6, keeps 150 — drops the 4 pointers followed
+//                                        by a sentence-ending `.`, which is in its own deny class
+//   (?=$|\s)                             closes 6 of 6, keeps 146
+//   (?=$|\s|[\x60*)]|\.(?=$|\s))          closes 6 of 6, keeps 154
+//   (?![A-Za-z0-9_/-]|\\|%(?:2[fF]|5[cC])|\u2044|\.(?=[A-Za-z0-9._/-]))
+//                                        closes 6 of 6, keeps 154, and still admits `,` `;` `:`
+//                                        quotes `]` `?` and an en or em dash after the name. An
+//                                        ASCII `-` is DENIED — it sits in that row's own deny class
+// The last shape closes every continuation probed here, so it is a live candidate rather than a
+// strawman. It does not close the CLASS: driven at this tree it still yields a prefix match on
+// U+2215, U+FF0F, U+29F8, U+FF3C, a double-encoded `%252f`, `%2e%2e`, a tab and U+0085. Which
+// separator spellings a boundary must deny is the open question, and the existence check above
+// raises the same question from the other side. Both are out of scope for #4841; a follow-up issue
+// is owed for them and is not yet filed.
 const BARE_INCLUDE_RE = /@gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
 const INSTALLED_INCLUDE_RE = /@~\/\.claude\/gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
 
@@ -165,7 +206,16 @@ function findBareIncludes(text) {
   return found;
 }
 
-/** Installed-path `@~/.claude/gsd-core/references/<name>` includes — target names. */
+/**
+ * Installed-path `@~/.claude/gsd-core/references/<name>` includes — the name the matcher
+ * CAPTURED. Per the STATED BOUND above that is not necessarily the target the text names. The
+ * grammar is greedy over `<seg>/` segments, so the capture runs to the FURTHEST `.md` reachable
+ * through valid segments — intermediate ones need NOT end in `.md`, so `a.md/b.md` and
+ * `tdd.md/xx/yy.md` are captured whole. It falls short only when no later `.md` is reachable:
+ * `tdd.md/xx/yy` gives `tdd.md` because nothing after it can end a name, `tdd.md/.hidden/y.md`
+ * gives `tdd.md` because `.hidden` is not a valid segment. So a caller resolving this value is
+ * resolving what the matcher could reach, which on a continuing token may be a prefix.
+ */
 function findInstalledIncludes(text) {
   const found = [];
   let m;
@@ -199,7 +249,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
     );
   });
 
-  test('#4841 gate: every installed-path @-include in agents/ names a reference that exists', () => {
+  test('#4841 gate: the name captured from every installed-path @-include in agents/ exists', () => {
     const missing = [];
     for (const { rel, abs } of walkAgentMarkdown()) {
       // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
@@ -210,7 +260,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
         }
       }
     }
-    assert.deepEqual(missing, [], 'Installed-path includes must name files that exist:\n' + missing.join('\n'));
+    assert.deepEqual(missing, [], 'The name captured from each installed-path include must exist. Per the STATED BOUND above this is the CAPTURE, not necessarily the whole token:\n' + missing.join('\n'));
   });
 
   test('#4841 gate: the agents/ scan is not vacuous — it reaches the four agents the defect lived in', () => {
@@ -251,7 +301,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
     assert.deepEqual(
       findInstalledIncludes('@~/.claude/gsd-core/references/../../README.md'),
       [],
-      'a traversal segment is not a reference name — it must never resolve outside gsd-core/references/',
+      'a LEADING traversal segment is not a reference name; what a TRAILING one does is the STATED BOUND above',
     );
     assert.deepEqual(findBareIncludes('@gsd-core/references/./x.md'), [], 'a dot segment is not a reference name');
   });

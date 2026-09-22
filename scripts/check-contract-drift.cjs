@@ -115,8 +115,14 @@ function referenceIncludes(content) {
   // form (#4841) that it does not. The bare form is now refused in agents/ by
   // tests/shipped-reference-cites.test.cjs; it is followed here so a pointer
   // that slips past that gate is still scanned rather than silently dropped.
-  // Nested names are allowed (`few-shot-examples/verifier.md`); every segment starts with a
-  // non-dot character, so a `.`/`..` segment is never a name and nothing resolves outside references/.
+  // Nested names are allowed (`few-shot-examples/verifier.md`); every segment starts with
+  // `[A-Za-z0-9_-]` — narrower than "non-dot", since `+x.md` and `é.md` do not match either — so a
+  // `.`/`..` segment is never a name and a LEADING traversal cannot match.
+  // STATED BOUND: the pattern ends at `\.md` with no following boundary, so it matches a PREFIX of a
+  // longer path and discards the rest — `…/references/tdd.md/xx/yy` is followed as `tdd.md`, a real
+  // file and not the one the text names. It constrains where a name may START, not what the whole
+  // token resolves to; "nothing resolves outside references/" does not follow. Out of scope for
+  // #4841 — tests/shipped-reference-cites.test.cjs records what closing it would take.
   const re = /@(?:~\/\.claude\/)?gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
   let m;
   while ((m = re.exec(content)) !== null) {
