@@ -2974,6 +2974,40 @@ describe('#3861 round 1 — step-file structural contract', () => {
   });
 });
 
+
+describe('#3861 round 16 — the embedded script fits a Windows command line', () => {
+  // Block 2 runs the record-builder as `node -e "<script>"`, so the whole script is ONE
+  // argv entry. Windows caps a command line at 32767 characters (CreateProcess), and Node
+  // surfaces the overflow as ENAMETOOLONG from spawn — the process never starts. Linux's
+  // ~2 MB ARG_MAX means the Linux lane cannot see this at all: when the script crossed the
+  // cap it stayed green on ubuntu and took out 83 tests on windows-latest in one push,
+  // every one of them reporting `spawn_failed` rather than anything about length.
+  //
+  // Measured on native Windows (node v25.2.1): the largest `-e` argument that still spawns
+  // is 32728 characters; 32729 fails. The budget below sits well under that so the next
+  // addition to the script has somewhere to go — long rationale belongs in the step file's
+  // prose, which costs the command line nothing.
+  const WINDOWS_CMDLINE_CAP = 32767;
+  const CMDLINE_BUDGET = 24576; // 24 KiB — the cap less ~8 KiB of deliberate headroom
+
+  test('the extracted node -e script stays well under the Windows command-line cap', () => {
+    const script = shippedDispositionScript();
+    // Anti-vacuity: a length assertion alone passes when the extractor returns '' — which is
+    // exactly what a moved fence or a renamed delimiter would produce. Bound it from BELOW
+    // first, so a broken extractor fails here instead of reporting a comfortable 0 bytes.
+    assert.ok(
+      script.length > 4096,
+      'the extractor returned ' + script.length + ' bytes — it is not reading the shipped script'
+    );
+    assert.ok(
+      script.length <= CMDLINE_BUDGET,
+      'the embedded node -e script is ' + script.length + ' characters; the budget is ' +
+      CMDLINE_BUDGET + ' and the hard Windows limit is ' + WINDOWS_CMDLINE_CAP +
+      '. Move long rationale out of the script and into the step file prose — it reads the ' +
+      'same there and costs the command line nothing.'
+    );
+  });
+});
 describe('#3861 round 2 — the shell-sharing guard, EXECUTED', () => {
   // The textual guard above is a fast-fail, not the authority. An adversarial pass evaded it
   // three ways -- an empty `REVIEW_FILE=`, a self-referential `REVIEW_FILE=$REVIEW_FILE`, and a
