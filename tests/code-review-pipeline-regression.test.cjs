@@ -2514,6 +2514,24 @@ describe('#3861 round 2 — a finding the heading parser cannot match is SURFACE
     assert.strictEqual(out.ledger, null, 'no findings declared and none parsed — nothing to record');
     assert.strictEqual(out.stdout.trim(), '', 'and nothing to say');
   });
+
+  test('a clean review with an unparseable fix report still writes nothing — the later exit must keep firing', () => {
+    // The fourth cell of the matrix, and the only one the three tests above leave open: they pin
+    // the LATER exit's under-fire (it must not swallow a shortfall) and the EARLIER exit's
+    // over-fire (a clean review must stay unrecorded), but nothing pins the later exit's OWN
+    // over-fire. It is reachable because a fix report — even one naming no matchable id — makes
+    // the earlier exit stand down, so control arrives at the later exit with a genuinely clean
+    // review and no shortfall. Neutering only that exit then writes a zero-row ledger reading
+    // "0 of 0 finding(s) open" for a phase that had nothing to report, and all three tests above
+    // stay green through it.
+    const clean = ['---', 'phase: 01', 'status: clean', 'findings:',
+      '  critical: 0', '  warning: 0', '  info: 0', '  total: 0', '---', '', 'No issues.'].join('\n');
+    const unparseableFix = ['## Fixed Issues', '', '### SEC-03: an unmatched id in the fix report'].join('\n');
+    const out = runShippedDisposition({ reviewText: clean, fixText: unparseableFix, reviewTotal: 0 });
+    assert.strictEqual(out.ledger, null,
+      'a fix report that decides nothing is not a reason to record a ledger for a clean review');
+    assert.strictEqual(out.stdout.trim(), '', 'and nothing to say about it');
+  });
 });
 
 describe('#3829 review round 2 — a review that reports nothing still reconciles the ledger', () => {
