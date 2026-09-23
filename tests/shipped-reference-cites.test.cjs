@@ -28,6 +28,7 @@
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 
 const REPO_ROOT = path.join(__dirname, '..');
@@ -249,6 +250,32 @@ function findInstalledIncludes(text) {
   return scanPointers(text, INSTALLED_POINTER_RE).names;
 }
 
+/**
+ * Does `name` resolve to a regular file under `<root>/gsd-core/references/`?
+ *
+ * `lstatSync().isFile()`, not `existsSync`, and the difference is the second half of what the previous
+ * round disclosed as open. `existsSync` establishes only that SOMETHING is there: a DIRECTORY named
+ * `<x>.md` satisfies it, and so does an entry that is itself a link to a target outside the directory —
+ * so the assertion built on it would hold for a pointer that resolves nowhere useful. Anchoring the name
+ * grammar closed the containment half (no accepted name can carry a traversal segment); this closes the
+ * other half. `lstatSync` does not follow the last component, which is what lets the check see the entry
+ * itself rather than whatever it refers to.
+ *
+ * Consequence, stated rather than left to be discovered: an entry that merely REFERS to a regular file
+ * is refused too, because `isFile()` is false for it. That is the conservative direction for a gate whose
+ * job is proving a pointer reaches shipped content, and it costs nothing at this tree — `gsd-core/
+ * references/` holds no such entry. The unit below fixtures the DIRECTORY case only; the other is a
+ * documented property of `lstatSync`, not something this suite needs to re-establish with a fixture
+ * whose creation would enrol the file in the real-OS conformance tier.
+ */
+function resolvesToReferenceFile(name, root = REPO_ROOT) {
+  try {
+    return fs.lstatSync(path.join(root, 'gsd-core', 'references', name)).isFile();
+  } catch {
+    return false;   // ENOENT and friends: absent is the same finding as not-a-file
+  }
+}
+
 /** Tokens carrying a reference-pointer prefix that do not denote a reference name, either spelling. */
 function findMalformedPointers(text) {
   return [
@@ -289,8 +316,8 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
       const text = fs.readFileSync(abs, 'utf-8');
       for (const name of findInstalledIncludes(text)) {
-        if (!fs.existsSync(path.join(REPO_ROOT, 'gsd-core', 'references', name))) {
-          missing.push(`${rel}: @~/.claude/gsd-core/references/${name} — target does not exist`);
+        if (!resolvesToReferenceFile(name)) {
+          missing.push(`${rel}: @~/.claude/gsd-core/references/${name} — target is not a regular file`);
         }
       }
     }
@@ -416,6 +443,32 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       findMalformedPointers('@gsd-core/references/tdd.md/xx/yy'),
       ['@gsd-core/references/tdd.md/xx/yy'],
     );
+  });
+
+  // The reversion control for the regular-file check. Without a fixture that check reverts SILENTLY —
+  // nothing in the real tree distinguishes `existsSync` from `lstatSync().isFile()`, which is exactly
+  // why the weaker form survived authoring. A directory named `<x>.md` is the cheapest case that does.
+  test('#4841 gate unit: a pointer target must be a regular file, not merely present', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4841-refs-'));
+    try {
+      const refs = path.join(root, 'gsd-core', 'references');
+      fs.mkdirSync(refs, { recursive: true });
+      fs.writeFileSync(path.join(refs, 'real.md'), '# real\n');
+      fs.mkdirSync(path.join(refs, 'directory.md'));          // present, and not a file
+      fs.mkdirSync(path.join(refs, 'nested'), { recursive: true });
+      fs.writeFileSync(path.join(refs, 'nested', 'deep.md'), '# deep\n');
+
+      assert.equal(resolvesToReferenceFile('real.md', root), true, 'a regular file resolves');
+      assert.equal(resolvesToReferenceFile('nested/deep.md', root), true, 'a nested regular file resolves');
+      assert.equal(resolvesToReferenceFile('absent.md', root), false, 'an absent target does not resolve');
+      assert.equal(
+        resolvesToReferenceFile('directory.md', root),
+        false,
+        'a DIRECTORY named <x>.md satisfies existsSync and must not satisfy this check — the whole point',
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   // The other half of the same rule: anchoring must not cost the corpus. Every shape below is a
