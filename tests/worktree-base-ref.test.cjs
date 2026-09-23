@@ -2384,20 +2384,36 @@ describe('#4881: the baseRef:"head" trust and the prior-worktree observation com
     }
   });
 
-  test('head + harness + WorktreeCreate hook + a clean prior harness worktree at HEAD → fork-from-head-observed: the observation restores the trust the hook withheld (#4881)', () => {
-    let cache = null;
+  test('head + harness + WorktreeCreate hook + a clean prior harness worktree at HEAD → baseref-head-bypassed-by-hook: the observation is withheld, not consulted (#4921)', () => {
+    // The stale-evidence case. A clean agent worktree sits at HEAD, so the
+    // #4868 probe WOULD confirm — but nothing on disk records which creator
+    // left it there, and a worktree the plain harness created before this hook
+    // was configured is indistinguishable from one the hook created. So the
+    // probe is not consulted at all: neither leg runs, which is why keying the
+    // cache by hook configuration would not have closed this (a cache miss
+    // falls through to the live probe and re-finds the same worktree).
+    // The stubs RECORD rather than throw: observeHarnessForkFromHead treats a throwing
+    // execGit or stateRead as an inconclusive observation and swallows it, so a throwing
+    // stub would fall through to the same verdict with or without the interlock and pin
+    // nothing. Recording keeps both assertions live under reversion.
+    const host = makeHostGit({ worktreeAtHead: true });
+    let consulted = false;
     const result = evaluateWorktreeBaseDegrade({
-      execGit: makeHostGit({ worktreeAtHead: true }),
+      execGit: (args) => {
+        if (args.join(' ') === 'worktree list --porcelain') consulted = true;
+        return host(args);
+      },
       effectiveBaseRef: 'head',
       cwd: '/repo',
       worktreeCreateHook: HOOK,
-      probeStateRead: () => cache,
-      probeStateWrite: (_file, content) => { cache = content; },
+      probeStateRead: () => { consulted = true; return null; },
+      probeStateWrite: () => { consulted = true; },
     });
-    assert.strictEqual(result.shouldDegrade, false, `reason=${result.reason}`);
-    assert.strictEqual(result.reason, 'fork-from-head-observed');
+    assert.strictEqual(consulted, false, 'the observation must not be consulted once a hook withheld the trust');
+    assert.strictEqual(result.shouldDegrade, true, `reason=${result.reason}`);
+    assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
     assert.strictEqual(result.headSha, HEAD_SHA);
-    assert.ok(cache && JSON.parse(cache).verdict === 'fork-from-head-confirmed', 'the observation is cached for this HEAD');
+    assert.strictEqual(result.forkSha, ORIGIN_SHA, 'the inferred comparison still governs');
   });
 
   test('head + harness + WorktreeCreate hook + no prior harness worktree → baseref-head-bypassed-by-hook: the observation is required on a hook host, never assumed (#4881)', () => {
@@ -2414,12 +2430,58 @@ describe('#4881: the baseRef:"head" trust and the prior-worktree observation com
     assert.strictEqual(result.forkSha, ORIGIN_SHA, 'the inferred comparison still governs');
   });
 
-  test('an unparseable settings layer is restored by the same observation (#4881)', () => {
+  test('an unparseable settings layer withholds the observation the same way — a hook in it cannot be ruled out (#4921)', () => {
+    const host = makeHostGit({ worktreeAtHead: true });
+    let consulted = false;
     const result = evaluateWorktreeBaseDegrade({
-      execGit: makeHostGit({ worktreeAtHead: true }),
+      execGit: (args) => {
+        if (args.join(' ') === 'worktree list --porcelain') consulted = true;
+        return host(args);
+      },
       effectiveBaseRef: 'head',
       cwd: '/repo',
       worktreeCreateHook: { file: '/repo/.claude/settings.local.json', kind: 'unparseable' },
+      probeStateRead: () => { consulted = true; return null; },
+      probeStateWrite: () => { consulted = true; },
+    });
+    assert.strictEqual(consulted, false, 'the observation must not be consulted once an unparseable layer withheld the trust');
+    assert.strictEqual(result.shouldDegrade, true, `reason=${result.reason}`);
+    assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
+  });
+
+  test('a cached fork-from-head verdict at this HEAD does NOT survive the hook interlock (#4921)', () => {
+    // The cache leg stated explicitly, because the review's proposed remedy
+    // aimed at it: a cache entry keyed to this exact HEAD and carrying the
+    // confirmed verdict is still never read once a hook withheld the trust.
+    const host = makeHostGit({ worktreeAtHead: false });
+    const cached = JSON.stringify({
+      headSha: HEAD_SHA,
+      worktreePath: WT_PATH,
+      worktreeHead: HEAD_SHA,
+      verdict: 'fork-from-head-confirmed',
+      probedAt: '2026-09-01T00:00:00.000Z',
+    });
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: host,
+      effectiveBaseRef: 'head',
+      cwd: '/repo',
+      worktreeCreateHook: HOOK,
+      probeStateRead: () => cached,
+      probeStateWrite: () => { assert.fail('the probe cache must not be written once a hook withheld the trust'); },
+    });
+    assert.strictEqual(result.shouldDegrade, true, `reason=${result.reason}`);
+    assert.strictEqual(result.reason, 'baseref-head-bypassed-by-hook');
+  });
+
+  test('the withholding is scoped to head + hook: with no setting, a hook does NOT withhold #4868 arm (#4921)', () => {
+    // The boundary this PR deliberately did not cross. b2 is #4868's own arm
+    // when `"head"` is absent, hook or not; re-scoping that trust is a separate
+    // question from the one #4881 opened, and is not taken here.
+    const result = evaluateWorktreeBaseDegrade({
+      execGit: makeHostGit({ worktreeAtHead: true }),
+      effectiveBaseRef: null,
+      cwd: '/repo',
+      worktreeCreateHook: HOOK,
       probeStateRead: () => null,
       probeStateWrite: () => {},
     });

@@ -722,7 +722,9 @@ export function evaluateWorktreeBaseDegrade(deps?: {
    * parse (findWorktreeCreateHook, #4588). Consulted only under `harness-worktree` with no
    * observation: there a hook, not the harness, creates the worktree and `worktree.baseRef`
    * is not applied, so `"head"` does not short-circuit and the inferred comparison runs; a
-   * mismatch degrades with `baseref-head-bypassed-by-hook`. Ignored under
+   * mismatch degrades with `baseref-head-bypassed-by-hook`. With `"head"` set it also
+   * withholds the #4868 prior-worktree observation, which cannot be attributed to the hook
+   * (#4921): on a hook host only `observedForkBase` restores a trusted verdict. Ignored under
    * `orchestrator-worktree` (GSD's own `git worktree add` never runs a Claude Code hook) and
    * whenever an observation is supplied (the measurement already sees where a hook forked).
    */
@@ -793,12 +795,19 @@ export function evaluateWorktreeBaseDegrade(deps?: {
   // harness does not apply `worktree.baseRef` on that path, so the measurement above does
   // not cover it. The short-circuit is withheld and the origin/HEAD inference below runs,
   // as for a host without the setting; a mismatch degrades with
-  // `baseref-head-bypassed-by-hook` — unless b2 below observes a clean prior harness
-  // worktree at this HEAD, the evidence a hook that does fork from HEAD leaves behind
-  // (#4868, #4881). orchestrator-worktree is unaffected — GSD runs
-  // `git worktree add` itself and no Claude Code hook is in that path.
+  // `baseref-head-bypassed-by-hook`, and the ONLY thing that restores a trusted verdict
+  // there is an explicit `--observed-fork-base` measurement of this dispatch. b2's
+  // prior-worktree observation deliberately does NOT restore it — see
+  // `hookWithheldHeadTrust` below (#4868, #4881, #4921). orchestrator-worktree is
+  // unaffected — GSD runs `git worktree add` itself and no Claude Code hook is in that
+  // path.
   const hookFinding: WorktreeCreateHookFinding | null = deps?.worktreeCreateHook ?? null;
   const hookBypassesBaseRef = hookFinding !== null && (deps?.isolationMode ?? 'harness-worktree') === 'harness-worktree';
+  // The interlock's fail-closed half, scoped to exactly the case branch a. declined to
+  // trust: `"head"` is set AND a hook (or an unparseable layer) is in the harness's
+  // worktree-creation path. It is deliberately NOT `hookBypassesBaseRef` alone — with no
+  // `"head"` setting, b2 is #4868's own arm and this PR does not re-scope it.
+  const hookWithheldHeadTrust = baseRefHead && hookBypassesBaseRef;
   if (baseRefHead && observedForkBase === null && !hookBypassesBaseRef) {
     return { shouldDegrade: false, reason: 'baseref-head', message: null, headSha: null, forkRef: null, forkSha: null, headAbsenceVerified: null };
   }
@@ -839,15 +848,29 @@ export function evaluateWorktreeBaseDegrade(deps?: {
   // forks). Fail-closed: every non-confirming observation falls through to
   // the comparison below. Since #4881 this step is reached only when branch a
   // did NOT trust the setting: the setting is absent or not "head", or a
-  // WorktreeCreate hook withheld the trust. On a hook host the observation
-  // is what restores it — a hook that forks from HEAD leaves exactly this
-  // evidence behind, and a hook that forks elsewhere never does. It is skipped
-  // when the caller supplies `observedForkBase`: an explicit measurement of
-  // this dispatch's fork base outranks an inference from a prior worktree,
-  // and the two must not disagree silently. The mode gate excludes
-  // orchestrator-worktree (no harness, no hook, nothing to observe), and
-  // probeStateRead/Write default to the .gsd cache file under cwd.
-  if (observedForkBase === null && (deps?.isolationMode ?? 'harness-worktree') === 'harness-worktree') {
+  // WorktreeCreate hook withheld the trust — and in that second case the
+  // observation is NOT consulted at all (`hookWithheldHeadTrust`), because it
+  // cannot be attributed to the hook. The evidence is a worktree sitting at
+  // HEAD; nothing on disk records WHICH creator left it there, so a clean
+  // worktree the plain harness created BEFORE the hook was configured, with
+  // HEAD unmoved since, is indistinguishable from one the hook created. Keying
+  // the cache by hook configuration does not close that: the cache is only one
+  // of the two legs, and a cache miss falls through to the live probe, which
+  // re-finds the same stale worktree and re-confirms. Under a hook the only
+  // admissible positive signal is an explicit `--observed-fork-base`
+  // measurement of THIS dispatch, which lands in c/d below; absent one the
+  // inferred comparison runs and a mismatch degrades with
+  // `baseref-head-bypassed-by-hook`, leaving the spawn-time exit-42 guard as
+  // the backstop. That keeps the interlock fail-closed end to end.
+  // This step is skipped for a second, unrelated reason when the caller
+  // supplies `observedForkBase`: an explicit measurement of this dispatch's
+  // fork base outranks an inference from a prior worktree, and the two must
+  // not disagree silently. The mode gate excludes orchestrator-worktree (no
+  // harness, no hook, nothing to observe), and probeStateRead/Write default to
+  // the .gsd cache file under cwd. With no `"head"` setting the #4868 arm is
+  // unchanged, hook or not — that trust predates this PR and is not re-scoped
+  // here (#4921 round 1).
+  if (observedForkBase === null && !hookWithheldHeadTrust && (deps?.isolationMode ?? 'harness-worktree') === 'harness-worktree') {
     const observed = observeHarnessForkFromHead({
       execGit,
       cwd: deps?.cwd,
@@ -912,8 +935,10 @@ export function evaluateWorktreeBaseDegrade(deps?: {
   if (baseRefHead && observedForkBase === null && hookFinding !== null) {
     // Reachable only through the hook interlock in a.: "head" was not trusted because a
     // WorktreeCreate hook (or an unparseable settings layer) is in the harness's path, b2
-    // found no clean prior harness worktree at this HEAD, and HEAD differs from the
-    // inferred fork base (#4588, #4881). The inferred comparison is the one
+    // was withheld there (`hookWithheldHeadTrust` — a prior worktree cannot be attributed
+    // to the hook), and HEAD differs from the inferred fork base (#4588, #4881, #4921).
+    // So this is now the unconditional harness-mode verdict for a hook host with "head"
+    // set, a diverged HEAD and no `--observed-fork-base`. The inferred comparison is the one
     // this check made in harness mode before #4588 — it is not a measurement of the hook, so
     // a match above (head-matches-fork) does not prove the hook forks from HEAD either; the
     // spawn-time exit-42 guard stays the backstop for that case, and it halts even in a

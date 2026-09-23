@@ -42,8 +42,9 @@
    hook in any of those settings files — or one of them that does not parse, so a hook cannot be
    ruled out — withholds the trust: the hook creates the worktree without applying the setting,
    so the check compares against `origin/HEAD` anyway and a mismatch degrades with
-   `baseref-head-bypassed-by-hook` — unless a clean prior harness worktree at the current HEAD
-   is observed (`fork-from-head-observed`, #4868), the evidence a hook that does fork from HEAD
-   leaves behind. The exit-42
+   `baseref-head-bypassed-by-hook`. The #4868 prior-worktree observation does not lift that
+   degrade: a worktree at HEAD records nothing about which creator left it there, so one the
+   plain harness created before the hook was configured reads the same as one the hook created
+   (#4881). On a hook host only `--observed-fork-base` restores a trusted verdict. The exit-42
    guard in each executor remains the backstop on a host that does not honor the setting.
    See #683 for the base-ref configuration detail.

@@ -97,13 +97,13 @@ parse, it compares `HEAD` against `origin/HEAD` as if the setting were absent, a
 returns `shouldDegrade: true` with `reason: "baseref-head-bypassed-by-hook"` and a message naming
 the file (#4588). That fallback is the comparison the check makes without the setting, and it does
 not know where your hook forks either: when `HEAD` matches `origin/HEAD` the check does not degrade,
-and the exit-42 guard below still catches a hook that forks elsewhere. A hook that *does* fork from
-`HEAD` proves itself: once a dispatch has left a clean agent worktree under `.claude/worktrees/`
-sitting at the current `HEAD`, the check observes it and lifts the degrade with
-`reason: "fork-from-head-observed"` (#4868), remembered per `HEAD` in `.gsd/harness-fork-probe.json`
-until `HEAD` moves. For a measured verdict now, pass the
-commit a hook-created worktree starts at as `--observed-fork-base` (described next), or remove the
-hook. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK
+and the exit-42 guard below still catches a hook that forks elsewhere. A hook cannot prove itself by
+leaving a worktree behind: the #4868 observation looks for a clean agent worktree under
+`.claude/worktrees/` sitting at the current `HEAD`, but nothing on disk records *which* creator left
+it there, so one the plain harness created before you configured the hook — with `HEAD` unmoved
+since — would read as evidence for the hook. The check therefore does not consult that observation
+once a hook is in the path (#4881). To get a trusted verdict, pass the commit a hook-created
+worktree starts at as `--observed-fork-base` (described next), or remove the hook. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK
 registrations are not visible to the check; there the exit-42 guard below is the backstop.
 
 If you have a real measurement of what a worktree on this host forked from (`git rev-parse HEAD`
