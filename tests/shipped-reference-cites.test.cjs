@@ -194,7 +194,17 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 // exercises nothing of. Unescaping it would enrol the suite silently; verified against
 // `gen-platform-conformance-tier.cjs --check`, both tiers, list matches.)
 const BARE_POINTER_RE = /@gsd-core\/references\/(\S+)/g;
-const INSTALLED_POINTER_RE = /@~\/\.claude\/gsd-core\/references\/(\S+)/g;
+// BOTH installed-path spellings. `@$HOME/.claude/` is not a typo for `@~/.claude/` — the installer
+// rewrites it explicitly (`applyAgentPathRewritesInner`, src/runtime-artifact-conversion.cts, the
+// `/\$HOME\/\.claude\//g` replace beside the `~/.claude/` one), so it resolves exactly as the tilde
+// form does. It reached NEITHER half of this gate until now: not refused, because it is not broken,
+// and not existence-checked, because the matcher did not recognise it. A dead pointer written that
+// way was therefore invisible here. Census at this tree, `@~` / bare / `@$HOME` per shipped root:
+//   agents 154/0/0 · workflows 97/67/6 · references 10/1/0 · templates 3/0/0 · commands 37/0/3 ·
+//   contexts 0/0/0 · capabilities 0/0/0
+// Zero in agents/ today, which is why nothing was failing — an enumeration falls behind its domain
+// silently, and `agents/` acquiring its first one needs no change to this file to become reachable.
+const INSTALLED_POINTER_RE = /@(?:~|\$HOME)\/\.claude\/gsd-core\/references\/(\S+)/g;
 const REFERENCE_NAME_RE = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
 const TRAILING_PROSE_RE = /[.,;:!?)\]}>"'`*]+$/;
 
@@ -346,6 +356,34 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       'a nested installed-path include is existence-checked by its nested name',
     );
     assert.deepEqual(findBareIncludes('@gsd-core/references/./x.md'), [], 'a dot segment is not a reference name');
+  });
+
+  // The third installed-path spelling. The installer rewrites `$HOME/.claude/` exactly as it rewrites
+  // `~/.claude/`, so a pointer written this way resolves — and until this round it reached neither the
+  // refusal half nor the existence half of this gate. Zero occurrences in agents/ today; the point is
+  // that the enumeration now covers the domain rather than the corpus that happens to exist.
+  test('#4841 gate unit: the $HOME installed-path spelling is followed like the tilde form', () => {
+    assert.deepEqual(
+      findInstalledIncludes('recipes: @$HOME/.claude/gsd-core/references/tdd.md'),
+      ['tdd.md'],
+      'the $HOME spelling names a reference and is existence-checked',
+    );
+    assert.deepEqual(
+      findBareIncludes('recipes: @$HOME/.claude/gsd-core/references/tdd.md'),
+      [],
+      'it is an installed-path form, not the bare form — it must not be refused',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('@$HOME/.claude/gsd-core/references/few-shot-examples/verifier.md'),
+      ['few-shot-examples/verifier.md'],
+      'nested names resolve under this spelling too',
+    );
+    // It is anchored by the same grammar, so it refuses the same continuations.
+    assert.deepEqual(findInstalledIncludes('@$HOME/.claude/gsd-core/references/tdd.md/xx/yy'), []);
+    assert.deepEqual(
+      findMalformedPointers('@$HOME/.claude/gsd-core/references/tdd.md/xx/yy'),
+      ['@$HOME/.claude/gsd-core/references/tdd.md/xx/yy'],
+    );
   });
 
   // The regression the round-2 review asked for. Each case below captured a PREFIX under the previous

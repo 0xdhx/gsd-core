@@ -138,7 +138,10 @@ function referenceIncludes(content) {
   // reads a file the text does not name. The loud half lives in the gate:
   // tests/shipped-reference-cites.test.cjs REPORTS such a token in agents/, so
   // in a green tree this skip has nothing to skip.
-  const re = /@(?:~\/\.claude\/)?gsd-core\/references\/(\S+)/g;
+  // THREE spellings, not two. `@$HOME/.claude/` is a third installed-path form the installer rewrites
+  // explicitly (applyAgentPathRewritesInner's `/\$HOME\/\.claude\//g` replace, beside the `~/.claude/`
+  // one), so it resolves like the tilde form and this follower must see it or it drops a live pointer.
+  const re = /@(?:(?:~|\$HOME)\/\.claude\/)?gsd-core\/references\/(\S+)/g;
   const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
   // Trailing prose punctuation is not part of a filename — a pointer may end a
   // sentence or sit inside backticks, parentheses or bold markers. The class
