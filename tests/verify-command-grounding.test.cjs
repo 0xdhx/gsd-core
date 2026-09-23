@@ -1058,6 +1058,97 @@ describe('check verify-command-paths verb', () => {
     assert.ok(payload.readError.length > 0);
   });
 
+  // ── #4785 review: `--dir` containment ────────────────────────────────────────────────────
+  // The probe READS the directory it is handed (`readdirSync`, then `readFileSync` over every
+  // `*-PLAN.md`), so an uncontained `--dir` is an arbitrary-directory read — the same escape
+  // class this PR exists to close, on the entry point this PR itself added. Boundary cases
+  // mirror the absolute-target set the probe fix already covers: exactly-at-root, one level
+  // outside, several levels outside, and the symlink case a LEXICAL check cannot see.
+  //
+  // Every refusal assertion checks BOTH the degraded payload AND that the out-of-root plan's
+  // sentinel never appears in the output. A containment test that reads only `status` passes
+  // just as well against a probe that read the file and then discarded it.
+
+  /** A plan dir OUTSIDE any fixture root, whose `<automated>` carries a sentinel token. */
+  function outOfRootPlanDir(name, token) {
+    const dir = path.join(ROOT, `escape-target-${name}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '01-PLAN.md'), planWith([`cd /${token} && npm test`]), 'utf8');
+    return dir;
+  }
+
+  function assertRefusedAndUnread(result, token) {
+    const payload = JSON.parse(result.output);
+    assert.equal(payload.status, 'unresolvable', 'an out-of-root --dir must be unresolvable');
+    assert.deepEqual(payload.commands, [], 'no command may be reported from outside the root');
+    assert.equal(payload.counts.total, 0);
+    assert.match(String(payload.readError), /outside the project root/);
+    assert.ok(!result.output.includes(token), 'out-of-root plan content reached the payload');
+  }
+
+  test('#4785 — --dir with an ABSOLUTE target outside the project root is refused unread', () => {
+    const root = fixtureRoot('dir-flag-escape-abs');
+    const token = 'SENTINEL-ABS-4785';
+    const outside = outOfRootPlanDir('abs', token);
+    const result = runGsdTools(['check', 'verify-command-paths', '--dir', outside, '--raw'], root);
+    assertRefusedAndUnread(result, token);
+  });
+
+  test('#4785 — --dir climbing ONE level out of the project root is refused unread', () => {
+    const root = fixtureRoot('dir-flag-escape-rel1');
+    const token = 'SENTINEL-REL1-4785';
+    const outside = outOfRootPlanDir('rel1', token);
+    const rel = path.join('..', path.basename(outside));
+    const result = runGsdTools(['check', 'verify-command-paths', '--dir', rel, '--raw'], root);
+    assertRefusedAndUnread(result, token);
+  });
+
+  test('#4785 — --dir climbing SEVERAL levels out of the project root is refused unread', () => {
+    const root = fixtureRoot('dir-flag-escape-deep');
+    const token = 'SENTINEL-DEEP-4785';
+    const outside = outOfRootPlanDir('deep', token);
+    const rel = path.join('..', '..', path.basename(ROOT), path.basename(outside));
+    const result = runGsdTools(['check', 'verify-command-paths', '--dir', rel, '--raw'], root);
+    assertRefusedAndUnread(result, token);
+  });
+
+  test('#4785 — --dir EXACTLY AT the project root is contained, not refused', () => {
+    // `target === root` is contained by the canonical predicate, so the boundary is inclusive:
+    // the fix must refuse the escape without also refusing the edge that touches it.
+    const root = fixtureRoot('dir-flag-at-root');
+    fs.writeFileSync(path.join(root, '01-PLAN.md'), planWith(['npm test']), 'utf8');
+    const result = runGsdTools(['check', 'verify-command-paths', '--dir', '.', '--raw'], root);
+    assert.ok(result.success, `--dir . should succeed. stderr: ${result.error}`);
+    const payload = JSON.parse(result.output);
+    assert.equal(payload.readError, null);
+    assert.equal(payload.commands.length, 1);
+  });
+
+  test('#4785 — a SYMLINK inside the root pointing outside it is refused unread', (t) => {
+    // The discriminator between the realpath predicate and the lexical one: this path is
+    // lexically inside the root, so `tryWithinRootLexical` returns contained and the probe
+    // then reads through the link. Only a resolved-target check refuses it.
+    const root = fixtureRoot('dir-flag-escape-symlink');
+    const token = 'SENTINEL-LINK-4785';
+    const outside = outOfRootPlanDir('symlink', token);
+    const link = path.join(root, '.planning', 'quick', 'looks-inside');
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    try {
+      fs.symlinkSync(outside, link, 'dir');
+    } catch (err) {
+      if (err.code === 'EPERM' || err.code === 'ENOSYS') {
+        t.skip('creating a directory symlink requires privilege on this host');
+        return;
+      }
+      throw err;
+    }
+    const result = runGsdTools(
+      ['check', 'verify-command-paths', '--dir', path.join('.planning', 'quick', 'looks-inside'), '--raw'],
+      root,
+    );
+    assertRefusedAndUnread(result, token);
+  });
+
   test('row 45 — check verb degrades on unknown phase', () => {
     const root = fixtureRoot('row45');
     fs.mkdirSync(path.join(root, '.planning', 'phases'), { recursive: true });

@@ -1122,9 +1122,10 @@ function resolvePhaseDirOrEmpty(projectDir: string, phase: string): string {
  * `--dir` (#4767) names a directory holding `-PLAN.md` files directly, for
  * plans that live outside `.planning/phases/` — quick mode's
  * `.planning/quick/<id>/` is the motivating caller, which until #4767 never ran
- * this probe at all. The directory is resolved against the project root and
- * probed exactly as a phase directory is; `projectRoot` stays the project root
- * in both forms.
+ * this probe at all. The directory is resolved against the project root AND
+ * CONTAINED WITHIN IT — an absolute or climbing `--dir` that lands outside the
+ * root is `unresolvable`, never read — then probed exactly as a phase directory
+ * is; `projectRoot` stays the project root in both forms.
  *
  * When the phase cannot be resolved to a directory, this emits a non-throwing
  * degraded JSON payload (status/commands/counts all zeroed, `readError`
@@ -1154,7 +1155,37 @@ function cmdVerifyCommandPaths(projectDir: string, args: string[], raw: boolean)
     return;
   }
 
-  const phaseDir = dirFlag ? path.resolve(projectDir, dirFlag) : resolvePhaseDirOrEmpty(projectDir, phase);
+  // `--dir` is CALLER-SUPPLIED, so it is contained before it reaches the
+  // `readdirSync`/`readFileSync` calls in probePhaseVerifyCommands (#4785 review).
+  // Same predicate and policy as `resolvePath` above, and for the reason ADR-4650
+  // gives at the other read site: the reads below FOLLOW SYMLINKS, so containment
+  // must be decided on the resolved target, not a lexical prefix — a link inside
+  // the root pointing outside it passes `tryWithinRootLexical` and is then read.
+  // Read the value the predicate RETURNED; never re-derive the path. An escape
+  // degrades to the same non-throwing payload the unresolvable-phase arm emits,
+  // because a consumer must be able to tell "could not look" from "nothing to
+  // report" (and `error()` would collapse them).
+  let phaseDir: string;
+  if (dirFlag) {
+    const candidate = path.isAbsolute(dirFlag) ? dirFlag : path.join(projectDir, dirFlag);
+    const contained = tryWithinRoot(candidate, projectDir, PathAcceptance.AbsoluteInsideRoot);
+    if (contained === null) {
+      output(
+        {
+          status: 'unresolvable',
+          commands: [],
+          counts: { blocker: 0, warning: 0, total: 0 },
+          readError: `--dir resolves outside the project root: ${dirFlag}`,
+        },
+        raw,
+        undefined,
+      );
+      return;
+    }
+    phaseDir = contained;
+  } else {
+    phaseDir = resolvePhaseDirOrEmpty(projectDir, phase);
+  }
 
   if (!phaseDir) {
     output(
