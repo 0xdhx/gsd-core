@@ -639,7 +639,10 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.ok(!result.message.includes('--paths'),
       'no mapper command is emitted when no path can be passed safely');
     assert.ok(!result.message.includes('Auto-remap scheduled'));
-    assert.match(result.message, /every affected directory prefix was filtered as unsafe/);
+    assert.match(result.message, /every affected directory prefix was filtered as unsafe/,
+      'the explanation must name the cause that actually applies');
+    assert.ok(!result.message.includes('could be derived'),
+      'the no-derivable-prefix explanation must not be used for the filtered route');
     assert.strictEqual(result.elements.length, 2, 'the drifted paths are still enumerated');
   });
 
@@ -677,6 +680,12 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.strictEqual(result.directive, 'warn');
     assert.strictEqual(result.spawnMapper, false);
     assert.ok(!result.message.includes('Auto-remap scheduled'));
+    // The two empty-list causes get DIFFERENT explanations. Nothing was filtered here —
+    // chooseAffectedPaths discarded the empty path before the allowlist saw it — so
+    // telling the operator a prefix was "filtered as unsafe" would send them hunting
+    // for a hostile directory name that does not exist.
+    assert.match(result.message, /No affected path could be derived for the mapper/);
+    assert.ok(!result.message.includes('filtered as unsafe'));
   });
 
   test('a single safe prefix keeps auto-remap intact — the degrade is not a blanket', () => {

@@ -280,12 +280,15 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       // Filtering at this single producer covers both consumers with one call. An unsafe prefix
       // is dropped from the remediation command only; `elements` still reports its paths
       // verbatim, so the operator is told what drifted even when it cannot be auto-remapped.
-      affectedPaths = sanitizePaths(chooseAffectedPaths(elements.map((e) => e.path)));
-      // Wiring the filter in made an EMPTY `affectedPaths` reachable for the first
-      // time: `chooseAffectedPaths` returns at least one prefix per element, and
-      // before this nothing removed any, so a non-empty element list always yielded a
-      // non-empty path list. With every prefix filtered there is nothing safe to scope
-      // a remap to, and `auto-remap` degrades to `warn`.
+      const derivedPaths = chooseAffectedPaths(elements.map((e) => e.path));
+      affectedPaths = sanitizePaths(derivedPaths);
+      // An EMPTY `affectedPaths` alongside `actionRequired: true` has TWO causes, and
+      // they are not interchangeable. Filtering is the new one. The other predates it:
+      // `chooseAffectedPaths` skips a falsy path, so an empty-string entry yields an
+      // element with no derivable prefix — unreachable from `cmdVerifyCodebaseDrift`,
+      // which drops blank `git diff --name-status` lines, but reachable through this
+      // exported function. Either way there is nothing to scope a remap to, so the
+      // degrade keys on the RESULT being empty rather than on the reason.
       //
       // The degrade is on `directive`, not on `spawnMapper`, because that is what the
       // consumer reads: the execute-phase gate branches on `directive` being
@@ -302,7 +305,9 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       }
       // The RESOLVED directive, not the requested action — otherwise a degraded
       // auto-remap would still render "Auto-remap scheduled for paths:".
-      message = buildMessage(elements, affectedPaths, directive, inp.runtime);
+      message = buildMessage(
+        elements, affectedPaths, directive, inp.runtime, derivedPaths.length > 0,
+      );
     }
 
     return {
@@ -341,7 +346,15 @@ function skipped(reason: string): SkippedResult {
   };
 }
 
-function buildMessage(elements: DriftElement[], affectedPaths: string[], action: string, runtime: string | undefined): string {
+function buildMessage(
+  elements: DriftElement[],
+  affectedPaths: string[],
+  action: string,
+  runtime: string | undefined,
+  // True when prefixes WERE derived and the allowlist then removed them all. False when
+  // no prefix could be derived in the first place. Only an empty `affectedPaths` reads it.
+  prefixesWereFiltered: boolean,
+): string {
   const byCat: Record<string, string[]> = {};
   for (const e of elements) {
     if (!byCat[e.category]) byCat[e.category] = [];
@@ -367,12 +380,15 @@ function buildMessage(elements: DriftElement[], affectedPaths: string[], action:
   }
   lines.push('');
   if (affectedPaths.length === 0) {
-    // Reachable only once `sanitizePaths` is wired in: every affected directory
-    // prefix was filtered, so there is no path that can be spliced into a mapper
-    // invocation. Say so instead of emitting a command with an empty `--paths`.
+    // No path can be spliced into a mapper invocation. Report the actual cause: saying
+    // "filtered as unsafe" on the no-derivable-prefix route would tell the operator to
+    // go looking for a hostile directory name that is not there.
     lines.push(
-      'No affected path can be passed to the mapper safely — every affected directory '
-      + 'prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.',
+      prefixesWereFiltered
+        ? 'No affected path can be passed to the mapper safely — every affected directory '
+          + 'prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.'
+        : 'No affected path could be derived for the mapper from the elements above. '
+          + 'Refresh planning context by hand.',
     );
   } else if (action === 'auto-remap') {
     lines.push(`Auto-remap scheduled for paths: ${affectedPaths.join(', ')}`);

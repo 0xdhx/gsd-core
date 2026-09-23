@@ -55,12 +55,20 @@ Run /gsd:map-codebase --paths {affected_paths} to refresh planning context.
 
 `affected_paths` is filtered before it is emitted (REQ-DRIFT-04), so a directory
 prefix that is absolute, contains traversal, or carries a shell metacharacter is
-dropped from that command. When filtering leaves NO path at all, the last line is
-instead:
+dropped from that command. prefix that is absolute, contains traversal, or carries a shell metacharacter is
+dropped from that command. When no path survives to be passed at all, that last line
+is replaced by one of two, naming which of the two causes applies:
 
 ```text
 No affected path can be passed to the mapper safely — every affected directory prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.
 ```
+
+```text
+No affected path could be derived for the mapper from the elements above. Refresh planning context by hand.
+```
+
+The second is the case where no prefix could be derived in the first place, rather
+than derived and then dropped.
 
 The element list above it is unfiltered either way, so a dropped prefix is still
 named. This is also the case in which a requested `auto-remap` arrives here: with
