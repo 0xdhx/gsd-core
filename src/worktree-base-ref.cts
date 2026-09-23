@@ -566,16 +566,47 @@ export function classifyGitHead(deps?: {
  * #4588 (decision A2) — observe, from documented git metadata, whether the
  * harness forks its worktrees from the orchestrator HEAD.
  *
- * Substrate: the harness's own prior worktrees. A linked worktree under
+ * Substrate: the harness's own prior worktrees. TWO LEGS answer the question —
+ * a cache read, then a live probe on a miss — and they are not the same kind
+ * of evidence.
+ *
+ * The LIVE PROBE looks for a linked worktree under
  * `<repo>/.claude/worktrees/agent-*` that is still CLEAN (no tracked
  * modifications; untracked review notes are fine) and whose HEAD equals the
- * current orchestrator HEAD can only exist if the harness forked from HEAD
- * after that commit was made — an origin/HEAD fork would have landed on an
- * older commit once the orchestrator advanced. That combination is therefore
- * POSITIVE evidence of fork-from-HEAD, and it is the only configuration that
- * counts: every other observation (dirty worktree, different HEAD, no
- * worktrees, git failure) is inconclusive and fails closed to the caller's
- * existing flow.
+ * current orchestrator HEAD. That is POSITIVE evidence of fork-from-HEAD: an
+ * origin/HEAD fork would ordinarily have landed on an older commit once the
+ * orchestrator advanced. It is the only configuration that counts — every
+ * other observation (dirty worktree, different HEAD, no worktrees, git
+ * failure) is inconclusive and fails closed to the caller's existing flow.
+ *
+ * The CACHE leg looks at no worktree at all. It replays this function's OWN
+ * earlier conclusion for the same orchestrator HEAD, so a hit inherits whatever
+ * that earlier probe was worth and re-examines nothing — not the worktree, not
+ * even whether one still exists.
+ *
+ * EVIDENCE, NOT PROOF, AND THE LIVE PROBE FAILS IN TWO INDEPENDENT WAYS
+ * (#4921). What it reads is a worktree's PRESENT state — is it clean, where is
+ * its HEAD — and none of `worktree list --porcelain`, `status --porcelain` or
+ * `rev-parse HEAD` carries provenance.
+ *
+ *   1. It cannot say WHICH CREATOR. Where the harness is the only creator that
+ *      is a distinction without a difference; where a `WorktreeCreate` hook is
+ *      configured it is not, because a worktree the plain harness left behind
+ *      BEFORE the hook existed — with HEAD unmoved since — is
+ *      indistinguishable from one the hook made.
+ *   2. It cannot say WHAT IT WAS FORKED FROM either. A worktree created from an
+ *      older base and since `git checkout --detach`ed onto the orchestrator
+ *      HEAD is clean, sits at HEAD, and satisfies the probe identically. Note
+ *      the shape of this one precisely: the worktree's own reflog DOES retain
+ *      that original checkout, so the information is not lost — the probe just
+ *      does not consult it, and #4868 did not design it to. Inherited from
+ *      #4868 rather than introduced here, and accepted there for the no-hook
+ *      case; stated so the strength of the signal is not overread.
+ *
+ * Both are reasons the observation is inadmissible once a hook is in the
+ * creation path, and the cache leg is a third, since it re-examines nothing at
+ * all. So the caller withholds it entirely under that interlock rather than
+ * re-keying it; see `hookWithheldHeadTrust` in evaluateWorktreeBaseDegrade.
  *
  * The verdict is cached at `<cwd>/.gsd/harness-fork-probe.json` keyed by the
  * orchestrator HEAD (the decision's keying): trusted only while the

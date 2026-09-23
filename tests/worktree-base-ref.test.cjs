@@ -2418,7 +2418,7 @@ describe('#4881: the baseRef:"head" trust and the prior-worktree observation com
     assert.strictEqual(result.forkSha, ORIGIN_SHA, 'the inferred comparison still governs');
   });
 
-  test('head + harness + WorktreeCreate hook + no prior harness worktree → baseref-head-bypassed-by-hook: the observation is required on a hook host, never assumed (#4881)', () => {
+  test('head + harness + WorktreeCreate hook + no prior harness worktree → baseref-head-bypassed-by-hook: with no observation the inferred comparison governs (#4881)', () => {
     const result = evaluateWorktreeBaseDegrade({
       execGit: makeHostGit({ worktreeAtHead: false }),
       effectiveBaseRef: 'head',
