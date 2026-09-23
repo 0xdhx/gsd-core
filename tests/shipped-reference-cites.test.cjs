@@ -195,7 +195,9 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 //
 // One consequence that IS the anchor's own: the existence assertion means what it says again. Its
 // wording was weakened in an earlier round to "the name CAPTURED", because the capture need not be the
-// token's target. It is the whole token now.
+// token's target. What is validated now is the whole token less any trailing PROSE punctuation, and
+// hole 1 above is exactly the price of that qualifier — which is why the qualifier is written down
+// rather than rounded off to "the whole token".
 //
 // `check-contract-drift.cjs`'s reference-follower READS the path it matches, so it carries the same
 // anchoring AND the same containment check. Both consumers changed together; neither is safe alone.
@@ -225,10 +227,18 @@ const INSTALLED_POINTER_RE = /@(?:~|\$HOME)\/\.claude\/gsd-core\/references\/(\S
 // the SHAPE: one or MORE leading segments before `gsd-core`. One is not enough — a config dir nested
 // under the project root emits `@config/nested/gsd-core/…`, driven against `_computePathPrefix`, and a
 // single-segment pattern misses it. `+` also excludes the bare `@gsd-core/references/` form by
-// construction (it needs at least one segment BEFORE `gsd-core`), so no negative lookahead is owed and
-// the bare form stays the bare form. Zero occurrences in any shipped tree today; this covers the
-// member rather than the corpus.
-const PROJECT_REL_POINTER_RE = /@(?:[A-Za-z0-9._-]+\/)+gsd-core\/references\/(\S+)/g;
+// construction (it needs at least one segment BEFORE `gsd-core`), so the bare form stays the bare form.
+// A `.` or `..` prefix segment is refused for the same reason the NAME grammar refuses one — the
+// installer emits neither, and accepting them would let a pointer's PREFIX carry a traversal the name
+// half is careful not to.
+//
+// WHAT THIS PATTERN IS AND IS NOT. It is a SHAPE, not an enumeration of what `_computePathPrefix` can
+// emit, and the difference is the honest statement: a config dir named `config+nested` or `ümlaut`
+// emits a prefix this class does not match, because widening the class to arbitrary directory names is
+// what turns every `@scope/…` token in prose into a pointer. The trade is deliberate and the cost is
+// bounded — a prefix outside the class is simply not followed, which is the same position the gate was
+// in for ALL project-relative spellings before this round. Zero occurrences in any shipped tree today.
+const PROJECT_REL_POINTER_RE = /@(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+gsd-core\/references\/(\S+)/g;
 const REFERENCE_NAME_RE = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
 // ANCHORED AT BOTH ENDS, and the anchoring is the whole point. This tests a CUT SUFFIX, so the suffix
 // must be punctuation END TO END. An end-anchored-only `/[…]+$/` merely asks whether the suffix ENDS in
@@ -345,10 +355,12 @@ function resolvesToReferenceFile(name, root = REPO_ROOT) {
  * `tdd.md?`" are both real readings of the same bytes.
  *
  * It IS decidable, though, and the decision needs no judgement: the ambiguity only matters when BOTH
- * readings resolve. If the unstripped token also names something under `references/`, the strip picked
- * one of two live referents and the pointer is reported. If it does not — the overwhelming case, and
- * every one of the 154 live pointers — the stripped reading is the only one with a referent, so
- * preferring it is not a redirect.
+ * readings resolve. If the unstripped token also names something ON DISK at that path, the strip picked
+ * one of two live referents and the pointer is reported. (On disk, not "contained" — the probe is a
+ * plain existence check and does not establish containment; a raw token whose referent escapes the
+ * directory is still a second reading of the same bytes, and reporting it is the fail-closed answer.)
+ * If it does not — the overwhelming case, and every one of the 154 live pointers — the stripped reading
+ * is the only one with a referent, so preferring it is not a redirect.
  */
 function pointerReadingIsUnambiguous({ name, raw }, root = REPO_ROOT) {
   if (raw === name) return true;                       // nothing was stripped
@@ -676,6 +688,38 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       'and the tilde form is matched once, by its own pattern — not twice',
     );
     assert.deepEqual(findInstalledIncludes('see @.claude/gsd-core/references/tdd.md/xx/yy'), []);
+    // A `.` or `..` PREFIX segment is refused for the same reason the name grammar refuses one. The
+    // installer emits neither, and accepting them would let the prefix carry a traversal the name half
+    // is careful not to.
+    for (const dotted of [
+      '@./gsd-core/references/tdd.md',
+      '@../gsd-core/references/tdd.md',
+      '@a/../gsd-core/references/tdd.md',
+    ]) {
+      assert.deepEqual(findInstalledIncludes(dotted), [], `a dot prefix segment is not an install prefix: ${dotted}`);
+    }
+  });
+
+  // The false-positive surface, pinned so it is VISIBLE and deliberate rather than discovered. Every
+  // shape below carries a reference prefix and is reported as malformed, and for each one a reasonable
+  // author could have meant it to work. Measured across every shipped root: ZERO such tokens exist
+  // today, which is why this is a residual and not a bug — but "zero today" is exactly the argument
+  // that produced the defect this round is fixing, so it is written down instead of assumed away.
+  // If a future change makes any of these resolve, this test fails and that change is deliberate.
+  test('#4841 gate unit: the known false-positive shapes, recorded rather than discovered', () => {
+    const reported = [
+      ['@~/.claude/gsd-core/references/tdd.md\u2014see', 'an em dash as a prose boundary'],
+      ['@~/.claude/gsd-core/references/tdd.md\u3002', 'an ideographic full stop'],
+      ['@~/.claude/gsd-core/references/c++.md', 'a legal filename the name grammar does not admit'],
+      ['@~/.claude/gsd-core/references/<name>.md', 'a template placeholder in prose or a code fence'],
+    ];
+    for (const [token, why] of reported) {
+      assert.deepEqual(findInstalledIncludes(token), [], `not resolved: ${why}`);
+      assert.deepEqual(findMalformedPointers(token), [token], `reported, not silently dropped: ${why}`);
+    }
+    // The escape hatch, such as it is: put the placeholder outside the pointer prefix. Recorded here
+    // because "write it differently" is otherwise documented nowhere.
+    assert.deepEqual(findMalformedPointers('a reference under `gsd-core/references/` named <name>.md'), []);
   });
 
   // The other half of the same rule: anchoring must not cost the corpus. Every shape below is a

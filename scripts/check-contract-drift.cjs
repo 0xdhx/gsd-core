@@ -131,9 +131,14 @@ function referenceIncludes(content) {
   // folded the wrong file's text into the scanned corpus. Matching the whole
   // whitespace-delimited token and requiring it to satisfy the grammar end to
   // end closes that by construction, and for any separator spelling rather
-  // than the ones a boundary lookahead happens to enumerate. Containment under
-  // `references/` now follows too: no accepted name can carry a traversal
-  // segment, leading OR trailing.
+  // than the ones a boundary lookahead happens to enumerate.
+  //
+  // ANCHORING DOES NOT ESTABLISH CONTAINMENT, and an earlier revision of this
+  // comment said it did. The grammar's refusal of `.`/`..` segments covers the
+  // TEXTUAL half only: an intermediate component that refers outside the tree
+  // is resolved transparently on the way to the file. Containment is decided
+  // separately, below, by `tryWithinRoot` — and it has to be, because this
+  // loop READS what it resolves.
   //
   // A token that does not parse WHOLE is skipped rather than truncated — the
   // conservative half of the same rule. Skipping loses a scan the previous
@@ -149,7 +154,7 @@ function referenceIncludes(content) {
   // the project root emits `@config/nested/gsd-core/…`). The `+` keeps the bare form the bare form by
   // construction, since it needs a segment BEFORE `gsd-core`. Each spelling resolves at runtime, so
   // this follower must see all of them or it drops a live pointer.
-  const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?:[A-Za-z0-9._-]+\/)+)?gsd-core\/references\/(\S+)/g;
+  const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+)?gsd-core\/references\/(\S+)/g;
   const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
   // Trailing prose punctuation is not part of a filename — a pointer may end a
   // sentence or sit inside backticks, parentheses or bold markers. The class
