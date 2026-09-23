@@ -151,9 +151,16 @@ function referenceIncludes(content) {
   // one). The fourth is a FAMILY rather than a string: `--relative-includes` (#4377) makes a local
   // install emit project-relative includes whose prefix is DERIVED from the resolved config dir, so it
   // is matched by SHAPE — one or MORE leading segments before `gsd-core` (a config dir nested under
-  // the project root emits `@config/nested/gsd-core/…`). The `+` keeps the bare form the bare form by
-  // construction, since it needs a segment BEFORE `gsd-core`. Each spelling resolves at runtime, so
-  // this follower must see all of them or it drops a live pointer.
+  // the project root emits `@config/nested/gsd-core/…`), none of them `.` or `..`. The `+` keeps the
+  // bare form the bare form by construction, since it needs a segment BEFORE `gsd-core`.
+  //
+  // THE SHAPE IS NARROWER THAN THE FAMILY, and saying otherwise would be the overstatement this
+  // function has already had to retract once. `_computePathPrefix` can emit a prefix this character
+  // class does not match — a config dir named `config+nested` or `ümlaut` — and widening the class to
+  // arbitrary directory names is what would turn every `@scope/…` token in prose into a pointer. So a
+  // prefix outside the class is not followed, which is where this follower was for ALL
+  // project-relative spellings before #4841. The gate's own comment states the same bound; the two
+  // must not drift apart, because between them they are the only record of it.
   const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?:(?!\.\.?\/)[A-Za-z0-9._-]+\/)+)?gsd-core\/references\/(\S+)/g;
   const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
   // Trailing prose punctuation is not part of a filename — a pointer may end a
