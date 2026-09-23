@@ -115,18 +115,40 @@ function referenceIncludes(content) {
   // form (#4841) that it does not. The bare form is now refused in agents/ by
   // tests/shipped-reference-cites.test.cjs; it is followed here so a pointer
   // that slips past that gate is still scanned rather than silently dropped.
-  // Nested names are allowed (`few-shot-examples/verifier.md`); every segment starts with
-  // `[A-Za-z0-9_-]` — narrower than "non-dot", since `+x.md` and `é.md` do not match either — so a
-  // `.`/`..` segment is never a name and a LEADING traversal cannot match.
-  // STATED BOUND: the pattern ends at `\.md` with no following boundary, so it matches a PREFIX of a
-  // longer path and discards the rest — `…/references/tdd.md/xx/yy` is followed as `tdd.md`, a real
-  // file and not the one the text names. It constrains where a name may START, not what the whole
-  // token resolves to; "nothing resolves outside references/" does not follow. Out of scope for
-  // #4841 — tests/shipped-reference-cites.test.cjs records what closing it would take.
-  const re = /@(?:~\/\.claude\/)?gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
+  //
+  // THE TOKEN IS CAPTURED WHOLE AND THE NAME GRAMMAR IS ANCHORED AT BOTH ENDS.
+  // Nested names are allowed (`few-shot-examples/verifier.md`); every segment
+  // starts with `[A-Za-z0-9_-]` — narrower than "non-dot", since `+x.md` and
+  // `é.md` do not match either — so a `.` or `..` segment is never a name.
+  // Anchoring is what makes that a statement about the whole pointer rather
+  // than about its first few segments: an earlier form of this pattern ended
+  // at `\.md` with no following boundary, so `…/references/tdd.md/xx/yy` was
+  // followed as `tdd.md`, and THIS FUNCTION'S CALLER READS THE PATH IT
+  // RETURNS — `fs.readFileSync` in main()'s agent loop — so a truncated prefix
+  // folded the wrong file's text into the scanned corpus. Matching the whole
+  // whitespace-delimited token and requiring it to satisfy the grammar end to
+  // end closes that by construction, and for any separator spelling rather
+  // than the ones a boundary lookahead happens to enumerate. Containment under
+  // `references/` now follows too: no accepted name can carry a traversal
+  // segment, leading OR trailing.
+  //
+  // A token that does not parse WHOLE is skipped rather than truncated — the
+  // conservative half of the same rule. Skipping loses a scan the previous
+  // behaviour did not perform correctly anyway, where following the prefix
+  // reads a file the text does not name. The loud half lives in the gate:
+  // tests/shipped-reference-cites.test.cjs REPORTS such a token in agents/, so
+  // in a green tree this skip has nothing to skip.
+  const re = /@(?:~\/\.claude\/)?gsd-core\/references\/(\S+)/g;
+  const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
+  // Trailing prose punctuation is not part of a filename — a pointer may end a
+  // sentence or sit inside backticks, parentheses or bold markers. The class
+  // cannot eat into `.md`, which ends at `d`.
+  const trailingProse = /[.,;:!?)\]}>"'`*]+$/;
   let m;
   while ((m = re.exec(content)) !== null) {
-    seen.add('gsd-core/references/' + m[1]);
+    const candidate = m[1].replace(trailingProse, '');
+    if (!name.test(candidate)) continue;
+    seen.add('gsd-core/references/' + candidate);
   }
   return [...seen];
 }

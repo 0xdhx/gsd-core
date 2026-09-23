@@ -153,74 +153,98 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 // a scope note that names only the workflow tree reads as an exhaustive one.
 
 // A reference name is one or more path segments, each starting with `[A-Za-z0-9_-]` (NOT merely
-// "a non-dot character" — `+x.md` and `é.md` do not match either), so a `.` or `..` segment is never
-// a name: a LEADING traversal (`references/../../README.md`) cannot match.
+// "a non-dot character" — `+x.md` and `é.md` do not match either), the last ending `.md`.
 //
-// STATED BOUND, because the stronger claim is the tempting one and it is false. These patterns end
-// at `\.md` with no following boundary, so on a longer token they match as far as the name grammar
-// reaches and discard the rest: `…/references/tdd.md/xx/yy` captures `tdd.md`, and the existence
-// check below then validates a file the pointer does not actually name. (The truncation is not
-// unconditional. The capture runs to the FURTHEST `.md` reachable through valid segments, and
-// intermediate segments need NOT end in `.md`: `…/references/a.md/b.md` and `…/tdd.md/xx/yy.md`
-// are both captured WHOLE. It truncates only when no later `.md` is reachable — `tdd.md/xx/yy`
-// gives `tdd.md` because nothing after it can end a name, and `tdd.md/.hidden/y.md` gives `tdd.md`
-// because `.hidden` is not a valid segment.) So this grammar constrains where a name may START, not
-// what the whole token resolves to, and "nothing resolves outside references/" does NOT follow from
-// it. Both consumers are author-time tooling — a lint gate and a drift checker — so nothing here
-// resolves at product runtime. The cost is NOT purely a false GREEN, though:
-// check-contract-drift.cjs READS the matched path (`fs.readFileSync` in its agent loop), so a
-// truncated prefix folds the wrong file's text into the scanned corpus, and because the existence
-// check below proves no containment, a path under references/ that is itself a link to a target
-// outside it would be followed out by that same read. (Phrased without the s-word on purpose:
-// gen-platform-conformance-tier.cjs keys a tier on /\bsymlink/i over whole file CONTENT, so the
-// literal in a prose comment enrols this suite in the cross-platform matrix. It exercises no such
-// behaviour; do not reword it back.)
-// Closing it needs a boundary assertion after the name AND a ruling on that existence check, which
-// establishes neither `regular file` nor containment. A boundary after the name is addable and its
-// corpus cost is measurable; which boundary is CORRECT is not settled here — four attempts to settle
-// it in one sentence were each refuted in review, so what follows is the measurements themselves.
-// What was driven, against the 154 live `agents/` pointers and six continuation probes (`x.md/y`,
-// `x.md./y`, `x.mdx/y`, a backslash, `%2f`, U+2044):
-//   (?![A-Za-z0-9._/-])                  closes 3 of 6, keeps 150 — drops the 4 pointers followed
-//                                        by a sentence-ending `.`, which is in its own deny class
-//   (?=$|\s)                             closes 6 of 6, keeps 146
-//   (?=$|\s|[\x60*)]|\.(?=$|\s))          closes 6 of 6, keeps 154
-//   (?![A-Za-z0-9_/-]|\\|%(?:2[fF]|5[cC])|\u2044|\.(?=[A-Za-z0-9._/-]))
-//                                        closes 6 of 6, keeps 154, and still admits `,` `;` `:`
-//                                        quotes `]` `?` and an en or em dash after the name. An
-//                                        ASCII `-` is DENIED — it sits in that row's own deny class
-// The last shape closes every continuation probed here, so it is a live candidate rather than a
-// strawman. It does not close the CLASS: driven at this tree it still yields a prefix match on
-// U+2215, U+FF0F, U+29F8, U+FF3C, a double-encoded `%252f`, `%2e%2e`, a tab and U+0085. Which
-// separator spellings a boundary must deny is the open question, and the existence check above
-// raises the same question from the other side. Both are out of scope for #4841; a follow-up issue
-// is owed for them and is not yet filed.
-const BARE_INCLUDE_RE = /@gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
-const INSTALLED_INCLUDE_RE = /@~\/\.claude\/gsd-core\/references\/((?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md)/g;
+// THE SCAN CAPTURES THE WHOLE TOKEN AND THE GRAMMAR IS ANCHORED AT BOTH ENDS. The first form of these
+// patterns ended at `\.md` with no following boundary, so on a longer token they matched as far as the
+// grammar could reach and discarded the rest: `…/references/tdd.md/xx/yy` captured `tdd.md`, and the
+// existence check below then validated a file the pointer does not name.
+//
+// The fix is deliberately NOT a boundary lookahead, and that choice is the point. A lookahead has to
+// ENUMERATE the separators it denies, so it is only ever as complete as its own list: `\`, `%2f`,
+// U+2044, U+2215, U+FF0F, U+29F8, U+FF3C, a double-encoded `%252f` and `%2e%2e` were each driven
+// against candidate lookaheads and each needed its own clause, and every shape that closed the probed
+// set still admitted some unprobed one. The enumeration is open, so no lookahead closes the class.
+// Anchoring does. These patterns capture the whole whitespace-delimited token and require it to satisfy
+// the name grammar END TO END; whatever follows the name is then INSIDE the token and fails the anchor,
+// whatever it is spelled as. A token that does not satisfy the grammar is REPORTED as malformed, never
+// silently truncated to the prefix that does.
+//
+// Three consequences, all of which were open in the previous form:
+//   - A TRAILING traversal is refused: `…/references/tdd.md/../../README.md` is one token and `..` is
+//     not a valid segment, so it is malformed. (A LEADING traversal was already unmatched; it is now
+//     reported rather than ignored.) Containment under `references/` therefore holds STRUCTURALLY — no
+//     accepted name can contain a `.` or `..` segment — which the previous form could not claim.
+//   - The existence assertion means what it says again. The previous round had to weaken its wording to
+//     "the name CAPTURED", because the capture need not be the token's target. It is the whole token now.
+//   - `check-contract-drift.cjs`'s reference-follower reads the path it matches, so the same anchoring
+//     is what stops it folding the wrong file's text into the corpus it scans. Both consumers changed
+//     together; neither is safe on its own.
+//
+// Trailing prose punctuation is stripped before validation, because a pointer ending a sentence — or sitting
+// inside backticks, parentheses or bold markers — is a pointer, not a filename ending in `.` or `` ` ``.
+// The stripped class cannot eat into `.md` (that ends at `d`), so no real name is shortened by it. The
+// residual this leaves is bounded and in the SAFE direction: a genuine filename whose last character is
+// one of these would be read one character short and then fail to exist, which is a loud failure, where
+// the defect being fixed was a silent pass.
+//
+// (Keep `\bsymlink` spelled with its escape in the line below. gen-platform-conformance-tier.cjs keys a
+// tier on that pattern over whole file CONTENT, and the leading `\b` is what excludes a mid-word
+// embedding — so the escaped spelling is why this file is NOT enrolled in the cross-platform matrix it
+// exercises nothing of. Unescaping it would enrol the suite silently; verified against
+// `gen-platform-conformance-tier.cjs --check`, both tiers, list matches.)
+const BARE_POINTER_RE = /@gsd-core\/references\/(\S+)/g;
+const INSTALLED_POINTER_RE = /@~\/\.claude\/gsd-core\/references\/(\S+)/g;
+const REFERENCE_NAME_RE = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
+const TRAILING_PROSE_RE = /[.,;:!?)\]}>"'`*]+$/;
 
-/** Bare `@gsd-core/references/<name>` includes — the form no installer rewrite reaches. */
-function findBareIncludes(text) {
-  const found = [];
-  let m;
-  while ((m = BARE_INCLUDE_RE.exec(text)) !== null) found.push(m[0]);
-  return found;
+/**
+ * The reference name a pointer token denotes, or `null` when the token is not one.
+ * Trailing prose punctuation is stripped; what remains must satisfy the name grammar WHOLE.
+ */
+function referenceNameOf(token) {
+  const name = token.replace(TRAILING_PROSE_RE, '');
+  return REFERENCE_NAME_RE.test(name) ? name : null;
 }
 
 /**
- * Installed-path `@~/.claude/gsd-core/references/<name>` includes — the name the matcher
- * CAPTURED. Per the STATED BOUND above that is not necessarily the target the text names. The
- * grammar is greedy over `<seg>/` segments, so the capture runs to the FURTHEST `.md` reachable
- * through valid segments — intermediate ones need NOT end in `.md`, so `a.md/b.md` and
- * `tdd.md/xx/yy.md` are captured whole. It falls short only when no later `.md` is reachable:
- * `tdd.md/xx/yy` gives `tdd.md` because nothing after it can end a name, `tdd.md/.hidden/y.md`
- * gives `tdd.md` because `.hidden` is not a valid segment. So a caller resolving this value is
- * resolving what the matcher could reach, which on a continuing token may be a prefix.
+ * Scan `text` for one pointer spelling. Returns `{ names, malformed }` — the well-formed reference
+ * names, and the raw tokens that carry the pointer prefix but do not denote a reference name. The
+ * loop runs to `null` on purpose: that is what resets the shared `/g` regex's `lastIndex` between files.
+ */
+function scanPointers(text, re) {
+  const names = [];
+  const malformed = [];
+  re.lastIndex = 0;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const name = referenceNameOf(m[1]);
+    if (name === null) malformed.push(m[0]);
+    else names.push(name);
+  }
+  return { names, malformed };
+}
+
+/** Bare `@gsd-core/references/<name>` includes — the form no installer rewrite reaches. */
+function findBareIncludes(text) {
+  return scanPointers(text, BARE_POINTER_RE).names.map((n) => `@gsd-core/references/${n}`);
+}
+
+/**
+ * Installed-path `@~/.claude/gsd-core/references/<name>` includes — the reference name each pointer
+ * NAMES. Per the anchoring above this is the whole token, not a prefix of it, so a caller resolving
+ * this value resolves what the text actually says.
  */
 function findInstalledIncludes(text) {
-  const found = [];
-  let m;
-  while ((m = INSTALLED_INCLUDE_RE.exec(text)) !== null) found.push(m[1]);
-  return found;
+  return scanPointers(text, INSTALLED_POINTER_RE).names;
+}
+
+/** Tokens carrying a reference-pointer prefix that do not denote a reference name, either spelling. */
+function findMalformedPointers(text) {
+  return [
+    ...scanPointers(text, BARE_POINTER_RE).malformed,
+    ...scanPointers(text, INSTALLED_POINTER_RE).malformed,
+  ];
 }
 
 function walkAgentMarkdown() {
@@ -249,7 +273,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
     );
   });
 
-  test('#4841 gate: the name captured from every installed-path @-include in agents/ exists', () => {
+  test('#4841 gate: every installed-path @-include in agents/ names a reference that exists', () => {
     const missing = [];
     for (const { rel, abs } of walkAgentMarkdown()) {
       // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
@@ -260,7 +284,30 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
         }
       }
     }
-    assert.deepEqual(missing, [], 'The name captured from each installed-path include must exist. Per the STATED BOUND above this is the CAPTURE, not necessarily the whole token:\n' + missing.join('\n'));
+    assert.deepEqual(missing, [], 'Installed-path includes must name files that exist:\n' + missing.join('\n'));
+  });
+
+  // The gate that makes the assertion above mean what it says. Without it, a token the name grammar
+  // cannot parse WHOLE would have to be either silently dropped or silently truncated to a prefix —
+  // and the truncated prefix is a real file, so the existence check passes over a pointer that names
+  // nothing. Reporting is the third option and the only honest one: the pointer is in the shipped
+  // text, it does not denote a reference, and a human should look at it.
+  test('#4841 gate: every reference pointer in agents/ denotes a whole reference name', () => {
+    const malformed = [];
+    for (const { rel, abs } of walkAgentMarkdown()) {
+      // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
+      const text = fs.readFileSync(abs, 'utf-8');
+      for (const token of findMalformedPointers(text)) {
+        malformed.push(`${rel}: ${token} — carries a reference-pointer prefix but does not name a reference`);
+      }
+    }
+    assert.deepEqual(
+      malformed,
+      [],
+      'A reference pointer must name a reference WHOLE — one or more `[A-Za-z0-9_-]`-initial segments '
+        + 'ending `.md`. A token that continues past the name resolves somewhere other than where it reads:\n'
+        + malformed.join('\n'),
+    );
   });
 
   test('#4841 gate: the agents/ scan is not vacuous — it reaches the four agents the defect lived in', () => {
@@ -298,11 +345,61 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       ['few-shot-examples/verifier.md'],
       'a nested installed-path include is existence-checked by its nested name',
     );
-    assert.deepEqual(
-      findInstalledIncludes('@~/.claude/gsd-core/references/../../README.md'),
-      [],
-      'a LEADING traversal segment is not a reference name; what a TRAILING one does is the STATED BOUND above',
-    );
     assert.deepEqual(findBareIncludes('@gsd-core/references/./x.md'), [], 'a dot segment is not a reference name');
+  });
+
+  // The regression the round-2 review asked for. Each case below captured a PREFIX under the previous
+  // patterns — `tdd.md`, a real file — so each one passed the existence check while naming something
+  // else. Anchoring the grammar at both ends is what turns every one of them into a reported token.
+  test('#4841 gate unit: a token that continues past the name is malformed, never truncated to a prefix', () => {
+    const continuations = [
+      ['@~/.claude/gsd-core/references/tdd.md/xx/yy', 'a path segment that cannot end a name'],
+      ['@~/.claude/gsd-core/references/tdd.md/../../README.md', 'a TRAILING traversal — the case the prior round could not refuse'],
+      ['@~/.claude/gsd-core/references/tdd.md/.hidden/y.md', 'a dot-initial segment mid-path'],
+      ['@~/.claude/gsd-core/references/tdd.md\\xx', 'a backslash separator'],
+      ['@~/.claude/gsd-core/references/tdd.md%2fxx', 'a percent-encoded separator'],
+      ['@~/.claude/gsd-core/references/tdd.md%252fxx', 'a DOUBLE-encoded separator'],
+      ['@~/.claude/gsd-core/references/tdd.md%2e%2e/xx', 'an encoded traversal'],
+      ['@~/.claude/gsd-core/references/tdd.md⁄xx', 'U+2044 FRACTION SLASH'],
+      ['@~/.claude/gsd-core/references/tdd.md∕xx', 'U+2215 DIVISION SLASH'],
+      ['@~/.claude/gsd-core/references/tdd.md／xx', 'U+FF0F FULLWIDTH SOLIDUS'],
+      ['@~/.claude/gsd-core/references/tdd.md⧸xx', 'U+29F8 BIG SOLIDUS'],
+      ['@~/.claude/gsd-core/references/tdd.md＼xx', 'U+FF3C FULLWIDTH REVERSE SOLIDUS'],
+      ['@~/.claude/gsd-core/references/tdd.mdx/xx', 'a longer extension'],
+      ['@~/.claude/gsd-core/references/../../README.md', 'a LEADING traversal — unmatched before, reported now'],
+    ];
+    for (const [token, why] of continuations) {
+      assert.deepEqual(findInstalledIncludes(token), [], `must capture no name: ${why}`);
+      assert.deepEqual(findMalformedPointers(token), [token], `must be reported as malformed: ${why}`);
+    }
+    // The bare spelling is anchored by the same grammar, so it refuses the same shapes.
+    assert.deepEqual(findBareIncludes('@gsd-core/references/tdd.md/xx/yy'), []);
+    assert.deepEqual(
+      findMalformedPointers('@gsd-core/references/tdd.md/xx/yy'),
+      ['@gsd-core/references/tdd.md/xx/yy'],
+    );
+  });
+
+  // The other half of the same rule: anchoring must not cost the corpus. Every shape below is a
+  // legitimate pointer that a boundary LOOKAHEAD would have dropped from the scan — a silent loss of
+  // coverage, which is the failure direction a gate can least afford.
+  test('#4841 gate unit: anchoring keeps the pointers the corpus actually contains', () => {
+    const kept = [
+      ['@~/.claude/gsd-core/references/tdd.md', 'bare, end of input'],
+      ['see @~/.claude/gsd-core/references/tdd.md now', 'mid-sentence'],
+      ['see @~/.claude/gsd-core/references/tdd.md.', 'ending a sentence'],
+      ['see `@~/.claude/gsd-core/references/tdd.md`', 'inside backticks'],
+      ['see (@~/.claude/gsd-core/references/tdd.md)', 'inside parentheses'],
+      ['see **@~/.claude/gsd-core/references/tdd.md**', 'inside bold markers'],
+      ['see @~/.claude/gsd-core/references/tdd.md, and', 'followed by a comma'],
+      ['see [@~/.claude/gsd-core/references/tdd.md]', 'inside brackets'],
+      ['col\t@~/.claude/gsd-core/references/tdd.md\tcol', 'tab-delimited'],
+    ];
+    for (const [text, why] of kept) {
+      assert.deepEqual(findInstalledIncludes(text), ['tdd.md'], `must still resolve: ${why}`);
+      assert.deepEqual(findMalformedPointers(text), [], `must not be reported malformed: ${why}`);
+    }
+    // A nested name that is well-formed to its END is captured WHOLE, not truncated at the first `.md`.
+    assert.deepEqual(findInstalledIncludes('@~/.claude/gsd-core/references/a.md/b.md'), ['a.md/b.md']);
   });
 });
