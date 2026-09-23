@@ -28,8 +28,10 @@
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
+// createTempDir/cleanup rather than raw mkdtempSync/rmSync: cleanup() carries the Windows-EBUSY
+// retry budget and refuses any path outside a recognised temp root (local/no-raw-rmsync-in-tests).
+const { createTempDir, cleanup } = require('./helpers.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
@@ -449,7 +451,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
   // nothing in the real tree distinguishes `existsSync` from `lstatSync().isFile()`, which is exactly
   // why the weaker form survived authoring. A directory named `<x>.md` is the cheapest case that does.
   test('#4841 gate unit: a pointer target must be a regular file, not merely present', () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4841-refs-'));
+    const root = createTempDir('gsd-4841-refs-');
     try {
       const refs = path.join(root, 'gsd-core', 'references');
       fs.mkdirSync(refs, { recursive: true });
@@ -467,7 +469,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
         'a DIRECTORY named <x>.md satisfies existsSync and must not satisfy this check — the whole point',
       );
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      cleanup(root);
     }
   });
 
