@@ -128,8 +128,7 @@ const MSG_UNKNOWN = `⚠ Cannot determine the worktree fork base (origin/HEAD un
 // Mode-neutral on purpose: the observation can come from a harness-created OR a
 // GSD-created worktree, and the message must not attribute the miss to "the harness"
 // when GSD's own `git worktree add` was the creator (P4.6 review, 2026-09-14).
-function buildMsgBaserefHeadIgnored(headSha: string | null, forkRef: string | null, forkSha: string | null): string {
-  void forkRef;
+function buildMsgBaserefHeadIgnored(headSha: string | null, forkSha: string | null): string {
   return `⚠ Worktree base mismatch: worktree.baseRef:"head" is set, but a worktree created for this dispatch was observed to fork from ${shortSha(forkSha)} while HEAD is ${shortSha(headSha)} — the worktree was not forked from HEAD despite the setting. Running this phase sequentially on the main working tree. Parallel worktrees return once a fresh dispatch is observed to fork from HEAD, or once HEAD is merged/pushed so the default fork base matches it. See #3659, #4588.`;
 }
 
@@ -950,7 +949,7 @@ export function evaluateWorktreeBaseDegrade(deps?: {
     // Reachable only with an observation (a. returned otherwise): the setting
     // asked for HEAD and the measured fork base is something else — the
     // existing degrade-and-warn, now reporting a measurement (#4588).
-    const message = buildMsgBaserefHeadIgnored(headSha, forkRef, forkSha);
+    const message = buildMsgBaserefHeadIgnored(headSha, forkSha);
     return { shouldDegrade: true, reason: 'baseref-head-ignored-by-harness', message, headSha, forkRef, forkSha, headAbsenceVerified: null };
   }
   const message = buildMsgDiverged(headSha, forkRef, forkSha);
