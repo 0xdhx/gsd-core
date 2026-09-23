@@ -35,6 +35,9 @@
 
 const fs   = require('fs');
 const path = require('path');
+// The repo's ONE containment decision (ADR-4650, src/security.cts) — realpath-resolved, so an
+// intermediate component referring outside the root is refused before this loop reads the file.
+const { tryWithinRoot } = require('../gsd-core/bin/lib/security.cjs');
 
 function resolveRoot(argv) {
   const idx = argv.indexOf('--root');
@@ -138,10 +141,14 @@ function referenceIncludes(content) {
   // reads a file the text does not name. The loud half lives in the gate:
   // tests/shipped-reference-cites.test.cjs REPORTS such a token in agents/, so
   // in a green tree this skip has nothing to skip.
-  // THREE spellings, not two. `@$HOME/.claude/` is a third installed-path form the installer rewrites
+  // FOUR spellings. `@$HOME/.claude/` is a second installed-path form the installer rewrites
   // explicitly (applyAgentPathRewritesInner's `/\$HOME\/\.claude\//g` replace, beside the `~/.claude/`
-  // one), so it resolves like the tilde form and this follower must see it or it drops a live pointer.
-  const re = /@(?:(?:~|\$HOME)\/\.claude\/)?gsd-core\/references\/(\S+)/g;
+  // one). The fourth is a FAMILY rather than a string: `--relative-includes` (#4377) makes a local
+  // install emit project-relative includes whose prefix is DERIVED from the resolved config dir, so it
+  // is matched by SHAPE — one leading segment that is not `gsd-core` itself, which keeps the bare form
+  // the bare form. Each resolves at runtime, so this follower must see all four or it drops a live
+  // pointer.
+  const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?!gsd-core\/)[A-Za-z0-9._-]+\/)?gsd-core\/references\/(\S+)/g;
   const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
   // Trailing prose punctuation is not part of a filename — a pointer may end a
   // sentence or sit inside backticks, parentheses or bold markers. The class
@@ -214,7 +221,17 @@ function main() {
     const includeTexts = [];
     for (const refRelPath of referenceIncludes(content)) {
       try {
-        includeTexts.push(fs.readFileSync(path.join(ROOT, refRelPath), 'utf-8'));
+        // CONTAIN BEFORE READ. The name grammar refuses `.`/`..` segments, which covers the TEXTUAL
+        // half of containment and nothing else: an intermediate path component that refers outside
+        // the tree is resolved transparently on the way to the file, so a textually-clean name can
+        // still address something outside `references/`. This loop READS what it resolves and folds
+        // the text into the scanned corpus, so the real path is what has to be checked.
+        const refsDir = path.join(ROOT, 'gsd-core', 'references');
+        const contained = tryWithinRoot(refRelPath.slice('gsd-core/references/'.length), refsDir);
+        if (contained === null) continue;
+        // Read the ContainedPath the predicate returned, never a re-joined path (ADR-4650).
+        if (!fs.lstatSync(contained).isFile()) continue;
+        includeTexts.push(fs.readFileSync(contained, 'utf-8'));
       } catch {
         // include miss — lint-command-contract rule 4 owns @-ref existence
       }

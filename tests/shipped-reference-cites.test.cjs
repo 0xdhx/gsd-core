@@ -32,6 +32,9 @@ const path = require('node:path');
 // createTempDir/cleanup rather than raw mkdtempSync/rmSync: cleanup() carries the Windows-EBUSY
 // retry budget and refuses any path outside a recognised temp root (local/no-raw-rmsync-in-tests).
 const { createTempDir, cleanup } = require('./helpers.cjs');
+// The repo's ONE containment decision (ADR-4650, src/security.cts). Realpath-resolved, so an
+// intermediate component referring outside the root is refused — which a file-type check cannot see.
+const { tryWithinRoot } = require('../gsd-core/bin/lib/security.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 
@@ -168,34 +171,41 @@ describe('#3576 gate: shipped reference citations resolve', () => {
 // U+2044, U+2215, U+FF0F, U+29F8, U+FF3C, a double-encoded `%252f` and `%2e%2e` were each driven
 // against candidate lookaheads and each needed its own clause, and every shape that closed the probed
 // set still admitted some unprobed one. The enumeration is open, so no lookahead closes the class.
-// Anchoring does. These patterns capture the whole whitespace-delimited token and require it to satisfy
-// the name grammar END TO END; whatever follows the name is then INSIDE the token and fails the anchor,
-// whatever it is spelled as. A token that does not satisfy the grammar is REPORTED as malformed, never
-// silently truncated to the prefix that does.
+// Anchoring closes it for every SEPARATOR spelling, probed or not: whatever follows the name is inside
+// the token and fails the anchor. A token that does not satisfy the grammar is REPORTED as malformed,
+// never silently truncated to the prefix that does.
 //
-// Three consequences, all of which were open in the previous form:
-//   - A TRAILING traversal is refused: `…/references/tdd.md/../../README.md` is one token and `..` is
-//     not a valid segment, so it is malformed. (A LEADING traversal was already unmatched; it is now
-//     reported rather than ignored.) Containment under `references/` therefore holds STRUCTURALLY — no
-//     accepted name can contain a `.` or `..` segment — which the previous form could not claim.
-//   - The existence assertion means what it says again. The previous round had to weaken its wording to
-//     "the name CAPTURED", because the capture need not be the token's target. It is the whole token now.
-//   - `check-contract-drift.cjs`'s reference-follower reads the path it matches, so the same anchoring
-//     is what stops it folding the wrong file's text into the corpus it scans. Both consumers changed
-//     together; neither is safe on its own.
+// WHAT ANCHORING ALONE DOES *NOT* CLOSE — two holes, both found by driving this file rather than
+// reading it, and both closed here by a SEPARATE mechanism. Do not re-collapse them into the grammar:
 //
-// Trailing prose punctuation is stripped before validation, because a pointer ending a sentence — or sitting
-// inside backticks, parentheses or bold markers — is a pointer, not a filename ending in `.` or `` ` ``.
-// The stripped class cannot eat into `.md` (that ends at `d`), so no real name is shortened by it. The
-// residual this leaves is bounded and in the SAFE direction: a genuine filename whose last character is
-// one of these would be read one character short and then fail to exist, which is a loud failure, where
-// the defect being fixed was a silent pass.
+//   1. **The trailing-prose strip is a hole in the anchor, by construction.** Punctuation has to be
+//      stripped before validation or a pointer ending a sentence stops resolving — and `tdd.md?`
+//      strips to `tdd.md`, which exists, so the gate would check a file the text does not name. That is
+//      the original defect narrowed to the stripped class, not closed. It is also not decidable by
+//      argument: on POSIX `tdd.md?` is a legal filename, so both readings are real. It IS decidable by
+//      LOOKUP, which is what `pointerReadingIsUnambiguous` does — the ambiguity only bites when BOTH
+//      readings resolve, and that is a question with an answer. The strip is MINIMAL (shortest run that
+//      yields a valid name) so the discarded suffix is the smallest claim being made.
+//   2. **Containment is not a property of the name.** The grammar refuses `.` and `..` segments, which
+//      covers the TEXTUAL half and nothing more: an intermediate path component that refers outside the
+//      tree is resolved transparently, so `linked/evil.md` is a textually-clean name addressing
+//      something outside `references/`. Real paths are what settle it — see `resolvesToReferenceFile`.
+//      An earlier revision of this comment claimed containment held "structurally" from the grammar.
+//      It does not, and a fixture proves it.
 //
-// (Keep `\bsymlink` spelled with its escape in the line below. gen-platform-conformance-tier.cjs keys a
-// tier on that pattern over whole file CONTENT, and the leading `\b` is what excludes a mid-word
-// embedding — so the escaped spelling is why this file is NOT enrolled in the cross-platform matrix it
-// exercises nothing of. Unescaping it would enrol the suite silently; verified against
-// `gen-platform-conformance-tier.cjs --check`, both tiers, list matches.)
+// One consequence that IS the anchor's own: the existence assertion means what it says again. Its
+// wording was weakened in an earlier round to "the name CAPTURED", because the capture need not be the
+// token's target. It is the whole token now.
+//
+// `check-contract-drift.cjs`'s reference-follower READS the path it matches, so it carries the same
+// anchoring AND the same containment check. Both consumers changed together; neither is safe alone.
+//
+// (This file IS enrolled in the real-OS conformance tier, deliberately — the containment fixture below
+// creates a directory link, which is platform-sensitive, and the tier is how such a test reaches a real
+// OS. gen-platform-conformance-tier.cjs keys that on a pattern matched over whole file CONTENT. An
+// earlier revision avoided the keyword to stay out of the matrix; that was right while the fixture was
+// link-free and is wrong now. If the fixture ever goes away, re-run the generator rather than assuming
+// either state: `--check` and `--target macos --check` are the arbiters.)
 const BARE_POINTER_RE = /@gsd-core\/references\/(\S+)/g;
 // BOTH installed-path spellings. `@$HOME/.claude/` is not a typo for `@~/.claude/` — the installer
 // rewrites it explicitly (`applyAgentPathRewritesInner`, src/runtime-artifact-conversion.cts, the
@@ -208,6 +218,13 @@ const BARE_POINTER_RE = /@gsd-core\/references\/(\S+)/g;
 // Zero in agents/ today, which is why nothing was failing — an enumeration falls behind its domain
 // silently, and `agents/` acquiring its first one needs no change to this file to become reachable.
 const INSTALLED_POINTER_RE = /@(?:~|\$HOME)\/\.claude\/gsd-core\/references\/(\S+)/g;
+// The FOURTH resolving spelling, and it is a FAMILY rather than a string. `--relative-includes`
+// (#4377, bin/install.js) makes a local install emit project-relative includes, and the prefix is
+// DERIVED from the resolved config dir — `.claude/` conventionally, but `--config-dir` makes it
+// anything. So this one cannot be enumerated the way the other three can, and the pattern matches
+// the SHAPE: a single leading segment that is not `gsd-core` itself. Zero occurrences in any shipped
+// tree today; it is here so the existence check covers the member rather than the corpus.
+const PROJECT_REL_POINTER_RE = /@(?!gsd-core\/)[A-Za-z0-9._-]+\/gsd-core\/references\/(\S+)/g;
 const REFERENCE_NAME_RE = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
 const TRAILING_PROSE_RE = /[.,;:!?)\]}>"'`*]+$/;
 
@@ -216,8 +233,16 @@ const TRAILING_PROSE_RE = /[.,;:!?)\]}>"'`*]+$/;
  * Trailing prose punctuation is stripped; what remains must satisfy the name grammar WHOLE.
  */
 function referenceNameOf(token) {
-  const name = token.replace(TRAILING_PROSE_RE, '');
-  return REFERENCE_NAME_RE.test(name) ? name : null;
+  // MINIMAL strip, not greedy: take the SHORTEST trailing run whose removal yields a valid name, so
+  // the reading that keeps the most of what the author wrote wins. Greedy stripping is not wrong here
+  // (the name must end `.md` either way) but minimal makes the discarded suffix the smallest possible
+  // claim, and the ambiguity check below is keyed on that suffix.
+  for (let cut = 0; cut <= token.length; cut++) {
+    const candidate = token.slice(0, token.length - cut);
+    if (cut > 0 && !TRAILING_PROSE_RE.test(token.slice(token.length - cut))) break;
+    if (REFERENCE_NAME_RE.test(candidate)) return candidate;
+  }
+  return null;
 }
 
 /**
@@ -227,15 +252,19 @@ function referenceNameOf(token) {
  */
 function scanPointers(text, re) {
   const names = [];
+  const found = [];
   const malformed = [];
   re.lastIndex = 0;
   let m;
   while ((m = re.exec(text)) !== null) {
     const name = referenceNameOf(m[1]);
     if (name === null) malformed.push(m[0]);
-    else names.push(name);
+    else {
+      names.push(name);
+      found.push({ name, raw: m[1] });   // raw carries the stripped suffix, if any
+    }
   }
-  return { names, malformed };
+  return { names, found, malformed };
 }
 
 /** Bare `@gsd-core/references/<name>` includes — the form no installer rewrite reaches. */
@@ -249,33 +278,71 @@ function findBareIncludes(text) {
  * this value resolves what the text actually says.
  */
 function findInstalledIncludes(text) {
-  return scanPointers(text, INSTALLED_POINTER_RE).names;
+  return [
+    ...scanPointers(text, INSTALLED_POINTER_RE).names,
+    ...scanPointers(text, PROJECT_REL_POINTER_RE).names,
+  ];
+}
+
+/** Same set, with each pointer's RAW token — what the ambiguity check below needs. */
+function findInstalledPointers(text) {
+  return [
+    ...scanPointers(text, INSTALLED_POINTER_RE).found,
+    ...scanPointers(text, PROJECT_REL_POINTER_RE).found,
+  ];
 }
 
 /**
- * Does `name` resolve to a regular file under `<root>/gsd-core/references/`?
+ * Does `name` resolve to a regular file whose REAL path is inside `<root>/gsd-core/references/`?
  *
- * `lstatSync().isFile()`, not `existsSync`, and the difference is the second half of what the previous
- * round disclosed as open. `existsSync` establishes only that SOMETHING is there: a DIRECTORY named
- * `<x>.md` satisfies it, and so does an entry that is itself a link to a target outside the directory —
- * so the assertion built on it would hold for a pointer that resolves nowhere useful. Anchoring the name
- * grammar closed the containment half (no accepted name can carry a traversal segment); this closes the
- * other half. `lstatSync` does not follow the last component, which is what lets the check see the entry
- * itself rather than whatever it refers to.
+ * Two checks, because each catches what the other cannot, and the first form of this shipped with only
+ * the second:
  *
- * Consequence, stated rather than left to be discovered: an entry that merely REFERS to a regular file
- * is refused too, because `isFile()` is false for it. That is the conservative direction for a gate whose
- * job is proving a pointer reaches shipped content, and it costs nothing at this tree — `gsd-core/
- * references/` holds no such entry. The unit below fixtures the DIRECTORY case only; the other is a
- * documented property of `lstatSync`, not something this suite needs to re-establish with a fixture
- * whose creation would enrol the file in the real-OS conformance tier.
+ *  - **Containment by real path.** `lstatSync` does not follow the FINAL component, so it refuses an
+ *    entry under `references/` that refers somewhere else. It says nothing about INTERMEDIATE ones: a
+ *    directory component that refers outside the tree is resolved transparently on the way to the final
+ *    entry, so `linked/evil.md` passes an `isFile()` check while its real path is outside `references/`.
+ *    Driven against a fixture and confirmed. Containment is decided by `tryWithinRoot`, this repo's one
+ *    containment predicate (ADR-4650) — realpath-resolved, so intermediate components are resolved
+ *    before the decision. The name grammar's refusal of `.`/`..` segments only ever covered the TEXTUAL
+ *    half of that, and a hand-rolled prefix compare here is refused by lint for the same reason.
+ *  - **Regular file.** `existsSync` establishes only that something is at the path — a DIRECTORY named
+ *    `<x>.md` satisfies it. `lstatSync` is deliberate: checking the entry itself rather than its target
+ *    is what keeps a final component that refers elsewhere from passing on its target's file-ness.
+ *
+ * The two compose: `lstat` rules on the last component, `realpath` on the whole path. Neither is
+ * redundant.
  */
 function resolvesToReferenceFile(name, root = REPO_ROOT) {
+  const contained = tryWithinRoot(name, path.join(root, 'gsd-core', 'references'));
+  if (contained === null) return false;   // escapes the directory — realpath-resolved, so intermediates count
   try {
-    return fs.lstatSync(path.join(root, 'gsd-core', 'references', name)).isFile();
+    // Stat the ContainedPath the predicate returned, never a re-joined path (ADR-4650): the path that
+    // was validated has to be the path that is probed, or the two can disagree.
+    return fs.lstatSync(contained).isFile();
   } catch {
-    return false;   // ENOENT and friends: absent is the same finding as not-a-file
+    return false;   // ENOENT, a broken reference, a loop: all the same finding
   }
+}
+
+/**
+ * Is this pointer's reading UNAMBIGUOUS?
+ *
+ * Only relevant when trailing prose punctuation was stripped. `tdd.md?` strips to `tdd.md`, which
+ * exists — so the gate would check a file the text does not name, which is the ROUND-2 DEFECT in
+ * miniature, narrowed to the stripped class rather than closed. It is not closable by argument: on
+ * POSIX `tdd.md?` is a legal filename, so "pointer followed by a question mark" and "file named
+ * `tdd.md?`" are both real readings of the same bytes.
+ *
+ * It IS decidable, though, and the decision needs no judgement: the ambiguity only matters when BOTH
+ * readings resolve. If the unstripped token also names something under `references/`, the strip picked
+ * one of two live referents and the pointer is reported. If it does not — the overwhelming case, and
+ * every one of the 154 live pointers — the stripped reading is the only one with a referent, so
+ * preferring it is not a redirect.
+ */
+function pointerReadingIsUnambiguous({ name, raw }, root = REPO_ROOT) {
+  if (raw === name) return true;                       // nothing was stripped
+  return !fs.existsSync(path.join(root, 'gsd-core', 'references', raw));
 }
 
 /** Tokens carrying a reference-pointer prefix that do not denote a reference name, either spelling. */
@@ -283,6 +350,7 @@ function findMalformedPointers(text) {
   return [
     ...scanPointers(text, BARE_POINTER_RE).malformed,
     ...scanPointers(text, INSTALLED_POINTER_RE).malformed,
+    ...scanPointers(text, PROJECT_REL_POINTER_RE).malformed,
   ];
 }
 
@@ -317,9 +385,18 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
     for (const { rel, abs } of walkAgentMarkdown()) {
       // allow-test-rule: source-text-is-the-product (#3576) — shipped text is the runtime contract
       const text = fs.readFileSync(abs, 'utf-8');
-      for (const name of findInstalledIncludes(text)) {
-        if (!resolvesToReferenceFile(name)) {
-          missing.push(`${rel}: @~/.claude/gsd-core/references/${name} — target is not a regular file`);
+      for (const pointer of findInstalledPointers(text)) {
+        if (!pointerReadingIsUnambiguous(pointer)) {
+          missing.push(
+            `${rel}: @~/.claude/gsd-core/references/${pointer.raw} — AMBIGUOUS: both this token and `
+              + `\`${pointer.name}\` name something under references/; the trailing punctuation cannot be `
+              + 'read as prose here',
+          );
+        } else if (!resolvesToReferenceFile(pointer.name)) {
+          missing.push(
+            `${rel}: @~/.claude/gsd-core/references/${pointer.name} — target is not a regular file `
+              + 'contained under gsd-core/references/',
+          );
         }
       }
     }
@@ -471,6 +548,101 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
     } finally {
       cleanup(root);
     }
+  });
+
+  // The three refutations the pre-push round review returned, each now a control. Every one was
+  // DRIVEN against this tree before it was believed; none is a hypothetical.
+  test('#4841 gate unit: an INTERMEDIATE directory reference cannot escape gsd-core/references/', () => {
+    const root = createTempDir('gsd-4841-contain-');
+    try {
+      const refs = path.join(root, 'gsd-core', 'references');
+      fs.mkdirSync(refs, { recursive: true });
+      fs.mkdirSync(path.join(root, 'outside'));
+      fs.writeFileSync(path.join(root, 'outside', 'evil.md'), '# evil\n');
+      fs.writeFileSync(path.join(refs, 'real.md'), '# real\n');
+      let linked = true;
+      try {
+        fs.symlinkSync(path.join(root, 'outside'), path.join(refs, 'linked'), 'dir');
+      } catch {
+        linked = false;   // a platform that refuses the fixture cannot exercise the property
+      }
+      assert.equal(resolvesToReferenceFile('real.md', root), true, 'a contained regular file still resolves');
+      if (linked) {
+        // The entry IS a regular file and lstat() on it says so — the whole point is that file-ness
+        // was never the question. Its REAL path is outside, and that is what must refuse it.
+        assert.equal(
+          fs.lstatSync(path.join(refs, 'linked', 'evil.md')).isFile(),
+          true,
+          'precondition: the fixture is exactly the case a file-type check passes',
+        );
+        assert.equal(
+          resolvesToReferenceFile('linked/evil.md', root),
+          false,
+          'an intermediate component resolving outside references/ must be refused',
+        );
+      }
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('#4841 gate unit: a stripped suffix is refused when BOTH readings resolve', () => {
+    const root = createTempDir('gsd-4841-ambig-');
+    try {
+      const refs = path.join(root, 'gsd-core', 'references');
+      fs.mkdirSync(refs, { recursive: true });
+      fs.writeFileSync(path.join(refs, 'tdd.md'), '# tdd\n');
+      const plain = { name: 'tdd.md', raw: 'tdd.md' };
+      const stripped = { name: 'tdd.md', raw: 'tdd.md?' };
+      assert.equal(pointerReadingIsUnambiguous(plain, root), true, 'nothing stripped is never ambiguous');
+      assert.equal(
+        pointerReadingIsUnambiguous(stripped, root),
+        true,
+        'only the stripped reading resolves, so preferring it is not a redirect',
+      );
+      let named = true;
+      try {
+        fs.writeFileSync(path.join(refs, 'tdd.md?'), '# literally named with the punctuation\n');
+      } catch {
+        named = false;   // a filesystem that refuses the name cannot exercise the property
+      }
+      if (named) {
+        assert.equal(
+          pointerReadingIsUnambiguous(stripped, root),
+          false,
+          'both readings resolve — the strip would pick one of two live referents, so report it',
+        );
+      }
+    } finally {
+      cleanup(root);
+    }
+  });
+
+  test('#4841 gate unit: the project-relative install spelling is followed too', () => {
+    // --relative-includes (#4377) derives its prefix from the resolved config dir, so the spelling is
+    // a family rather than a string. The matcher keys on the SHAPE; `@gsd-core/` itself is excluded so
+    // the bare form stays the bare form.
+    assert.deepEqual(
+      findInstalledIncludes('see @.claude/gsd-core/references/tdd.md'),
+      ['tdd.md'],
+      'the conventional project-relative prefix resolves',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('see @.claude-work/gsd-core/references/tdd.md'),
+      ['tdd.md'],
+      'a --config-dir prefix resolves too — the point of matching the shape',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('see @gsd-core/references/tdd.md'),
+      [],
+      'the BARE form is not a project-relative pointer — it must stay refused, not existence-checked',
+    );
+    assert.deepEqual(
+      findBareIncludes('see @.claude/gsd-core/references/tdd.md'),
+      [],
+      'and the project-relative form is not the bare form',
+    );
+    assert.deepEqual(findInstalledIncludes('see @.claude/gsd-core/references/tdd.md/xx/yy'), []);
   });
 
   // The other half of the same rule: anchoring must not cost the corpus. Every shape below is a
