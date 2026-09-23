@@ -55,7 +55,6 @@ Run /gsd:map-codebase --paths {affected_paths} to refresh planning context.
 
 `affected_paths` is filtered before it is emitted (REQ-DRIFT-04), so a directory
 prefix that is absolute, contains traversal, or carries a shell metacharacter is
-dropped from that command. prefix that is absolute, contains traversal, or carries a shell metacharacter is
 dropped from that command. When no path survives to be passed at all, that last line
 is replaced by one of two, naming which of the two causes applies:
 

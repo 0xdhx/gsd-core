@@ -1584,7 +1584,7 @@ const capabilities = {
           "auto-remap"
         ],
         "default": "warn",
-        "description": "Action taken by the codebase drift gate when the threshold is exceeded: warn (advisory message) or auto-remap (spawn gsd-codebase-mapper agent to refresh STRUCTURE.md)."
+        "description": "Action taken by the codebase drift gate when the threshold is exceeded: warn (advisory message) or auto-remap (spawn gsd-codebase-mapper agent to refresh STRUCTURE.md). auto-remap degrades to warn when no affected path survives filtering, rather than spawning an unscoped remap."
       },
       "workflow.schema_drift_gate": {
         "type": "boolean",
@@ -5074,7 +5074,7 @@ const configSchema = {
     "owner": "drift",
     "type": "enum",
     "default": "warn",
-    "description": "Action taken by the codebase drift gate when the threshold is exceeded: warn (advisory message) or auto-remap (spawn gsd-codebase-mapper agent to refresh STRUCTURE.md).",
+    "description": "Action taken by the codebase drift gate when the threshold is exceeded: warn (advisory message) or auto-remap (spawn gsd-codebase-mapper agent to refresh STRUCTURE.md). auto-remap degrades to warn when no affected path survives filtering, rather than spawning an unscoped remap.",
     "values": [
       "warn",
       "auto-remap"

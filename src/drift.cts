@@ -278,14 +278,17 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       // mapped directory whose name carries a shell metacharacter previously reached `--paths`
       // only via an added file, and now reaches it via an edit or deletion inside it too.
       // Filtering at this single producer covers both consumers with one call. An unsafe prefix
-      // is dropped from the remediation command only; `elements` still reports its paths
-      // verbatim, so the operator is told what drifted even when it cannot be auto-remapped.
+      // is dropped from the remediation command only; `elements` still reports every drifted
+      // path (posix-normalized, as it always has been), so the operator is told what drifted
+      // even when it cannot be auto-remapped.
       const derivedPaths = chooseAffectedPaths(elements.map((e) => e.path));
       affectedPaths = sanitizePaths(derivedPaths);
       // An EMPTY `affectedPaths` alongside `actionRequired: true` has TWO causes, and
       // they are not interchangeable. Filtering is the new one. The other predates it:
-      // `chooseAffectedPaths` skips a falsy path, so an empty-string entry yields an
-      // element with no derivable prefix — unreachable from `cmdVerifyCodebaseDrift`,
+      // `chooseAffectedPaths` skips a falsy path, so an empty-string entry CAN yield an
+      // element with no derivable prefix — only where the map does not already count it
+      // as mapped, since `isPathMapped('', md)` is true for any `md` containing a slash
+      // — unreachable from `cmdVerifyCodebaseDrift`,
       // which drops blank `git diff --name-status` lines, but reachable through this
       // exported function. Either way there is nothing to scope a remap to, so the
       // degrade keys on the RESULT being empty rather than on the reason.
@@ -351,9 +354,11 @@ function buildMessage(
   affectedPaths: string[],
   action: string,
   runtime: string | undefined,
-  // True when prefixes WERE derived and the allowlist then removed them all. False when
-  // no prefix could be derived in the first place. Only an empty `affectedPaths` reads it.
-  prefixesWereFiltered: boolean,
+  // Whether ANY prefix was derived, measured before the allowlist ran. Read ONLY on the
+  // empty-`affectedPaths` branch, where it is what separates "derived, then all removed"
+  // from "none derivable at all". It is deliberately not named for the former: outside
+  // that branch it is simply true, and a name asserting filtering would be wrong there.
+  prefixesWereDerived: boolean,
 ): string {
   const byCat: Record<string, string[]> = {};
   for (const e of elements) {
@@ -384,7 +389,7 @@ function buildMessage(
     // "filtered as unsafe" on the no-derivable-prefix route would tell the operator to
     // go looking for a hostile directory name that is not there.
     lines.push(
-      prefixesWereFiltered
+      prefixesWereDerived
         ? 'No affected path can be passed to the mapper safely — every affected directory '
           + 'prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.'
         : 'No affected path could be derived for the mapper from the elements above. '

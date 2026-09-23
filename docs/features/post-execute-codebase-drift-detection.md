@@ -12,7 +12,9 @@ order: 27.2
   structural elements before the gate acts.
 - `workflow.drift_action` (`warn` | `auto-remap`, default `warn`) —
   warn-only or spawn `gsd-codebase-mapper` with `--paths` scoped to
-  affected subtrees.
+  affected subtrees. `auto-remap` degrades to `warn` when no affected path
+  survives to scope the mapper with (REQ-DRIFT-04): the gate reports the
+  drift and spawns nothing rather than remapping the whole tree.
 
 **What counts as drift:**
 - New directory outside mapped paths
