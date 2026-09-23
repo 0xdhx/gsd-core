@@ -658,6 +658,27 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.match(result.message, /Refresh planning context by hand/);
   });
 
+  // The SAME degraded state is reachable without any filtering at all: an empty-string
+  // entry is skipped by chooseAffectedPaths, so it yields an element with no prefix.
+  // That route predates the filter — `cmdVerifyCodebaseDrift` cannot produce it, because
+  // it drops blank `git diff --name-status` lines, but `detectDrift` is exported and the
+  // pre-filter module answered it with directive 'auto-remap' and spawnMapper true.
+  test('an element with no usable prefix degrades too — the pre-existing empty-path route', () => {
+    const result = detectDrift({
+      addedFiles: [''],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd: '',
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.actionRequired, true);
+    assert.deepStrictEqual(result.affectedPaths, []);
+    assert.strictEqual(result.directive, 'warn');
+    assert.strictEqual(result.spawnMapper, false);
+    assert.ok(!result.message.includes('Auto-remap scheduled'));
+  });
+
   test('a single safe prefix keeps auto-remap intact — the degrade is not a blanket', () => {
     const structureMd = [
       '# Structure', '', '- `we;rm -rf /` — hostile', '- `src/` — ordinary modules', '',
