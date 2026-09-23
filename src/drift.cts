@@ -445,6 +445,12 @@ function sanitizePaths(paths: unknown): string[] {
   for (const p of paths) {
     if (typeof p !== 'string') continue;
     if (p.startsWith('/')) continue;
+    // `.` clears SAFE_PATH_RE — it is shell-safe and carries no traversal — but it
+    // denotes the whole repository, so splicing it into `--paths` produces exactly the
+    // unscoped remap this filter and the auto-remap degrade exist to prevent. It is
+    // reachable: `chooseAffectedPaths` takes the first component, so any `./x` path
+    // derives the prefix `.`. Dropping it here lets the empty-list degrade take over.
+    if (p === '.') continue;
     if (!SAFE_PATH_RE.test(p)) continue;
     out.push(p);
   }

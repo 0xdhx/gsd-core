@@ -544,6 +544,21 @@ describe('sanitizePaths', () => {
       ['apps/web', 'packages/ui'],
     );
   });
+
+  // `.` is shell-safe and carries no traversal, so the allowlist regex admits it — but it
+  // names the whole repository, and a mapper scoped to `.` is the unscoped remap the
+  // filter exists to prevent. It is reachable: chooseAffectedPaths takes the first
+  // component, so any `./x` input derives the prefix `.`.
+  test('rejects the repo-root scope', () => {
+    assert.deepStrictEqual(sanitizePaths(['.']), []);
+  });
+
+  test('still accepts paths that merely CONTAIN dots', () => {
+    assert.deepStrictEqual(
+      sanitizePaths(['.github', 'a.b', 'src/app.config.js', './src']),
+      ['.github', 'a.b', 'src/app.config.js', './src'],
+    );
+  });
 });
 
 // ─── Regression #4922 review: affectedPaths is sanitized at the producer ─────
@@ -686,6 +701,22 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     // for a hostile directory name that does not exist.
     assert.match(result.message, /No affected path could be derived for the mapper/);
     assert.ok(!result.message.includes('filtered as unsafe'));
+  });
+
+  test('a repo-root prefix degrades rather than remapping the whole tree', () => {
+    const result = detectDrift({
+      addedFiles: ['./evil.js'],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd: 'x',
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.actionRequired, true);
+    assert.deepStrictEqual(result.affectedPaths, [],
+      'chooseAffectedPaths derives "." from a ./ path; it must not survive filtering');
+    assert.strictEqual(result.directive, 'warn');
+    assert.strictEqual(result.spawnMapper, false);
   });
 
   test('a single safe prefix keeps auto-remap intact — the degrade is not a blanket', () => {
