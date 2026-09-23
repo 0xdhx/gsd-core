@@ -716,7 +716,7 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.ok(!result.message.includes('Auto-remap scheduled'));
     // The two empty-list causes get DIFFERENT explanations. Nothing was filtered here —
     // chooseAffectedPaths discarded the empty path before the allowlist saw it — so
-    // telling the operator a prefix was "filtered as unsafe" would send them hunting
+    // telling the operator a prefix was "withheld as unsafe" would send them hunting
     // for a hostile directory name that does not exist.
     assert.match(result.message, /No affected path could be derived for the mapper/);
     assert.deepStrictEqual(result.droppedPaths, []);

@@ -584,8 +584,8 @@ This gate is **non-blocking** and **never blocks, never spawns** the mapper at p
 `action_required` is false, continue silently to step 6. If `action_required` is true, print `message`
 verbatim and continue — planning proceeds whether or not the map is refreshed first. Do NOT assume how
 that message ends: under `drift_action: auto-remap` it ends with `Auto-remap scheduled for paths: …`
-even though nothing is scheduled at plan time, and where no affected path survives filtering it ends
-with a manual-refresh line instead of a `/gsd:map-codebase` pointer.
+or `Auto-remap was not run: …`, though nothing is scheduled or run at plan time, and where filtering
+withholds an affected path a line names it, replacing the `/gsd:map-codebase` pointer when nothing survives.
 (`drift_action: auto-remap` stays at `execute:wave:post`.)
 
 ## 6. Check Existing Plans
