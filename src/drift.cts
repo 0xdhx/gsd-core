@@ -424,10 +424,11 @@ function buildMessage(
   }
   if (droppedPaths.length > 0) {
     // #4923: name every withheld prefix, whether or not any other survived. Each is
-    // JSON-quoted so a space or a control character is visible and cannot break the
-    // line. The line carries no `--paths` token: it is a report, not a command.
+    // quoted by `quoteForMessage` so a space, a control character or a Unicode line
+    // separator is visible and cannot break the line. The line carries no `--paths`
+    // token: it is a report, not a command.
     lines.push(
-      `Withheld from the mapper as unsafe to pass: ${droppedPaths.map((p) => JSON.stringify(p)).join(', ')}. `
+      `Withheld from the mapper as unsafe to pass: ${droppedPaths.map(quoteForMessage).join(', ')}. `
         + `Refresh planning context for ${droppedPaths.length === 1 ? 'it' : 'them'} by hand.`,
     );
   }
@@ -442,6 +443,29 @@ function buildMessage(
     );
   }
   return lines.join('\n');
+}
+
+// JSON.stringify escapes the C0 controls, `"` and `\`, and nothing else. It leaves U+2028
+// and U+2029 literal, and many renderers break a line on them. It also leaves every other
+// invisible or look-alike character literal: the C1 controls (U+0085 is NEL), zero-width
+// and soft-hyphen break opportunities, the bidirectional marks and overrides, the BOM, and
+// the non-ASCII spaces (U+00A0, U+3000, ...) that render as a space while being a different
+// character. An enumerated escape list misses members, so escape by general category
+// instead: every control (Cc), format (Cf) and separator (Z*) code point except the ASCII
+// space becomes a `\uXXXX` escape, so a withheld prefix renders as one visible token. An
+// astral code point is written as its UTF-16 surrogate pair, so every token stays valid
+// JSON and reads back exactly. Combining marks are left alone on purpose: they render
+// visibly, and escaping them would mangle a decomposed accented name.
+const INVISIBLE_IN_MESSAGE_RE = /(?! )[\p{Cc}\p{Cf}\p{Z}]/gu;
+
+function quoteForMessage(p: string): string {
+  return JSON.stringify(p).replace(INVISIBLE_IN_MESSAGE_RE, (c) => {
+    let out = '';
+    for (let i = 0; i < c.length; i++) {
+      out += '\\u' + c.charCodeAt(i).toString(16).padStart(4, '0');
+    }
+    return out;
+  });
 }
 
 // ─── Affected paths ──────────────────────────────────────────────────────────

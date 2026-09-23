@@ -810,6 +810,41 @@ describe('detectDrift — a withheld prefix is named in the result and the messa
     );
   });
 
+  // JSON.stringify alone leaves U+2028/U+2029 literal, and every other invisible or
+  // look-alike code point unescaped: C1 controls (NEL), zero-width and soft-hyphen break
+  // opportunities, bidi marks and overrides, the BOM, non-ASCII spaces, and astral format
+  // characters. Each must render as a visible escape, and every token must read back.
+  test('invisible and look-alike code points are escaped, and each token reads back', () => {
+    const result = detectDrift({
+      addedFiles: [
+        'a\u2028b/x.ts', 'c\u2029d/x.ts', 'e\u0085f/x.ts', 'g\u202eh/x.ts',
+        'i\u200bj/x.ts', 'k\u00adl/x.ts', 'm\u061cn/x.ts', 'o\ufeffp/x.ts', 'q\u2060r/x.ts',
+        's\u3000t/x.ts', 'u\u00a0v/x.ts', 'w\u{e0001}x/x.ts', 'y z/x.ts',
+        'lib2/a.ts',
+      ],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.strictEqual(result.droppedPaths.length, 13);
+    const line = withheldLine(result.message);
+    assert.ok(!/(?! )[\p{Cc}\p{Cf}\p{Z}]/u.test(line), 'no raw invisible or look-alike code point survives');
+    // Every quoted token is valid JSON and parses back to exactly the withheld prefix,
+    // astral code points included (a `\u{...}` escape would not parse).
+    const tokens = line.match(/"(?:[^"\\]|\\.)*"/g).map((tok) => JSON.parse(tok));
+    assert.deepStrictEqual(tokens, result.droppedPaths);
+    assert.ok(line.includes('"y z"'), 'an ASCII space stays a plain space');
+    for (const esc of [
+      '"a\\u2028b"', '"c\\u2029d"', '"e\\u0085f"', '"g\\u202eh"',
+      '"i\\u200bj"', '"k\\u00adl"', '"m\\u061cn"', '"o\\ufeffp"', '"q\\u2060r"',
+      '"s\\u3000t"', '"u\\u00a0v"', '"w\\udb40\\udc01x"',
+    ]) {
+      assert.ok(line.includes(esc), `the line carries ${esc}`);
+    }
+  });
+
   test('nothing withheld: droppedPaths is empty and no withheld line is emitted', () => {
     const result = detectDrift({
       addedFiles: ['lib2/a.ts', 'lib3/b.ts'],
