@@ -308,15 +308,22 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       // an EMPTY `--paths` — an unscoped remap of the whole tree, which is not what the
       // directive asked for. Drift is still detected and still reported; only the
       // automation is withheld, and `action` still records what was requested.
-      if (action === 'auto-remap' && affectedPaths.length === 0) {
+      //
+      // #4923: the degrade fires on ANY withheld prefix, not only when none survives. A
+      // partial remap is not a smaller correct remap: on success the gate stamps
+      // STRUCTURE.md and ARCHITECTURE.md at HEAD, and the next drift check diffs from
+      // that stamp, so a withheld directory's drift would be recorded as mapped without
+      // ever being remapped, and never reported again.
+      if (action === 'auto-remap' && (affectedPaths.length === 0 || droppedPaths.length > 0)) {
         directive = 'warn';
       }
       if (directive === 'auto-remap') {
         spawnMapper = true;
       }
-      // The RESOLVED directive, not the requested action — otherwise a degraded
-      // auto-remap would still render "Auto-remap scheduled for paths:".
-      message = buildMessage(elements, affectedPaths, droppedPaths, directive, inp.runtime);
+      // The RESOLVED directive decides the remediation line — otherwise a degraded
+      // auto-remap would still render "Auto-remap scheduled for paths:". The requested
+      // action is passed too, so a degrade can say that it happened.
+      message = buildMessage(elements, affectedPaths, droppedPaths, directive, action, inp.runtime);
     }
 
     return {
@@ -363,7 +370,10 @@ function buildMessage(
   // Prefixes the allowlist withheld. On the empty-`affectedPaths` branch it is also what
   // separates "derived, then all withheld" from "none derivable at all".
   droppedPaths: string[],
+  // The RESOLVED directive. `requestedAction` is what the config asked for; they differ
+  // exactly when a requested auto-remap was degraded.
   action: string,
+  requestedAction: string,
   runtime: string | undefined,
 ): string {
   const byCat: Record<string, string[]> = {};
@@ -419,6 +429,16 @@ function buildMessage(
     lines.push(
       `Withheld from the mapper as unsafe to pass: ${droppedPaths.map((p) => JSON.stringify(p)).join(', ')}. `
         + `Refresh planning context for ${droppedPaths.length === 1 ? 'it' : 'them'} by hand.`,
+    );
+  }
+  if (requestedAction === 'auto-remap' && action !== 'auto-remap') {
+    // An operator who configured auto-remap and got a warn needs to know the automation
+    // was withheld on purpose, and why — otherwise it reads as auto-remap being broken.
+    lines.push(
+      affectedPaths.length > 0
+        ? 'Auto-remap was not run: remapping only the other paths would record the map as '
+          + 'current past the withheld ones.'
+        : 'Auto-remap was not run: no affected path can be passed to the mapper.',
     );
   }
   return lines.join('\n');

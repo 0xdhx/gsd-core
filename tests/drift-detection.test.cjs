@@ -612,7 +612,10 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     );
   });
 
-  test('an unsafe prefix reached via a DELETED file is dropped from the auto-remap paths', () => {
+  // Under auto-remap an unsafe prefix no longer reaches a SHORTER remap: any withheld
+  // prefix degrades the directive (#4923), so what must hold is that it reaches neither
+  // the mapper's path list nor the command the degraded warn prints.
+  test('an unsafe prefix reached via a DELETED file reaches no mapper path list', () => {
     const result = detectDrift({
       addedFiles: [],
       modifiedFiles: [],
@@ -621,15 +624,15 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
       threshold: 1,
       action: 'auto-remap',
     });
-    assert.strictEqual(result.spawnMapper, true);
     assert.deepStrictEqual(result.affectedPaths, ['src']);
-    const schedLine = result.message
-      .split('\n')
-      .find((l) => l.startsWith('Auto-remap scheduled for paths:'));
-    assert.ok(schedLine, 'the auto-remap message names the scheduled paths');
-    assert.ok(!schedLine.includes('rm -rf'),
-      'the unsafe prefix must not reach the auto-remap path list');
-    assert.strictEqual(schedLine, 'Auto-remap scheduled for paths: src');
+    assert.deepStrictEqual(result.droppedPaths, ['we;rm -rf ']);
+    assert.strictEqual(result.directive, 'warn');
+    assert.strictEqual(result.spawnMapper, false);
+    assert.ok(!result.message.includes('Auto-remap scheduled'));
+    const pathsLine = result.message.split('\n').find((l) => l.includes('--paths'));
+    assert.ok(!pathsLine.includes('rm -rf'),
+      'the unsafe prefix must not reach the --paths argument');
+    assert.match(pathsLine, /--paths src /);
   });
 
   // Filtering made an EMPTY affectedPaths reachable for the first time: before it was
@@ -668,6 +671,12 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     );
     assert.ok(!result.message.includes('could be derived'),
       'the no-derivable-prefix explanation must not be used for the filtered route');
+    assert.ok(
+      result.message.split('\n').includes(
+        'Auto-remap was not run: no affected path can be passed to the mapper.',
+      ),
+      'a degraded auto-remap says so, rather than reading as auto-remap being broken',
+    );
     assert.strictEqual(result.elements.length, 2, 'the drifted paths are still enumerated');
   });
 
@@ -730,13 +739,15 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.strictEqual(result.spawnMapper, false);
   });
 
-  test('a single safe prefix keeps auto-remap intact — the degrade is not a blanket', () => {
+  // The boundary: the degrade keys on a WITHHELD prefix, never on drift as such. When
+  // every derived prefix survives, auto-remap is scheduled exactly as before.
+  test('nothing withheld keeps auto-remap intact — the degrade is not a blanket', () => {
     const structureMd = [
-      '# Structure', '', '- `we;rm -rf /` — hostile', '- `src/` — ordinary modules', '',
+      '# Structure', '', '- `docs/` — documentation', '- `src/` — ordinary modules', '',
     ].join('\n');
     const result = detectDrift({
       addedFiles: [],
-      modifiedFiles: ['we;rm -rf /a.py', 'src/app/main.py'],
+      modifiedFiles: ['docs/guide.md', 'src/app/main.py'],
       deletedFiles: [],
       structureMd,
       threshold: 1,
@@ -744,7 +755,10 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     });
     assert.strictEqual(result.directive, 'auto-remap');
     assert.strictEqual(result.spawnMapper, true);
-    assert.deepStrictEqual(result.affectedPaths, ['src']);
+    assert.deepStrictEqual(result.affectedPaths, ['docs', 'src']);
+    assert.deepStrictEqual(result.droppedPaths, []);
+    assert.ok(result.message.split('\n').includes('Auto-remap scheduled for paths: docs, src'));
+    assert.ok(!result.message.includes('Auto-remap was not run'));
   });
 });
 
@@ -807,6 +821,38 @@ describe('detectDrift — a withheld prefix is named in the result and the messa
     });
     assert.deepStrictEqual(result.droppedPaths, []);
     assert.strictEqual(withheldLine(result.message), undefined);
+  });
+
+  // The half that is not cosmetic. On a successful remap the execute-phase gate stamps
+  // STRUCTURE.md and ARCHITECTURE.md at HEAD, and the next check diffs from that stamp.
+  // Remapping only `lib2` would therefore record `bad name/` as mapped without remapping
+  // it, and its drift would never be reported again. The gate never prints `message` on
+  // this branch, so naming the drop there would not reach anyone either.
+  test('auto-remap with one prefix withheld degrades to warn rather than remapping the rest', () => {
+    const result = detectDrift({
+      addedFiles: ['bad name/x.ts', 'lib2/a.ts', 'lib2/b.ts'],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.actionRequired, true);
+    assert.strictEqual(result.directive, 'warn',
+      'a partial auto-remap would be stamped as covering the withheld directory');
+    assert.strictEqual(result.spawnMapper, false);
+    assert.strictEqual(result.action, 'auto-remap', 'the requested action is still reported');
+    assert.deepStrictEqual(result.affectedPaths, ['lib2']);
+    assert.deepStrictEqual(result.droppedPaths, ['bad name']);
+    assert.ok(!result.message.includes('Auto-remap scheduled'));
+    assert.strictEqual(
+      withheldLine(result.message),
+      'Withheld from the mapper as unsafe to pass: "bad name". Refresh planning context for it by hand.',
+    );
+    assert.ok(result.message.split('\n').includes(
+      'Auto-remap was not run: remapping only the other paths would record the map as '
+        + 'current past the withheld ones.',
+    ));
   });
 
   test('a skipped result carries an empty droppedPaths', () => {
@@ -1925,6 +1971,28 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
     assert.deepStrictEqual(data.affected_paths, ['lib2']);
     assert.deepStrictEqual(data.dropped_paths, ['bad name']);
     assert.match(data.message, /Withheld from the mapper as unsafe to pass: "bad name"\./);
+  });
+
+  test('under drift_action auto-remap, a withheld prefix degrades the directive the gate branches on', () => {
+    fs.writeFileSync(
+      path.join(tmp, '.planning', 'config.json'),
+      JSON.stringify({ workflow: { drift_threshold: 3, drift_action: 'auto-remap' } }),
+    );
+    fs.mkdirSync(path.join(tmp, 'bad name'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, 'lib2'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'bad name', 'a.py'), 'a = 1\n');
+    fs.writeFileSync(path.join(tmp, 'lib2', 'b.py'), 'b = 1\n');
+    fs.writeFileSync(path.join(tmp, 'lib2', 'c.py'), 'c = 1\n');
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'add two unmapped directories, one with an unsafe name');
+
+    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output);
+    assert.strictEqual(data.action, 'auto-remap');
+    // Both keys the two execute-phase consumers spawn on must be off.
+    assert.strictEqual(data.directive, 'warn');
+    assert.strictEqual(data.spawn_mapper, false);
+    assert.deepStrictEqual(data.affected_paths, ['lib2']);
+    assert.deepStrictEqual(data.dropped_paths, ['bad name']);
   });
 
   test('re-stamping the map after a remap returns the gate to quiet', () => {
