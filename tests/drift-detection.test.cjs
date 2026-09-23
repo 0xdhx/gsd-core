@@ -546,6 +546,74 @@ describe('sanitizePaths', () => {
   });
 });
 
+// ─── Regression #4922 review: affectedPaths is sanitized at the producer ─────
+//
+// `sanitizePaths` shipped with zero production callers, so `affectedPaths`
+// reached BOTH of its consumers unfiltered: `cmdVerifyCodebaseDrift`'s
+// `affected_paths` field and the `--paths <list>` command `buildMessage`
+// splices into the warn text. #4886 widened the reachable input set — a mapped
+// directory whose name carries a shell metacharacter previously reached that
+// list only via an ADDED file, and now reaches it via an edit or deletion
+// inside it too. Both tests below fail on the pre-fix module.
+
+describe('detectDrift — affectedPaths is sanitized before it reaches a command', () => {
+  // The unsafe top-level directory is named in STRUCTURE.md, so a file edited
+  // or deleted inside it is "mapped territory" and takes the #4886 loop.
+  const structureMd = [
+    '# Structure',
+    '',
+    '- `we;rm -rf /` — a directory whose name is a shell metacharacter',
+    '- `src/` — ordinary modules',
+    '',
+  ].join('\n');
+
+  test('an unsafe prefix reached via a MODIFIED file is dropped from affectedPaths and from the warn command', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['we;rm -rf /main.py', 'src/app/main.py'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.strictEqual(result.skipped, false);
+    assert.deepStrictEqual(result.affectedPaths, ['src'],
+      'the unsafe prefix must not reach affected_paths');
+    // Scope the assertion to the SPLICE SITE. The message also lists the drifted
+    // elements under their category headings; that is a report of what changed,
+    // not a command, and it must keep naming the path verbatim.
+    const pathsLine = result.message.split('\n').find((l) => l.includes('--paths'));
+    assert.ok(pathsLine, 'the warn message carries a --paths remediation command');
+    assert.ok(!pathsLine.includes('rm -rf'),
+      'the unsafe prefix must not be spliced into the --paths argument');
+    assert.match(pathsLine, /--paths src /);
+    assert.ok(
+      result.elements.some((e) => e.category === 'modified' && e.path.startsWith('we;')),
+      'the element list still names the drifted path verbatim',
+    );
+  });
+
+  test('an unsafe prefix reached via a DELETED file is dropped from the auto-remap paths', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: [],
+      deletedFiles: ['we;rm -rf /gone.py', 'src/lib/gone.py'],
+      structureMd,
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.spawnMapper, true);
+    assert.deepStrictEqual(result.affectedPaths, ['src']);
+    const schedLine = result.message
+      .split('\n')
+      .find((l) => l.startsWith('Auto-remap scheduled for paths:'));
+    assert.ok(schedLine, 'the auto-remap message names the scheduled paths');
+    assert.ok(!schedLine.includes('rm -rf'),
+      'the unsafe prefix must not reach the auto-remap path list');
+    assert.strictEqual(schedLine, 'Auto-remap scheduled for paths: src');
+  });
+});
+
 // ─── Unit: last_mapped_commit frontmatter round-trip ─────────────────────────
 
 describe('last_mapped_commit frontmatter', () => {

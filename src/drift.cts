@@ -256,7 +256,16 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
 
     if (actionRequired) {
       directive = action;
-      affectedPaths = chooseAffectedPaths(elements.map((e) => e.path));
+      // #4922 review (Major): `sanitizePaths` shipped with zero production callers, so every
+      // consumer of `affectedPaths` received unfiltered repo paths — this result field, which
+      // `cmdVerifyCodebaseDrift` emits as `affected_paths`, AND the `--paths` argument
+      // `buildMessage` splices below. This PR widened the reachable input set for that gap: a
+      // mapped directory whose name carries a shell metacharacter previously reached `--paths`
+      // only via an added file, and now reaches it via an edit or deletion inside it too.
+      // Filtering at this single producer covers both consumers with one call. An unsafe prefix
+      // is dropped from the remediation command only; `elements` still reports its paths
+      // verbatim, so the operator is told what drifted even when it cannot be auto-remapped.
+      affectedPaths = sanitizePaths(chooseAffectedPaths(elements.map((e) => e.path)));
       if (action === 'auto-remap') {
         spawnMapper = true;
       }
