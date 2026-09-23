@@ -612,6 +612,68 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
       'the unsafe prefix must not reach the auto-remap path list');
     assert.strictEqual(schedLine, 'Auto-remap scheduled for paths: src');
   });
+
+  // Filtering made an EMPTY affectedPaths reachable for the first time: before it was
+  // wired in, chooseAffectedPaths returned at least one prefix per element and nothing
+  // removed any. The execute-phase gate branches on `directive` and splices
+  // `affected_paths` into the mapper's `--paths`, so an undegraded auto-remap here
+  // would spawn an UNSCOPED mapper.
+  const allUnsafeMd = ['# Structure', '', '- `we;rm -rf /` — a hostile directory name', ''].join('\n');
+
+  test('auto-remap degrades to warn when every affected prefix is filtered', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['we;rm -rf /a.py', 'we;rm -rf /b.py'],
+      deletedFiles: [],
+      structureMd: allUnsafeMd,
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.actionRequired, true, 'the drift is still reported');
+    assert.deepStrictEqual(result.affectedPaths, []);
+    assert.strictEqual(result.directive, 'warn',
+      'the gate branches on directive — leaving it auto-remap spawns an unscoped mapper');
+    assert.strictEqual(result.spawnMapper, false);
+    assert.strictEqual(result.action, 'auto-remap',
+      'the REQUESTED action is still reported; only the resolved directive degrades');
+    assert.ok(!result.message.includes('--paths'),
+      'no mapper command is emitted when no path can be passed safely');
+    assert.ok(!result.message.includes('Auto-remap scheduled'));
+    assert.match(result.message, /every affected directory prefix was filtered as unsafe/);
+    assert.strictEqual(result.elements.length, 2, 'the drifted paths are still enumerated');
+  });
+
+  test('warn with every affected prefix filtered emits no empty --paths command', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['we;rm -rf /a.py'],
+      deletedFiles: ['we;rm -rf /b.py'],
+      structureMd: allUnsafeMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.strictEqual(result.directive, 'warn');
+    assert.deepStrictEqual(result.affectedPaths, []);
+    assert.ok(!result.message.includes('--paths'));
+    assert.match(result.message, /Refresh planning context by hand/);
+  });
+
+  test('a single safe prefix keeps auto-remap intact — the degrade is not a blanket', () => {
+    const structureMd = [
+      '# Structure', '', '- `we;rm -rf /` — hostile', '- `src/` — ordinary modules', '',
+    ].join('\n');
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['we;rm -rf /a.py', 'src/app/main.py'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'auto-remap',
+    });
+    assert.strictEqual(result.directive, 'auto-remap');
+    assert.strictEqual(result.spawnMapper, true);
+    assert.deepStrictEqual(result.affectedPaths, ['src']);
+  });
 });
 
 // ─── Unit: last_mapped_commit frontmatter round-trip ─────────────────────────

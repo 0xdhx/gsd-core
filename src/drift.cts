@@ -281,10 +281,28 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       // is dropped from the remediation command only; `elements` still reports its paths
       // verbatim, so the operator is told what drifted even when it cannot be auto-remapped.
       affectedPaths = sanitizePaths(chooseAffectedPaths(elements.map((e) => e.path)));
-      if (action === 'auto-remap') {
+      // Wiring the filter in made an EMPTY `affectedPaths` reachable for the first
+      // time: `chooseAffectedPaths` returns at least one prefix per element, and
+      // before this nothing removed any, so a non-empty element list always yielded a
+      // non-empty path list. With every prefix filtered there is nothing safe to scope
+      // a remap to, and `auto-remap` degrades to `warn`.
+      //
+      // The degrade is on `directive`, not on `spawnMapper`, because that is what the
+      // consumer reads: the execute-phase gate branches on `directive` being
+      // `auto-remap` and then splices `affected_paths` into the mapper's `--paths`
+      // argument. Withholding only `spawnMapper` would leave it spawning a mapper with
+      // an EMPTY `--paths` — an unscoped remap of the whole tree, which is not what the
+      // directive asked for. Drift is still detected and still reported; only the
+      // automation is withheld, and `action` still records what was requested.
+      if (action === 'auto-remap' && affectedPaths.length === 0) {
+        directive = 'warn';
+      }
+      if (directive === 'auto-remap') {
         spawnMapper = true;
       }
-      message = buildMessage(elements, affectedPaths, action, inp.runtime);
+      // The RESOLVED directive, not the requested action — otherwise a degraded
+      // auto-remap would still render "Auto-remap scheduled for paths:".
+      message = buildMessage(elements, affectedPaths, directive, inp.runtime);
     }
 
     return {
@@ -348,7 +366,15 @@ function buildMessage(elements: DriftElement[], affectedPaths: string[], action:
     }
   }
   lines.push('');
-  if (action === 'auto-remap') {
+  if (affectedPaths.length === 0) {
+    // Reachable only once `sanitizePaths` is wired in: every affected directory
+    // prefix was filtered, so there is no path that can be spliced into a mapper
+    // invocation. Say so instead of emitting a command with an empty `--paths`.
+    lines.push(
+      'No affected path can be passed to the mapper safely — every affected directory '
+      + 'prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.',
+    );
+  } else if (action === 'auto-remap') {
     lines.push(`Auto-remap scheduled for paths: ${affectedPaths.join(', ')}`);
   } else {
     // drift.cts is a pure library — it must never read env/config. The
