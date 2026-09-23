@@ -51,11 +51,13 @@ import { formatGsdSlash } from './runtime-slash.cjs';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const DRIFT_CATEGORIES = Object.freeze(['new_dir', 'barrel', 'migration', 'route', 'modified', 'deleted']);
+const DRIFT_CATEGORIES: readonly DriftCategory[] = Object.freeze(
+  ['new_dir', 'barrel', 'migration', 'route', 'modified', 'deleted'] as const,
+);
 
 // Category priority when a single file matches multiple rules.
 // Higher index = more specific = wins.
-const CATEGORY_PRIORITY: Record<string, number> = { modified: 0, deleted: 0, new_dir: 1, barrel: 2, route: 3, migration: 4 };
+const CATEGORY_PRIORITY: Record<DriftCategory, number> = { modified: 0, deleted: 0, new_dir: 1, barrel: 2, route: 3, migration: 4 };
 
 const BARREL_RE = /^(packages|apps)\/[^/]+\/src\/index\.(ts|tsx|js|mjs|cjs)$/;
 
@@ -83,7 +85,20 @@ const SAFE_PATH_RE = /^(?!.*\.\.)(?:[A-Za-z0-9_.][A-Za-z0-9_.\-]*)(?:\/[A-Za-z0-
 
 // ─── Classification ──────────────────────────────────────────────────────────
 
-type DriftCategory = 'barrel' | 'migration' | 'route' | 'new_dir';
+// The category set is mirrored at four sites in this file — DRIFT_CATEGORIES,
+// CATEGORY_PRIORITY, the `labels` map, and this union. #4886 added `modified`
+// and `deleted` to three of them and missed this one, which compiled because
+// `DriftElement.category` was `string` and the two maps were `Record<string, _>`
+// — the union documented the set without governing it. Keying both maps by this
+// union makes a seventh category a compile error at every mirror rather than a
+// silent omission at one.
+type DriftCategory =
+  | 'new_dir'
+  | 'barrel'
+  | 'migration'
+  | 'route'
+  | 'modified'
+  | 'deleted';
 
 /**
  * Classify a single file path into a drift category or null.
@@ -122,7 +137,7 @@ function isPathMapped(file: string, structureMd: string): boolean {
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 interface DriftElement {
-  category: string;
+  category: DriftCategory;
   path: string;
 }
 
@@ -199,12 +214,12 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
 
     // Build elements. One element per file, highest-priority category wins.
     const elements: DriftElement[] = [];
-    const seen = new Map<string, string>();
+    const seen = new Map<string, DriftCategory>();
 
     for (const rawFile of added) {
       const file = posixNormalize(rawFile);
       const specific = classifyFile(file);
-      let category: string | null = specific;
+      let category: DriftCategory | null = specific;
       if (!category) {
         if (!isPathMapped(file, structureMd)) {
           category = 'new_dir';
@@ -318,7 +333,7 @@ function buildMessage(elements: DriftElement[], affectedPaths: string[], action:
     `Codebase drift detected: ${elements.length} structural element(s) since last mapping.`,
     '',
   ];
-  const labels: Record<string, string> = {
+  const labels: Record<DriftCategory, string> = {
     new_dir: 'New directories',
     barrel: 'New barrel exports',
     migration: 'New migrations',
@@ -326,7 +341,7 @@ function buildMessage(elements: DriftElement[], affectedPaths: string[], action:
     modified: 'Modified mapped files',
     deleted: 'Deleted mapped files',
   };
-  for (const cat of ['new_dir', 'barrel', 'migration', 'route', 'modified', 'deleted']) {
+  for (const cat of DRIFT_CATEGORIES) {
     if (byCat[cat]) {
       lines.push(`${labels[cat]}:`);
       for (const p of byCat[cat]) lines.push(`  - ${p}`);
