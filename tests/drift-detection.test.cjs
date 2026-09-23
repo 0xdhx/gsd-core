@@ -658,8 +658,14 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.ok(!result.message.includes('--paths'),
       'no mapper command is emitted when no path can be passed safely');
     assert.ok(!result.message.includes('Auto-remap scheduled'));
-    assert.match(result.message, /every affected directory prefix was filtered as unsafe/,
-      'the explanation must name the cause that actually applies');
+    assert.deepStrictEqual(result.droppedPaths, ['we;rm -rf '],
+      'the withheld prefix is reported on the result, not subtracted silently (#4923)');
+    assert.ok(
+      result.message.split('\n').includes(
+        'Withheld from the mapper as unsafe to pass: "we;rm -rf ". Refresh planning context for it by hand.',
+      ),
+      'the explanation must name the cause that actually applies, and the prefix it applies to',
+    );
     assert.ok(!result.message.includes('could be derived'),
       'the no-derivable-prefix explanation must not be used for the filtered route');
     assert.strictEqual(result.elements.length, 2, 'the drifted paths are still enumerated');
@@ -677,7 +683,7 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.strictEqual(result.directive, 'warn');
     assert.deepStrictEqual(result.affectedPaths, []);
     assert.ok(!result.message.includes('--paths'));
-    assert.match(result.message, /Refresh planning context by hand/);
+    assert.match(result.message, /Refresh planning context for it by hand/);
   });
 
   // The SAME degraded state is reachable without any filtering at all: an empty-string
@@ -704,7 +710,8 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     // telling the operator a prefix was "filtered as unsafe" would send them hunting
     // for a hostile directory name that does not exist.
     assert.match(result.message, /No affected path could be derived for the mapper/);
-    assert.ok(!result.message.includes('filtered as unsafe'));
+    assert.deepStrictEqual(result.droppedPaths, []);
+    assert.ok(!result.message.includes('Withheld from the mapper'));
   });
 
   test('a repo-root prefix degrades rather than remapping the whole tree', () => {
@@ -738,6 +745,72 @@ describe('detectDrift — affectedPaths is sanitized before it reaches a command
     assert.strictEqual(result.directive, 'auto-remap');
     assert.strictEqual(result.spawnMapper, true);
     assert.deepStrictEqual(result.affectedPaths, ['src']);
+  });
+});
+
+// ─── Regression #4923: a withheld prefix is named, never silently subtracted ─
+//
+// Filtering at the producer closed the splice, but when SOME prefixes survived and
+// some were dropped, nothing said which were dropped: no field carried them, and the
+// remediation line simply got shorter. The element list above it prints the drifted
+// files, not which directories the command leaves out, so a partial `--paths` read as
+// the whole of it.
+
+describe('detectDrift — a withheld prefix is named in the result and the message (#4923)', () => {
+  const structureMd = '# S\n- `src/`\n';
+  const withheldLine = (msg) => msg.split('\n').find((l) => l.startsWith('Withheld from the mapper'));
+
+  test('warn with one prefix withheld and one surviving names the withheld one', () => {
+    const result = detectDrift({
+      addedFiles: ['bad name/x.ts', 'lib2/a.ts', 'lib2/b.ts'],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.deepStrictEqual(result.affectedPaths, ['lib2']);
+    assert.deepStrictEqual(result.droppedPaths, ['bad name']);
+    const runLine = result.message.split('\n').find((l) => l.includes('--paths'));
+    assert.match(runLine, /--paths lib2 /);
+    assert.ok(!runLine.includes('bad name'), 'the withheld prefix never reaches the command');
+    assert.strictEqual(
+      withheldLine(result.message),
+      'Withheld from the mapper as unsafe to pass: "bad name". Refresh planning context for it by hand.',
+    );
+  });
+
+  test('every withheld prefix is quoted, so a control character cannot break the line', () => {
+    const result = detectDrift({
+      addedFiles: ['a\nb/x.ts', 'c;d/y.ts', 'lib2/a.ts'],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.deepStrictEqual(result.droppedPaths, ['a\nb', 'c;d']);
+    assert.strictEqual(
+      withheldLine(result.message),
+      'Withheld from the mapper as unsafe to pass: "a\\nb", "c;d". Refresh planning context for them by hand.',
+    );
+  });
+
+  test('nothing withheld: droppedPaths is empty and no withheld line is emitted', () => {
+    const result = detectDrift({
+      addedFiles: ['lib2/a.ts', 'lib3/b.ts'],
+      modifiedFiles: [],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    assert.deepStrictEqual(result.droppedPaths, []);
+    assert.strictEqual(withheldLine(result.message), undefined);
+  });
+
+  test('a skipped result carries an empty droppedPaths', () => {
+    assert.deepStrictEqual(detectDrift({ structureMd: null }).droppedPaths, []);
   });
 });
 
@@ -1832,6 +1905,26 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
     assert.deepStrictEqual(data.elements, [{ category: 'modified', path: 'src/lib/more.py' }]);
     assert.strictEqual(data.action_required, false);
     assert.strictEqual(data.block, false);
+  });
+
+  // #4923: cmdVerifyCodebaseDrift builds its payload by naming each field, so a result
+  // field it does not name is never emitted. This drives the real CLI over a real tree.
+  test('a withheld prefix is emitted as dropped_paths, beside the affected_paths it left', () => {
+    fs.mkdirSync(path.join(tmp, 'bad name'), { recursive: true });
+    fs.mkdirSync(path.join(tmp, 'lib2'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, 'bad name', 'a.py'), 'a = 1\n');
+    fs.writeFileSync(path.join(tmp, 'lib2', 'b.py'), 'b = 1\n');
+    fs.writeFileSync(path.join(tmp, 'lib2', 'c.py'), 'c = 1\n');
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'add two unmapped directories, one with an unsafe name');
+
+    const r = runGsdTools(['verify', 'codebase-drift'], tmp);
+    assert.strictEqual(r.success, true, r.error);
+    const data = JSON.parse(r.output);
+    assert.strictEqual(data.action_required, true);
+    assert.deepStrictEqual(data.affected_paths, ['lib2']);
+    assert.deepStrictEqual(data.dropped_paths, ['bad name']);
+    assert.match(data.message, /Withheld from the mapper as unsafe to pass: "bad name"\./);
   });
 
   test('re-stamping the map after a remap returns the gate to quiet', () => {

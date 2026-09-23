@@ -158,6 +158,8 @@ interface DetectDriftResult {
   directive: string;
   spawnMapper: boolean;
   affectedPaths: string[];
+  // Derived prefixes the path allowlist withheld from `affectedPaths` (#4923).
+  droppedPaths: string[];
   threshold: number;
   action: string;
   message: string;
@@ -176,6 +178,7 @@ interface SkippedResult {
   directive: string;
   spawnMapper: false;
   affectedPaths: string[];
+  droppedPaths: string[];
   message: string;
 }
 
@@ -267,6 +270,7 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
     let directive = 'none';
     let spawnMapper = false;
     let affectedPaths: string[] = [];
+    let droppedPaths: string[] = [];
     let message = '';
 
     if (actionRequired) {
@@ -283,6 +287,10 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       // even when it cannot be auto-remapped.
       const derivedPaths = chooseAffectedPaths(elements.map((e) => e.path));
       affectedPaths = sanitizePaths(derivedPaths);
+      // #4923: a withheld prefix must be NAMED, not silently subtracted. `elements` lists
+      // the drifted files, but nothing there says which directories were left out of the
+      // remediation command, so a shorter `--paths` list reads as the whole of it.
+      droppedPaths = derivedPaths.filter((p) => !affectedPaths.includes(p));
       // An EMPTY `affectedPaths` alongside `actionRequired: true` has TWO causes, and
       // they are not interchangeable. Filtering is the new one. The other predates it:
       // `chooseAffectedPaths` skips a falsy path, so an empty-string entry CAN yield an
@@ -308,9 +316,7 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       }
       // The RESOLVED directive, not the requested action — otherwise a degraded
       // auto-remap would still render "Auto-remap scheduled for paths:".
-      message = buildMessage(
-        elements, affectedPaths, directive, inp.runtime, derivedPaths.length > 0,
-      );
+      message = buildMessage(elements, affectedPaths, droppedPaths, directive, inp.runtime);
     }
 
     return {
@@ -320,6 +326,7 @@ function detectDrift(input: unknown): DetectDriftResult | SkippedResult {
       directive,
       spawnMapper,
       affectedPaths,
+      droppedPaths,
       threshold,
       action,
       message,
@@ -345,6 +352,7 @@ function skipped(reason: string): SkippedResult {
     directive: 'none',
     spawnMapper: false,
     affectedPaths: [],
+    droppedPaths: [],
     message: '',
   };
 }
@@ -352,13 +360,11 @@ function skipped(reason: string): SkippedResult {
 function buildMessage(
   elements: DriftElement[],
   affectedPaths: string[],
+  // Prefixes the allowlist withheld. On the empty-`affectedPaths` branch it is also what
+  // separates "derived, then all withheld" from "none derivable at all".
+  droppedPaths: string[],
   action: string,
   runtime: string | undefined,
-  // Whether ANY prefix was derived, measured before the allowlist ran. Read ONLY on the
-  // empty-`affectedPaths` branch, where it is what separates "derived, then all removed"
-  // from "none derivable at all". It is deliberately not named for the former: outside
-  // that branch it is simply true, and a name asserting filtering would be wrong there.
-  prefixesWereDerived: boolean,
 ): string {
   const byCat: Record<string, string[]> = {};
   for (const e of elements) {
@@ -384,27 +390,35 @@ function buildMessage(
     }
   }
   lines.push('');
-  if (affectedPaths.length === 0) {
-    // No path can be spliced into a mapper invocation. Report the actual cause: saying
-    // "filtered as unsafe" on the no-derivable-prefix route would tell the operator to
-    // go looking for a hostile directory name that is not there.
+  if (affectedPaths.length > 0) {
+    if (action === 'auto-remap') {
+      lines.push(`Auto-remap scheduled for paths: ${affectedPaths.join(', ')}`);
+    } else {
+      // drift.cts is a pure library — it must never read env/config. The
+      // caller (verify.cmdVerifyCodebaseDrift) resolves the runtime once and
+      // passes it in via input.runtime so emitted commands match the project
+      // the caller is targeting, not the current process directory.
+      const mapCmd = formatGsdSlash('map-codebase', runtime || 'claude');
+      lines.push(
+        `Run ${String(mapCmd)} --paths ${affectedPaths.join(',')} to refresh planning context.`,
+      );
+    }
+  } else if (droppedPaths.length === 0) {
+    // Nothing was withheld, so the cause is that no prefix could be derived at all.
+    // Saying "unsafe" here would send the operator looking for a hostile directory
+    // name that is not there.
     lines.push(
-      prefixesWereDerived
-        ? 'No affected path can be passed to the mapper safely — every affected directory '
-          + 'prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.'
-        : 'No affected path could be derived for the mapper from the elements above. '
-          + 'Refresh planning context by hand.',
+      'No affected path could be derived for the mapper from the elements above. '
+        + 'Refresh planning context by hand.',
     );
-  } else if (action === 'auto-remap') {
-    lines.push(`Auto-remap scheduled for paths: ${affectedPaths.join(', ')}`);
-  } else {
-    // drift.cts is a pure library — it must never read env/config. The
-    // caller (verify.cmdVerifyCodebaseDrift) resolves the runtime once and
-    // passes it in via input.runtime so emitted commands match the project
-    // the caller is targeting, not the current process directory.
-    const mapCmd = formatGsdSlash('map-codebase', runtime || 'claude');
+  }
+  if (droppedPaths.length > 0) {
+    // #4923: name every withheld prefix, whether or not any other survived. Each is
+    // JSON-quoted so a space or a control character is visible and cannot break the
+    // line. The line carries no `--paths` token: it is a report, not a command.
     lines.push(
-      `Run ${String(mapCmd)} --paths ${affectedPaths.join(',')} to refresh planning context.`,
+      `Withheld from the mapper as unsafe to pass: ${droppedPaths.map((p) => JSON.stringify(p)).join(', ')}. `
+        + `Refresh planning context for ${droppedPaths.length === 1 ? 'it' : 'them'} by hand.`,
     );
   }
   return lines.join('\n');

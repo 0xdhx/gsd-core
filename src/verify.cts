@@ -2655,6 +2655,9 @@ function cmdVerifyCodebaseDrift(cwd: string, raw: boolean): void {
       directive: driftResult['directive'],
       spawn_mapper: !!driftResult['spawnMapper'],
       affected_paths: driftResult['affectedPaths'] || [],
+      // #4923: the prefixes withheld from affected_paths. Mapped explicitly like every
+      // field here — a result field this list does not name is never emitted.
+      dropped_paths: driftResult['droppedPaths'] || [],
       elements: driftResult['elements'] || [],
       threshold,
       action,
