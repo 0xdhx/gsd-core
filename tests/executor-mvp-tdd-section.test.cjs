@@ -636,6 +636,47 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     assert.match(guard, /_resets_cwd "\$BFR" \|\| _resets_cwd "\$RAW"/, 'the event scan must retain resets across intervening unrecognized commands');
   });
 
+  test("the boundary section names every interpreter _EXEC admits (#4785)", () => {
+    // The reference's own closing line says the enumerations are the parts that rot. This is that
+    // line made checkable in the one direction that misleads a reader: the boundary section exists
+    // to say where coverage ENDS, so an interpreter `_EXEC` admits and the section never names
+    // reads as uncovered. Derived from the shipped regex, so adding an interpreter without
+    // documenting it reds here instead of silently understating the guard.
+    // splitLines, not `split('\n')`: `guard` is readFileSync content and Windows autocrlf makes a
+    // literal split CRLF-fragile (local/no-crlf-fragile-split, DEFECT.WINDOWS-CRLF-TEST-PORTABILITY).
+    const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
+    const execLine = splitLines(guard).find((l) => l.startsWith('_EXEC='));
+    assert.ok(execLine, '_EXEC not found in the extracted guard');
+    const groups = [...execLine.matchAll(/\(([a-z0-9?|]{4,})\)/g)]
+      .map((m) => m[1])
+      .filter((g) => g.includes('|') && !/^[a-z]$/.test(g));
+    const names = new Set();
+    for (const g of groups) {
+      for (const alt of g.split('|')) {
+        // `python3?` documents as both `python3` and `python`; take the base word either way.
+        const base = alt.replace(/\?$/, '').replace(/3$/, '');
+        if (/^[a-z]{2,}$/.test(base)) names.add(base);
+      }
+    }
+    // `eval` sits outside the alternation groups — it is its own branch of _EXEC.
+    assert.ok(/\|eval\)/.test(execLine), '_EXEC no longer carries the eval branch');
+    names.add('eval');
+
+    // `refSrc` is this describe's own read of the reference — the same text `guard` was cut from,
+    // so the regex and the prose being compared cannot come from two different revisions.
+    const boundaryIdx = refSrc.indexOf('### What this guard does NOT see');
+    assert.ok(boundaryIdx !== -1, 'the step 0c boundary section is missing');
+    const boundary = refSrc.slice(boundaryIdx);
+    const missing = [...names].filter((n) => !boundary.includes(n)).sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `_EXEC admits interpreter(s) the boundary section never names: ${missing.join(', ')} — a reader takes an unnamed one for uncovered`,
+    );
+    // Guard the guard: an empty derived set would make the assertion above vacuous.
+    assert.ok(names.size >= 8, `derived too few interpreter names (${names.size}) — the extraction broke, not the doc`);
+  });
+
   test('halts on a cd into the main checkout (the #4767 shape)', () => {
     const r = run(`cd ${realMain()}/scripts/verify && python3 -m pytest -q`);
     assert.equal(r.status, 1);
@@ -703,6 +744,12 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     ['a clustered short flag (sh -ec)', () => `sh -ec "cd ${realMain()} && ls"`],
     ['python3 -c relocating via os.chdir', () => `python3 -c "import os;os.chdir('${realMain()}')"`],
     ['node -e relocating via process.chdir', () => `node -e "process.chdir('${realMain()}')"`],
+    // The rest of `_EXEC`'s set, pinned because worktree-path-safety.md now STATES the ten it
+    // recognizes and a stated coverage claim with no row is prose. The guard never executes the
+    // command — it scans text — so none of these needs its interpreter installed.
+    ['perl -e relocating via chdir', () => `perl -e 'chdir "${realMain()}"'`],
+    ['ksh -c wrapping a cd into main', () => `ksh -c "cd ${realMain()} && ls"`],
+    ['a digit-less python -c relocating via os.chdir', () => `python -c "import os;os.chdir('${realMain()}')"`],
     ['a wrapper nested inside a wrapper', () => `eval "sh -c 'cd ${realMain()} && ls'"`],
     ['an interpreter reached after &&', () => `echo hi && eval "cd ${realMain()} && ls"`],
     // …and the launcher forms a planner actually writes in front of one. `timeout` in particular is

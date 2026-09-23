@@ -446,6 +446,13 @@ The rest, in descending order of how likely a planner is to reach them:
   that was merely an *argument* (`echo bash -c '…'`), and halting on a command that executes nothing
   is the false-positive direction. `command` and `exec` are excluded for that same reason —
   `command -v bash` is a name probe.
+- **An interpreter outside `$_EXEC`'s set.** Ten are recognized, named by bare word or absolute path:
+  `sh` `bash` `zsh` `dash` `ksh` behind `-c`, `python3`/`python` `node` `perl` `ruby` behind `-c` or
+  `-e`, and `eval`. The set is stated here because the entries above name only the handful a planner
+  reaches for most, which reads as the whole of it — `perl -e 'chdir "/main"'` IS unwrapped and
+  rescanned. What is not: an interpreter with no entry (`awk`, `php`, a shell not listed), whose
+  payload stays one opaque token, so only an absolute path written as a bare word in it is caught by
+  the catch-all scan.
 - **An interpreter option that takes an operand.** `bash --noprofile -c` is recognized;
   `bash -O extglob -c` is not, because `_EXEC` admits long options without values, and widening it to
   consume operands risks swallowing the `-c` it is looking for.
