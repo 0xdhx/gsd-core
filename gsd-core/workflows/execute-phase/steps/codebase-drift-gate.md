@@ -53,8 +53,9 @@ Deleted mapped files:
 Run /gsd:map-codebase --paths {affected_paths} to refresh planning context.
 ```
 
-A listed path that carries a newline or another invisible character is printed quoted
-and escaped, so it cannot add lines to the message; every other path prints as-is.
+A listed path that carries a line break, another control or format character, or a
+non-ASCII space is printed quoted and escaped, so it cannot add lines to the message or
+reorder it; every other path prints as-is.
 
 `affected_paths` is filtered before it is emitted (REQ-DRIFT-04), so a directory
 prefix that is absolute, contains traversal, carries a shell metacharacter, or names

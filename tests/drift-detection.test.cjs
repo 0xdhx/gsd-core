@@ -810,11 +810,12 @@ describe('detectDrift — a withheld prefix is named in the result and the messa
     );
   });
 
-  // JSON.stringify alone leaves U+2028/U+2029 literal, and every other invisible or
-  // look-alike code point unescaped: C1 controls (NEL), zero-width and soft-hyphen break
+  // JSON.stringify alone leaves U+2028/U+2029 literal, along with the other control,
+  // format and separator code points: C1 controls (NEL), zero-width and soft-hyphen break
   // opportunities, bidi marks and overrides, the BOM, non-ASCII spaces, and astral format
-  // characters. Each must render as a visible escape, and every token must read back.
-  test('invisible and look-alike code points are escaped, and each token reads back', () => {
+  // characters. Each Cc/Cf/Z* code point other than the ASCII space must render as an
+  // escape, and every token must read back. Combining marks are out of scope by design.
+  test('control, format and non-ASCII separator code points are escaped, and each token reads back', () => {
     const result = detectDrift({
       addedFiles: [
         'a\u2028b/x.ts', 'c\u2029d/x.ts', 'e\u0085f/x.ts', 'g\u202eh/x.ts',
@@ -830,7 +831,7 @@ describe('detectDrift — a withheld prefix is named in the result and the messa
     });
     assert.strictEqual(result.droppedPaths.length, 13);
     const line = withheldLine(result.message);
-    assert.ok(!/(?! )[\p{Cc}\p{Cf}\p{Z}]/u.test(line), 'no raw invisible or look-alike code point survives');
+    assert.ok(!/(?! )[\p{Cc}\p{Cf}\p{Z}]/u.test(line), 'no raw Cc, Cf or non-ASCII Z* code point survives');
     // Every quoted token is valid JSON and parses back to exactly the withheld prefix,
     // astral code points included (a `\u{...}` escape would not parse).
     const tokens = line.match(/"(?:[^"\\]|\\.)*"/g).map((tok) => JSON.parse(tok));
@@ -845,9 +846,11 @@ describe('detectDrift — a withheld prefix is named in the result and the messa
     }
   });
 
-  // The element list prints drifted paths raw. A modified file under a mapped directory
-  // whose name carries a newline reached it only through the #4886 categories, and printed
-  // raw it injects a line of its own into the message the gate prints verbatim.
+  // The element list used to print every drifted path raw. A modified file under a mapped
+  // directory whose name carries a newline reached it only through the #4886 categories,
+  // and printed raw it injected a line of its own into the message the gate prints
+  // verbatim. A path carrying any Cc, Cf or non-ASCII Z* code point is now quoted and
+  // escaped; a path without one, a plain space included, still prints raw.
   test('an element path carrying a newline is escaped in the message; ordinary paths are not', () => {
     const result = detectDrift({
       addedFiles: [],

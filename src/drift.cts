@@ -445,17 +445,20 @@ function buildMessage(
   return lines.join('\n');
 }
 
-// JSON.stringify escapes the C0 controls, `"` and `\`, and nothing else. It leaves U+2028
-// and U+2029 literal, and many renderers break a line on them. It also leaves every other
-// invisible or look-alike character literal: the C1 controls (U+0085 is NEL), zero-width
-// and soft-hyphen break opportunities, the bidirectional marks and overrides, the BOM, and
-// the non-ASCII spaces (U+00A0, U+3000, ...) that render as a space while being a different
-// character. An enumerated escape list misses members, so escape by general category
-// instead: every control (Cc), format (Cf) and separator (Z*) code point except the ASCII
-// space becomes a `\uXXXX` escape, so a withheld prefix renders as one visible token. An
-// astral code point is written as its UTF-16 surrogate pair, so every token stays valid
-// JSON and reads back exactly. Combining marks are left alone on purpose: they render
-// visibly, and escaping them would mangle a decomposed accented name.
+// JSON.stringify escapes only the C0 controls, `"`, `\` and lone surrogates. It leaves
+// U+2028 and U+2029 literal, and many renderers break a line on them. It also leaves every
+// other invisible or look-alike character literal: the C1 controls (U+0085 is NEL),
+// zero-width and soft-hyphen break opportunities, the bidirectional marks and overrides,
+// the BOM, and the non-ASCII spaces (U+00A0, U+3000, ...) that render as a space while
+// being a different character. An enumerated escape list misses members, so escape by
+// general category instead: every control (Cc), format (Cf) and separator (Z*) code point
+// except the ASCII space is escaped. JSON.stringify has already escaped the C0 controls,
+// a few in short forms such as `\n`; every other match becomes `\uXXXX`. So a withheld
+// prefix renders as one token that cannot break or reorder the line. An astral code point
+// is written as its UTF-16 surrogate pair, so every token stays valid JSON and reads back
+// exactly. Combining marks (Mn/Me) are left alone on purpose. Some are invisible (U+034F,
+// the variation selectors), but none breaks or reorders the line, and escaping marks would
+// mangle a decomposed accented name.
 const INVISIBLE_IN_MESSAGE_RE = /(?! )[\p{Cc}\p{Cf}\p{Z}]/gu;
 
 // Non-global twin of INVISIBLE_IN_MESSAGE_RE for a presence test: `.test()` on a /g regex
@@ -463,11 +466,13 @@ const INVISIBLE_IN_MESSAGE_RE = /(?! )[\p{Cc}\p{Cf}\p{Z}]/gu;
 const HAS_INVISIBLE_IN_MESSAGE_RE = /(?! )[\p{Cc}\p{Cf}\p{Z}]/u;
 
 // The element list prints drifted paths as they are, which is what an operator wants to
-// read, but a path carrying a newline or another invisible code point would then inject
-// lines into, or reorder, the message printed verbatim by the gate. That was reachable
-// through an added file before #4886, and the modified/deleted categories widen it to any
-// edit or deletion in mapped territory. Only such a path is quoted and escaped, so every
-// ordinary path prints byte-identical to before.
+// read. A path carrying a newline, another control or format character, or a non-ASCII
+// space would then inject lines into, reorder, or disguise the message the gate prints
+// verbatim. That was reachable through an added file before #4886, and the modified/deleted
+// categories widen it to any edit or deletion in mapped territory. So a path carrying a
+// Cc, Cf or Z* code point other than the ASCII space is quoted and escaped by
+// `quoteForMessage`; every other path, combining marks included, prints byte-identical to
+// before.
 function renderPathForMessage(p: string): string {
   return HAS_INVISIBLE_IN_MESSAGE_RE.test(p) ? quoteForMessage(p) : p;
 }
