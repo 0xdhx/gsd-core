@@ -145,19 +145,33 @@ function referenceIncludes(content) {
   // explicitly (applyAgentPathRewritesInner's `/\$HOME\/\.claude\//g` replace, beside the `~/.claude/`
   // one). The fourth is a FAMILY rather than a string: `--relative-includes` (#4377) makes a local
   // install emit project-relative includes whose prefix is DERIVED from the resolved config dir, so it
-  // is matched by SHAPE — one leading segment that is not `gsd-core` itself, which keeps the bare form
-  // the bare form. Each resolves at runtime, so this follower must see all four or it drops a live
-  // pointer.
-  const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?!gsd-core\/)[A-Za-z0-9._-]+\/)?gsd-core\/references\/(\S+)/g;
+  // is matched by SHAPE — one or MORE leading segments before `gsd-core` (a config dir nested under
+  // the project root emits `@config/nested/gsd-core/…`). The `+` keeps the bare form the bare form by
+  // construction, since it needs a segment BEFORE `gsd-core`. Each spelling resolves at runtime, so
+  // this follower must see all of them or it drops a live pointer.
+  const re = /@(?:(?:~|\$HOME)\/\.claude\/|(?:[A-Za-z0-9._-]+\/)+)?gsd-core\/references\/(\S+)/g;
   const name = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
   // Trailing prose punctuation is not part of a filename — a pointer may end a
   // sentence or sit inside backticks, parentheses or bold markers. The class
   // cannot eat into `.md`, which ends at `d`.
-  const trailingProse = /[.,;:!?)\]}>"'`*]+$/;
+  // START-ANCHORED: this tests a CUT SUFFIX, so it must be punctuation END TO END. An unanchored
+  // `/…$/` answers true for `/xx?`, which would let the loop cut a separator and call the remainder a
+  // name — `tdd.md/xx?` following as `tdd.md`, the defect this whole function was rewritten to close.
+  const trailingProseOnly = /^[.,;:!?)\]}>"'`*]+$/;
   let m;
   while ((m = re.exec(content)) !== null) {
-    const candidate = m[1].replace(trailingProse, '');
-    if (!name.test(candidate)) continue;
+    const raw = m[1];
+    // MINIMAL strip, same rule as the gate: shortest trailing run whose removal yields a valid name.
+    let candidate = null;
+    for (let cut = 0; cut <= raw.length; cut++) {
+      const probe = raw.slice(0, raw.length - cut);
+      if (cut > 0 && !trailingProseOnly.test(raw.slice(raw.length - cut))) break;
+      if (name.test(probe)) { candidate = probe; break; }
+    }
+    if (candidate === null) continue;
+    // AMBIGUITY, mirrored from the gate. If the UNSTRIPPED token also names something, the strip would
+    // pick one of two readings — and this loop READS what it picks, so it declines rather than guess.
+    if (candidate !== raw && fs.existsSync(path.join(ROOT, 'gsd-core', 'references', raw))) continue;
     seen.add('gsd-core/references/' + candidate);
   }
   return [...seen];

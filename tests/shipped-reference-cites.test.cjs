@@ -222,11 +222,21 @@ const INSTALLED_POINTER_RE = /@(?:~|\$HOME)\/\.claude\/gsd-core\/references\/(\S
 // (#4377, bin/install.js) makes a local install emit project-relative includes, and the prefix is
 // DERIVED from the resolved config dir — `.claude/` conventionally, but `--config-dir` makes it
 // anything. So this one cannot be enumerated the way the other three can, and the pattern matches
-// the SHAPE: a single leading segment that is not `gsd-core` itself. Zero occurrences in any shipped
-// tree today; it is here so the existence check covers the member rather than the corpus.
-const PROJECT_REL_POINTER_RE = /@(?!gsd-core\/)[A-Za-z0-9._-]+\/gsd-core\/references\/(\S+)/g;
+// the SHAPE: one or MORE leading segments before `gsd-core`. One is not enough — a config dir nested
+// under the project root emits `@config/nested/gsd-core/…`, driven against `_computePathPrefix`, and a
+// single-segment pattern misses it. `+` also excludes the bare `@gsd-core/references/` form by
+// construction (it needs at least one segment BEFORE `gsd-core`), so no negative lookahead is owed and
+// the bare form stays the bare form. Zero occurrences in any shipped tree today; this covers the
+// member rather than the corpus.
+const PROJECT_REL_POINTER_RE = /@(?:[A-Za-z0-9._-]+\/)+gsd-core\/references\/(\S+)/g;
 const REFERENCE_NAME_RE = /^(?:[A-Za-z0-9_-][A-Za-z0-9._-]*\/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md$/;
-const TRAILING_PROSE_RE = /[.,;:!?)\]}>"'`*]+$/;
+// ANCHORED AT BOTH ENDS, and the anchoring is the whole point. This tests a CUT SUFFIX, so the suffix
+// must be punctuation END TO END. An end-anchored-only `/[…]+$/` merely asks whether the suffix ENDS in
+// punctuation, which is true of `/xx?` and `XYZ?` — and the strip loop below then cuts straight through
+// a path separator and calls the remainder a name. `tdd.md/xx?` resolved as `tdd.md`: the exact defect
+// this file exists to close, reintroduced by the fix for a different one. Found by driving the loop
+// rather than reading it, which is also how the defect it replaced was found.
+const TRAILING_PROSE_ONLY_RE = /^[.,;:!?)\]}>"'`*]+$/;
 
 /**
  * The reference name a pointer token denotes, or `null` when the token is not one.
@@ -239,7 +249,7 @@ function referenceNameOf(token) {
   // claim, and the ambiguity check below is keyed on that suffix.
   for (let cut = 0; cut <= token.length; cut++) {
     const candidate = token.slice(0, token.length - cut);
-    if (cut > 0 && !TRAILING_PROSE_RE.test(token.slice(token.length - cut))) break;
+    if (cut > 0 && !TRAILING_PROSE_ONLY_RE.test(token.slice(token.length - cut))) break;
     if (REFERENCE_NAME_RE.test(candidate)) return candidate;
   }
   return null;
@@ -342,6 +352,11 @@ function resolvesToReferenceFile(name, root = REPO_ROOT) {
  */
 function pointerReadingIsUnambiguous({ name, raw }, root = REPO_ROOT) {
   if (raw === name) return true;                       // nothing was stripped
+  // Deliberately `existsSync` on the raw token rather than the contained predicate: the question is
+  // whether the unstripped reading has ANY referent, and one that escapes the directory is still a
+  // second reading of the same bytes. Escaping raw tokens therefore report rather than pass — fail
+  // closed, which is the right direction, and the message below says "on disk" rather than claiming
+  // containment the probe does not establish.
   return !fs.existsSync(path.join(root, 'gsd-core', 'references', raw));
 }
 
@@ -389,7 +404,7 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
         if (!pointerReadingIsUnambiguous(pointer)) {
           missing.push(
             `${rel}: @~/.claude/gsd-core/references/${pointer.raw} — AMBIGUOUS: both this token and `
-              + `\`${pointer.name}\` name something under references/; the trailing punctuation cannot be `
+              + `\`${pointer.name}\` name something on disk; the trailing punctuation cannot be `
               + 'read as prose here',
           );
         } else if (!resolvesToReferenceFile(pointer.name)) {
@@ -511,6 +526,13 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       ['@~/.claude/gsd-core/references/tdd.md＼xx', 'U+FF3C FULLWIDTH REVERSE SOLIDUS'],
       ['@~/.claude/gsd-core/references/tdd.mdx/xx', 'a longer extension'],
       ['@~/.claude/gsd-core/references/../../README.md', 'a LEADING traversal — unmatched before, reported now'],
+      // These three are the regression the MINIMAL-strip loop introduced and the resumed round review
+      // found: the cut-suffix test was not START-anchored, so a suffix merely ENDING in punctuation
+      // was accepted and the loop cut straight through a path separator. `tdd.md/xx?` resolved as
+      // `tdd.md` — the defect this file exists to close, restored by the fix for a different one.
+      ['@~/.claude/gsd-core/references/tdd.md/xx?', 'a separator inside a suffix that ends in punctuation'],
+      ['@~/.claude/gsd-core/references/tdd.md/%2f?', 'an encoded separator inside such a suffix'],
+      ['@~/.claude/gsd-core/references/tdd.mdXYZ?', 'ordinary characters inside such a suffix'],
     ];
     for (const [token, why] of continuations) {
       assert.deepEqual(findInstalledIncludes(token), [], `must capture no name: ${why}`);
@@ -641,6 +663,17 @@ describe('#4841 gate: agent @-includes use the installed-path form', () => {
       findBareIncludes('see @.claude/gsd-core/references/tdd.md'),
       [],
       'and the project-relative form is not the bare form',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('see @config/nested/gsd-core/references/tdd.md'),
+      ['tdd.md'],
+      'a NESTED config dir resolves too — `_computePathPrefix` emits a multi-segment prefix, and a '
+        + 'single-segment pattern missed it',
+    );
+    assert.deepEqual(
+      findInstalledIncludes('see @~/.claude/gsd-core/references/tdd.md'),
+      ['tdd.md'],
+      'and the tilde form is matched once, by its own pattern — not twice',
     );
     assert.deepEqual(findInstalledIncludes('see @.claude/gsd-core/references/tdd.md/xx/yy'), []);
   });
