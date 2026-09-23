@@ -787,7 +787,8 @@ If the count meets `workflow.drift_threshold` (default 3), the gate either
 **warns** (default) with the suggested `/gsd-map-codebase --paths …` command,
 or **auto-remaps** (`workflow.drift_action = auto-remap`) by spawning
 `gsd-codebase-mapper` scoped to the affected paths. Those paths are filtered
-before they are emitted, and where none survives the filter `auto-remap`
+before they are emitted. Where none survives, the warn message carries a
+manual-refresh line in place of the `--paths` command, and `auto-remap`
 degrades to `warn` rather than spawning an unscoped remap. Any error in detection
 or remap is logged and the phase continues — drift detection cannot fail
 verification.

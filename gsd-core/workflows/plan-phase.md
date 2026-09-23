@@ -582,8 +582,11 @@ DRIFT=$(gsd_run verify codebase-drift 2>/dev/null || echo '{"skipped":true}')
 
 This gate is **non-blocking** and **never blocks, never spawns** the mapper at plan time. If `skipped` or
 `action_required` is false, continue silently to step 6. If `action_required` is true, print `message`
-verbatim (it ends with a `/gsd:map-codebase` pointer) and continue — planning proceeds whether or not the
-map is refreshed first. (`drift_action: auto-remap` stays at `execute:wave:post`.)
+verbatim and continue — planning proceeds whether or not the map is refreshed first. Do NOT assume how
+that message ends: under `drift_action: auto-remap` it ends with `Auto-remap scheduled for paths: …`
+even though nothing is scheduled at plan time, and where no affected path survives filtering it ends
+with a manual-refresh line instead of a `/gsd:map-codebase` pointer.
+(`drift_action: auto-remap` stays at `execute:wave:post`.)
 
 ## 6. Check Existing Plans
 
