@@ -53,6 +53,20 @@ Deleted mapped files:
 Run /gsd:map-codebase --paths {affected_paths} to refresh planning context.
 ```
 
+`affected_paths` is filtered before it is emitted (REQ-DRIFT-04), so a directory
+prefix that is absolute, contains traversal, or carries a shell metacharacter is
+dropped from that command. When filtering leaves NO path at all, the last line is
+instead:
+
+```text
+No affected path can be passed to the mapper safely — every affected directory prefix was filtered as unsafe. Refresh planning context by hand for the paths listed above.
+```
+
+The element list above it is unfiltered either way, so a dropped prefix is still
+named. This is also the case in which a requested `auto-remap` arrives here: with
+no path to scope the mapper to, `directive` degrades to `warn` (`action` still
+reports `auto-remap`) rather than spawning an unscoped remap.
+
 Then continue to `verify_phase_goal`. Do NOT block. Do NOT spawn anything.
 
 **If `action_required` is true AND `directive` is `auto-remap`:**
