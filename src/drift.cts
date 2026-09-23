@@ -445,12 +445,15 @@ function sanitizePaths(paths: unknown): string[] {
   for (const p of paths) {
     if (typeof p !== 'string') continue;
     if (p.startsWith('/')) continue;
-    // `.` clears SAFE_PATH_RE — it is shell-safe and carries no traversal — but it
-    // denotes the whole repository, so splicing it into `--paths` produces exactly the
-    // unscoped remap this filter and the auto-remap degrade exist to prevent. It is
-    // reachable: `chooseAffectedPaths` takes the first component, so any `./x` path
-    // derives the prefix `.`. Dropping it here lets the empty-list degrade take over.
-    if (p === '.') continue;
+    // A path made only of `.` components clears SAFE_PATH_RE — each is shell-safe and
+    // none is traversal — but it denotes the whole repository, so splicing it into
+    // `--paths` produces exactly the unscoped remap this filter and the auto-remap
+    // degrade exist to prevent. It is reachable: `chooseAffectedPaths` takes the first
+    // component, so any `./x` path derives the prefix `.`. Tested component-wise rather
+    // than against the literal `.`, because `./.` and `././.` are the same request
+    // spelled differently and an exact compare admits both. Dropping them here lets the
+    // empty-list degrade take over. `./src` is unaffected — not every component is `.`.
+    if (p.split('/').every((seg) => seg === '.')) continue;
     if (!SAFE_PATH_RE.test(p)) continue;
     out.push(p);
   }

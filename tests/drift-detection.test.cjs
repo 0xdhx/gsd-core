@@ -549,8 +549,12 @@ describe('sanitizePaths', () => {
   // names the whole repository, and a mapper scoped to `.` is the unscoped remap the
   // filter exists to prevent. It is reachable: chooseAffectedPaths takes the first
   // component, so any `./x` input derives the prefix `.`.
-  test('rejects the repo-root scope', () => {
+  test('rejects the repo-root scope, however it is spelled', () => {
+    // Tested component-wise, not against the literal: `./.` and `././.` are the same
+    // request and an exact compare against '.' admits both.
     assert.deepStrictEqual(sanitizePaths(['.']), []);
+    assert.deepStrictEqual(sanitizePaths(['./.']), []);
+    assert.deepStrictEqual(sanitizePaths(['././.']), []);
   });
 
   test('still accepts paths that merely CONTAIN dots', () => {
