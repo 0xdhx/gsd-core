@@ -845,6 +845,27 @@ describe('detectDrift — a withheld prefix is named in the result and the messa
     }
   });
 
+  // The element list prints drifted paths raw. A modified file under a mapped directory
+  // whose name carries a newline reached it only through the #4886 categories, and printed
+  // raw it injects a line of its own into the message the gate prints verbatim.
+  test('an element path carrying a newline is escaped in the message; ordinary paths are not', () => {
+    const result = detectDrift({
+      addedFiles: [],
+      modifiedFiles: ['src/evil\nInjected line/b.py', 'src/bad name/c.py', 'src/app/main.py'],
+      deletedFiles: [],
+      structureMd,
+      threshold: 1,
+      action: 'warn',
+    });
+    const lines = result.message.split('\n');
+    assert.ok(!lines.some((l) => l.startsWith('Injected line')), 'no path injects a line of its own');
+    assert.ok(lines.includes('  - "src/evil\\nInjected line/b.py"'), 'the unsafe path is quoted and escaped');
+    assert.ok(lines.includes('  - src/bad name/c.py'), 'a space alone does not trigger quoting');
+    assert.ok(lines.includes('  - src/app/main.py'), 'an ordinary path prints unchanged');
+    assert.ok(result.elements.some((e) => e.path === 'src/evil\nInjected line/b.py'),
+      'the elements data keeps the raw path; only the printed message escapes it');
+  });
+
   test('nothing withheld: droppedPaths is empty and no withheld line is emitted', () => {
     const result = detectDrift({
       addedFiles: ['lib2/a.ts', 'lib3/b.ts'],

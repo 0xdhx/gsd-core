@@ -396,7 +396,7 @@ function buildMessage(
   for (const cat of DRIFT_CATEGORIES) {
     if (byCat[cat]) {
       lines.push(`${labels[cat]}:`);
-      for (const p of byCat[cat]) lines.push(`  - ${p}`);
+      for (const p of byCat[cat]) lines.push(`  - ${renderPathForMessage(p)}`);
     }
   }
   lines.push('');
@@ -457,6 +457,20 @@ function buildMessage(
 // JSON and reads back exactly. Combining marks are left alone on purpose: they render
 // visibly, and escaping them would mangle a decomposed accented name.
 const INVISIBLE_IN_MESSAGE_RE = /(?! )[\p{Cc}\p{Cf}\p{Z}]/gu;
+
+// Non-global twin of INVISIBLE_IN_MESSAGE_RE for a presence test: `.test()` on a /g regex
+// carries `lastIndex` between calls and would skip matches on alternate paths.
+const HAS_INVISIBLE_IN_MESSAGE_RE = /(?! )[\p{Cc}\p{Cf}\p{Z}]/u;
+
+// The element list prints drifted paths as they are, which is what an operator wants to
+// read, but a path carrying a newline or another invisible code point would then inject
+// lines into, or reorder, the message printed verbatim by the gate. That was reachable
+// through an added file before #4886, and the modified/deleted categories widen it to any
+// edit or deletion in mapped territory. Only such a path is quoted and escaped, so every
+// ordinary path prints byte-identical to before.
+function renderPathForMessage(p: string): string {
+  return HAS_INVISIBLE_IN_MESSAGE_RE.test(p) ? quoteForMessage(p) : p;
+}
 
 function quoteForMessage(p: string): string {
   return JSON.stringify(p).replace(INVISIBLE_IN_MESSAGE_RE, (c) => {
