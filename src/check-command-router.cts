@@ -1125,7 +1125,12 @@ function resolvePhaseDirOrEmpty(projectDir: string, phase: string): string {
  * this probe at all. The directory is resolved against the project root AND
  * CONTAINED WITHIN IT — an absolute or climbing `--dir` that lands outside the
  * root is `unresolvable`, never read — then probed exactly as a phase directory
- * is; `projectRoot` stays the project root in both forms.
+ * is; `projectRoot` stays the project root in both forms. `--dir <value>` is the
+ * only accepted spelling: `--dir=<value>` yields no `dir` flag and falls through to
+ * the no-argument arm, as does an empty value. Both are `partitionPredicateArgs`
+ * behaviour, inherited and unchanged. (How that parser resolves a REPEATED `--dir`
+ * is deliberately not characterised here — a malformed later occurrence does not
+ * displace an earlier valid one, so the obvious "last one wins" gloss is wrong.)
  *
  * When the phase cannot be resolved to a directory, this emits a non-throwing
  * degraded JSON payload (status/commands/counts all zeroed, `readError`
@@ -1165,6 +1170,16 @@ function cmdVerifyCommandPaths(projectDir: string, args: string[], raw: boolean)
   // degrades to the same non-throwing payload the unresolvable-phase arm emits,
   // because a consumer must be able to tell "could not look" from "nothing to
   // report" (and `error()` would collapse them).
+  //
+  // RESIDUAL, stated rather than left to be rediscovered: this is check-then-use, so
+  // a symlink planted at the resolved path BETWEEN this call and the reads inside
+  // probePhaseVerifyCommands would be followed. A link already in place when the
+  // command runs IS refused — the predicate resolves it and returns null (driven) —
+  // so the window is the in-process gap, not the ordinary case. It is a property of
+  // every `tryWithinRoot` call site in this repo, including `resolvePath` above and
+  // the artifact scan below, not of this arm; closing it needs O_NOFOLLOW/dirfd
+  // semantics inside the ADR-4650 predicate, which is a wider change than the bug
+  // this fixes.
   let phaseDir: string;
   if (dirFlag) {
     const candidate = path.isAbsolute(dirFlag) ? dirFlag : path.join(projectDir, dirFlag);

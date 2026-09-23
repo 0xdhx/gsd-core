@@ -1077,13 +1077,18 @@ describe('check verify-command-paths verb', () => {
     return dir;
   }
 
+  // SENTINEL FIRST, THEN THE SHAPE. Ordering is the whole strength of this helper: with the status
+  // assertion first, a pre-fix run fails there and the sentinel assertion is NEVER EXERCISED, so the
+  // negative control says nothing about whether the sentinel check can fail at all. Driven by the
+  // pre-push review of this round. Pre-fix the out-of-root plan IS read, so its command text carries
+  // the token into the payload and this line is what fires.
   function assertRefusedAndUnread(result, token) {
+    assert.ok(!result.output.includes(token), 'out-of-root plan content reached the payload');
     const payload = JSON.parse(result.output);
     assert.equal(payload.status, 'unresolvable', 'an out-of-root --dir must be unresolvable');
     assert.deepEqual(payload.commands, [], 'no command may be reported from outside the root');
     assert.equal(payload.counts.total, 0);
     assert.match(String(payload.readError), /outside the project root/);
-    assert.ok(!result.output.includes(token), 'out-of-root plan content reached the payload');
   }
 
   test('#4785 — --dir with an ABSOLUTE target outside the project root is refused unread', () => {

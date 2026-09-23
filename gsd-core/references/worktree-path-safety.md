@@ -446,13 +446,20 @@ The rest, in descending order of how likely a planner is to reach them:
   that was merely an *argument* (`echo bash -c '…'`), and halting on a command that executes nothing
   is the false-positive direction. `command` and `exec` are excluded for that same reason —
   `command -v bash` is a name probe.
-- **An interpreter outside `$_EXEC`'s set.** Ten are recognized, named by bare word or absolute path:
-  `sh` `bash` `zsh` `dash` `ksh` behind `-c`, `python3`/`python` `node` `perl` `ruby` behind `-c` or
-  `-e`, and `eval`. The set is stated here because the entries above name only the handful a planner
-  reaches for most, which reads as the whole of it — `perl -e 'chdir "/main"'` IS unwrapped and
-  rescanned. What is not: an interpreter with no entry (`awk`, `php`, a shell not listed), whose
-  payload stays one opaque token, so only an absolute path written as a bare word in it is caught by
-  the catch-all scan.
+- **An interpreter outside `$_EXEC`'s set.** The set is stated because the entries above name only the
+  handful a planner reaches for most, which reads as the whole of it — `perl -e 'chdir "/main"'` IS
+  unwrapped and rescanned. Recognized, each named by a bare word OR an absolute path: `sh` `bash`
+  `zsh` `dash` `ksh`, and `python3`/`python` `node` `perl` `ruby`. The option is a short-option
+  CLUSTER, not the literal flag — `-[a-z]*c` for the shells and `-[a-z]*[ce]` for the rest — so
+  `-c`, `-ec` and even `-abc` all match. Recognized as a BARE WORD ONLY, with no absolute-path
+  form: `eval`; `/bin/eval 'cd ../main'` is NOT seen (driven).
+  Not recognized: an interpreter with no entry (`awk`, `php`, a shell not listed), whose payload stays
+  one opaque token, so only an absolute path written as a bare word in it is caught by the catch-all
+  scan. **The two lists are delimited on purpose** — the parity test in
+  `tests/executor-mvp-tdd-section.test.cjs` reads only the span between `Recognized,` and
+  `Not recognized:`, matching BACKTICKED TOKENS rather than substrings, because a containment check over the whole section is satisfied by a name that
+  appears here saying it is UNsupported: adding `awk` to `$_EXEC` with this prose untouched passed
+  that test, driven by the pre-push review of the round that added it.
 - **An interpreter option that takes an operand.** `bash --noprofile -c` is recognized;
   `bash -O extglob -c` is not, because `_EXEC` admits long options without values, and widening it to
   consume operands risks swallowing the `-c` it is looking for.

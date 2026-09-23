@@ -636,45 +636,94 @@ describe('#4767: step 0c <automated> guard executes against a real worktree', { 
     assert.match(guard, /_resets_cwd "\$BFR" \|\| _resets_cwd "\$RAW"/, 'the event scan must retain resets across intervening unrecognized commands');
   });
 
-  test("the boundary section names every interpreter _EXEC admits (#4785)", () => {
-    // The reference's own closing line says the enumerations are the parts that rot. This is that
-    // line made checkable in the one direction that misleads a reader: the boundary section exists
-    // to say where coverage ENDS, so an interpreter `_EXEC` admits and the section never names
-    // reads as uncovered. Derived from the shipped regex, so adding an interpreter without
-    // documenting it reds here instead of silently understating the guard.
-    // splitLines, not `split('\n')`: `guard` is readFileSync content and Windows autocrlf makes a
-    // literal split CRLF-fragile (local/no-crlf-fragile-split, DEFECT.WINDOWS-CRLF-TEST-PORTABILITY).
-    const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
-    const execLine = splitLines(guard).find((l) => l.startsWith('_EXEC='));
-    assert.ok(execLine, '_EXEC not found in the extracted guard');
-    const groups = [...execLine.matchAll(/\(([a-z0-9?|]{4,})\)/g)]
-      .map((m) => m[1])
-      .filter((g) => g.includes('|') && !/^[a-z]$/.test(g));
-    const names = new Set();
-    for (const g of groups) {
-      for (const alt of g.split('|')) {
-        // `python3?` documents as both `python3` and `python`; take the base word either way.
-        const base = alt.replace(/\?$/, '').replace(/3$/, '');
-        if (/^[a-z]{2,}$/.test(base)) names.add(base);
-      }
-    }
-    // `eval` sits outside the alternation groups — it is its own branch of _EXEC.
-    assert.ok(/\|eval\)/.test(execLine), '_EXEC no longer carries the eval branch');
-    names.add('eval');
-
-    // `refSrc` is this describe's own read of the reference — the same text `guard` was cut from,
-    // so the regex and the prose being compared cannot come from two different revisions.
+  test('the boundary section’s two interpreter lists match the guard’s behaviour (#4785)', () => {
+    // The reference's own closing line says the enumerations are the parts that rot. This checks that
+    // claim BEHAVIOURALLY: every name the prose lists as Recognized really halts, and every name it
+    // lists as Not recognized really passes. It does NOT parse `_EXEC`.
+    //
+    // WHY NOT, because the obvious design is to derive the names from the regex and diff them, and
+    // that is what this test did for four revisions. The pre-push review broke it four times, each
+    // time with a different ERE shape the parser did not model: a section-wide `includes` satisfied by
+    // a name in the UNSUPPORTED half (`awk`); a span-scoped `includes` satisfied by substring nesting
+    // (`ash` inside `bash`/`dash`); an end-anchored optional-expansion that silently dropped `a?sh`;
+    // and, after that was made fail-closed, a bare OUTER alternative (`...|ash|eval)`) that sits
+    // outside the groups the fail-closed arm inspects. Four driven evasions of four parsers is the
+    // finding: a test that re-implements a shell ERE will keep losing to the next shape, and every
+    // loss is a FALSE GREEN on the exact question it exists to answer.
+    //
+    // So the guarantee is narrowed to one that is TRUE and driven. STATE THE RESIDUAL PLAINLY: this
+    // does not catch an interpreter added to `_EXEC` and documented nowhere — nothing here enumerates
+    // `_EXEC` any more. What it does catch is the direction that actually misleads a reader of the
+    // boundary section: prose that claims coverage the guard does not have, or disclaims coverage it
+    // does. `perl -e` was silently covered while the prose implied otherwise; that is this shape.
+    //
+    // TWO FURTHER RESIDUALS, named because an incomplete disclosure is its own defect. (a) Each
+    // ordinary name is exercised as `<name> -c` only; the prose's claims about OTHER option forms and
+    // path spellings are unchecked except for the three explicit controls at the end of this test.
+    // (b) This reads the two delimited spans and nothing else, so a coverage claim made elsewhere in
+    // the section is not driven. Both were named by the pre-push review rather than assumed absent.
     const boundaryIdx = refSrc.indexOf('### What this guard does NOT see');
     assert.ok(boundaryIdx !== -1, 'the step 0c boundary section is missing');
     const boundary = refSrc.slice(boundaryIdx);
-    const missing = [...names].filter((n) => !boundary.includes(n)).sort();
-    assert.deepEqual(
-      missing,
-      [],
-      `_EXEC admits interpreter(s) the boundary section never names: ${missing.join(', ')} — a reader takes an unnamed one for uncovered`,
-    );
-    // Guard the guard: an empty derived set would make the assertion above vacuous.
-    assert.ok(names.size >= 8, `derived too few interpreter names (${names.size}) — the extraction broke, not the doc`);
+    const recogIdx = boundary.indexOf('Recognized,');
+    const notRecogIdx = boundary.indexOf('Not recognized:');
+    const tailIdx = boundary.indexOf('**The two lists are delimited on purpose**');
+    assert.ok(recogIdx !== -1 && notRecogIdx > recogIdx && tailIdx > notRecogIdx,
+      'the boundary section no longer delimits `Recognized,` … `Not recognized:` … the spans this test reads are gone');
+
+    // CLASSIFY EVERY BACKTICKED TOKEN IN THE SPAN, AND FAIL CLOSED ON ONE THIS CANNOT PLACE. A
+    // narrower name regex silently SKIPS what it does not match, which is the same false green in
+    // miniature: `Also recognized: \`tcl-sh\`.` inside the Recognized span left an earlier version
+    // green because the pattern was `[a-z][a-z0-9]+` and the hyphen dropped the token — driven by the
+    // pre-push review. An option spelling (`-c`, `-ec`, `-[a-z]*[ce]`) is a legitimate non-name and is
+    // recognised as such by its leading dash; anything else is UNCLASSIFIABLE and reds here rather
+    // than being quietly excluded from the behavioural loop below. A token carrying whitespace or a
+    // slash is an example COMMAND or path rather than a name (`/bin/eval 'cd ../main'`), and is
+    // skipped; the prose's absolute-path claims are pinned by the three explicit controls at the end
+    // of this test instead. That skip is the one deliberate hole in the classification, and it is
+    // narrow: a bare name cannot hide in it.
+    const words = (span) => {
+      const out = [];
+      for (const m of span.matchAll(/`([^`\n]+)`/g)) {
+        const tok = m[1];
+        if (tok.startsWith('-')) continue;                       // an option spelling, not a name
+        if (/[\s/]/.test(tok)) continue;                         // an example COMMAND or path, not a name
+        if (/^[A-Za-z][A-Za-z0-9._-]+$/.test(tok)) { out.push(tok); continue; }
+        if (/^[A-Za-z]$/.test(tok)) continue;                    // a single letter: `c` / `e` in the option prose
+        assert.fail(
+          `the interpreter lists contain a backticked token this test cannot classify: \`${tok}\`. ` +
+          `It is neither an option spelling (leading '-') nor an interpreter name, so it would be ` +
+          `silently excluded from the behavioural check.`,
+        );
+      }
+      return out;
+    };
+    const recognized = [...new Set(words(boundary.slice(recogIdx, notRecogIdx)))];
+    const unsupported = [...new Set(words(boundary.slice(notRecogIdx, tailIdx)))];
+    assert.ok(recognized.length >= 8, `Recognized list parsed ${recognized.length} names — the span markers moved`);
+    assert.ok(unsupported.length >= 2, `Not-recognized list parsed ${unsupported.length} names — the span markers moved`);
+    for (const n of unsupported) {
+      assert.ok(!recognized.includes(n), `'${n}' appears in BOTH lists — the two halves disagree`);
+    }
+
+    // `eval` is a shell builtin with no `-c`; everything else takes a short-option cluster. The guard
+    // never EXECUTES the command, so no interpreter needs to be installed for these rows.
+    const payload = `cd ${realMain()} && ls`;
+    for (const n of recognized) {
+      const cmd = n === 'eval' ? `eval "${payload}"` : `${n} -c "${payload}"`;
+      assert.notEqual(run(cmd).status, 0,
+        `the prose lists '${n}' as Recognized, but the guard did NOT halt on \`${cmd}\``);
+    }
+    for (const n of unsupported) {
+      const cmd = `${n} -c "${payload}"`;
+      assert.equal(run(cmd).status, 0,
+        `the prose lists '${n}' as Not recognized, but the guard halted on \`${cmd}\``);
+    }
+    // The prose's own two distinctions, pinned: an absolute-path interpreter IS unwrapped, while the
+    // `eval` branch carries no absolute-path form, and the option is a CLUSTER rather than a literal.
+    assert.notEqual(run(`/bin/bash -c "${payload}"`).status, 0, 'an absolute-path shell must still halt');
+    assert.equal(run(`/bin/eval "${payload}"`).status, 0, 'the prose says `eval` has no absolute-path form');
+    assert.notEqual(run(`python -abc "${payload}"`).status, 0, 'the prose says the option is a cluster, not a literal -c');
   });
 
   test('halts on a cd into the main checkout (the #4767 shape)', () => {
