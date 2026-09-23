@@ -456,7 +456,9 @@ describe('evaluateWorktreeBaseDegrade', () => {
       () => evaluateWorktreeBaseDegrade({ execGit: () => { throw new Error('unreachable'); }, observedForkBase: 'HEAD' }),
       { name: 'TypeError', message: 'evaluateWorktreeBaseDegrade: observedForkBase must be a full 40- or 64-hex commit sha (git rev-parse HEAD inside the worktree, before any commit), got "HEAD"' }
     );
-    for (const bad of ['0123456', '0123456789abcdef0123456789abcdef0123456', 'HEAD', 'not-a-sha', 'g'.repeat(40), 'b'.repeat(41)]) {
+    // Both alternatives of FULL_SHA_RE get their own ±1 boundary: 39/41 around the
+    // 40-hex (SHA-1) arm, 63/65 around the 64-hex (SHA-256) arm (#4921 review).
+    for (const bad of ['0123456', '0123456789abcdef0123456789abcdef0123456', 'HEAD', 'not-a-sha', 'g'.repeat(40), 'b'.repeat(41), 'c'.repeat(63), 'd'.repeat(65), 'g'.repeat(64)]) {
       assert.throws(
         () => evaluateWorktreeBaseDegrade({
           execGit: () => { throw new Error('execGit must not be called before the observation is validated'); },
