@@ -2014,7 +2014,19 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
 
   // `git diff --name-status` reports a moved file as one R line, not D + A, so the
   // old path never reached deletedFiles and a `git mv` inside mapped directories
-  // left the map describing files that no longer exist.
+  // left the map describing files that no longer exist. Rename detection is pinned
+  // on for both the precondition diff and the CLI's own diff: a contributor's
+  // `diff.renames=false` would otherwise turn these R lines into D + A, and the
+  // tests would stop exercising the arm they exist for. GIT_CONFIG_PARAMETERS is
+  // cleared too: an outer `git -c diff.renames=false …` exports it, and it outranks
+  // GIT_CONFIG_COUNT, so an inherited value would quietly undo the pin.
+  const RENAMES_ON = {
+    GIT_CONFIG_PARAMETERS: '',
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'diff.renames',
+    GIT_CONFIG_VALUE_0: 'true',
+  };
+
   test('files renamed inside mapped directories register their old paths as deleted (R100)', () => {
     git(tmp, 'mv', 'src/app/old.py', 'src/app/older.py');
     git(tmp, 'mv', 'src/app/main.py', 'src/app/entry.py');
@@ -2022,9 +2034,9 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
     git(tmp, 'commit', '-m', 'rename three mapped files');
     // Precondition: git paired all three as pure renames, so this drives the R arm.
     assert.strictEqual(
-      (git(tmp, 'diff', '--name-status', 'HEAD~1', 'HEAD').match(/^R100\t/gm) || []).length, 3);
+      (git(tmp, '-c', 'diff.renames=true', 'diff', '--name-status', 'HEAD~1', 'HEAD').match(/^R100\t/gm) || []).length, 3);
 
-    const r = runGsdTools(['verify', 'codebase-drift'], tmp);
+    const r = runGsdTools(['verify', 'codebase-drift'], tmp, RENAMES_ON);
     assert.strictEqual(r.success, true, r.error);
     const data = JSON.parse(r.output);
     assert.deepStrictEqual(
@@ -2051,9 +2063,9 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
     git(tmp, 'add', '-A');
     git(tmp, 'commit', '-m', 'rename and edit');
     // Precondition: a rename with a similarity score below 100, not a pure R100.
-    assert.match(git(tmp, 'diff', '--name-status', 'HEAD~1', 'HEAD'), /^R0\d\d\tsrc\/lib\/big\.py\tsrc\/lib\/large\.py$/m);
+    assert.match(git(tmp, '-c', 'diff.renames=true', 'diff', '--name-status', 'HEAD~1', 'HEAD'), /^R0\d\d\tsrc\/lib\/big\.py\tsrc\/lib\/large\.py$/m);
 
-    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output);
+    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp, RENAMES_ON).output);
     assert.strictEqual(data.skipped, false);
     assert.deepStrictEqual(data.elements, [{ category: 'deleted', path: 'src/lib/big.py' }]);
   });
