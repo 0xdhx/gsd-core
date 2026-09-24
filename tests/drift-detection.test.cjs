@@ -2012,6 +2012,52 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
     assert.strictEqual(data.block, false);
   });
 
+  // `git diff --name-status` reports a moved file as one R line, not D + A, so the
+  // old path never reached deletedFiles and a `git mv` inside mapped directories
+  // left the map describing files that no longer exist.
+  test('files renamed inside mapped directories register their old paths as deleted (R100)', () => {
+    git(tmp, 'mv', 'src/app/old.py', 'src/app/older.py');
+    git(tmp, 'mv', 'src/app/main.py', 'src/app/entry.py');
+    git(tmp, 'mv', 'src/lib/util.py', 'src/lib/helpers.py');
+    git(tmp, 'commit', '-m', 'rename three mapped files');
+    // Precondition: git paired all three as pure renames, so this drives the R arm.
+    assert.strictEqual(
+      (git(tmp, 'diff', '--name-status', 'HEAD~1', 'HEAD').match(/^R100\t/gm) || []).length, 3);
+
+    const r = runGsdTools(['verify', 'codebase-drift'], tmp);
+    assert.strictEqual(r.success, true, r.error);
+    const data = JSON.parse(r.output);
+    assert.deepStrictEqual(
+      data.elements.map((e) => `${e.category}:${e.path}`).sort(),
+      ['deleted:src/app/main.py', 'deleted:src/app/old.py', 'deleted:src/lib/util.py'],
+    );
+    assert.strictEqual(data.action_required, true,
+      'three moved files left STRUCTURE.md naming paths that no longer exist');
+    assert.deepStrictEqual(data.affected_paths, ['src']);
+  });
+
+  test('a file renamed and edited inside a mapped directory registers its old path as deleted (R<100)', () => {
+    const body = Array.from({ length: 20 }, (_, i) => `line_${i} = ${i}\n`).join('');
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'big.py'), body);
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'add a larger mapped file');
+    const stamp = runGsdTools(['stamp-codebase-map', '--files', 'STRUCTURE.md'], tmp);
+    assert.strictEqual(stamp.success, true, stamp.error);
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'restamp the map');
+
+    git(tmp, 'mv', 'src/lib/big.py', 'src/lib/large.py');
+    fs.writeFileSync(path.join(tmp, 'src', 'lib', 'large.py'), body.replace('line_0 = 0', 'line_0 = 100'));
+    git(tmp, 'add', '-A');
+    git(tmp, 'commit', '-m', 'rename and edit');
+    // Precondition: a rename with a similarity score below 100, not a pure R100.
+    assert.match(git(tmp, 'diff', '--name-status', 'HEAD~1', 'HEAD'), /^R0\d\d\tsrc\/lib\/big\.py\tsrc\/lib\/large\.py$/m);
+
+    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output);
+    assert.strictEqual(data.skipped, false);
+    assert.deepStrictEqual(data.elements, [{ category: 'deleted', path: 'src/lib/big.py' }]);
+  });
+
   // #4923: cmdVerifyCodebaseDrift builds its payload by naming each field, so a result
   // field it does not name is never emitted. This drives the real CLI over a real tree.
   test('a withheld prefix is emitted as dropped_paths, beside the affected_paths it left', () => {
