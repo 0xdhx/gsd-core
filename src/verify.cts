@@ -2623,7 +2623,9 @@ function cmdVerifyCodebaseDrift(cwd: string, raw: boolean): void {
       }
       if (isPlanningArtifact(file)) continue;
       if (status === 'A' || status === 'R' || status === 'C') added.push(file);
-      else if (status === 'M') modified.push(file);
+      // T is a type change at the same path (a file replaced by a symlink or a
+      // submodule): the path survives, but what the map describes there does not.
+      else if (status === 'M' || status === 'T') modified.push(file);
       else if (status === 'D') deleted.push(file);
     }
 

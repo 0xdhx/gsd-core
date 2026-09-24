@@ -2070,6 +2070,25 @@ describe('verify codebase-drift: a map that goes stale through edits is flagged 
     assert.deepStrictEqual(data.elements, [{ category: 'deleted', path: 'src/lib/big.py' }]);
   });
 
+  // A T line is a type change at the same path — a mapped file replaced by a symlink
+  // (or a submodule). The path survives, so it was neither added nor deleted, and
+  // the loop dropped it. The symlink is recorded in the index only (mode 120000), so
+  // the test needs no symlink privilege on Windows.
+  test('a mapped file replaced by a symlink registers as modified (T)', () => {
+    const target = path.join(tmp, 'link-target.txt');
+    fs.writeFileSync(target, 'util.py');
+    const blob = git(tmp, 'hash-object', '-w', target);
+    fs.unlinkSync(target);
+    git(tmp, 'update-index', '--cacheinfo', `120000,${blob},src/lib/more.py`);
+    git(tmp, 'commit', '-m', 'replace a mapped file with a symlink');
+    // Precondition: git reports a type change, the arm under test.
+    assert.match(git(tmp, 'diff', '--name-status', 'HEAD~1', 'HEAD'), /^T\tsrc\/lib\/more\.py$/m);
+
+    const data = JSON.parse(runGsdTools(['verify', 'codebase-drift'], tmp).output);
+    assert.strictEqual(data.skipped, false);
+    assert.deepStrictEqual(data.elements, [{ category: 'modified', path: 'src/lib/more.py' }]);
+  });
+
   // #4923: cmdVerifyCodebaseDrift builds its payload by naming each field, so a result
   // field it does not name is never emitted. This drives the real CLI over a real tree.
   test('a withheld prefix is emitted as dropped_paths, beside the affected_paths it left', () => {
