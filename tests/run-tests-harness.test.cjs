@@ -3709,7 +3709,7 @@ const FAKE_CHUNK_LONG_GRACE_MS = 5000;
 const UNREACHED_CHUNK_TIMEOUT_MS = 60000;
 // The real-child test: long enough for `node -e` to install its SIGTERM trap
 // before the kill lands, so the first kill is genuinely ignored on POSIX.
-const REAL_CHILD_TIMEOUT_MS = 1000;
+const REAL_CHILD_TIMEOUT_MS = 2000;
 const REAL_CHILD_GRACE_MS = 1000;
 
 // A stand-in ChildProcess. It never exits unless `exitOn` names the signal
@@ -3942,9 +3942,13 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
     order.push('resolved');
     assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
     assert.strictEqual(r.timedOut, true);
-    if (process.platform !== 'win32' && trapArmedAtKill) {
-      assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
+    if (process.platform !== 'win32') {
+      if (trapArmedAtKill) {
+        assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
+      } else {
+        // Visible, never silent: the abandonment arm was not exercised this run.
+        t.diagnostic('child had not armed its SIGTERM trap before the kill; abandonment not asserted this run');
+      }
     }
   });
 });
-
