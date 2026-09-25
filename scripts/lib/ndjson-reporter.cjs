@@ -16,8 +16,9 @@
 // Durability, not `--test-reporter-destination` (#3889 root cause): a
 // reporter that YIELDS strings has them piped by Node into a
 // `fs.WriteStream` targeting the destination path, and that stream buffers.
-// The parent's `execFileSync` timeout SIGKILLs the child on a hang, and
-// SIGKILL is uncatchable and gives the process zero chance to flush — so a
+// The parent's per-chunk timeout (run-tests.cjs's runChunk) kills the child
+// on a hang, and a hard kill (TerminateProcess on Windows, SIGKILL on POSIX)
+// is uncatchable and gives the process zero chance to flush — so a
 // yield-based reporter can lose every event still sitting in the stream's
 // buffer, which is exactly the case this feature exists to diagnose (proven
 // live: a chunk killed at 2006ms produced a `killed after 2006ms` line from

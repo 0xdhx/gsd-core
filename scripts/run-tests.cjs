@@ -39,7 +39,7 @@ const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync, writeFileSyn
 const { join, basename } = require('path');
 const { tmpdir } = require('os');
 const { pathToFileURL } = require('url');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn, spawnSync } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
 const { suiteOf } = require('./lib/suite-detection.cjs');
 const {
@@ -1189,7 +1189,122 @@ function computeSweepProtectSet(selectedFiles, runTempRoot, dirnameImpl = requir
   return protectSet;
 }
 
-function main() {
+// #4936: how long runChunk waits, after the per-chunk timeout has fired and
+// the kill has been sent, for the child's exit to actually be OBSERVED before
+// it stops waiting. Operator/test override via RUN_TESTS_CHUNK_KILL_GRACE_MS.
+const DEFAULT_CHUNK_KILL_GRACE_MS = 30000;
+
+// #4936: kill a timed-out chunk child. On Windows the kill must reach the whole
+// tree: `node --test` is itself the parent of per-file test processes, and
+// child.kill() there is TerminateProcess on the direct child only, which
+// orphans those descendants. Same shape as #4601/#4775's run-with-timeout in
+// gsd-core/bin/gsd-tools.cjs — `taskkill /PID <pid> /T /F` on the FIRST attempt,
+// while the root is still alive (once it exits, its descendants are orphaned
+// and /T can no longer walk to them); /F because a headless process never
+// pumps the WM_CLOSE a plain taskkill posts; bounded so a wedged taskkill
+// cannot hang the runner; argv array, no shell. A non-zero status means it
+// lost a race with an exiting process, so fall through to the direct kill and
+// the attempt is never weaker than the pre-#4936 one. POSIX keeps the signal
+// execFileSync's timeout used to send (SIGTERM, direct child) — the observed
+// defect is Windows-only, and a detached process group would also take the
+// chunk out of the terminal's foreground group, so Ctrl-C would stop reaching it.
+function killChunkTree(child, { platform = process.platform, spawnSyncImpl = spawnSync } = {}) {
+  if (platform === 'win32' && child.pid) {
+    try {
+      const reap = spawnSyncImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        encoding: 'utf8',
+        timeout: 15000,
+        windowsHide: true,
+      });
+      if (reap && reap.status === 0) return 'tree';
+    } catch {
+      // Fall through to the direct kill.
+    }
+  }
+  try {
+    child.kill('SIGTERM');
+  } catch {
+    // Already exited.
+  }
+  return 'direct';
+}
+
+// #4936: run one chunk with a wall-clock bound that does not depend on the
+// child's exit ever being observed. The chunk used to run under
+// execFileSync({ timeout }), which BLOCKS this process's event loop until the
+// OS reports the child's exit — so no watchdog could run beside it, and every
+// diagnostic sat in a catch arm reachable only once execFileSync returned. On
+// a Windows runner that report never came: a conformance chunk ran 37 minutes
+// past its 600000ms bound with no kill line and no in-flight-file diagnostic,
+// until the job's own timeout cancelled it. Here the timer is ours:
+//   1. at timeoutMs, kill the tree (killChunkTree) and call onTimeout — which
+//      prints the diagnostic — WITHOUT waiting for the exit;
+//   2. then wait up to graceMs for the exit to be observed;
+//   3. if it still is not, escalate once (SIGKILL; TerminateProcess again on
+//      Windows), unref the child so this process can exit, and resolve with
+//      exitObserved: false. The runner then aborts, as it does on any timeout.
+// Resolves (never rejects) with { code, signal, timedOut, exitObserved, error }.
+// spawnImpl / spawnSyncImpl / platform are injectable so the watchdog's arms
+// can be exercised without a real wedged Windows process.
+function runChunk(command, args, {
+  env,
+  timeoutMs,
+  graceMs = DEFAULT_CHUNK_KILL_GRACE_MS,
+  onTimeout = () => {},
+  spawnImpl = spawn,
+  spawnSyncImpl = spawnSync,
+  platform = process.platform,
+} = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawnImpl(command, args, { stdio: 'inherit', env });
+    } catch (error) {
+      resolve({ code: 1, signal: null, timedOut: false, exitObserved: false, error });
+      return;
+    }
+    let settled = false;
+    let timedOut = false;
+    let timeoutTimer = null;
+    let graceTimer = null;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      clearTimeout(graceTimer);
+      resolve(result);
+    };
+    child.once('exit', (code, signal) => {
+      finish({ code, signal, timedOut, exitObserved: true, error: null });
+    });
+    child.on('error', (error) => {
+      // After a timeout, a failed kill also surfaces here; the grace timer
+      // already owns that outcome, so only a spawn failure settles.
+      if (!timedOut) finish({ code: 1, signal: null, timedOut: false, exitObserved: false, error });
+    });
+    timeoutTimer = setTimeout(() => {
+      timedOut = true;
+      killChunkTree(child, { platform, spawnSyncImpl });
+      try {
+        onTimeout();
+      } catch {
+        // A diagnostic failure must never stop the bound from being enforced.
+      }
+      if (settled) return;
+      graceTimer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          // Already exited.
+        }
+        if (typeof child.unref === 'function') child.unref();
+        finish({ code: null, signal: null, timedOut: true, exitObserved: false, error: null });
+      }, graceMs);
+    }, timeoutMs);
+  });
+}
+
+async function main() {
   const args = process.argv.slice(2);
   const parsed = parseArgs(args);
   if (parsed.error) {
@@ -1607,7 +1722,7 @@ function main() {
   // `fs.appendFileSync` to a path passed through GSD_RUN_TESTS_EVENTS_FILE
   // instead of yielding strings for Node to pipe through
   // `--test-reporter-destination`: that destination is backed by an
-  // `fs.WriteStream`, which BUFFERS, and execFileSync's timeout SIGKILLs the
+  // `fs.WriteStream`, which BUFFERS, and the per-chunk timeout kills the
   // child — uncatchable, zero chance to flush — so a yield-based reporter can
   // lose every event still sitting in the stream's buffer, which is exactly
   // the case this feature exists to diagnose (confirmed live: chunk killed at
@@ -1652,7 +1767,7 @@ function main() {
   // close to that ceiling.
   const eventsPathFor = (i) => join(eventsDir, `chunk-${String(i).padStart(3, '0')}.ndjson`);
   // Fixed argv for every chunk: the events path moved to the environment
-  // (GSD_RUN_TESTS_EVENTS_FILE, set per-chunk below in execFileSync's `env`),
+  // (GSD_RUN_TESTS_EVENTS_FILE, set per-chunk below in runChunk's `env`),
   // which does NOT count toward the Windows 32,767-char argv ceiling — only
   // this fixed sink destination does.
   //
@@ -1723,6 +1838,12 @@ function main() {
   // old 20m silent-cancel model; they are different failure modes with
   // different evidence.
   const chunkTimeoutMs = positiveNumberEnv(process.env.RUN_TESTS_CHUNK_TIMEOUT_MS, 600000);
+  // #4936: after the timeout's kill, how long to wait for the child's exit to
+  // be observed before the runner stops waiting (see runChunk).
+  const chunkKillGraceMs = positiveNumberEnv(
+    process.env.RUN_TESTS_CHUNK_KILL_GRACE_MS,
+    DEFAULT_CHUNK_KILL_GRACE_MS,
+  );
 
   // #2665: snapshot GSD's install footprint in every LIVE runtime config dir
   // before a single test runs. The suite must not write there; the check after
@@ -1754,23 +1875,97 @@ function main() {
     }
     const chunkEventsPath = eventsPathFor(i);
     const chunkStartedAt = process.hrtime.bigint();
-    try {
-      execFileSync(
-        process.execPath,
-        [
-          '--test',
-          ...(forceExit ? ['--test-force-exit'] : []),
-          concurrency,
-          ...reporterArgs,
-          ...chunks[i],
-        ],
-        {
-          stdio: 'inherit',
-          env: { ...process.env, GSD_RUN_TESTS_EVENTS_FILE: chunkEventsPath },
-          timeout: chunkTimeoutMs,
-        },
-      );
+    // #4936: the timeout diagnostic is printed from runChunk's own timer the
+    // moment the bound is exceeded — not from the result, which only arrives
+    // once the child's exit is observed (or the kill grace runs out). On the
+    // Windows run that motivated this, that observation never came, and the
+    // pre-#4936 catch arm that held this report was never reached.
+    const reportChunkTimeout = () => {
       const elapsedMs = Number(process.hrtime.bigint() - chunkStartedAt) / 1e6;
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} was killed after ${elapsedMs.toFixed(0)}ms`,
+      );
+      // #3889: name the file(s) in flight when the kill fired, using the
+      // ndjson companion reporter's destination file (stdio:'inherit' means
+      // this parent never saw the child's own stdout, so it cannot know
+      // otherwise). Falls back to "no file identified" rather than
+      // throwing when the reporter file is missing/empty/truncated.
+      const {
+        files: inFlightFiles,
+        staleMs,
+        sawInitMarker,
+        anyDequeued,
+        readError,
+      } = analyzeChunkEvents(chunkEventsPath);
+      const inFlightMsg = inFlightFiles.length > 0
+        ? `In flight when killed (test:dequeue with no matching pass/fail): ` +
+          `${inFlightFiles.map((f) => basename(f)).join(', ')} — last reporter event was ` +
+          `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this diagnostic ` +
+          `(small = output kept flowing until the kill = slow; large = it stopped early = hang).`
+        : anyDequeued
+          ? `No file was in flight when killed — every file the runner dequeued in this ` +
+            `chunk already terminated (test:pass/test:fail seen for each), so the CHILD ` +
+            `PROCESS itself hung after its last test finished (last reporter event was ` +
+            `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this ` +
+            `diagnostic); suspect a leaked handle outside any single test, or an ` +
+            `after-tests hook.`
+          : readError
+            ? `THE EVENTS FILE DOES NOT EXIST for this chunk — not even the reporter's own ` +
+              `\`reporter:init\` marker, which is the reporter module's first action before ` +
+              `it reads a single test event. Two possible causes, NOT distinguished by this ` +
+              `diagnostic: the ndjson reporter module never loaded in the child at all ` +
+              `(--test-reporter resolution failure), or the child was killed before the ` +
+              `reporter function was ever invoked (process/spawn startup stall). This ` +
+              `diagnostic could not identify an in-flight file.`
+            : sawInitMarker
+              ? `THE REPORTER LOADED BUT THE RUNNER NEVER DEQUEUED A SINGLE FILE — the events ` +
+                `file contains only the reporter's own \`reporter:init\` marker (and possibly ` +
+                `\`test:enqueue\` events with no matching \`test:dequeue\`), so the reporter ` +
+                `module was invoked and ran, but node's test runner never began executing any ` +
+                `file in this chunk before the kill. This is a genuinely surprising state — ` +
+                `\`test:dequeue\` fires the instant the runner starts a file, independent of ` +
+                `whether anything inside it ever completes. Two possible causes, NOT ` +
+                `distinguished by this diagnostic: node --test itself stalled before ` +
+                `dispatching any test file, or process/spawn startup stalled. This diagnostic ` +
+                `could not identify an in-flight file.`
+              : `No reporter events were recorded before the kill — the companion reporter's ` +
+                `events file exists but is empty/unparseable (no \`reporter:init\` marker and ` +
+                `no test events), so even the reporter's first appendFileSync may not have ` +
+                `completed. This diagnostic could not identify an in-flight file.`;
+
+      const table = loadTestTimings(process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH);
+      const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table).join('\n');
+
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} exceeded the per-chunk timeout ` +
+          `of ${chunkTimeoutMs}ms and was killed. Two possible causes: (1) a test leaks ` +
+          `an open handle (un-terminated Worker, un-killed child process, or ref'd timer) ` +
+          `so node --test never exits — but --test-force-exit already guards that, so if it ` +
+          `is enabled suspect (2) the chunk is legitimately too slow for the budget (too ` +
+          `many/too-heavy files packed together).\n${inFlightMsg}\n` +
+          `Files in this chunk, heaviest-first by measured weight ` +
+          `(table last regenerated 2026-08-07; real Windows cost runs ~2.2x the recorded ` +
+          `figure, so treat every number as a floor):\n${ranked}`,
+      );
+    };
+    const result = await runChunk(
+      process.execPath,
+      [
+        '--test',
+        ...(forceExit ? ['--test-force-exit'] : []),
+        concurrency,
+        ...reporterArgs,
+        ...chunks[i],
+      ],
+      {
+        env: { ...process.env, GSD_RUN_TESTS_EVENTS_FILE: chunkEventsPath },
+        timeoutMs: chunkTimeoutMs,
+        graceMs: chunkKillGraceMs,
+        onTimeout: reportChunkTimeout,
+      },
+    );
+    const elapsedMs = Number(process.hrtime.bigint() - chunkStartedAt) / 1e6;
+    if (!result.timedOut && result.code === 0 && !result.signal && !result.error) {
       console.error(
         `run-tests: chunk ${i + 1}/${chunks.length} completed in ${elapsedMs.toFixed(0)}ms`,
       );
@@ -1801,111 +1996,54 @@ function main() {
         }
         assertTempRootBounded(runTempRoot);
       }
-    } catch (err) {
-      const elapsedMs = Number(process.hrtime.bigint() - chunkStartedAt) / 1e6;
-      // When the per-chunk timeout fires, execFileSync kills the child and
-      // surfaces it as err.code === 'ETIMEDOUT' (POSIX) and/or err.killed === true
-      // (platform-dependent). Check both so detection holds on Windows and POSIX.
-      const timedOut = err.killed === true || err.code === 'ETIMEDOUT';
+      continue;
+    }
+    if (!result.timedOut) {
       console.error(
-        `run-tests: chunk ${i + 1}/${chunks.length} ${timedOut ? 'was killed' : 'failed'} ` +
-          `after ${elapsedMs.toFixed(0)}ms`,
+        `run-tests: chunk ${i + 1}/${chunks.length} failed after ${elapsedMs.toFixed(0)}ms` +
+          (result.error ? ` (${result.error.message})` : ''),
       );
-      if (timedOut) {
-        // #3889: name the file(s) in flight when the kill fired, using the
-        // ndjson companion reporter's destination file (stdio:'inherit' means
-        // this parent never saw the child's own stdout, so it cannot know
-        // otherwise). Falls back to "no file identified" rather than
-        // throwing when the reporter file is missing/empty/truncated.
-        const {
-          files: inFlightFiles,
-          staleMs,
-          sawInitMarker,
-          anyDequeued,
-          readError,
-        } = analyzeChunkEvents(chunkEventsPath);
-        const inFlightMsg = inFlightFiles.length > 0
-          ? `In flight when killed (test:dequeue with no matching pass/fail): ` +
-            `${inFlightFiles.map((f) => basename(f)).join(', ')} — last reporter event was ` +
-            `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this diagnostic ` +
-            `(small = output kept flowing until the kill = slow; large = it stopped early = hang).`
-          : anyDequeued
-            ? `No file was in flight when killed — every file the runner dequeued in this ` +
-              `chunk already terminated (test:pass/test:fail seen for each), so the CHILD ` +
-              `PROCESS itself hung after its last test finished (last reporter event was ` +
-              `${staleMs !== null ? `${staleMs}ms` : 'an unknown time'} before this ` +
-              `diagnostic); suspect a leaked handle outside any single test, or an ` +
-              `after-tests hook.`
-            : readError
-              ? `THE EVENTS FILE DOES NOT EXIST for this chunk — not even the reporter's own ` +
-                `\`reporter:init\` marker, which is the reporter module's first action before ` +
-                `it reads a single test event. Two possible causes, NOT distinguished by this ` +
-                `diagnostic: the ndjson reporter module never loaded in the child at all ` +
-                `(--test-reporter resolution failure), or the child was killed before the ` +
-                `reporter function was ever invoked (process/spawn startup stall). This ` +
-                `diagnostic could not identify an in-flight file.`
-              : sawInitMarker
-                ? `THE REPORTER LOADED BUT THE RUNNER NEVER DEQUEUED A SINGLE FILE — the events ` +
-                  `file contains only the reporter's own \`reporter:init\` marker (and possibly ` +
-                  `\`test:enqueue\` events with no matching \`test:dequeue\`), so the reporter ` +
-                  `module was invoked and ran, but node's test runner never began executing any ` +
-                  `file in this chunk before the kill. This is a genuinely surprising state — ` +
-                  `\`test:dequeue\` fires the instant the runner starts a file, independent of ` +
-                  `whether anything inside it ever completes. Two possible causes, NOT ` +
-                  `distinguished by this diagnostic: node --test itself stalled before ` +
-                  `dispatching any test file, or process/spawn startup stalled. This diagnostic ` +
-                  `could not identify an in-flight file.`
-                : `No reporter events were recorded before the kill — the companion reporter's ` +
-                  `events file exists but is empty/unparseable (no \`reporter:init\` marker and ` +
-                  `no test events), so even the reporter's first appendFileSync may not have ` +
-                  `completed. This diagnostic could not identify an in-flight file.`;
-
-        const table = loadTestTimings(process.env.RUN_TESTS_TIMINGS_FILE || DEFAULT_TIMINGS_PATH);
-        const ranked = rankChunkFilesByWeight(chunks[i], fileWeightOf(), table).join('\n');
-
+    } else if (!result.exitObserved) {
+      // #4936: the kill was sent but the child's exit was never reported back
+      // within the grace window — the state that used to hold the runner
+      // silently until the CI job's own timeout. The diagnostic above has
+      // already named the in-flight files; say what the runner is doing now.
+      console.error(
+        `run-tests: chunk ${i + 1}/${chunks.length} did not confirm its exit within ` +
+          `${chunkKillGraceMs}ms of the kill — no longer waiting for it (processes from ` +
+          `this chunk may still be running).`,
+      );
+    }
+    const code = result.code || 1;
+    if (firstFailureExit === 0) firstFailureExit = code;
+    if (result.timedOut) {
+      // A timeout has already burned a large share of the job's budget
+      // (chunkTimeoutMs defaults to 600000ms, i.e. half the 20m CI job
+      // cap), so — unlike an ordinary test failure — letting the loop
+      // fall through to the remaining chunks risks the CI runner
+      // cancelling the whole job before they finish. That cancellation
+      // replaces the loud, specific diagnostic printed above with an
+      // opaque "The operation was canceled." buried at the very end of
+      // the log, thousands of lines past the real cause (observed live on
+      // CI run 29749380190: chunk 1/5 timed out, the loop pressed on
+      // through chunks 2-4, and the job was cancelled mid-chunk-5 — the
+      // timeout message was ~38,000 log lines from the end and
+      // `gh run view --log-failed` returned nothing). Abort the remaining
+      // chunks instead so the operator actually sees this message.
+      const skipped = chunks.length - (i + 1);
+      if (skipped > 0) {
         console.error(
-          `run-tests: chunk ${i + 1}/${chunks.length} exceeded the per-chunk timeout ` +
-            `of ${chunkTimeoutMs}ms and was killed. Two possible causes: (1) a test leaks ` +
-            `an open handle (un-terminated Worker, un-killed child process, or ref'd timer) ` +
-            `so node --test never exits — but --test-force-exit already guards that, so if it ` +
-            `is enabled suspect (2) the chunk is legitimately too slow for the budget (too ` +
-            `many/too-heavy files packed together).\n${inFlightMsg}\n` +
-            `Files in this chunk, heaviest-first by measured weight ` +
-            `(table last regenerated 2026-08-07; real Windows cost runs ~2.2x the recorded ` +
-            `figure, so treat every number as a floor):\n${ranked}`,
+          `run-tests: aborting — skipping the remaining ${skipped} chunk${skipped === 1 ? '' : 's'} ` +
+            `after the chunk ${i + 1}/${chunks.length} timeout rather than risk the CI runner ` +
+            `cancelling the job (and burying this diagnostic) before they finish.`,
         );
       }
-      const code = err.status || 1;
-      if (firstFailureExit === 0) firstFailureExit = code;
-      if (timedOut) {
-        // A timeout has already burned a large share of the job's budget
-        // (chunkTimeoutMs defaults to 600000ms, i.e. half the 20m CI job
-        // cap), so — unlike an ordinary test failure — letting the loop
-        // fall through to the remaining chunks risks the CI runner
-        // cancelling the whole job before they finish. That cancellation
-        // replaces the loud, specific diagnostic printed above with an
-        // opaque "The operation was canceled." buried at the very end of
-        // the log, thousands of lines past the real cause (observed live on
-        // CI run 29749380190: chunk 1/5 timed out, the loop pressed on
-        // through chunks 2-4, and the job was cancelled mid-chunk-5 — the
-        // timeout message was ~38,000 log lines from the end and
-        // `gh run view --log-failed` returned nothing). Abort the remaining
-        // chunks instead so the operator actually sees this message.
-        const skipped = chunks.length - (i + 1);
-        if (skipped > 0) {
-          console.error(
-            `run-tests: aborting — skipping the remaining ${skipped} chunk${skipped === 1 ? '' : 's'} ` +
-              `after the chunk ${i + 1}/${chunks.length} timeout rather than risk the CI runner ` +
-              `cancelling the job (and burying this diagnostic) before they finish.`,
-          );
-        }
-        break;
-      }
-      // A non-timeout failure is cheap in wall-clock terms (the child exits
-      // promptly on its own), so — unlike the timeout case above — run every
-      // remaining chunk anyway: the operator sees all failures in one pass,
-      // and the first non-zero exit is reported at the end.
+      break;
     }
+    // A non-timeout failure is cheap in wall-clock terms (the child exits
+    // promptly on its own), so — unlike the timeout case above — run every
+    // remaining chunk anyway: the operator sees all failures in one pass,
+    // and the first non-zero exit is reported at the end.
   }
   // #3889: sweep any events file the per-chunk success path didn't already
   // delete (a timeout diagnostic read one but left it on disk; an aborted
@@ -1967,6 +2105,12 @@ module.exports = {
   ISOLATION_BUDGET_FRACTION,
   partitionIsolatedFiles,
   analyzeChunkEvents,
+  // #4936: the chunk watchdog, exported so its arms are unit-testable with
+  // injected spawn/platform seams (a real wedged Windows child is not
+  // reproducible on demand).
+  runChunk,
+  killChunkTree,
+  DEFAULT_CHUNK_KILL_GRACE_MS,
   DEFAULT_TIMINGS_PATH,
   // Exported so callers (tests/ci-test-scope.test.cjs) can assert the
   // suite-token resolution contract in-process rather than through a timed
