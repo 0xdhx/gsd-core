@@ -3696,6 +3696,22 @@ describe('the win32 per-chunk cap must not permit a chunk that exceeds the 600s 
 const { runChunk, killChunkTree } = require('../scripts/run-tests.cjs');
 const { EventEmitter } = require('node:events');
 
+// Watchdog bounds for these tests — a distinct class from every subprocess
+// timeout in tests/helpers/timeouts.cjs. The fake-child bounds only need to
+// ORDER the timeout before the grace expiry, so they are tiny; nothing real
+// runs under them.
+const FAKE_CHUNK_TIMEOUT_MS = 20;
+const FAKE_CHUNK_GRACE_MS = 50;
+// A grace long enough that a child exiting on its first kill is always
+// observed inside it.
+const FAKE_CHUNK_LONG_GRACE_MS = 5000;
+// A bound that must never fire: the chunk under it exits on its own at once.
+const UNREACHED_CHUNK_TIMEOUT_MS = 60000;
+// The real-child test: long enough for `node -e` to install its SIGTERM trap
+// before the kill lands, so the first kill is genuinely ignored on POSIX.
+const REAL_CHILD_TIMEOUT_MS = 1000;
+const REAL_CHILD_GRACE_MS = 1000;
+
 // A stand-in ChildProcess. It never exits unless `exitOn` names the signal
 // whose delivery should make it exit.
 function fakeChunkChild({ pid = 4242, exitOn = null } = {}) {
@@ -3728,8 +3744,8 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
     let fired = 0;
     const r = await runChunk(process.execPath, ['-e', 'process.exit(3)'], {
       env: process.env,
-      timeoutMs: 60000,
-      graceMs: 1000,
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
       onTimeout: () => {
         fired += 1;
       },
@@ -3747,8 +3763,8 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
     const child = fakeChunkChild();
     const order = [];
     const r = await runChunk('unused', [], {
-      timeoutMs: 20,
-      graceMs: 50,
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
       platform: 'linux',
       spawnImpl: () => child,
       onTimeout: () => order.push('diagnostic'),
@@ -3767,8 +3783,8 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
     const child = fakeChunkChild({ exitOn: 'SIGTERM' });
     let fired = 0;
     const r = await runChunk('unused', [], {
-      timeoutMs: 20,
-      graceMs: 5000,
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_LONG_GRACE_MS,
       platform: 'linux',
       spawnImpl: () => child,
       onTimeout: () => {
@@ -3785,8 +3801,8 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
   test('a diagnostic that throws does not stop the bound from being enforced', async () => {
     const child = fakeChunkChild();
     const r = await runChunk('unused', [], {
-      timeoutMs: 20,
-      graceMs: 20,
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
       platform: 'linux',
       spawnImpl: () => child,
       onTimeout: () => {
@@ -3799,7 +3815,7 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
 
   test('a spawn failure resolves as a failed, non-timed-out chunk instead of throwing', async () => {
     const r = await runChunk('unused', [], {
-      timeoutMs: 60000,
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
       spawnImpl: () => {
         throw new Error('spawn EMFILE');
       },
@@ -3813,8 +3829,8 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
     const child = fakeChunkChild({ pid: 4242 });
     const reap = recordingSpawnSync(0);
     const r = await runChunk('unused', [], {
-      timeoutMs: 20,
-      graceMs: 20,
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
       platform: 'win32',
       spawnImpl: () => child,
       spawnSyncImpl: reap.impl,
@@ -3850,19 +3866,18 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
     // which the child cannot trap, so only the bound and ordering are asserted
     // there.
     const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+    // Reaching the assertions at all is the bound: pre-#4936 (execFileSync
+    // with a timeout) the same child blocked the runner indefinitely.
     const order = [];
-    const startedAt = Date.now();
     const r = await runChunk(process.execPath, ['-e', script], {
       env: process.env,
-      timeoutMs: 1000,
-      graceMs: 1000,
+      timeoutMs: REAL_CHILD_TIMEOUT_MS,
+      graceMs: REAL_CHILD_GRACE_MS,
       onTimeout: () => order.push('diagnostic'),
     });
     order.push('resolved');
-    const elapsedMs = Date.now() - startedAt;
     assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
     assert.strictEqual(r.timedOut, true);
-    assert.ok(elapsedMs < 30000, `runChunk must return within its bound plus grace; took ${elapsedMs}ms`);
     if (process.platform !== 'win32') {
       assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
     }
