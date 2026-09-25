@@ -39,7 +39,7 @@ const { readdirSync, readFileSync, mkdtempSync, rmSync, unlinkSync, writeFileSyn
 const { join, basename } = require('path');
 const { tmpdir } = require('os');
 const { pathToFileURL } = require('url');
-const { execFileSync, spawn, spawnSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const { ExitError, runMain } = require('./lib/cli-exit.cjs');
 const { suiteOf } = require('./lib/suite-detection.cjs');
 const {
@@ -1189,43 +1189,60 @@ function computeSweepProtectSet(selectedFiles, runTempRoot, dirnameImpl = requir
   return protectSet;
 }
 
-// #4936: how long runChunk waits, after the per-chunk timeout has fired and
-// the kill has been sent, for the child's exit to actually be OBSERVED before
-// it stops waiting. Operator/test override via RUN_TESTS_CHUNK_KILL_GRACE_MS.
+// #4936: how long runChunk waits, once the per-chunk timeout has fired, for the
+// child's exit to actually be OBSERVED before it stops waiting. Operator/test
+// override via RUN_TESTS_CHUNK_KILL_GRACE_MS.
 const DEFAULT_CHUNK_KILL_GRACE_MS = 30000;
 
-// #4936: kill a timed-out chunk child. On Windows the kill must reach the whole
-// tree: `node --test` is itself the parent of per-file test processes, and
-// child.kill() there is TerminateProcess on the direct child only, which
-// orphans those descendants. Same shape as #4601/#4775's run-with-timeout in
-// gsd-core/bin/gsd-tools.cjs — `taskkill /PID <pid> /T /F` on the FIRST attempt,
-// while the root is still alive (once it exits, its descendants are orphaned
-// and /T can no longer walk to them); /F because a headless process never
-// pumps the WM_CLOSE a plain taskkill posts; bounded so a wedged taskkill
-// cannot hang the runner; argv array, no shell. A non-zero status means it
-// lost a race with an exiting process, so fall through to the direct kill and
-// the attempt is never weaker than the pre-#4936 one. POSIX keeps the signal
-// execFileSync's timeout used to send (SIGTERM, direct child) — the observed
-// defect is Windows-only, and a detached process group would also take the
-// chunk out of the terminal's foreground group, so Ctrl-C would stop reaching it.
-function killChunkTree(child, { platform = process.platform, spawnSyncImpl = spawnSync } = {}) {
-  if (platform === 'win32' && child.pid) {
+// #4936: kill a timed-out chunk child WITHOUT blocking this process — the
+// watchdog runs on the event loop, and anything synchronous here would hold it
+// the way execFileSync used to. On Windows the kill must reach the whole tree:
+// `node --test` is itself the parent of per-file test processes, and
+// child.kill() there is TerminateProcess on the direct child only. Same shape
+// as #4601/#4775's run-with-timeout in gsd-core/bin/gsd-tools.cjs —
+// `taskkill /PID <pid> /T /F` on the FIRST attempt, while the root is still
+// alive (once it exits, its descendants are orphaned and /T can no longer walk
+// to them); /F because a headless process never pumps the WM_CLOSE a plain
+// taskkill posts; argv array, no shell. Unlike #4775 it is spawned, not
+// spawnSync'd: a spawnSync timeout is not a hard bound (it returns only once
+// the killed process's exit is observed), and an unobserved exit is exactly
+// the #4936 state. The reaper is unref'd so a wedged one cannot keep the
+// runner alive, and a non-zero exit or spawn error falls through to the direct
+// kill, so the attempt is never weaker than the pre-#4936 one. POSIX keeps the
+// signal execFileSync's timeout used to send (SIGTERM, direct child) — the
+// observed defect is Windows-only, and a detached process group would also
+// take the chunk out of the terminal's foreground group, so Ctrl-C would stop
+// reaching it.
+function killChunkTree(child, { platform = process.platform, reapSpawnImpl = spawn } = {}) {
+  let killedDirectly = false;
+  const killDirectly = () => {
+    if (killedDirectly) return;
+    killedDirectly = true;
     try {
-      const reap = spawnSyncImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
-        encoding: 'utf8',
-        timeout: 15000,
+      child.kill('SIGTERM');
+    } catch {
+      // Already exited.
+    }
+  };
+  if (platform === 'win32' && child.pid) {
+    let reaper;
+    try {
+      reaper = reapSpawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
         windowsHide: true,
       });
-      if (reap && reap.status === 0) return 'tree';
     } catch {
-      // Fall through to the direct kill.
+      killDirectly();
+      return 'direct';
     }
+    reaper.once('exit', (code) => {
+      if (code !== 0) killDirectly();
+    });
+    reaper.once('error', killDirectly);
+    if (typeof reaper.unref === 'function') reaper.unref();
+    return 'tree';
   }
-  try {
-    child.kill('SIGTERM');
-  } catch {
-    // Already exited.
-  }
+  killDirectly();
   return 'direct';
 }
 
@@ -1236,15 +1253,19 @@ function killChunkTree(child, { platform = process.platform, spawnSyncImpl = spa
 // diagnostic sat in a catch arm reachable only once execFileSync returned. On
 // a Windows runner that report never came: a conformance chunk ran 37 minutes
 // past its 600000ms bound with no kill line and no in-flight-file diagnostic,
-// until the job's own timeout cancelled it. Here the timer is ours:
-//   1. at timeoutMs, kill the tree (killChunkTree) and call onTimeout — which
-//      prints the diagnostic — WITHOUT waiting for the exit;
-//   2. then wait up to graceMs for the exit to be observed;
+// until the job's own timeout cancelled it. Here the timer is ours, and
+// nothing it runs blocks:
+//   1. at timeoutMs, arm the grace timer, send the kill (killChunkTree, which
+//      does not wait), and call onTimeout — which prints the diagnostic —
+//      WITHOUT waiting for the exit;
+//   2. wait up to graceMs for the exit to be observed;
 //   3. if it still is not, escalate once (SIGKILL; TerminateProcess again on
 //      Windows), unref the child so this process can exit, and resolve with
 //      exitObserved: false. The runner then aborts, as it does on any timeout.
+// Because the diagnostic no longer waits for the exit, a slow-dying child can
+// still write output after it.
 // Resolves (never rejects) with { code, signal, timedOut, exitObserved, error }.
-// spawnImpl / spawnSyncImpl / platform are injectable so the watchdog's arms
+// spawnImpl / reapSpawnImpl / platform are injectable so the watchdog's arms
 // can be exercised without a real wedged Windows process.
 function runChunk(command, args, {
   env,
@@ -1252,7 +1273,7 @@ function runChunk(command, args, {
   graceMs = DEFAULT_CHUNK_KILL_GRACE_MS,
   onTimeout = () => {},
   spawnImpl = spawn,
-  spawnSyncImpl = spawnSync,
+  reapSpawnImpl = spawn,
   platform = process.platform,
 } = {}) {
   return new Promise((resolve) => {
@@ -1284,13 +1305,7 @@ function runChunk(command, args, {
     });
     timeoutTimer = setTimeout(() => {
       timedOut = true;
-      killChunkTree(child, { platform, spawnSyncImpl });
-      try {
-        onTimeout();
-      } catch {
-        // A diagnostic failure must never stop the bound from being enforced.
-      }
-      if (settled) return;
+      // Armed FIRST, so nothing below can delay the bound.
       graceTimer = setTimeout(() => {
         try {
           child.kill('SIGKILL');
@@ -1300,6 +1315,12 @@ function runChunk(command, args, {
         if (typeof child.unref === 'function') child.unref();
         finish({ code: null, signal: null, timedOut: true, exitObserved: false, error: null });
       }, graceMs);
+      killChunkTree(child, { platform, reapSpawnImpl });
+      try {
+        onTimeout();
+      } catch {
+        // A diagnostic failure must never stop the bound from being enforced.
+      }
     }, timeoutMs);
   });
 }
@@ -1722,8 +1743,9 @@ async function main() {
   // `fs.appendFileSync` to a path passed through GSD_RUN_TESTS_EVENTS_FILE
   // instead of yielding strings for Node to pipe through
   // `--test-reporter-destination`: that destination is backed by an
-  // `fs.WriteStream`, which BUFFERS, and the per-chunk timeout kills the
-  // child — uncatchable, zero chance to flush — so a yield-based reporter can
+  // `fs.WriteStream`, which BUFFERS, and the per-chunk timeout can end the
+  // child with a hard kill (TerminateProcess on Windows, the SIGKILL
+  // escalation on POSIX) — uncatchable, zero chance to flush — so a yield-based reporter can
   // lose every event still sitting in the stream's buffer, which is exactly
   // the case this feature exists to diagnose (confirmed live: chunk killed at
   // 2006ms produced a timer-based "killed after 2006ms" line — which lives in
@@ -1838,8 +1860,8 @@ async function main() {
   // old 20m silent-cancel model; they are different failure modes with
   // different evidence.
   const chunkTimeoutMs = positiveNumberEnv(process.env.RUN_TESTS_CHUNK_TIMEOUT_MS, 600000);
-  // #4936: after the timeout's kill, how long to wait for the child's exit to
-  // be observed before the runner stops waiting (see runChunk).
+  // #4936: once the timeout fires, how long to wait for the child's exit to be
+  // observed before the runner stops waiting (see runChunk).
   const chunkKillGraceMs = positiveNumberEnv(
     process.env.RUN_TESTS_CHUNK_KILL_GRACE_MS,
     DEFAULT_CHUNK_KILL_GRACE_MS,
@@ -2000,8 +2022,7 @@ async function main() {
     }
     if (!result.timedOut) {
       console.error(
-        `run-tests: chunk ${i + 1}/${chunks.length} failed after ${elapsedMs.toFixed(0)}ms` +
-          (result.error ? ` (${result.error.message})` : ''),
+        `run-tests: chunk ${i + 1}/${chunks.length} failed after ${elapsedMs.toFixed(0)}ms`,
       );
     } else if (!result.exitObserved) {
       // #4936: the kill was sent but the child's exit was never reported back

@@ -3730,14 +3730,27 @@ function fakeChunkChild({ pid = 4242, exitOn = null } = {}) {
   return child;
 }
 
-function recordingSpawnSync(status) {
+// A stand-in for the spawned tree reaper. `exitCode` undefined = it never
+// exits (a wedged reaper); `emitError` = it fails to spawn asynchronously.
+function fakeReaper({ exitCode, emitError = false } = {}) {
   const calls = [];
+  const reapers = [];
   const impl = (command, args) => {
     calls.push([command, args]);
-    return { status };
+    const reaper = new EventEmitter();
+    reaper.unrefCalls = 0;
+    reaper.unref = () => {
+      reaper.unrefCalls += 1;
+    };
+    reapers.push(reaper);
+    if (emitError) setImmediate(() => reaper.emit('error', new Error('spawn taskkill ENOENT')));
+    else if (exitCode !== undefined) setImmediate(() => reaper.emit('exit', exitCode, null));
+    return reaper;
   };
-  return { calls, impl };
+  return { calls, reapers, impl };
 }
+
+const nextTick = () => new Promise((r) => setImmediate(r));
 
 describe('runChunk per-chunk watchdog (#4936)', () => {
   test('a chunk that exits on its own resolves with its code and never fires the timeout', async () => {
@@ -3827,59 +3840,111 @@ describe('runChunk per-chunk watchdog (#4936)', () => {
 
   test('on win32 the first kill reaps the whole tree (#4601 shape), not just the direct child', async () => {
     const child = fakeChunkChild({ pid: 4242 });
-    const reap = recordingSpawnSync(0);
+    const reap = fakeReaper({ exitCode: 0 });
     const r = await runChunk('unused', [], {
       timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
       graceMs: FAKE_CHUNK_GRACE_MS,
       platform: 'win32',
       spawnImpl: () => child,
-      spawnSyncImpl: reap.impl,
+      reapSpawnImpl: reap.impl,
     });
     assert.deepStrictEqual(reap.calls, [['taskkill', ['/PID', '4242', '/T', '/F']]]);
+    assert.strictEqual(reap.reapers[0].unrefCalls, 1, 'the reaper must never keep the runner alive');
     assert.deepStrictEqual(child.kills, ['SIGKILL'],
       'a successful tree reap replaces the direct first kill; only the grace escalation follows');
     assert.strictEqual(r.exitObserved, false);
   });
 
-  test('on win32 a failed tree reap falls through to the direct kill', () => {
+  test('REGRESSION: a tree reaper that never exits delays neither the diagnostic nor the bound', async () => {
+    // A synchronous reap (spawnSync) returns only once the reaper's own exit is
+    // observed, so it could re-create the #4936 stall one layer down. The
+    // reaper is spawned and never awaited.
     const child = fakeChunkChild();
-    const reap = recordingSpawnSync(128);
-    assert.strictEqual(killChunkTree(child, { platform: 'win32', spawnSyncImpl: reap.impl }), 'direct');
-    assert.strictEqual(reap.calls.length, 1);
-    assert.deepStrictEqual(child.kills, ['SIGTERM']);
-  });
-
-  test('off win32 the kill never shells out to a tree reap', () => {
-    for (const platform of ['linux', 'darwin']) {
-      const child = fakeChunkChild();
-      const reap = recordingSpawnSync(0);
-      assert.strictEqual(killChunkTree(child, { platform, spawnSyncImpl: reap.impl }), 'direct');
-      assert.deepStrictEqual(reap.calls, [], `${platform} must not spawn a tree reap`);
-      assert.deepStrictEqual(child.kills, ['SIGTERM']);
-    }
-  });
-
-  test('a real child that ignores its first kill signal is still bounded, and its diagnostic still fires first', async () => {
-    // On POSIX the child traps SIGTERM, so the first kill does nothing and
-    // only the grace escalation ends the wait — the "kill sent, no exit"
-    // state with a real process. On Windows the kill is TerminateProcess,
-    // which the child cannot trap, so only the bound and ordering are asserted
-    // there.
-    const script = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
-    // Reaching the assertions at all is the bound: pre-#4936 (execFileSync
-    // with a timeout) the same child blocked the runner indefinitely.
+    const reap = fakeReaper();
     const order = [];
-    const r = await runChunk(process.execPath, ['-e', script], {
-      env: process.env,
-      timeoutMs: REAL_CHILD_TIMEOUT_MS,
-      graceMs: REAL_CHILD_GRACE_MS,
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
       onTimeout: () => order.push('diagnostic'),
     });
     order.push('resolved');
     assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
     assert.strictEqual(r.timedOut, true);
-    if (process.platform !== 'win32') {
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGKILL']);
+  });
+
+  test('on win32 a failed tree reap falls through to the direct kill', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ exitCode: 128 });
+    assert.strictEqual(killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl }), 'tree');
+    assert.deepStrictEqual(child.kills, [], 'the direct kill waits for the reaper\'s verdict');
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+  });
+
+  test('on win32 a reaper that cannot start falls through to the direct kill, once', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ emitError: true });
+    killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl });
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+
+    const child2 = fakeChunkChild();
+    const throwing = () => {
+      throw new Error('spawn EMFILE');
+    };
+    assert.strictEqual(killChunkTree(child2, { platform: 'win32', reapSpawnImpl: throwing }), 'direct');
+    assert.deepStrictEqual(child2.kills, ['SIGTERM']);
+  });
+
+  test('off win32 the kill never spawns a tree reap', () => {
+    for (const platform of ['linux', 'darwin']) {
+      const child = fakeChunkChild();
+      const reap = fakeReaper({ exitCode: 0 });
+      assert.strictEqual(killChunkTree(child, { platform, reapSpawnImpl: reap.impl }), 'direct');
+      assert.deepStrictEqual(reap.calls, [], `${platform} must not spawn a tree reap`);
+      assert.deepStrictEqual(child.kills, ['SIGTERM']);
+    }
+  });
+
+  test('a real child that ignores its first kill signal is still bounded, and its diagnostic still fires first', async (t) => {
+    // On POSIX the child traps SIGTERM, so the first kill does nothing and
+    // only the grace escalation ends the wait — the "kill sent, no exit"
+    // state with a real process. On Windows the kill is TerminateProcess,
+    // which the child cannot trap, so only the bound and ordering are asserted
+    // there. The child writes a marker once its trap is installed; the POSIX
+    // assertion applies only when the trap was armed before the kill, so a
+    // slow child start cannot turn it into a flake.
+    const dir = createTempDir('gsd-4936-real-child-');
+    t.after(() => cleanup(dir));
+    const marker = path.join(dir, 'trap-armed');
+    const script =
+      "process.on('SIGTERM', () => {}); " +
+      "require('fs').writeFileSync(process.argv[1], 'armed'); " +
+      'setInterval(() => {}, 1000);';
+    // Reaching the assertions at all is the bound: pre-#4936 (execFileSync
+    // with a timeout) the same child blocked the runner indefinitely.
+    const order = [];
+    let trapArmedAtKill = false;
+    const r = await runChunk(process.execPath, ['-e', script, marker], {
+      env: process.env,
+      timeoutMs: REAL_CHILD_TIMEOUT_MS,
+      graceMs: REAL_CHILD_GRACE_MS,
+      onTimeout: () => {
+        trapArmedAtKill = fs.existsSync(marker);
+        order.push('diagnostic');
+      },
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    if (process.platform !== 'win32' && trapArmedAtKill) {
       assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
     }
   });
 });
+
