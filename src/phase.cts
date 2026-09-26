@@ -1413,8 +1413,14 @@ function cmdPhaseAdd(cwd: string, description: string, raw: boolean, customId?: 
 
       // 1) Section headers: ### Phase N: / ## Phase N: / #### Phase N:
       // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
-      // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-      const headerPattern = /#{2,4}\s*Phase\s+(\d+)[A-Z]?(?:\.\d+)*(?:\s*\([^)\n]{0,200}\))?:/gi;
+      // #5007 (Phase 6 / ADR-4910 §8): migrated onto buildPhaseHeadingScanRegex
+      // (src/phase-id.cjs) with the LABEL_ONLY baseline and no convention
+      // argument — a counter site, matching phase-id.cts's own LABEL_ONLY
+      // docstring guidance, reproducing the prior `Phase\s+` literal (no
+      // bracket tolerance) byte-for-byte. See collectSiblingWorktreePhaseNums
+      // (above) for the identical migration on the same regex shape.
+      const { regex: headerPattern, phaseNumGroup } =
+        buildPhaseHeadingScanRegex(PHASE_HEADING_BASELINE.LABEL_ONLY);
       // 2) Roadmap bullet entries: - [ ] **Phase N: ...** (all checkbox variants)
       // The lookahead accepts colon, decimal-dot, whitespace, bold-close asterisk,
       // or end-of-line so titleless forms ("- [ ] **Phase 11**", "- [ ] Phase 11")
@@ -1425,7 +1431,7 @@ function cmdPhaseAdd(cwd: string, description: string, raw: boolean, customId?: 
       let m: RegExpExecArray | null;
 
       while ((m = headerPattern.exec(content)) !== null) {
-        const num = parseInt(m[1], 10);
+        const num = parseInt(m[phaseNumGroup], 10);
         // #3185: canonical sentinel predicate (SENTINEL_RANGES [0,999]) — this was a local 999-only literal that admitted Phase 0.
         if (!isSentinelPhaseId(num)) usedPhaseNums.add(num);
       }

@@ -8744,6 +8744,36 @@ describe('bug #1229: phase.add must count bullet-only phases to avoid number col
     );
   });
 
+  // Phase 6 (#5007): cmdPhaseAdd's header-counting regex migrated onto
+  // buildPhaseHeadingScanRegex (LABEL_ONLY, no convention argument) — a
+  // bracket-tagged header must stay unrecognized before and after, same as
+  // the collectSiblingWorktreePhaseNums migration above.
+  test('#5007: a bracket-tagged header is not counted (LABEL_ONLY parity)', () => {
+    const roadmap = [
+      '# Roadmap v1.0',
+      '',
+      '### [GSD.01] Phase 5: Bracket-tagged',
+      '',
+      '**Goal:** Setup',
+      '',
+      '### Phase 6: Untagged',
+      '',
+      '**Goal:** Build',
+      '',
+      '---',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+
+    const result = runGsdTools('phase add New Feature', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.phase_number,
+      7,
+      'bracket-tagged Phase 5 is invisible to the counter (max seen is untagged Phase 6) — next is 7',
+    );
+  });
+
   test('[x] checkbox variant bullet phase is counted', () => {
     // Phase 5 exists only as a [x] bullet (completed, no dir, no header)
     const roadmap = [
