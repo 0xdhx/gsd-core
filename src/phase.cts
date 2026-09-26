@@ -1341,8 +1341,15 @@ function collectSiblingWorktreePhaseNums(cwd: string, used: Set<number>): void {
   const siblingPlanningDir = (wt: string): string => planningDir(wt, ws);
   const dirNumPattern = /^(?:[A-Z][A-Z0-9]*-)?(\d+)-/;
   // Same header shape the allocators scan locally (#1729 tag tolerance).
-  // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-  const headerPattern = /#{2,4}\s*Phase\s+(\d+)[A-Z]?(?:\.\d+)*(?:\s*\([^)\n]{0,200}\))?:/gi;
+  // #5007 (Phase 6 / ADR-4910 §8): migrated onto buildPhaseHeadingScanRegex
+  // (src/phase-id.cjs), the shared "which phases exist in this content" scan
+  // owner. LABEL_ONLY baseline with no convention argument reproduces the
+  // prior literal `Phase\s+` (no bracket tolerance) byte-for-byte — this is a
+  // counter, matching the LABEL_ONLY docstring guidance exactly, so it is
+  // deliberately NOT widened onto the bracket grammar the way the real-heading
+  // readers (getRoadmapModeForPhase, phaseDisplayNameFromRoadmap) are.
+  const { regex: headerPattern, phaseNumGroup } =
+    buildPhaseHeadingScanRegex(PHASE_HEADING_BASELINE.LABEL_ONLY);
   for (const line of porcelain.split('\n')) {
     if (!line.startsWith('worktree ')) continue;
     const wt = line.slice('worktree '.length).trim();
@@ -1362,7 +1369,7 @@ function collectSiblingWorktreePhaseNums(cwd: string, used: Set<number>): void {
       let m: RegExpExecArray | null;
       headerPattern.lastIndex = 0;
       while ((m = headerPattern.exec(content)) !== null) {
-        const num = parseInt(m[1], 10);
+        const num = parseInt(m[phaseNumGroup], 10);
         if (!isSentinelPhaseId(num)) used.add(num);
       }
     } catch {

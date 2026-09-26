@@ -2668,6 +2668,38 @@ describe('phase add allocation vs sibling git worktrees (#3849)', () => {
     );
   });
 
+  // Phase 6 (#5007): collectSiblingWorktreePhaseNums migrated its hand-rolled
+  // header regex onto buildPhaseHeadingScanRegex with the LABEL_ONLY baseline
+  // and no convention argument — a deliberate non-widening, since this is a
+  // "counter" site (phase-id.cts's own LABEL_ONLY docstring guidance). A
+  // bracket-tagged sibling heading must stay unrecognized before AND after
+  // the migration — proving the swap did not (accidentally) start admitting
+  // the ANY_BRACKET grammar the real-heading readers use.
+  test('#5007: a bracket-tagged sibling heading does not corrupt (or widen) the numeric allocation horizon', () => {
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-bracket-'));
+    activeDirs.push(repoDir);
+    initRepo(repoDir);
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf-8', timeout: GIT_TIMEOUT_MS }).trim();
+    const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-bracket-sib-'));
+    execFileSync('git', ['worktree', 'add', '--detach', worktreeDir, sha], { cwd: repoDir, encoding: 'utf-8', timeout: GIT_TIMEOUT_MS });
+    activeWorktrees.push({ repoDir, worktreeDir });
+    fs.mkdirSync(path.join(worktreeDir, '.planning', 'phases'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktreeDir, '.planning', 'ROADMAP.md'),
+      ['# Roadmap v1.0', '', '### [GSD.01] Phase 441: bracket-tagged sibling phase', '**Goal:** Talk', '', '---', ''].join('\n')
+    );
+
+    const result = runGsdTools('phase add anything', repoDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.phase_number,
+      441,
+      '#5007: the bracket-tagged sibling heading is not counted (LABEL_ONLY baseline, no convention widening) — next is 441, not 442'
+    );
+  });
+
   test('phase add-batch counts bullet-only Phase N rows (#1229 reached the batch path)', () => {
     const tmp = createTempProject();
     try {
