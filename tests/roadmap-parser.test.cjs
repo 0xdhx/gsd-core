@@ -622,6 +622,38 @@ describe('roadmap-parser: extractCurrentMilestone', () => {
     assert.ok(result.includes('<summary>v9.0 Archived</summary>'), 'the summary tag that located the block is retained');
   });
 
+  // #5007 (Phase 6 / ADR-4910 §8): currentSectionHasPhaseDetails (the boolean
+  // gate deciding whether the preamble strip runs at all) migrated off its own
+  // hand-rolled `#{2,4}\s*Phase\s+\S` literal. The #3235 tests above already
+  // pin the TRUE branch (current section has its own phase details, preamble
+  // is stripped); this pins the FALSE branch directly via extractCurrentMilestone
+  // (the #2947 test elsewhere in this file exercises the same false branch
+  // only indirectly, through the CLI's phase_count assertion).
+  test('#5007 — currentSectionHasPhaseDetails false branch: preamble phases preserved when the current section has none of its own', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Phases',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+      '## v9.0 Progress',
+      '',
+      '### v9.0 phase progress',
+      '',
+      '| Phase | Status |',
+      '|-------|--------|',
+      '| 1     | Planned |',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(result.includes('Phase 1: Alpha'), 'preamble phase details survive when the selected section has none of its own');
+  });
+
   // The fixture below carries its own `## Phase Details` heading in the preamble.
   // The LF-only sibling test above can't catch a CRLF-specific regression in the
   // `[^\n]*` / `\n?` tail of the Phase Details strip regex — those tail tokens are

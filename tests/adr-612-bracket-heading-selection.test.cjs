@@ -163,6 +163,10 @@ const BASE_SITES = [
   // hand-rolled `Phase\s+` literal.
   { file: 'roadmap-parser.cts', site: 'PHASE_HEADING_BLOCK_STRIP_RE (extractCurrentMilestoneScoped fallback + preambleWithoutPhaseDetails)',
     baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  // #5007: the "does this section have ANY phase heading" boolean gate,
+  // migrated off its own hand-rolled `Phase\s+` literal.
+  { file: 'roadmap-parser.cts', site: 'currentSectionHasPhaseDetails',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
 ];
 
 // Every convention value that is NOT the bracket convention. A repo carrying any
@@ -727,7 +731,7 @@ describe('#612 PR-2: every selector call site declares the right baseline (live 
     'validate.cts': [1, 2],
     'state.cts': [0, 3],
     'planning-snapshot.cts': [0, 2],
-    'roadmap-parser.cts': [2, 1],
+    'roadmap-parser.cts': [2, 2],
     'roadmap-upgrade.cts': [0, 1],
     // #5007 (Phase 6 / ADR-4910 §8): phase.cts became a real selector consumer
     // once its 11 grandfathered sites migrated onto phaseHeadingPrefixSrcFor /

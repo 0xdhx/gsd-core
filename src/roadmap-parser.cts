@@ -1367,8 +1367,18 @@ function extractCurrentMilestoneScoped(content: string, cwd?: string, ws?: strin
   // every phase (phase_count: 0, exit 0). Only strip preamble phase details when
   // the selected milestone section actually contains its own — otherwise the
   // preamble phases ARE this milestone's phases and must be preserved.
-  // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-  const currentSectionHasPhaseDetails = /^#{2,4}\s*Phase\s+\S/im.test(currentSection);
+  // #5007 (Phase 6 / ADR-4910 §8): a pure "does this section have ANY phase
+  // heading" boolean — same shape as phase.cts:1691's anyHeadingPattern
+  // (composed directly from phaseHeadingPrefixSrcFor, no shared owner exposes
+  // a captureless existence check), but this site's terminal token is `\S`
+  // (any non-whitespace), not phase.cts:1691's `\d` — kept as `\S` to
+  // reproduce this site's own prior behavior byte-for-byte rather than
+  // forcing the two sites onto an identical terminal token that would be a
+  // behavior change here.
+  const currentSectionHasPhaseDetails = new RegExp(
+    `^#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY)}\\S`,
+    'im',
+  ).test(currentSection);
   const preambleBase = stripTaggedBlocks(beforeMilestones, 'details');
   // #3235: the conditional wraps the REPLACE, not the pattern. This used to select between the
   // strip regex and a `/$/` sentinel, which made the do-not-strip branch an identity replacement
