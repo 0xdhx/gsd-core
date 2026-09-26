@@ -404,23 +404,42 @@ describe('stateReplaceField — anchored bold form leaves prose lookalikes untou
 });
 
 // #5007 (Phase 6 / ADR-4910 amendment): the bold branch above was migrated
-// off its hand-rolled `\*\*${escaped}:\*\*` regex onto the PlanningDoc
-// boldField seam (parsePlanningDoc/setFieldValue/serialize), the same
-// migration shape as src/phase.cts's "Depends on" field (#5007). These rows
-// pin the behaviours the migration must preserve OR deliberately widen —
-// see the inline comment on stateReplaceField itself for the full
-// rationale of each deviation from a bare findField()/setFieldValue() call.
+// off its hand-rolled `\*\*${escaped}:\*\*` regex onto `parsePlanningDoc` for
+// LOCATING the field, the same migration shape as src/phase.cts's "Depends
+// on" field (#5007). These rows pin the behaviours the migration must
+// preserve OR deliberately widen — see the inline comment on
+// stateReplaceField itself for the full rationale of each deviation from a
+// bare findField() call, and for why the write is a LOCAL full-rest-of-line
+// splice against `content` rather than a call through `setFieldValue`.
 describe('stateReplaceField — bold branch migrated onto the PlanningDoc seam (#5007)', () => {
-  // The exact bug class TRAILING_SEPARATOR_RE / setFieldValue's default
-  // round-trip check guards against (#4917 finding 2): a value containing
-  // the grammar's own ` — ` separator token. Before the `allowSeparator`
-  // widening, migrating this branch naively would have made such a write
+  // The exact bug class TRAILING_SEPARATOR_RE / setFieldValue's round-trip
+  // check guards against (#4917 finding 2): a value containing the
+  // grammar's own ` — ` separator token. Migrating this branch naively onto
+  // a bare findField()/setFieldValue() call would have made such a write
   // silently no-op (findField finds the field, setFieldValue refuses,
-  // stateReplaceField falls through and returns null). This pins the fix.
+  // stateReplaceField falls through and returns null) — this pins that the
+  // local full-rest-of-line splice still writes it, untruncated. See
+  // tests/planning-document.test.cjs row 32 for why this write path is
+  // local to this module rather than a shared `setFieldValue` option.
   test('a value containing the trailing " — " separator is written, not silently dropped', () => {
     const input = '**Core value:** Something else';
     const result = stateReplaceField(input, 'Core value', 'Ship the seam — narrow, not delete the guard');
     assert.equal(result, '**Core value:** Ship the seam — narrow, not delete the guard');
+  });
+
+  // ROUND-TRIP REGRESSION (the corruption a code review flagged in the
+  // original allowSeparator-based migration, confirmed by direct
+  // reproduction before this fix): the value written above must also read
+  // back CORRECTLY through the REAL production read path for this field —
+  // `stateExtractField`'s own regex, `(.+)` to end of line, which does NOT
+  // split on ` — ` the way `parseBoldFieldLine` does. Before this fix, the
+  // write was byte-correct but nothing verified the read side; this closes
+  // that gap for the actual call path STATE.md fields are read through.
+  test('a separator-containing value round-trips losslessly through the real read path (stateExtractField)', () => {
+    const input = '**Current Phase:** 1';
+    const written = stateReplaceField(input, 'Current Phase', '1 — COMPLETE');
+    assert.equal(written, '**Current Phase:** 1 — COMPLETE');
+    assert.equal(stateExtractField(written, 'Current Phase'), '1 — COMPLETE');
   });
 
   // Case-insensitive label lookup is preserved (not findField's exact

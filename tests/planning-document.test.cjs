@@ -780,7 +780,7 @@ describe('row 30: setFieldValue refuses a value containing the trailing separato
   });
 });
 
-// ─── Row 32: setFieldValue's `{ allowSeparator: true }` option (#5007) ─────────
+// ─── Row 32: setFieldValue has NO separator-widening escape hatch (#5007) ──────
 //
 // #4917's review finding 2 (the round-trip check row 30 above pins) is: a
 // value containing the grammar's own ` — ` separator token gets silently
@@ -791,59 +791,61 @@ describe('row 30: setFieldValue refuses a value containing the trailing separato
 // identical input shape to the reader. Narrowing the round-trip check's
 // regex can never fix this safely — see setFieldValue's own comment.
 //
-// `{ allowSeparator: true }` (#5007 / ADR-4910 Phase 6 amendment) is
-// therefore not a narrower version of the SAME check — it is a different,
-// explicitly opt-in WRITE TARGET (the full rest-of-line span, not just
-// valueSpan) that makes finding 2's failure mode structurally impossible:
-// nothing is ever reparsed or split, so nothing can be silently dropped.
-describe('row 32: setFieldValue({ allowSeparator: true }) writes a separator-containing value losslessly', () => {
-  test('a value containing " — " is REFUSED by default (finding 2 stays fixed) but ACCEPTED with allowSeparator', () => {
+// An earlier version of #5007 added a `{ allowSeparator: true }` option that
+// spliced the caller's value across the FULL rest-of-line span instead of
+// just `valueSpan`, reasoning that skipping the reparse-and-split made
+// finding 2's failure mode "structurally impossible". A failing-first
+// reproduction proved that reasoning wrong: the option only avoided the
+// refusal AT WRITE TIME. The bytes it wrote were correct, but
+// `parseBoldFieldLine` splits on ` — ` unconditionally on every READ, with
+// no escaping/metadata in this grammar to tell the two cases apart — so the
+// NEXT fresh `parsePlanningDoc` of that exact text (not the in-memory doc
+// the option's own tests checked) silently re-truncated the value via
+// `findField`/`readNode`, reporting a confident `ok: true` and no error.
+// That is finding 2 itself, just moved one parse cycle downstream of where
+// the check could catch it. The option was removed; this seam now has
+// exactly ONE write path, and it round-trips safely by refusing outright,
+// not by silently mis-splitting.
+describe('row 32: setFieldValue has no way to accept a separator-containing value', () => {
+  test('a value containing " — " is refused (finding 2 stays fixed) — setFieldValue has no options parameter', () => {
     const source = ['**Phase:** 1', '**Owner:** alice', ''].join('\n');
     const doc = parseOk(source);
     const id = findField(doc, 'Phase');
 
-    const defaultResult = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`);
-    assert.strictEqual(defaultResult.ok, false, 'default (non-opted-in) path must still refuse — finding 2 pin');
+    const result = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`);
+    assert.strictEqual(result.ok, false, 'the round-trip check must still refuse — finding 2 pin');
 
-    const widenedResult = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`, { allowSeparator: true });
-    assert.strictEqual(widenedResult.ok, true);
-
-    const outcome = serialize(widenedResult.value);
-    assert.strictEqual(outcome.ok, true);
-    assert.strictEqual(outcome.value, ['**Phase:** 1 — COMPLETE', '**Owner:** alice', ''].join('\n'));
+    // Regression pin: a 3rd "options" argument (the removed allowSeparator
+    // shape) must have NO effect — proves the escape hatch cannot silently
+    // be reintroduced by a caller who copies the old call shape.
+    const withIgnoredOptions = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`, { allowSeparator: true });
+    assert.strictEqual(withIgnoredOptions.ok, false, 'a stray options arg must not reopen the refusal');
   });
 
-  test('allowSeparator replaces the FULL rest-of-line span — a pre-existing trailing annotation is clobbered, not preserved', () => {
-    const source = [`**Plans:** short ${EM_DASH} a hand-written annotation`, '**Owner:** alice', ''].join('\n');
-    const doc = parseOk(source);
-    const id = findField(doc, 'Plans');
+  // ROUND-TRIP CORRUPTION PROOF (why the removed option was unsafe, kept as
+  // a permanent regression pin against reintroducing it under any name):
+  // this grammar has no escaping convention, so ANY line whose rest-of-line
+  // text contains " — " — however it got written — is split at the FIRST
+  // occurrence on every parse. There is no way for a value legitimately
+  // containing that token to round-trip through parsePlanningDoc/findField/
+  // readNode; the only representable-by-construction contract this seam can
+  // offer is refuse-at-write, which is what setFieldValue does.
+  test('a line whose rest-of-line text contains " — " is ALWAYS split on (re)parse — the grammar has no escape', () => {
+    // Simulates what a full-rest-of-line write (with no reparse/refusal)
+    // would have produced on disk, bypassing setFieldValue entirely to
+    // isolate the parser's own behaviour from any writer.
+    const written = ['**Phase:** 1 — COMPLETE', '**Owner:** alice', ''].join('\n');
 
-    const staged = setFieldValue(doc, id, `new ${EM_DASH} value`, { allowSeparator: true });
-    assert.strictEqual(staged.ok, true);
+    const reparsed = parseOk(written);
+    const id = findField(reparsed, 'Phase');
+    const read = readNode(reparsed, id);
 
-    const outcome = serialize(staged.value);
-    assert.strictEqual(outcome.ok, true);
-    assert.strictEqual(outcome.value, [`**Plans:** new ${EM_DASH} value`, '**Owner:** alice', ''].join('\n'));
-  });
-
-  test('allowSeparator does not weaken the line-break refusal — a value containing \\n is still refused', () => {
-    const source = ['**Plans:** initial value', ''].join('\n');
-    const doc = parseOk(source);
-    const id = findField(doc, 'Plans');
-
-    const result = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE\nforged sibling`, { allowSeparator: true });
-    assert.strictEqual(result.ok, false);
-  });
-
-  test('a value with no separator still writes correctly with allowSeparator (no-op-shaped input)', () => {
-    const source = ['**Plans:** initial value', ''].join('\n');
-    const doc = parseOk(source);
-    const id = findField(doc, 'Plans');
-
-    const staged = setFieldValue(doc, id, 'plain replacement', { allowSeparator: true });
-    assert.strictEqual(staged.ok, true);
-    const outcome = serialize(staged.value);
-    assert.strictEqual(outcome.ok, true);
-    assert.strictEqual(outcome.value, ['**Plans:** plain replacement', ''].join('\n'));
+    assert.strictEqual(read.ok, true);
+    assert.notStrictEqual(
+      read.value,
+      '1 — COMPLETE',
+      'reparsing must NOT recover the full atomic value — proves no safe round-trip exists in this grammar',
+    );
+    assert.strictEqual(read.value, '1', 'the grammar unconditionally truncates at the first " — "');
   });
 });

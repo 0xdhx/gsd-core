@@ -12,7 +12,7 @@ import { clampPercentFromFraction } from './phase-lifecycle.cjs';
 import { collectSection, withSection } from './markdown-sectionizer.cjs';
 import type { HeadingToken } from './markdown-sectionizer.cjs';
 import { escapeRegex } from './pattern.cjs';
-import { parsePlanningDoc, setFieldValue, serialize } from './planning-document.cjs';
+import { parsePlanningDoc } from './planning-document.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-scope.cjs is an export= CommonJS module
 import planningScopeMod = require('./planning-scope.cjs');
 const { SCOPE } = planningScopeMod;
@@ -554,18 +554,43 @@ export function stateReplaceField(content: string, fieldName: string, newValue: 
   // #5007 (Phase 6 / ADR-4910 amendment): migrated off the hand-rolled
   // `^([ \t]*\*\*${escaped}:\*\*[ \t]*)(.*)$` regex (which, per #4010/#4243
   // below, already existed to fix real same-line-confinement and mid-prose
-  // data-loss bugs) onto the PlanningDoc `boldField` parse/read/write seam
-  // (`parsePlanningDoc`/`setFieldValue`/`serialize`) — the same seam-based
-  // migration shape as src/phase.cts's "Depends on" field (#5007). The seam
-  // already owns same-line confinement AND fence/frontmatter exclusion
-  // (parseBoldFieldLine never matches inside a fenced block or frontmatter,
-  // which the removed regex could not tell apart from prose), so this
-  // migration keeps #4010/#4243's fix and extends it, rather than
-  // replacing it with a weaker check.
+  // data-loss bugs) onto `parsePlanningDoc` for LOCATING the field — same-
+  // line confinement AND fence/frontmatter exclusion (parseBoldFieldLine
+  // never matches inside a fenced block or frontmatter, which the removed
+  // regex could not tell apart from prose) — so this migration keeps
+  // #4010/#4243's fix and extends it, rather than replacing it with a
+  // weaker check.
   //
-  // Two deliberate deviations from a bare findField()/setFieldValue() call,
-  // both PRESERVING this function's own prior contract rather than
-  // adopting the seam's stricter defaults:
+  // This does NOT go through the seam's `setFieldValue`/`serialize` write
+  // path. An earlier version of this migration did, via a since-removed
+  // `setFieldValue({ allowSeparator: true })` option (#5007) — that option
+  // spliced the caller's value across the FULL rest-of-line span
+  // (`valueSpan.start`..`trailingSpan.end`) to permit a value containing the
+  // grammar's ` — ` trailing-separator token (needed here: see the
+  // `${currentPhase} — COMPLETE` value below). It was removed after a
+  // failing-first reproduction proved it only avoided the write-time
+  // refusal: the bytes it writes are correct, but `parseBoldFieldLine`
+  // splits on ` — ` unconditionally on every read, with no escaping
+  // convention in this grammar to tell "atomic value containing the token"
+  // apart from "value plus hand-annotation". So the NEXT fresh
+  // `parsePlanningDoc` of that exact text — not the in-memory doc the
+  // option's own tests checked — silently re-truncates the value and
+  // demotes the rest to `trailingSpan`, with `findField`/`readNode`
+  // reporting a confident, wrong `ok: true` and no error. That is exactly
+  // the #4917 finding-2 corruption `setFieldValue`'s round-trip check
+  // exists to prevent, just moved one parse cycle downstream. This call
+  // site never reads STATE.md fields back through `parsePlanningDoc`/
+  // `findField` (reads go through `stateExtractField`'s own non-splitting
+  // regex, below), so it is safe HERE — but making that a shared, public
+  // option on the seam's `setFieldValue` was an attractive nuisance for any
+  // future `findField`/`readNode` caller (this same module already serves
+  // ROADMAP.md's `Plans`/`Depends on` fields that way). The full-rest-of-
+  // line splice is done locally, directly against `content`, instead —
+  // `parsePlanningDoc` is used only to locate the field's spans.
+  //
+  // Two deliberate deviations from a bare findField() call, both
+  // PRESERVING this function's own prior contract rather than adopting the
+  // seam's stricter defaults:
   //
   //  1. Label lookup here is case-INSENSITIVE (not findField's exact
   //     match), mirroring the removed regex's `i` flag: callers in
@@ -574,42 +599,40 @@ export function stateReplaceField(content: string, fieldName: string, newValue: 
   //     explicit 'Last Activity' / 'Last activity' fallback-call pairs at
   //     those call sites), so a case-sensitive lookup would silently miss
   //     matches the removed regex used to find.
-  //  2. Every write below uses `setFieldValue`'s `{ allowSeparator: true }`
-  //     option (#5007 / ADR-4910 Phase 6 amendment) UNCONDITIONALLY, not
-  //     only when `newValue` contains the grammar's ` — ` separator token,
+  //  2. Every write below replaces the FULL rest-of-line span
+  //     (`valueSpan.start`..`trailingSpan.end`) UNCONDITIONALLY, not only
+  //     when `newValue` contains the grammar's ` — ` separator token,
   //     because `joinFieldReplacement` always discarded the OLD regex's
   //     entire captured tail (`(.*)$` — both what the seam calls
   //     `valueSpan` AND `trailingSpan`) and replaced it wholesale with the
   //     new value. This call site never had a "preserve a hand-written
   //     trailing annotation" contract, so writing anything narrower than
   //     the full rest-of-line span here would be a NEW, untested behavior
-  //     this migration must not introduce as a side effect. `allowSeparator`
-  //     exists precisely so a value like `` `${currentPhase} — COMPLETE}` ``
-  //     (state.cts, tested at tests/state.test.cjs) can be written at all —
-  //     see setFieldValue's own comment for why the option is safe.
+  //     this migration must not introduce as a side effect.
   //
   // Matching BOTH bold-placement spellings (`**Label:**` and `**Label**:`,
   // `BOLD_FIELD_RE`) where the removed regex recognized only `**Label:**`
   // is the same, already-precedented widening as the "Depends on"
   // migration (src/phase.cts) — intentional, not scope creep.
   //
-  // A parse failure, or an absent/case-mismatched label, falls through to
-  // the plain/pipe-table branches below unchanged — the same silent
+  // A parse failure, an absent/case-mismatched label, or a value containing
+  // a line break (\r/\n — would forge sibling structure on splice, the same
+  // hazard `setFieldValue` refuses unconditionally at #4917/ADR-4910
+  // Decision 2 & 4; this local splice has no seam call to inherit that
+  // refusal from, so it is re-checked here) falls through to the
+  // plain/pipe-table branches below unchanged — the same silent
   // per-occurrence no-op-on-no-match contract the removed regex had for any
-  // input it didn't match. A `serialize` refusal (an UNRELATED unreadable
-  // node elsewhere in `content`) falls through the same way.
+  // input it didn't match.
   const parsed = parsePlanningDoc(content, 'STATE.md');
   if (parsed.ok) {
-    let boldFieldId: string | null = null;
-    let spacingText = '';
+    let boldField: Extract<(typeof parsed.value.nodes)[number], { kind: 'boldField' }> | null = null;
     for (const node of parsed.value.nodes) {
       if (node.kind !== 'boldField') continue;
       if (node.label.toLowerCase() !== fieldName.toLowerCase()) continue;
-      boldFieldId = node.id;
-      spacingText = parsed.value.source.slice(node.labelSpan.end, node.valueSpan.start);
+      boldField = node;
       break;
     }
-    if (boldFieldId) {
+    if (boldField) {
       // Replicates joinFieldReplacement's own `` `${newValue}` `` coercion
       // (a caller may pass a non-string, e.g. a number, at the JS boundary
       // even though the type signature says `string`) before the
@@ -617,13 +640,14 @@ export function stateReplaceField(content: string, fieldName: string, newValue: 
       // the existing label-to-value gap has none, so `**Status:**value`
       // still becomes `**Status:** value` rather than gluing the two
       // together.
+      const spacingText = parsed.value.source.slice(boldField.labelSpan.end, boldField.valueSpan.start);
       const newValueStr = `${newValue}`;
       const needsSeparator = newValueStr.length > 0 && !/[ \t]$/.test(spacingText);
       const writeValue = `${needsSeparator ? ' ' : ''}${newValueStr}`;
-      const staged = setFieldValue(parsed.value, boldFieldId, writeValue, { allowSeparator: true });
-      if (staged.ok) {
-        const outcome = serialize(staged.value);
-        if (outcome.ok) return outcome.value;
+      if (!/[\r\n]/.test(writeValue)) {
+        return (
+          content.slice(0, boldField.valueSpan.start) + writeValue + content.slice(boldField.trailingSpan.end)
+        );
       }
     }
   }
