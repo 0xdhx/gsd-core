@@ -66,15 +66,47 @@ const FIXTURE_ARTIFACT_NAME = 'ROADMAP.md';
 // against a deliberately broken registry entry (a missing entry, or one
 // pointed at a nonexistent fixture) — proving the lint genuinely fails the
 // build, per ADR-4910 §7's "a parser without one fails the build" guarantee
-// — without ever touching the real registry or fixture files. No real
-// invocation (`npm run lint:ci`, `npm run lint:planning-document-positive-control`)
-// ever sets this. See tests/lint-planning-document-positive-control.test.cjs.
+// — without ever touching the real registry or fixture files.
+//
+// This env var alone is NEVER sufficient to activate the override — a bare
+// `process.env` lookup would mean a stray, accidentally-inherited copy of
+// this variable (a leftover shell `export`, a misconfigured CI environment,
+// a compromised dependency's postinstall script) could silently swap the
+// registry in a REAL `npm run lint:ci` / `npm run lint:planning-document-
+// positive-control` invocation, with nothing in the code enforcing otherwise
+// (flagged by both the security review and the code-review Standards axis
+// on #5007 Phase 6: the old comment asserted "no real invocation ever sets
+// this" as a convention, not a fact the code made true).
+//
+// What now makes it true, by construction: `scanRepo` only reads this env
+// var via `resolveRegistry` when its caller ALSO passes `allowOverride ===
+// true`, which `main()` only does when the `--test-registry-override` CLI
+// flag is present in argv (see `parseArgs`). The test file spawns this
+// script as a real child process (`tests/helpers/process-seam.cjs`'s
+// `runNode`, over `spawnSync`) — a process boundary that can only carry data
+// in via `env`/`argv`, so the override cannot be passed as an in-process
+// function parameter here the way it can be for the pure functions below.
+// Requiring BOTH the env var and the CLI flag closes the gap: neither
+// `lint:ci` nor `lint:planning-document-positive-control` (see package.json)
+// ever passes `--test-registry-override` in their fixed argv, and unlike an
+// env var, a CLI flag is never accidentally "leaked" into a fixed npm-script
+// invocation. See tests/lint-planning-document-positive-control.test.cjs.
 const TEST_REGISTRY_OVERRIDE_ENV_VAR = 'LINT_PLANNING_DOCUMENT_POSITIVE_CONTROL_TEST_REGISTRY_OVERRIDE';
 
+/** CLI flag gate for the test-only override (see `TEST_REGISTRY_OVERRIDE_ENV_VAR`
+ * above). Must be passed explicitly in argv — never inferred from env — for
+ * `resolveRegistry`'s env-var override to be honored at all. */
+const TEST_REGISTRY_OVERRIDE_CLI_FLAG = '--test-registry-override';
+
 /** Resolve the registry to scan against: the real hardcoded registry, unless
- * the test-only override env var is set and parses as JSON, in which case
- * its keys are shallow-merged on top (see `TEST_REGISTRY_OVERRIDE_ENV_VAR`). */
-function resolveRegistry(env) {
+ * BOTH `allowOverride` is `true` (only ever set by the
+ * `--test-registry-override` CLI flag, see `TEST_REGISTRY_OVERRIDE_CLI_FLAG`)
+ * AND the test-only override env var is set and parses as JSON, in which
+ * case its keys are shallow-merged on top (see
+ * `TEST_REGISTRY_OVERRIDE_ENV_VAR`). Without `allowOverride === true`, the
+ * env var is never even read. */
+function resolveRegistry(env, allowOverride) {
+  if (!allowOverride) return POSITIVE_CONTROL_REGISTRY;
   const override = env[TEST_REGISTRY_OVERRIDE_ENV_VAR];
   if (!override) return POSITIVE_CONTROL_REGISTRY;
   try {
@@ -198,8 +230,12 @@ function findPositiveControlGaps(liveKinds, registry, readFixture, parsePlanning
  * `findPositiveControlGaps`. If the seam hasn't been built yet, or the
  * `NodeKind` union can't be located, reports a single actionable violation
  * rather than throwing.
+ *
+ * `allowOverride` (default `false`) must be explicitly `true` for the
+ * test-only env-var registry override to be honored at all — see
+ * `resolveRegistry` and `TEST_REGISTRY_OVERRIDE_ENV_VAR`'s header comment.
  */
-function scanRepo(root, env) {
+function scanRepo(root, env, allowOverride = false) {
   const readFile = (relPath) => {
     try {
       return fs.readFileSync(path.join(root, relPath), 'utf8');
@@ -227,25 +263,32 @@ function scanRepo(root, env) {
     ];
   }
 
-  const registry = resolveRegistry(env || process.env);
+  const registry = resolveRegistry(env || process.env, allowOverride);
   return findPositiveControlGaps(live.value, registry, readFixture, seam.parsePlanningDoc, FIXTURE_ARTIFACT_NAME);
 }
 
-/** Parse a bare `--root <path>` CLI override; defaults to the real repo root. */
+/** Parse a bare `--root <path>` CLI override (defaults to the real repo root)
+ * and the `--test-registry-override` flag that gates `resolveRegistry`'s
+ * env-var override (see `TEST_REGISTRY_OVERRIDE_CLI_FLAG`'s header comment).
+ * No real invocation (`npm run lint:ci`, `npm run lint:planning-document-
+ * positive-control`) ever passes this flag. */
 function parseArgs(argv) {
   let root = path.join(__dirname, '..');
+  let allowTestRegistryOverride = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--root' && argv[i + 1]) {
       root = path.resolve(argv[i + 1]);
       i += 1;
+    } else if (argv[i] === TEST_REGISTRY_OVERRIDE_CLI_FLAG) {
+      allowTestRegistryOverride = true;
     }
   }
-  return { root };
+  return { root, allowTestRegistryOverride };
 }
 
 function main() {
-  const { root } = parseArgs(process.argv.slice(2));
-  const violations = scanRepo(root);
+  const { root, allowTestRegistryOverride } = parseArgs(process.argv.slice(2));
+  const violations = scanRepo(root, process.env, allowTestRegistryOverride);
   if (violations.length === 0) {
     process.stdout.write(
       'ok planning-document-positive-control: every declared PlanningDoc grammar has a passing positive-control fixture\n',
@@ -282,4 +325,5 @@ module.exports = {
   PLANNING_DOCUMENT_LIB,
   FIXTURE_DIR,
   TEST_REGISTRY_OVERRIDE_ENV_VAR,
+  TEST_REGISTRY_OVERRIDE_CLI_FLAG,
 };

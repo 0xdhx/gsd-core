@@ -28,6 +28,7 @@ const {
   FIXTURE_ARTIFACT_NAME,
   FIXTURE_DIR,
   TEST_REGISTRY_OVERRIDE_ENV_VAR,
+  TEST_REGISTRY_OVERRIDE_CLI_FLAG,
 } = lint;
 
 const REPO_ROOT = path.join(__dirname, '..');
@@ -212,8 +213,16 @@ describe('findPositiveControlGaps — pure-function unit checks (boundary cases)
 // Spawns the REAL, otherwise-unmodified, script file as its own child
 // process — never a mutated copy, never touching the real registry or
 // fixture files — using the script's supported test-only override hook
-// (TEST_REGISTRY_OVERRIDE_ENV_VAR) to substitute a deliberately broken
+// (TEST_REGISTRY_OVERRIDE_ENV_VAR, gated by the TEST_REGISTRY_OVERRIDE_CLI_FLAG
+// argv flag this test also passes) to substitute a deliberately broken
 // registry entry, proving the exit-code/stderr contract is load-bearing.
+//
+// The CLI flag is required alongside the env var: `resolveRegistry` only
+// reads the env var at all when `scanRepo`/`main` is told `allowOverride ===
+// true`, which only happens via this argv flag (#5007 Phase 6 fix — see
+// TEST_REGISTRY_OVERRIDE_ENV_VAR's header comment in the script for why an
+// env var alone is not a sufficient gate for a real child-process
+// invocation).
 
 describe('red-first: the lint script (spawned as a real child process) actually enforces', () => {
   test('control: the real script passes clean with no override set', () => {
@@ -225,8 +234,25 @@ describe('red-first: the lint script (spawned as a real child process) actually 
     );
   });
 
-  test('a fixture path pointed at a nonexistent file fails the build (non-zero exit, clear message)', () => {
+  test('the override env var alone (no CLI flag) is IGNORED — proves the override cannot leak into a real invocation', () => {
     const result = runNode([SCRIPT_PATH], {
+      cwd: REPO_ROOT,
+      timeoutMs: PROBE_TIMEOUT_MS,
+      env: {
+        ...process.env,
+        [TEST_REGISTRY_OVERRIDE_ENV_VAR]: JSON.stringify({ table: 'does-not-exist-nonexistent-fixture.md' }),
+      },
+    });
+    assert.equal(
+      result.exitCode,
+      0,
+      `expected the override to be ignored without --test-registry-override, and the real script to pass clean; ` +
+        `got ${result.exitCode} (${result.outcome}). stdout: ${result.stdout} stderr: ${result.stderr}`,
+    );
+  });
+
+  test('a fixture path pointed at a nonexistent file fails the build (non-zero exit, clear message)', () => {
+    const result = runNode([SCRIPT_PATH, TEST_REGISTRY_OVERRIDE_CLI_FLAG], {
       cwd: REPO_ROOT,
       timeoutMs: PROBE_TIMEOUT_MS,
       env: {
@@ -250,7 +276,7 @@ describe('red-first: the lint script (spawned as a real child process) actually 
     // every OTHER real key intact, and an empty string is falsy, so
     // `findPositiveControlGaps` takes the exact same "no entry for it"
     // branch a truly-removed key would.
-    const result = runNode([SCRIPT_PATH], {
+    const result = runNode([SCRIPT_PATH, TEST_REGISTRY_OVERRIDE_CLI_FLAG], {
       cwd: REPO_ROOT,
       timeoutMs: PROBE_TIMEOUT_MS,
       env: {
