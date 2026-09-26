@@ -5574,6 +5574,63 @@ describe('phase complete command', () => {
     assert.ok(req.includes('| API-01 | Phase 2 | Pending |'), 'API-01 should remain Pending');
   });
 
+  // Phase 6 (#5007): phaseSectionMatch (the Requirements-citation section
+  // extractor feeding cmdPhaseComplete) migrated off its hand-rolled
+  // `#{2,4}\s*Phase\s+` literal (which appeared TWICE in this source — the
+  // main capture prefix AND the to-next-heading lookahead — onto one
+  // phaseHeadingPrefixSrcFor composition reused for both. Boundary case: an
+  // EMPTY section body (heading immediately followed by the next heading,
+  // no Requirements field at all) must not error and must simply skip the
+  // citation scan.
+  test('#5007: phase complete tolerates an empty phase section body (heading immediately followed by next heading)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] Phase 1: Auth
+### Phase 1: Auth
+### Phase 2: API
+**Goal:** Build API
+**Requirements:** API-01
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'REQUIREMENTS.md'),
+      `# Requirements
+
+## v1 Requirements
+
+### API
+
+- [ ] **API-01**: REST endpoints
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| API-01 | Phase 2 | Pending |
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Current Phase:** 01\n**Current Phase Name:** Auth\n**Status:** In progress\n**Current Plan:** 01-01\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working\n`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-auth');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-api'), { recursive: true });
+
+    const result = runVerifiedPhaseComplete('phase complete 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const req = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+    // No AUTH-* requirement exists to cite (phase 1 has no Requirements field
+    // at all) — the empty-body match must not throw and must not touch
+    // Phase 2's own (unrelated) API-01 row.
+    assert.ok(req.includes('| API-01 | Phase 2 | Pending |'), 'unrelated phase 2 requirement must stay untouched');
+  });
+
   test('#2245 F1: phase complete traceability write is not fooled by an earlier Out of Scope table', () => {
     // Same class as the milestone.cts F1 regression: the shipped requirements
     // template puts an `## Out of Scope` table (`| Feature | Reason |`, no

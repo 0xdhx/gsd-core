@@ -4109,10 +4109,24 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
         if (fs.existsSync(reqPath)) {
           const phaseEsc = phaseMarkdownRegexSource(phaseNum);
           const currentMilestoneRoadmap = extractCurrentMilestone(roadmapContent, cwd);
+          // #5007 (Phase 6 / ADR-4910 §8): this site captures the entire
+          // section BODY through to the next heading (via its own
+          // `[\s\S]*?` lookahead-to-next-heading structure) — neither shared
+          // owner returns that shape, so phaseHeadingPrefixSrcFor is composed
+          // directly, keeping this site's own lookahead. The prior literal
+          // `#{2,4}\s*Phase\s+` appeared TWICE in this source (the main
+          // capture prefix AND the lookahead) — both occurrences are the
+          // literal-drift detector's target (findPhaseHeadingScanLiteralDrift
+          // is a pure literal-text match, blind to what surrounds it), so
+          // both are replaced with the same composed prefix, built once and
+          // reused, so the two halves cannot drift from each other. No
+          // convention argument: LABEL_ONLY with convention=undefined
+          // reproduces the prior `Phase\s+` literal byte-for-byte — this
+          // feeds cmdPhaseComplete, so no widening was introduced.
+          const phaseSectionHeadingPrefix = `#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY)}`;
           const phaseSectionMatch = currentMilestoneRoadmap.match(
             new RegExp(
-              // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-              `(#{2,4}\\s*Phase\\s+${phaseEsc}${OPTIONAL_PHASE_TAG_SOURCE}[:\\s][\\s\\S]*?)(?=#{2,4}\\s*Phase\\s+|$)`,
+              `(${phaseSectionHeadingPrefix}${phaseEsc}${OPTIONAL_PHASE_TAG_SOURCE}[:\\s][\\s\\S]*?)(?=${phaseSectionHeadingPrefix}|$)`,
               'i',
             ),
           );
