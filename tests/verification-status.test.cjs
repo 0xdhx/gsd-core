@@ -3214,6 +3214,8 @@ describe('#4987: verification query verbs distinguish a non-directory path from 
     return raw ? res.output.trimEnd() : JSON.parse(res.output);
   }
 
+  // Tmp roots are realpath'd: the CLI resolves a relative argument against
+  // process.cwd(), which is the realpath (macOS /var → /private/var).
   function assertNotFound(result, expectedPath) {
     assert.equal(result.status, 'phase_dir_not_found', 'a non-directory path must not read as missing');
     assert.equal(result.next_command, '', 'a non-directory path must not route to execute-phase (or anywhere)');
@@ -3221,7 +3223,7 @@ describe('#4987: verification query verbs distinguish a non-directory path from 
   }
 
   test('an archived phase read at its old path is phase_dir_not_found, not missing (the issue repro)', (t) => {
-    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4987-archive-'));
+    const projectDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4987-archive-')));
     t.after(() => cleanup(projectDir));
     const oldDir = path.join(projectDir, '.planning', 'phases', '03-auth');
     fs.mkdirSync(oldDir, { recursive: true });
@@ -3238,14 +3240,14 @@ describe('#4987: verification query verbs distinguish a non-directory path from 
   });
 
   test('a path that does not exist is phase_dir_not_found', (t) => {
-    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4987-absent-'));
+    const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4987-absent-')));
     t.after(() => cleanup(parent));
     const absent = path.join(parent, 'no-such-phase');
     assertNotFound(status(parent, absent), absent);
   });
 
   test('a regular file is phase_dir_not_found', (t) => {
-    const parent = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4987-file-'));
+    const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4987-file-')));
     t.after(() => cleanup(parent));
     const file = path.join(parent, 'notes.txt');
     fs.writeFileSync(file, '');
