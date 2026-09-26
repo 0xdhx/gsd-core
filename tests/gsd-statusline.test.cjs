@@ -654,17 +654,16 @@ describe('readGsdState', () => {
 
 // ─── CLAUDE_CODE_AUTO_COMPACT_WINDOW context meter (#2219) ──────────────────
 
-describe('context meter respects CLAUDE_CODE_AUTO_COMPACT_WINDOW (#2219)', () => {
+describe('context meter: 100% is the auto-compact threshold (#2219, #4985)', () => {
   const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
   const hookPath = path.join(__dirname, '..', 'hooks', 'gsd-statusline.js');
 
   /**
    * Run the statusline hook with a synthetic context_window payload.
-   * Returns { normalizedUsed, rawUsedPct } where:
-   *   - normalizedUsed: the buffer-adjusted % shown in the statusline bar
-   *     (parsed from the hook's stdout ANSI output, e.g. "60%")
-   *   - rawUsedPct: the raw value written to the bridge file (100 - remaining,
-   *     CC-consistent per #2451 fix)
+   * Returns { normalizedUsed, bridge } where:
+   *   - normalizedUsed: the % of the auto-compact threshold shown in the
+   *     statusline bar (parsed from the hook's stdout ANSI output, e.g. "52%")
+   *   - bridge: the JSON written to the bridge file for the context monitor
    */
   // The meter now consults settings.json for autoCompactEnabled, so pin
   // CLAUDE_CONFIG_DIR to a scratch dir (optionally seeded with settings) —
@@ -704,46 +703,38 @@ describe('context meter respects CLAUDE_CODE_AUTO_COMPACT_WINDOW (#2219)', () =>
     const match = clean.match(/(\d+)%/);
     const normalizedUsed = match ? parseInt(match[1], 10) : null;
 
-    // Read raw used_pct from the bridge file (#2451: bridge stores raw CC value)
     const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
-    let rawUsedPct = null;
+    let bridge = null;
     try {
-      const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'));
-      rawUsedPct = bridge.used_pct;
+      bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'));
       fs.unlinkSync(bridgePath);
     } catch { /* bridge may not exist if hook exited early */ }
 
-    return { normalizedUsed, rawUsedPct };
+    return { normalizedUsed, bridge };
   }
 
-  test('default buffer (no env var): 50% remaining → ~60% normalized bar display', () => {
-    // Default 16.5% buffer: usableRemaining = (50 - 16.5) / (100 - 16.5) * 100 ≈ 40.12%
-    // normalized used ≈ 100 - 40.12 = 59.88 → rounded 60 (shown in statusline bar)
+  test('no window configured: 100% is the model window minus the 33k auto-compact buffer', () => {
+    // 50% of 1M = 500,000 tokens; threshold = 1,000,000 − 20,000 − 13,000 = 967,000
+    // → 500,000 / 967,000 = 51.7% → 52 (the retired 16.5% buffer gave 60).
     const { normalizedUsed } = runHook(50, 1_000_000, null);
-    assert.strictEqual(normalizedUsed, 60);
+    assert.strictEqual(normalizedUsed, 52);
   });
 
-  test('CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000: 50% remaining → 100% normalized bar display', () => {
-    // ACW = 400k usable tokens out of 1M total → usable fraction = 40%, buffer = 60%.
-    // (1 - 400000/1000000) * 100 = 60% buffer. With 50% remaining already below the
-    // 60% buffer threshold, usableRemaining = max(0, (50-60)/(100-60)*100) = 0%,
-    // normalized used = 100 (bar shows full — context is within the compact-trigger buffer).
+  test('CLAUDE_CODE_AUTO_COMPACT_WINDOW=400000: 50% remaining → 100% (past the threshold)', () => {
+    // threshold = 400,000 − 33,000 = 367,000; 500,000 used is past it → clamped to 100.
     const { normalizedUsed } = runHook(50, 1_000_000, 400_000);
     assert.strictEqual(normalizedUsed, 100);
   });
 
-  test('CLAUDE_CODE_AUTO_COMPACT_WINDOW=0 falls back to default buffer', () => {
-    // Explicit "0" means unset — should behave like no env var (16.5% buffer)
+  test('CLAUDE_CODE_AUTO_COMPACT_WINDOW=0 is ignored, as Claude Code ignores it', () => {
     const { normalizedUsed } = runHook(50, 1_000_000, 0);
-    assert.strictEqual(normalizedUsed, 60);
+    assert.strictEqual(normalizedUsed, 52);
   });
 
-  test('ACW exceeds total context: buffer clamped to 0% — used reflects real remaining', () => {
-    // Pathological: ACW > totalCtx → (1 - 2M/1M) * 100 = -100% → clamped to 0%.
-    // With 0% buffer, usableRemaining = 50%, normalized used = 50.
-    // The Math.max(0, ...) clamp prevents negative buffer from inverting the display.
+  test('ACW exceeds the model window: capped at the model window', () => {
+    // 2M → capped to 1M → the no-window-configured threshold, 967,000.
     const { normalizedUsed } = runHook(50, 1_000_000, 2_000_000);
-    assert.strictEqual(normalizedUsed, 50);
+    assert.strictEqual(normalizedUsed, 52);
   });
 
   test('autoCompactEnabled:false in settings.json → no buffer, bar shows raw used%', () => {
@@ -753,8 +744,8 @@ describe('context meter respects CLAUDE_CODE_AUTO_COMPACT_WINDOW (#2219)', () =>
     assert.strictEqual(runHook(16.5, 1_000_000, null, { autoCompactEnabled: false }).normalizedUsed, 84);
     // …and it overrides CLAUDE_CODE_AUTO_COMPACT_WINDOW too (no compaction → no window).
     assert.strictEqual(runHook(50, 1_000_000, 400_000, { autoCompactEnabled: false }).normalizedUsed, 50);
-    // autoCompactEnabled:true keeps the default buffer.
-    assert.strictEqual(runHook(50, 1_000_000, null, { autoCompactEnabled: true }).normalizedUsed, 60);
+    // autoCompactEnabled:true keeps the auto-compact threshold.
+    assert.strictEqual(runHook(50, 1_000_000, null, { autoCompactEnabled: true }).normalizedUsed, 52);
   });
 
   test('isAutoCompactDisabled: env switches and settings precedence, fail-soft', () => {
@@ -798,13 +789,185 @@ describe('context meter respects CLAUDE_CODE_AUTO_COMPACT_WINDOW (#2219)', () =>
     }
   });
 
-  test('bridge used_pct is raw (CC-consistent) regardless of ACW setting (#2451)', () => {
-    // Fix for #2451: bridge used_pct must be raw (100 - remaining), not normalized.
-    // This ensures gsd-context-monitor warning messages match CC native /context.
-    // The ACW normalization only affects the statusline bar display, not the bridge.
-    const { rawUsedPct } = runHook(50, 1_000_000, 400_000);
-    assert.strictEqual(rawUsedPct, 50,
-      'bridge used_pct must be raw (100-50=50) regardless of CLAUDE_CODE_AUTO_COMPACT_WINDOW');
+  test('bridge is on the bar\'s scale and carries the /context token counts (#2451, #4985)', () => {
+    // The monitor gates on remaining_percentage, so it has to count down to the
+    // threshold for WARNING/CRITICAL to fire before compaction. #2451 kept the
+    // bridge raw so the monitor's message matched /context; the token counts
+    // carry that agreement now.
+    const { normalizedUsed, bridge } = runHook(50, 1_000_000, 400_000);
+    assert.deepStrictEqual(
+      { used_pct: bridge.used_pct, remaining_percentage: bridge.remaining_percentage,
+        used_tokens: bridge.used_tokens, threshold_tokens: bridge.threshold_tokens },
+      { used_pct: normalizedUsed, remaining_percentage: 100 - normalizedUsed,
+        used_tokens: 500_000, threshold_tokens: 367_000 },
+    );
+  });
+});
+
+// ─── auto-compact threshold resolution (#4985) ──────────────────────────────
+
+describe('context meter resolves the auto-compact window the way Claude Code does (#4985)', () => {
+  const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
+  const { resolveAutoCompactThreshold, contextMeter } = require('../hooks/gsd-statusline.js');
+  const hookPath = path.join(__dirname, '..', 'hooks', 'gsd-statusline.js');
+  const monitorPath = path.join(__dirname, '..', 'hooks', 'gsd-context-monitor.js');
+
+  // A context_window in the documented shape, with current_usage summing to
+  // `tokens` the way Claude Code's /context counts them.
+  function usageWindow(tokens, size) {
+    const pct = Math.round((tokens / size) * 100);
+    return contextWindow({
+      total_input_tokens: tokens,
+      total_output_tokens: 412,
+      context_window_size: size,
+      current_usage: {
+        input_tokens: 2,
+        cache_creation_input_tokens: 819,
+        cache_read_input_tokens: tokens - 821,
+        output_tokens: 412,
+      },
+      used_percentage: pct,
+      remaining_percentage: 100 - pct,
+    });
+  }
+
+  function scratch(t) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4985-'));
+    t.after(() => cleanup(root));
+    const cfg = path.join(root, 'cfg');
+    const proj = path.join(root, 'proj');
+    fs.mkdirSync(cfg);
+    fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+    return { cfg, proj, env: { CLAUDE_CONFIG_DIR: cfg } };
+  }
+
+  function render({ cfg, proj }, tokens, size, extraEnv = {}) {
+    const sessionId = `test-4985-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: cfg, ...extraEnv };
+    for (const key of ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT']) {
+      if (!(key in extraEnv)) delete env[key];
+    }
+    const payload = JSON.stringify({
+      model: { display_name: 'Claude' },
+      workspace: { current_dir: proj, project_dir: proj },
+      session_id: sessionId,
+      context_window: usageWindow(tokens, size),
+    });
+    const r = runHookSeam(hookPath, [], { input: payload, env, timeoutMs: STATUSLINE_HOOK_TIMEOUT_MS });
+    // eslint-disable-next-line no-control-regex -- \x1b is the required leading byte of ANSI SGR sequences
+    const match = r.stdout.replace(/\x1b\[[0-9;]*m/g, '').match(/(\d+)%/);
+    const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
+    const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'));
+    return { used: match ? parseInt(match[1], 10) : null, bridge, bridgePath, sessionId, env };
+  }
+
+  test('settings autoCompactWindow (what /autocompact saves) sets 100%, and the monitor goes CRITICAL before compaction', (t) => {
+    // The reported case: /autocompact 650k on a 1M model, 383 tokens before
+    // Claude Code compacts at 650,000 − 33,000 = 617,000. It read 74% and the
+    // monitor stayed silent.
+    const dirs = scratch(t);
+    fs.writeFileSync(path.join(dirs.cfg, 'settings.json'), JSON.stringify({ autoCompactWindow: 650_000 }));
+    const { used, bridge, bridgePath, sessionId, env } = render(dirs, 616_927, 1_000_000);
+    t.after(() => {
+      for (const f of [bridgePath, path.join(os.tmpdir(), `claude-ctx-${sessionId}-warned.json`)]) {
+        try { fs.unlinkSync(f); } catch { /* noop */ }
+      }
+    });
+    assert.ok(used >= 99, `meter must read ≥99% at 616,927 of 617,000, got ${used}`);
+    assert.strictEqual(bridge.threshold_tokens, 617_000);
+    assert.strictEqual(bridge.used_tokens, 616_927);
+    assert.ok(bridge.remaining_percentage <= 1, `bridge remaining must count down to the threshold, got ${bridge.remaining_percentage}`);
+
+    const r = runHookSeam(monitorPath, [], {
+      input: JSON.stringify({ session_id: sessionId, cwd: dirs.proj, hook_event_name: 'PostToolUse', tool_name: 'Bash' }),
+      env,
+      timeoutMs: STATUSLINE_HOOK_TIMEOUT_MS,
+    });
+    const message = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(message, /^CONTEXT CRITICAL: Usage at 100% \(617k of 617k usable tokens\)/);
+  });
+
+  test('CLAUDE_CODE_AUTO_COMPACT_WINDOW=150000 on a 200K model: 100,000 tokens is 85%', (t) => {
+    // threshold 150,000 − 33,000 = 117,000. With the old 1M fallback this read 100%.
+    const { used } = render(scratch(t), 100_000, 200_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '150000' });
+    assert.strictEqual(used, 85);
+  });
+
+  test('CLAUDE_CODE_AUTO_COMPACT_WINDOW=650000 on a 1M model: 100% lands at the threshold, not the window', (t) => {
+    // It read 95%: the old formula put 100% at 650,000, after compaction.
+    const { used } = render(scratch(t), 616_927, 1_000_000, { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '650000' });
+    assert.ok(used >= 99, `got ${used}`);
+  });
+
+  test('project settings are read from workspace.project_dir, not the current directory', (t) => {
+    const dirs = scratch(t);
+    fs.writeFileSync(path.join(dirs.proj, '.claude', 'settings.json'), JSON.stringify({ autoCompactWindow: 400_000 }));
+    const sub = path.join(dirs.proj, 'src');
+    fs.mkdirSync(sub);
+    const sessionId = `test-4985-pd-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: dirs.cfg };
+    for (const key of ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT']) delete env[key];
+    runHookSeam(hookPath, [], {
+      input: JSON.stringify({
+        model: { display_name: 'Claude' },
+        workspace: { current_dir: sub, project_dir: dirs.proj },
+        session_id: sessionId,
+        context_window: usageWindow(100_000, 1_000_000),
+      }),
+      env,
+      timeoutMs: STATUSLINE_HOOK_TIMEOUT_MS,
+    });
+    const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
+    const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'));
+    fs.unlinkSync(bridgePath);
+    assert.strictEqual(bridge.threshold_tokens, 367_000);
+  });
+
+  test('resolveAutoCompactThreshold: precedence, validation, caps, and the pct override', (t) => {
+    const { cfg, proj, env } = scratch(t);
+    const M = 1_000_000;
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 967_000, 'model window');
+    assert.strictEqual(resolveAutoCompactThreshold(200_000, proj, env), 167_000, '200K model: the 16.5% the old code hardcoded');
+
+    fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify({ autoCompactWindow: 650_000 }));
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 617_000, 'user settings');
+    assert.strictEqual(resolveAutoCompactThreshold(200_000, proj, env), 167_000, 'capped at the model window');
+    fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ autoCompactWindow: 500_000 }));
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 467_000, 'project settings outrank user');
+    fs.writeFileSync(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ autoCompactWindow: 300_000 }));
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 267_000, 'settings.local.json outranks settings.json');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' }), 767_000, 'env outranks settings');
+
+    for (const bad of [50_000, 1_500_000, '400000', 400_000.5, null]) {
+      fs.writeFileSync(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ autoCompactWindow: bad }));
+      assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 467_000, `setting ${JSON.stringify(bad)} is not a window`);
+    }
+    for (const bad of ['abc', '0', '-5', '']) {
+      assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: bad }), 467_000, `env ${JSON.stringify(bad)} is ignored`);
+    }
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: '50000' }), 67_000, 'env raised to 100k');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: '5000000' }), 967_000, 'env capped at 1M');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: '650_000' }), 617_000, 'digit separators');
+
+    const noWindow = { CLAUDE_CONFIG_DIR: path.join(cfg, 'absent') };
+    assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '50' }), 490_000, 'floor(980,000 × 50%)');
+    assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '99' }), 967_000, 'only ever lowers the threshold');
+    assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '150' }), 967_000, 'out-of-range pct ignored');
+
+    assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, DISABLE_AUTO_COMPACT: '1' }), null, 'disabled: no threshold');
+  });
+
+  test('contextMeter: disabled compaction measures against the model window; no window size falls back unscaled', () => {
+    const env = { CLAUDE_CONFIG_DIR: path.join(os.tmpdir(), 'gsd-4985-absent-cfg') };
+    assert.deepStrictEqual(
+      contextMeter(usageWindow(500_000, 1_000_000), null, { ...env, DISABLE_AUTO_COMPACT: '1' }),
+      { used: 50, remaining: 50, usedTokens: 500_000, limitTokens: 1_000_000 },
+    );
+    assert.deepStrictEqual(
+      contextMeter(contextWindow({ remaining_percentage: 35 }), null, env),
+      { used: 65, remaining: 35, usedTokens: null, limitTokens: null },
+    );
+    assert.strictEqual(contextMeter(contextWindow({ context_window_size: 1_000_000, current_usage: null, remaining_percentage: null }), null, env), null);
   });
 });
 
@@ -863,44 +1026,40 @@ describe('context meter boundary: acw at/near totalCtx does not pin used at 100%
     return match ? parseInt(match[1], 10) : null;
   }
 
-  // acw == totalCtx - 1 (one token below total): buffer is near-zero (≈0%),
-  // so the full window is usable. With 50% remaining the bar should show ~50%.
-  test('acw = totalCtx - 1: used reflects actual remaining context (≈50%)', () => {
+  // acw == totalCtx - 1 (one token below total): threshold 999,999 − 33,000,
+  // so 500,000 used is 500,000 / 966,999 ≈ 51.7% → 52.
+  test('acw = totalCtx - 1: used reflects actual remaining context (≈52%)', () => {
     const totalCtx = 1_000_000;
     const acw = totalCtx - 1; // 999999
     const used = runBoundaryHook(50, totalCtx, acw);
-    // buffer ≈ 0% → usableRemaining ≈ 50% → used ≈ 50. Accept 49-51 for rounding.
-    assert.ok(
-      used !== null && used >= 49 && used <= 51,
-      `expected used ≈ 50 when acw=totalCtx-1, got: ${used}`
-    );
+    assert.strictEqual(used, 52, `expected 52 when acw=totalCtx-1, got: ${used}`);
   });
 
-  // acw == totalCtx (the triggering edge case): buffer should be 0%,
-  // NOT 100%.  The "used" value must reflect real remaining context, not 100.
+  // acw == totalCtx (the triggering edge case of #1194): the threshold is the
+  // model window minus the 33k auto-compact buffer, so used must not stick at 100.
   test('acw = totalCtx: used MUST NOT stick at 100 (division-by-zero boundary)', () => {
     const totalCtx = 1_000_000;
     const acw = totalCtx; // 1000000
     const used = runBoundaryHook(50, totalCtx, acw);
-    // Buffer = 0% → usableRemaining = 50% → used ≈ 50. Must not be 100.
+    // 500,000 / 967,000 → 52. Must not be 100.
     assert.ok(
       used !== null && used !== 100,
       `expected used != 100 when acw==totalCtx (div-by-zero boundary), got: ${used}`
     );
-    // Also assert the bar is in a sane range (should be around 50%)
+    // Also assert the bar is in a sane range (should be around 52%)
     assert.ok(
       used >= 0 && used <= 99,
       `expected used in 0-99 when acw==totalCtx, got: ${used}`
     );
   });
 
-  // acw == totalCtx + 1 (exceeds total): buffer would be negative without a clamp;
-  // the Math.max(0,...) clamp should keep buffer=0%, not a negative value.
-  test('acw = totalCtx + 1: does not produce negative buffer (clamp prevents it)', () => {
+  // acw == totalCtx + 1 (exceeds total): the window is capped at the model
+  // window, so this is the acw == totalCtx case again.
+  test('acw = totalCtx + 1: capped at the model window', () => {
     const totalCtx = 1_000_000;
     const acw = totalCtx + 1; // 1000001
     const used = runBoundaryHook(50, totalCtx, acw);
-    // Buffer clamped to 0 → used ≈ 50 (reflects real remaining, not 100)
+    // Capped to 1,000,000 → 500,000 / 967,000 → 52 (not 100)
     assert.ok(
       used !== null && used !== 100,
       `expected used != 100 when acw=totalCtx+1, got: ${used}`
@@ -911,16 +1070,14 @@ describe('context meter boundary: acw at/near totalCtx does not pin used at 100%
     );
   });
 
-  // Default path (no env var / acw==0): must be unchanged. 50% remaining → ~60%.
-  test('acw = 0 (default path): unchanged, ~60% normalized for 50% remaining', () => {
+  // Default path (no env var / acw==0): 50% remaining → 500,000 / 967,000 → 52.
+  test('acw = 0 (default path): 52% for 50% remaining', () => {
     const used = runBoundaryHook(50, 1_000_000, 0);
-    assert.strictEqual(used, 60, `default path must still produce 60, got: ${used}`);
+    assert.strictEqual(used, 52, `default path must produce 52, got: ${used}`);
   });
 
-  // Normal partial value: 93% remaining → ~usesd ≈ 7% with default buffer.
-  test('normal partial value: 93% remaining → ~7% normalized used', () => {
-    // Default 16.5% buffer: usableRemaining = (93 - 16.5) / (100 - 16.5) * 100 = 91.6%
-    // used ≈ 100 - 91.6 = 8.4 → rounded 8
+  // Normal partial value: 93% remaining → 70,000 / 967,000 = 7.2% → 7.
+  test('normal partial value: 93% remaining → ~7% used', () => {
     const used = runBoundaryHook(93, 1_000_000, null);
     assert.ok(
       used !== null && used >= 7 && used <= 10,

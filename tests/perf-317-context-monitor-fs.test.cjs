@@ -698,13 +698,14 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
  * Run the context monitor hook with a pre-written bridge file and return
  * the parsed additionalContext string from its stdout.
  */
-function runMonitorHook(remainingPct, usedPct) {
+function runMonitorHook(remainingPct, usedPct, extraBridge = {}) {
   const sessionId = `test-2451-mon-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
   fs.writeFileSync(bridgePath, JSON.stringify({
     session_id: sessionId,
     remaining_percentage: remainingPct,
     used_pct: usedPct,
+    ...extraBridge,
     timestamp: Math.floor(Date.now() / 1000),
   }));
 
@@ -772,6 +773,23 @@ describe('bug #2451: bridge used_pct matches CC native reporting', () => {
 });
 
 // ─── Context monitor message accuracy ───────────────────────────────────────
+
+describe('#4985: context monitor quotes the /context token counts when the bridge carries them', () => {
+  test('WARNING message names used and usable tokens next to the threshold-scale percentage', () => {
+    const msg = runMonitorHook(35, 65, { used_tokens: 401_050, threshold_tokens: 617_000 });
+    assert.match(msg, /^CONTEXT WARNING: Usage at 65% \(401k of 617k usable tokens\)\. Remaining: 35%\. /);
+  });
+
+  test('CRITICAL message names the tokens too', () => {
+    const msg = runMonitorHook(1, 99, { used_tokens: 616_927, threshold_tokens: 617_000 });
+    assert.match(msg, /^CONTEXT CRITICAL: Usage at 99% \(617k of 617k usable tokens\)\. Remaining: 1%\. /);
+  });
+
+  test('a bridge without token counts keeps the percentage-only message', () => {
+    const msg = runMonitorHook(30, 70, { used_tokens: 'garbage' });
+    assert.match(msg, /^CONTEXT WARNING: Usage at 70%\. Remaining: 30%\. /);
+  });
+});
 
 describe('bug #2451: context monitor warning messages show CC-consistent percentages', () => {
   test('WARNING message shows raw used_pct consistent with CC reporting', () => {

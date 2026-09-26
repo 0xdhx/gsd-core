@@ -175,9 +175,9 @@ const AUTO_COMPACT_ENV_TRUTHY = ['1', 'true', 'yes', 'on'];
 
 /**
  * Is Claude Code's auto-compact switched off for this session? When it is,
- * the ~16.5% "compact buffer" is ordinary usable context, so the meter must
- * not subtract it — otherwise the bar pins at 100% from raw 83.5% onward and
- * the last sixth of the window is invisible.
+ * the auto-compact buffer is ordinary usable context, so the meter's 100% is
+ * the model window — otherwise the bar pins at 100% early and the last of
+ * the window is invisible.
  *
  * The sources and their precedence mirror Claude Code's own resolution —
  * either env var wins over the setting, and only then does the setting decide:
@@ -194,6 +194,18 @@ function isAutoCompactDisabled(dir, env = process.env) {
     const v = env[key];
     if (typeof v === 'string' && AUTO_COMPACT_ENV_TRUTHY.includes(v.trim().toLowerCase())) return true;
   }
+  return readClaudeSetting(dir, env, 'autoCompactEnabled', v => typeof v === 'boolean') === false;
+}
+
+/**
+ * The first value of `key` that `accept` takes, reading the Claude Code
+ * settings files highest precedence first:
+ *   <dir>/.claude/settings.local.json, <dir>/.claude/settings.json,
+ *   (CLAUDE_CONFIG_DIR || ~/.claude)/settings.local.json, settings.json.
+ * Fail-soft: an absent or unparseable file is skipped; nothing found is
+ * `undefined`.
+ */
+function readClaudeSetting(dir, env, key, accept) {
   const candidates = [];
   if (dir) {
     candidates.push(path.join(dir, '.claude', 'settings.local.json'));
@@ -212,12 +224,104 @@ function isAutoCompactDisabled(dir, env = process.env) {
   for (const file of candidates) {
     try {
       const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (settings && typeof settings.autoCompactEnabled === 'boolean') {
-        return settings.autoCompactEnabled === false;
-      }
+      if (settings && typeof settings === 'object' && accept(settings[key])) return settings[key];
     } catch (e) { /* absent or unparseable — keep looking */ }
   }
-  return false;
+  return undefined;
+}
+
+/**
+ * Where Claude Code auto-compacts (#4985). The meter's 100% is this token
+ * count, so it has to be resolved the way Claude Code resolves it:
+ *
+ *   window     CLAUDE_CODE_AUTO_COMPACT_WINDOW (an unparseable or non-positive
+ *              value is ignored; capped at 1M, raised to 100k), else the
+ *              settings `autoCompactWindow` that `/autocompact` saves (an
+ *              integer in 100k–1M), else the model window. Always capped at
+ *              the model window.
+ *   threshold  window − min(model max output, 20,000) − 13,000, lowered to
+ *              floor((window − 20,000) × pct / 100) when
+ *              CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (0 < pct ≤ 100) is lower.
+ *
+ * `/context` shows the 33,000 as "Autocompact buffer". The hardcoded 16.5%
+ * this replaces is 33,000 / 200,000, so it was right only on a 200K window
+ * with nothing configured. Every current model's max output is at least
+ * 20,000, so the reserve is taken as 20,000.
+ *
+ * Not visible to a statusline, so not modelled: the `--autocompact` launch
+ * flag, managed-policy settings, and Claude Code's server-side window
+ * defaults. Those sessions fall back to the model window.
+ */
+const AUTO_COMPACT_WINDOW_MIN = 100_000;
+const AUTO_COMPACT_WINDOW_MAX = 1_000_000;
+const AUTO_COMPACT_OUTPUT_RESERVE = 20_000;
+const AUTO_COMPACT_SUMMARY_BUFFER = 13_000;
+
+function parseAutoCompactWindowEnv(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const s = raw.trim();
+  const n = /^\d[\d_,]*$/.test(s) ? parseInt(s.replace(/[_,]/g, ''), 10) : parseInt(s, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.max(AUTO_COMPACT_WINDOW_MIN, Math.min(AUTO_COMPACT_WINDOW_MAX, n));
+}
+
+/**
+ * The token count at which Claude Code auto-compacts this session, or null
+ * when auto-compaction is off (see isAutoCompactDisabled).
+ */
+function resolveAutoCompactThreshold(modelWindow, dir, env = process.env) {
+  if (!(modelWindow > 0) || isAutoCompactDisabled(dir, env)) return null;
+  let window = parseAutoCompactWindowEnv(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+  if (window === null) {
+    window = readClaudeSetting(dir, env, 'autoCompactWindow', v =>
+      Number.isInteger(v) && v >= AUTO_COMPACT_WINDOW_MIN && v <= AUTO_COMPACT_WINDOW_MAX) ?? modelWindow;
+  }
+  const effective = Math.min(window, modelWindow) - AUTO_COMPACT_OUTPUT_RESERVE;
+  let threshold = effective - AUTO_COMPACT_SUMMARY_BUFFER;
+  const pct = parseFloat(env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE);
+  if (Number.isFinite(pct) && pct > 0 && pct <= 100) {
+    threshold = Math.min(threshold, Math.floor(effective * (pct / 100)));
+  }
+  return threshold > 0 ? threshold : null;
+}
+
+/**
+ * The context meter, in one scale: `used` + `remaining` = 100, where 100% is
+ * the auto-compact threshold, or the model window when compaction is off.
+ * `usedTokens` is Claude Code's own count (input + cache creation + cache
+ * read of the last turn, the sum /context reports) and `limitTokens` the
+ * token count 100% stands for.
+ *
+ * Taken from token counts, not by re-scaling `remaining_percentage`: that
+ * value is already rounded against the model window, which loses up to 5,000
+ * tokens on a 1M model. Without `current_usage` the tokens are recovered
+ * from the percentage; without `context_window_size` the window is unknown,
+ * so the meter shows Claude Code's own percentage unscaled. Returns null
+ * when there is no usage yet.
+ */
+function contextMeter(contextWindow, dir, env = process.env) {
+  if (!contextWindow || typeof contextWindow !== 'object') return null;
+  const size = Number(contextWindow.context_window_size);
+  const usage = contextWindow.current_usage;
+  const remainingPct = contextWindow.remaining_percentage;
+  if (size > 0) {
+    let usedTokens = null;
+    if (usage && typeof usage === 'object') {
+      usedTokens = (Number(usage.input_tokens) || 0) +
+        (Number(usage.cache_creation_input_tokens) || 0) +
+        (Number(usage.cache_read_input_tokens) || 0);
+    } else if (remainingPct != null) {
+      usedTokens = Math.round(((100 - remainingPct) * size) / 100);
+    }
+    if (usedTokens !== null) {
+      const limitTokens = resolveAutoCompactThreshold(size, dir, env) ?? size;
+      const used = Math.max(0, Math.min(100, Math.round((usedTokens / limitTokens) * 100)));
+      return { used, remaining: 100 - used, usedTokens, limitTokens };
+    }
+  }
+  if (remainingPct == null) return null;
+  const used = Math.max(0, Math.min(100, Math.round(100 - remainingPct)));
+  return { used, remaining: 100 - used, usedTokens: null, limitTokens: null };
 }
 
 /**
@@ -881,36 +985,22 @@ function runStatusline() {
     const model = compactModelName(data.model?.display_name || 'Claude');
     const dir = data.workspace?.current_dir || process.cwd();
     const session = data.session_id || '';
-    const remaining = data.context_window?.remaining_percentage;
 
     // Read .planning config once — used by the context meter (token suffix)
     // and the last-command/position block below. Fail-soft to {}.
     let cfg = {};
     try { cfg = readGsdConfig(dir); } catch (e) {}
 
-    // Context window display (shows USED percentage scaled to usable context)
-    // Claude Code reserves a buffer for autocompact. By default this is ~16.5%
-    // of the total window, but users can override it via CLAUDE_CODE_AUTO_COMPACT_WINDOW
-    // (a token count). When the env var is set, compute the buffer % dynamically so
-    // the meter correctly reflects early-compaction configurations (#2219).
-    // With auto-compact disabled (settings autoCompactEnabled:false or the
-    // DISABLE_AUTO_COMPACT / DISABLE_COMPACT env) there is no reserved buffer — the bar
-    // shows the raw used% (100 - remaining), matching CC's own /context.
-    // `context_window_size` is the documented field name
-    // (code.claude.com/docs/en/statusline); it is absent early in a session,
-    // before the first API response, hence the fallback.
-    const totalCtx = data.context_window?.context_window_size || 1_000_000;
-    const acw = parseInt(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW || '0', 10);
-    const AUTO_COMPACT_BUFFER_PCT = isAutoCompactDisabled(dir)
-      ? 0
-      : acw > 0
-        ? Math.min(100, Math.max(0, (1 - acw / totalCtx) * 100))
-        : 16.5;
+    // Context window display: USED percentage of the auto-compact threshold,
+    // so 100% is where Claude Code compacts — resolved from
+    // CLAUDE_CODE_AUTO_COMPACT_WINDOW, the `autoCompactWindow` setting, or the
+    // model window (#2219, #4985). With auto-compact disabled (#4844) 100% is
+    // the model window. Project settings are read from workspace.project_dir,
+    // Claude Code's launch directory, not the current directory.
+    const meter = contextMeter(data.context_window, data.workspace?.project_dir || dir);
     let ctx = '';
-    if (remaining != null) {
-      // Normalize: subtract buffer from remaining, scale to usable range
-      const usableRemaining = Math.max(0, ((remaining - AUTO_COMPACT_BUFFER_PCT) / (100 - AUTO_COMPACT_BUFFER_PCT)) * 100);
-      const used = Math.max(0, Math.min(100, Math.round(100 - usableRemaining)));
+    if (meter) {
+      const { used } = meter;
 
       // Write context metrics to bridge file for the context-monitor PostToolUse hook.
       // The monitor reads this file to inject agent-facing warnings when context is low.
@@ -920,15 +1010,20 @@ function runStatusline() {
       if (sessionSafe) {
         try {
           const bridgePath = path.join(os.tmpdir(), `claude-ctx-${session}.json`);
-          // used_pct written to the bridge must match CC's native /context reporting:
-          // raw used = 100 - remaining_percentage (no buffer normalization applied).
-          // The normalized `used` value is correct for the statusline progress bar but
-          // inflates the context monitor warning messages by ~13 points (#2451).
-          const rawUsedPct = Math.round(100 - remaining);
+          // The bridge is on the bar's scale: remaining_percentage counts down
+          // to the auto-compact threshold, so the monitor's WARNING/CRITICAL
+          // fire before compaction rather than after it (#4985). The token
+          // counts let its message match /context, which is what #2451 kept
+          // the bridge raw for; they are absent when the payload has no
+          // context_window_size.
           const bridgeData = JSON.stringify({
             session_id: session,
-            remaining_percentage: remaining,
-            used_pct: rawUsedPct,
+            remaining_percentage: meter.remaining,
+            used_pct: used,
+            ...(meter.usedTokens !== null && {
+              used_tokens: meter.usedTokens,
+              threshold_tokens: meter.limitTokens,
+            }),
             timestamp: Math.floor(Date.now() / 1000)
           });
           fs.writeFileSync(bridgePath, bridgeData);
@@ -1157,6 +1252,7 @@ module.exports = {
   formatStateFreshness, resolveStatuslineOptions,
   renderBracketPhaseDisplay, renderBracketMilestoneDisplay,
   isAutoCompactDisabled, AUTO_COMPACT_DISABLE_ENV_KEYS, AUTO_COMPACT_ENV_TRUTHY,
+  resolveAutoCompactThreshold, contextMeter,
 };
 
 /**
