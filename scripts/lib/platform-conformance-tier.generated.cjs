@@ -27,6 +27,7 @@ module.exports = {
   "tests/capability-source.test.cjs",
   "tests/capability-state.test.cjs",
   "tests/changeset-new.test.cjs",
+  "tests/check-contract-drift.test.cjs",
   "tests/check-env.test.cjs",
   "tests/check-gap-analysis-plan-post-e2e.test.cjs",
   "tests/check-glossary-refs.test.cjs",
