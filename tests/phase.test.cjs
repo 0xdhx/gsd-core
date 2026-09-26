@@ -3629,6 +3629,64 @@ describe('phase remove command', () => {
     cleanup(tmpDir);
   });
 
+  // fast-check property (CLAUDE.md RULESET.TESTS.property-based-testing):
+  // the renumber rewrite (phase.cts's migrated `(prefix)(TOKEN)(suffix)`
+  // regex) must round-trip every heading UNRELATED to the removed phase
+  // byte-for-byte — headings before the removed number stay untouched, and
+  // headings after it are decremented by exactly one with prefix/suffix text
+  // preserved verbatim. Re-removing an already-renumbered phase (idempotence)
+  // is exercised by asserting the post-removal sequence is a single
+  // contiguous 1..N-1 run with no gaps and no duplicate numbers.
+  test('#5007 property: renumber round-trips unrelated headings unchanged and decrements the rest exactly once', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 3, max: 8 }).chain((totalPhases) =>
+          fc.record({
+            totalPhases: fc.constant(totalPhases),
+            target: fc.integer({ min: 1, max: totalPhases }),
+          }),
+        ),
+        ({ totalPhases, target }) => {
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-renumber-fc-'));
+          try {
+            fs.mkdirSync(path.join(dir, '.planning', 'phases'), { recursive: true });
+            const lines = ['# Roadmap', ''];
+            for (let i = 1; i <= totalPhases; i++) {
+              lines.push(`### Phase ${i}: Title${i}`, '**Goal:** Work', '');
+              fs.mkdirSync(path.join(dir, '.planning', 'phases', `${String(i).padStart(2, '0')}-title${i}`), { recursive: true });
+            }
+            fs.writeFileSync(path.join(dir, '.planning', 'ROADMAP.md'), lines.join('\n'));
+
+            const result = runGsdTools(`phase remove ${target} --force`, dir);
+            if (!result.success) return false;
+            const roadmap = fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf-8');
+
+            // Headings before the target are byte-identical, untouched.
+            for (let i = 1; i < target; i++) {
+              if (!roadmap.includes(`### Phase ${i}: Title${i}`)) return false;
+            }
+            // Headings after the target are decremented by exactly one, title
+            // text preserved verbatim.
+            for (let i = target + 1; i <= totalPhases; i++) {
+              if (!roadmap.includes(`### Phase ${i - 1}: Title${i}`)) return false;
+            }
+            // The removed phase's own title is gone entirely.
+            if (roadmap.includes(`Title${target}`)) return false;
+            // No duplicate phase numbers and no gaps: exactly totalPhases-1
+            // contiguous headings numbered 1..totalPhases-1.
+            const nums = [...roadmap.matchAll(/^### Phase (\d+): /gm)].map((m) => parseInt(m[1], 10));
+            const expected = Array.from({ length: totalPhases - 1 }, (_, i) => i + 1);
+            if (new Set(nums).size !== nums.length) return false;
+            return JSON.stringify([...nums].sort((a, b) => a - b)) === JSON.stringify(expected);
+          } finally {
+            cleanup(dir);
+          }
+        },
+      ),
+      { numRuns: 15 },
+    );
+  });
+
   test('removes phase directory and renumbers subsequent', () => {
     // Setup 3 phases
     fs.writeFileSync(

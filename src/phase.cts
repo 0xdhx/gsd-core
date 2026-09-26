@@ -2252,9 +2252,34 @@ function updateRoadmapAfterPhaseRemoval(
     if (!isDecimal) {
       // #1729: fold an optional pre-colon ( ) tag into the suffix capture so it
       // is re-emitted verbatim — a tagged later phase still gets renumbered.
+      // #5007 (Phase 6 / ADR-4910 §8): composes phaseHeadingPrefixSrcFor
+      // directly (needs prefix/number/suffix as three separate capture groups
+      // for a verbatim in-place rewrite — neither shared owner returns that
+      // shape). Two deliberate departures from the design doc's suggested
+      // composition, both kept for zero behavior change on this
+      // highest-blast-radius site (feeds phase remove's renumber path):
+      //   1. The `#{2,4}\s*` heading marker is kept explicit and folded INTO
+      //      the prefix capture group — the design's snippet omitted it
+      //      entirely (phaseHeadingPrefixSrcFor never includes it; every
+      //      caller adds it, e.g. buildPhaseHeadingScanRegex), and the
+      //      original group 1 here captured the marker too.
+      //   2. No convention argument is threaded (LABEL_ONLY with
+      //      convention=undefined), even though phaseHeadingPrefixSrcFor
+      //      COULD accept one — this keeps the composed source byte-identical
+      //      to the prior `Phase\s+` literal, a deliberate non-widening for
+      //      this specific site (unlike cmdPhaseInsert's targetPattern).
+      // The number group widens from `\d+(?:\.\d+)?` to the full
+      // PHASE_NUMBER_TOKEN_SOURCE (letter suffix + multi-segment decimals) —
+      // this is SAFE, not a behavior change: decrementRoadmapPhaseToken's own
+      // regex (`^(\d+)(\.\d+)?$`) rejects anything wider and returns the
+      // token unchanged, so a heading this widening newly matches (e.g.
+      // "Phase 12A:") is written back byte-for-byte unchanged, identical to
+      // the pre-migration outcome of the whole regex simply not matching it.
       content = content.replace(
-        // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-        /(#{2,4}\s*Phase\s+)(\d+(?:\.\d+)?)((?:\s*\([^)\r\n]{0,200}\))?\s*:)/gi,
+        new RegExp(
+          `(#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY)})(${PHASE_NUMBER_TOKEN_SOURCE})(${OPTIONAL_PHASE_TAG_SOURCE}\\s*:)`,
+          'gi',
+        ),
         (_match, prefix: string, num: string, suffix: string) =>
           `${prefix}${decrementRoadmapPhaseToken(num, removedInt)}${suffix}`,
       );
