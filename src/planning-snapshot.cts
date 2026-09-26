@@ -231,9 +231,9 @@ interface PlanningSnapshot {
   // ...)` call site before the #3309 code split) scopes ROADMAP.md to the
   // CURRENT milestone via `extractCurrentMilestone(roadmapRaw, cwd)` — the
   // same shared, `<details>`/`<summary>`-tolerant scoping owner every other
-  // milestone-aware consumer uses (`roadmap-parser.cts`) — then scans
-  // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-  // `#{2,4}\s*Phase\s+(TOKEN)...` headings within that scoped slice.
+  // milestone-aware consumer uses (`roadmap-parser.cts`) — then scans that
+  // scoped slice for every phase heading, built from `phaseHeadingPrefixSrcFor`
+  // (#5007, Phase 6 / ADR-4910 §8).
   // `roadmapDeclaredPhases`'s `milestone` attribution (above) is NOT a fit
   // here even though it looks adjacent: it exists to relocate
   // `checkMilestonePrefixMismatches`'s OWN narrower `sectionRx`
@@ -1125,6 +1125,22 @@ function buildCurrentMilestoneRoadmapPhaseIdsField(
   // and `bracketGroup` is 0. Inferring the convention from a matched bracket's
   // shape would run a repo-failing check against a repo that never opted in.
   const bracketGroup = convention === 'bracket' ? 1 : 0;
+  // #5007 (Phase 6 / ADR-4910 §8): already composed from `phaseHeadingPrefixSrcFor`
+  // directly, not a hand-rolled literal — the site's only marked defect was
+  // this doc comment's own prose quoting the pattern verbatim (fixed above),
+  // which is exactly what the drift detector matched. Audited against the
+  // design doc's suggested further swap onto `buildPhaseHeadingScanRegex`
+  // (the same owner `bracketGroup`/`phaseNumGroup` above hand-derives) and
+  // deliberately did NOT make that swap: the owner's regex requires a title
+  // (`${OPTIONAL_PHASE_TAG_SOURCE}\s*:\s*([^\n]+)` — at least one non-newline
+  // character after the colon), while this site's own tail is bare `:` with
+  // no title requirement. A live probe against this function (a `### Phase 3:`
+  // heading with no title text) confirms the current, pre-migration behavior
+  // DOES count that phase — swapping to the owner would silently drop it from
+  // W026's scan, and no existing test (including the ADR-612 census test
+  // pinned to this site by name) would catch that narrowing, since the census
+  // only pins `phaseHeadingPrefixSrcFor`'s own output, not this regex's tail.
+  // Kept as its own composition to preserve this exact byte-for-behavior.
   const phasePattern = new RegExp(
     `#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, convention, Boolean(bracketGroup))}(${PHASE_NUMBER_TOKEN_SOURCE})(?:\\s*\\([^)\\n]{0,200}\\))?\\s*:`,
     'gi',
