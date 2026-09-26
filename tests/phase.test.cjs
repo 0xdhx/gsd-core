@@ -4208,6 +4208,72 @@ Plans:
     }
   });
 
+  test('#5007: Depends-on field decrement preserves absent field, non-numeric value, and trailing annotation (PlanningDoc seam migration)', () => {
+    const roadmap = [
+      '# Roadmap',
+      '',
+      '## Progress',
+      '',
+      '| Phase | Plans | Status | Notes |',
+      '|---|---:|---|---|',
+      '| 1. Phase 1 | 0/1 | Planned | - |',
+      '| 2. Phase 2 | 0/1 | Planned | - |',
+      '| 3. Phase 3 | 0/1 | Planned | - |',
+      '| 4. Phase 4 | 0/1 | Planned | - |',
+      '',
+      '### Phase 1: First',
+      '**Goal:** Bootstrap',
+      '',
+      '### Phase 2: No dependency field at all',
+      '**Goal:** Independent work',
+      '',
+      '### Phase 3: Non-numeric dependency',
+      '**Goal:** Root-adjacent',
+      '**Depends on:** Nothing',
+      '',
+      '### Phase 4: Dependency with a trailing annotation',
+      '**Goal:** Downstream',
+      '**Depends on:** Phase 3 — blocks release until 3 ships',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    for (const [n, slug] of [[1, '01-first'], [2, '02-no-dep'], [3, '03-non-numeric'], [4, '04-trailing']]) {
+      fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', `${String(n).padStart(2, '0')}-${slug}`), {
+        recursive: true,
+      });
+    }
+
+    const result = runGsdTools('phase remove 1 --force', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const updated = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+
+    // Phase 2 (renumbered to 1) never had a "Depends on" field — the seam
+    // migration must not invent one; the section stays exactly as authored
+    // (scoped to just this section, up to the next heading, so a later
+    // section's own "Depends on" field can't leak into the check). Plain
+    // indexOf slicing, not a regex, to stay CRLF-safe.
+    const noDepHeadingStart = updated.indexOf('### Phase 1: No dependency field at all');
+    assert.ok(noDepHeadingStart !== -1, 'renumbered "no dependency" section heading found');
+    const nextHeadingStart = updated.indexOf('### Phase 2:', noDepHeadingStart);
+    assert.ok(nextHeadingStart !== -1, 'next section heading found');
+    const noDepSection = updated.slice(noDepHeadingStart, nextHeadingStart);
+    assert.ok(noDepSection.includes('**Goal:** Independent work'), 'section body preserved');
+    assert.ok(!noDepSection.includes('**Depends on'), 'absent Depends-on field must not be synthesized');
+
+    // Phase 3 (renumbered to 2) had a non-numeric "Nothing" value — no
+    // "Phase N" prefix to decrement, so it must be left byte-for-byte intact.
+    assert.ok(updated.includes('**Depends on:** Nothing'), 'non-numeric Depends-on value is left untouched');
+
+    // Phase 4 (renumbered to 3) depended on Phase 3 (now Phase 2) — the
+    // numeric token decrements but the ` — ` trailing annotation must survive
+    // verbatim (this is exactly the boldField grammar's trailingSpan).
+    assert.ok(
+      updated.includes('**Depends on:** Phase 2 — blocks release until 3 ships'),
+      'trailing annotation after the decremented dependency number must be preserved verbatim',
+    );
+  });
+
   test('#2245 F3: Progress-ordinal renumber re-escapes an escaped pipe in the Phase cell', () => {
     // The renumber's `newValue` callback builds its replacement from the
     // CURRENT (unescaped) cell value and used to splice it back verbatim —

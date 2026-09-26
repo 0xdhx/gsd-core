@@ -2405,16 +2405,48 @@ function updateRoadmapAfterPhaseRemoval(
         (_match, phaseNum: string, planNum: string) =>
           `${decrementRoadmapPaddedPhaseNumber(phaseNum, removedInt)}-${planNum}`,
       );
-      content = content.replace(
-        /(\*\*Depends on\*\*\s*:\s*Phase\s+)(\d+(?:\.\d+)?)\b/gi,
-        (_match, prefix: string, num: string) =>
-          `${prefix}${decrementRoadmapPhaseToken(num, removedInt)}`,
-      );
-      content = content.replace(
-        /(Depends on:\*\*\s*Phase\s+)(\d+(?:\.\d+)?)\b/gi,
-        (_match, prefix: string, num: string) =>
-          `${prefix}${decrementRoadmapPhaseToken(num, removedInt)}`,
-      );
+      // #5007 (Phase 6 / ADR-4910): migrated the "Depends on" bold-field
+      // decrement off two hand-rolled regexes — one per bold-placement
+      // variant, `**Depends on**: Phase N` and `**Depends on:** Phase N` —
+      // onto the PlanningDoc `boldField` read/write seam (`writePlansField`
+      // above is the established precedent for this migration shape).
+      // `BOLD_FIELD_RE` (planning-document.cts) recognizes BOTH placements
+      // as the SAME field label ("Depends on") — `parseBoldFieldLine` strips
+      // the token down to its inner text regardless of which side of `**`
+      // the colon lands on — so this single loop naturally replaces both
+      // regexes with one call site; no variant-specific branching remains.
+      // Unlike `writePlansField`'s single `findField` lookup (scoped to one
+      // already-isolated phase section), a whole ROADMAP.md can carry a
+      // "Depends on" field in EVERY phase's detail section, so this walks
+      // every `boldField` node in the whole parsed document whose label is
+      // "Depends on" and rewrites each one independently — a
+      // representability refusal or absent match on one field leaves that
+      // field untouched and never blocks any other field, mirroring the
+      // prior regexes' per-occurrence independence. A parse failure or an
+      // unreadable-nodes refusal on `serialize` leaves `content` byte-for-
+      // byte untouched, the same silent no-op the prior regexes had for any
+      // input they didn't match (neither ever threw or warned).
+      const dependsOnParsed = parsePlanningDoc(content, 'ROADMAP.md');
+      if (dependsOnParsed.ok) {
+        let dependsOnDoc = dependsOnParsed.value;
+        const dependsOnFieldIds = dependsOnDoc.nodes
+          .filter((n) => n.kind === 'boldField' && n.label === 'Depends on')
+          .map((n) => n.id);
+        for (const fieldId of dependsOnFieldIds) {
+          const currentRead = readNode(dependsOnDoc, fieldId);
+          if (!currentRead.ok) continue;
+          const depMatch = /^(Phase\s+)(\d+(?:\.\d+)?)\b/i.exec(currentRead.value);
+          if (!depMatch) continue;
+          const [wholeMatch, prefix, num] = depMatch;
+          const newValue =
+            `${prefix}${decrementRoadmapPhaseToken(num, removedInt)}` + currentRead.value.slice(wholeMatch.length);
+          if (newValue === currentRead.value) continue;
+          const staged = setFieldValue(dependsOnDoc, fieldId, newValue);
+          if (staged.ok) dependsOnDoc = staged.value;
+        }
+        const dependsOnOut = serialize(dependsOnDoc);
+        if (dependsOnOut.ok) content = dependsOnOut.value;
+      }
     }
 
     platformWriteSync(roadmapPath, content);
