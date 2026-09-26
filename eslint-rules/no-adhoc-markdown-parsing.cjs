@@ -70,6 +70,25 @@
  *                          this — nor does `.replace()` on a receiver whose name
  *                          doesn't match the roadmap/state fingerprint.
  *
+ *   5. FIELD-SHAPED-REPLACE-MUTATION — the same `.replace(` call/receiver gate
+ *                          as pattern 4, but for a THIRD fingerprint: a
+ *                          bold-label markdown field matcher (ADR-4910 §6, the
+ *                          "unrepresentable by construction" deliverable — the
+ *                          now-deleted #4852 paradigm). A regex source
+ *                          qualifies when it contains an escaped bold marker
+ *                          (`\*\*`) immediately followed (within the same
+ *                          single-line field span) by a label and a colon,
+ *                          with NO `[\s\S]`/`[\S\s]` cross-line flag (that
+ *                          would make it SECTION-COLLECT-shaped instead) and no
+ *                          qualifying negated-pipe cell class (that would make
+ *                          it TABLE-shaped instead) — e.g. a `.replace()` call
+ *                          whose pattern is /\*\*Plans:\*\*[^\n]*(space)/ .
+ *                          Table- and section-collect-shaped patterns are
+ *                          checked FIRST and always win (reported via
+ *                          `adhocReplaceMutation`, unchanged) — this fingerprint
+ *                          only applies when neither of those already matched,
+ *                          so no `.replace()` call is ever double-reported.
+ *
  * Per-finding exemption: add  // allow-adhoc-markdown: <reason>  as a
  * trailing comment on the same source line, OR as a standalone comment on the
  * line immediately preceding the flagged node.  (Mirrors no-source-grep's
@@ -99,6 +118,8 @@ const rule = {
         'Ad-hoc table-row/cell regex detected (escaped pipe + negated-pipe cell-capture class). Use parseMarkdownTable() / findTableWithColumns() / TABLE_SCHEMAS from ./markdown-table instead. Suppress with: // allow-adhoc-markdown: <reason>',
       adhocReplaceMutation:
         'Ad-hoc .replace() mutation of a roadmap/state document using a hand-rolled table or section regex. Use updateTableCell() (./markdown-table) or withSection()/withPhaseSection() (./markdown-sectionizer) instead. Suppress with: // allow-adhoc-markdown: <reason>',
+      fieldShapedReplaceMutation:
+        'Ad-hoc .replace() mutation of a roadmap/state document using a hand-rolled bold-label field regex (field-shaped: \\*\\*Label:\\*\\*...). Use findField() + setFieldValue() (./planning-document) instead. Suppress with: // allow-adhoc-markdown: <reason>',
     },
   },
 
@@ -280,6 +301,55 @@ const rule = {
       return isTableRegexSource(node.regex.pattern || '');
     }
 
+    // ── Field-shaped regex detection (ADR-4910 §6) ──────────────────────────
+    // A bold-label markdown field matcher: an escaped bold marker `\*\*`
+    // immediately followed, within the same single-line field span, by a
+    // label and a colon — e.g. `\*\*Plans:\*\*[^\n]*`. Deliberately excludes
+    // anything that already qualifies as SECTION-COLLECT-shaped (a `[\s\S]`/
+    // `[\S\s]` cross-line body) or TABLE-shaped (a qualifying negated-pipe
+    // cell class) — those are each other detectors' fingerprints and always
+    // win when present, so a single `.replace()` call is never reported
+    // twice for the same pattern.
+    function isFieldShapedRegex(src) {
+      const hasMultilineBody = src.includes('[\\s\\S]') || src.includes('[\\S\\s]');
+      if (hasMultilineBody) return false;
+      if (isTableRegexSource(src)) return false;
+      return hasBoldLabelColon(src);
+    }
+
+    // Single-pass scan (same cheap-scan discipline as
+    // hasQualifyingNegatedPipeClass above): from each `\*\*` occurrence, walk
+    // forward only as far as the next `\*\*` (the end of this field's own
+    // span) or the next escaped line-terminator (`\n`/`\r`), looking for a
+    // `:`. A bounded backtracking-free regex would be just as safe here (no
+    // nested unbounded quantifiers, so no quadratic-on-failure risk like the
+    // negated-pipe-class case above), but this keeps the same "walk forward,
+    // never re-enter consumed bytes" style as the rest of the file rather
+    // than introducing a second idiom. Every character between one `\*\*`
+    // occurrence and the next is visited at most once across the whole
+    // outer loop, so the total walk stays O(n) in `src.length`.
+    function hasBoldLabelColon(src) {
+      const BOLD = '\\*\\*';
+      let i = src.indexOf(BOLD);
+      while (i !== -1) {
+        let j = i + BOLD.length;
+        let sawColon = false;
+        while (j < src.length) {
+          if (src.startsWith(BOLD, j)) break;
+          const ch = src[j];
+          if (ch === ':') {
+            sawColon = true;
+            break;
+          }
+          if (ch === '\\' && (src[j + 1] === 'n' || src[j + 1] === 'r')) break;
+          j += 1;
+        }
+        if (sawColon) return true;
+        i = src.indexOf(BOLD, i + BOLD.length);
+      }
+      return false;
+    }
+
     // ── new RegExp(<Literal-string | TemplateLiteral>) source extraction ─────
     // Builds the EFFECTIVE regex source text for a `new RegExp(...)` call so
     // the same fingerprint checks above can run against it. Only a string
@@ -402,18 +472,28 @@ const rule = {
       return null;
     }
 
-    function isAdhocReplaceMutation(node, scope) {
-      if (node.type !== 'CallExpression') return false;
+    /**
+     * Resolves an ad-hoc `.replace()` mutation of a roadmap/state-ish
+     * receiver to the messageId it should report, or `null` if none of the
+     * three fingerprints (table, section-collect, field-shaped) matches.
+     * Table/section-collect are checked first and always win when present —
+     * field-shaped is a third, mutually-exclusive alternative, never a
+     * second report for the same call.
+     */
+    function resolveAdhocReplaceMutationMessageId(node, scope) {
+      if (node.type !== 'CallExpression') return null;
       const callee = node.callee;
-      if (!callee || callee.type !== 'MemberExpression' || callee.computed) return false;
-      if (!callee.property || callee.property.name !== 'replace') return false;
+      if (!callee || callee.type !== 'MemberExpression' || callee.computed) return null;
+      if (!callee.property || callee.property.name !== 'replace') return null;
       const receiver = callee.object;
-      if (!receiver || receiver.type !== 'Identifier' || !REPLACE_RECEIVER_RE.test(receiver.name)) return false;
+      if (!receiver || receiver.type !== 'Identifier' || !REPLACE_RECEIVER_RE.test(receiver.name)) return null;
       const patternArg = node.arguments && node.arguments[0];
-      if (!patternArg) return false;
+      if (!patternArg) return null;
       const src = resolveReplacePatternSource(patternArg, scope);
-      if (src === null) return false;
-      return isTableRegexSource(src) || isSectionCollectRegexSource(src);
+      if (src === null) return null;
+      if (isTableRegexSource(src) || isSectionCollectRegexSource(src)) return 'adhocReplaceMutation';
+      if (isFieldShapedRegex(src)) return 'fieldShapedReplaceMutation';
+      return null;
     }
 
     return {
@@ -453,12 +533,14 @@ const rule = {
         }
       },
 
-      // 4. Ad-hoc .replace() mutation of a roadmap/state document
+      // 4/5. Ad-hoc .replace() mutation of a roadmap/state document — table,
+      // section-collect, or field-shaped fingerprint.
       CallExpression(node) {
         const scope = context.getScope ? context.getScope() : sourceCode.getScope(node);
-        if (isAdhocReplaceMutation(node, scope)) {
+        const messageId = resolveAdhocReplaceMutationMessageId(node, scope);
+        if (messageId) {
           if (!isAllowed(node)) {
-            context.report({ node, messageId: 'adhocReplaceMutation' });
+            context.report({ node, messageId });
           }
         }
       },
