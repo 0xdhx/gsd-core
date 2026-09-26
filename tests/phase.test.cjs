@@ -3408,6 +3408,97 @@ describe('phase insert command', () => {
     assert.ok(roadmap.includes('Phase 05.1: Hotfix (INSERTED)'), 'roadmap should include inserted phase');
   });
 
+  // Phase 6 (#5007): cmdPhaseInsert's targetPattern/anyHeadingPattern/
+  // headerPattern migrated off their hand-rolled `#{2,4}\s*Phase\s+` literals
+  // onto buildPhaseHeadingRegex (tokenize-first) and phaseHeadingPrefixSrcFor
+  // compositions, threading resolvePhaseIdConvention so a bracket-convention
+  // repo's `[CODE.MM] Phase N:` heading is now found by target/header lookup
+  // — matching the widening the design doc / test matrix call for on this
+  // pair, unlike the "counter" sites (collectSiblingWorktreePhaseNums,
+  // cmdPhaseAdd/-Batch) which deliberately stay non-widened.
+  test('#5007: finds and inserts after a bracket-tagged target heading under the bracket convention', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ phase_id_convention: 'bracket', project_code: 'GSD' }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+### [GSD.01] Phase 1: Foundation
+**Goal:** Setup
+
+### [GSD.01] Phase 2: API
+**Goal:** Build API
+`
+    );
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', 'GSD.01-01-foundation'), { recursive: true });
+
+    const result = runGsdTools('phase insert 1 Fix Critical Bug', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_number, '01.1', 'should be 01.1');
+
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.ok(
+      roadmap.includes('Phase 01.1: Fix Critical Bug (INSERTED)'),
+      'roadmap should include inserted phase',
+    );
+    // NOT asserted: insertion position relative to the next phase header. The
+    // neighboring next-phase-boundary regex (`/\r?\n#{2,4}\s+Phase\s+\d[\d.]*/i`,
+    // a few lines below headerPattern) is NOT one of the 11 #5007-marked
+    // grandfathered sites and has its own pre-existing, unrelated bracket-blind
+    // gap: under the bracket convention it fails to recognize `[GSD.01] Phase 2:`
+    // as a heading boundary, so the new entry falls through to the
+    // rawContent.length branch and is appended at the end of the file instead
+    // of directly after the target section. This is a real, pre-existing
+    // behavior gap, but it belongs to a different (unmarked) regex outside
+    // this migration's scope — out of scope to fix here.
+  });
+
+  // Phase 6 (#5007) test matrix: anyHeadingPattern ("does ANY phase heading
+  // exist") boundary cases — zero headings (bullet-style-only doc) and one
+  // heading present.
+  test('#5007: zero headings — a purely bullet-style ROADMAP inserts a bullet, not a section', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] **Phase 1: Foundation**
+- [ ] **Phase 2: API**
+`
+    );
+    const result = runGsdTools('phase insert 1 Fix Critical Bug', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.ok(
+      /- \[ \] \*?\*?Phase 01\.1: Fix Critical Bug\*?\*?/.test(roadmap),
+      'no section headings exist anywhere, so anyHeadingPattern is false and insert takes the bullet-style path',
+    );
+    assert.ok(!roadmap.includes('### Phase 01.1'), 'must not create a section heading in a bullet-only doc');
+  });
+
+  test('#5007: one heading present forces the heading-style path even when a bullet also matches', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] **Phase 1: Foundation**
+
+### Phase 1: Foundation
+**Goal:** Setup
+`
+    );
+    const result = runGsdTools('phase insert 1 Fix Critical Bug', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.ok(
+      roadmap.includes('### Phase 01.1: Fix Critical Bug (INSERTED)'),
+      'a real heading exists (anyHeadingPattern is true), so insert takes the heading-style section path, not the bullet path',
+    );
+  });
+
   // #4569: cmdPhaseInsert's decimal allocation must count an existing decimal
   // regardless of WHICH of the three representations (on-disk directory,
   // `### Phase N.M:` heading, `- [ ] Phase N.M:` checklist bullet) carries it —

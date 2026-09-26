@@ -1731,16 +1731,34 @@ function cmdPhaseInsert(
 
     const normalizedAfter = normalizePhaseName(afterPhase);
     const afterPhaseEscaped = phaseMarkdownRegexSource(normalizedAfter);
-    // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-    const targetPattern = new RegExp(`#{2,4}\\s*Phase\\s+${afterPhaseEscaped}${OPTIONAL_PHASE_TAG_SOURCE}:`, 'i');
-    const headingMatch = targetPattern.test(content);
+    const insertConvention = resolvePhaseIdConvention(cwd);
+    // #5007 (Phase 6 / ADR-4910 §8): buildPhaseHeadingRegex (src/roadmap.cts)
+    // is anchored `^...$` with no 'm' flag — designed to test ONE
+    // already-tokenized heading LINE, not to `.test()` against multi-line
+    // `content` directly (the design doc's "no anchoring change needed"
+    // claim for this site does not hold once the anchor is accounted for —
+    // same discrepancy as getRoadmapModeForPhase and phaseDisplayNameFromRoadmap
+    // above/below). Routed through tokenizeHeadings, mirroring
+    // searchPhaseInContent's own usage.
+    const targetPattern = buildPhaseHeadingRegex(afterPhaseEscaped, insertConvention);
+    const headingMatch = tokenizeHeadings(content).some((h) => targetPattern.test(h.text));
 
     const bulletPattern = new RegExp(
       `-\\s*\\[[ x]\\]\\s*(?:\\*\\*)?Phase\\s+${afterPhaseEscaped}${OPTIONAL_PHASE_TAG_SOURCE}[:\\s]`,
       'i',
     );
-    // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-    const anyHeadingPattern = /#{2,4}\s*Phase\s+\d/i;
+    // #5007 (Phase 6 / ADR-4910 §8): a pure "does ANY phase heading exist"
+    // boolean — neither shared owner exposes this shape (buildPhaseHeadingRegex
+    // is phase-N-specific; buildPhaseHeadingScanRegex always captures a phase
+    // number). Composed directly from phaseHeadingPrefixSrcFor with the
+    // `#{2,4}\s*` marker kept explicit (phaseHeadingPrefixSrcFor never
+    // includes it). Unanchored `.test()` on multi-line content, same as the
+    // pre-migration literal — no tokenize-first refactor needed here since
+    // there is no anchor in this source.
+    const anyHeadingPattern = new RegExp(
+      `#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, insertConvention)}\\d`,
+      'i',
+    );
     const roadmapHasHeadingPhases = anyHeadingPattern.test(content);
     const isBulletStyle = !headingMatch && bulletPattern.test(content) && !roadmapHasHeadingPhases;
 
@@ -1839,9 +1857,16 @@ function cmdPhaseInsert(
       const phaseEntry =
         `\n### Phase ${_decimalPhase}: ${description} (INSERTED)\n\n**Goal:** [Urgent work - to be planned]\n**Requirements**: TBD\n**Depends on:** Phase ${afterPhase}\n**Plans:** 0 plans\n\nPlans:\n- [ ] TBD (run ${formatGsdSlash('plan-phase', resolveRuntime(cwd)) as string} ${_decimalPhase} to break down)\n`;
 
+      // #5007 (Phase 6 / ADR-4910 §8): this site needs the WHOLE matched
+      // heading line plus its trailing newline (for splicing the new entry
+      // in immediately after it) — neither shared owner returns that shape
+      // (buildPhaseHeadingRegex captures only the title). Composed directly
+      // from phaseHeadingPrefixSrcFor, keeping this site's own full-line
+      // capture; audited together with the targetPattern/anyHeadingPattern
+      // migration above (same describe block, same afterPhaseEscaped/
+      // insertConvention inputs).
       const headerPattern = new RegExp(
-        // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-        `(#{2,4}\\s*Phase\\s+${afterPhaseEscaped}${OPTIONAL_PHASE_TAG_SOURCE}:[^\\n]*\\n)`,
+        `(#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, insertConvention)}${afterPhaseEscaped}${OPTIONAL_PHASE_TAG_SOURCE}:[^\\n]*\\n)`,
         'i',
       );
       const headerMatch = rawContent.match(headerPattern);
