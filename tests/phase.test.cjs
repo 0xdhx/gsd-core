@@ -3064,6 +3064,36 @@ describe('phase add-batch command (#2165)', () => {
     assert.ok(roadmap.includes('### Phase 4: Gamma'), 'roadmap should include Phase 4');
   });
 
+  // Phase 6 (#5007): cmdPhaseAddBatch's header-counting regex migrated onto
+  // buildPhaseHeadingScanRegex (LABEL_ONLY, no convention argument) — a
+  // bracket-tagged header must stay invisible to the max-phase scan before
+  // and after, same parity guarantee as cmdPhaseAdd's identical regex.
+  test('#5007: a bracket-tagged header is not counted by add-batch (LABEL_ONLY parity)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap v1.0',
+        '',
+        '### Phase 1: Foundation',
+        '**Goal:** Setup',
+        '',
+        '### [GSD.09] Phase 9: Bracket-tagged',
+        '**Goal:** Later work',
+        '',
+        '---',
+        '',
+      ].join('\n')
+    );
+    const result = runGsdTools(['phase', 'add-batch', '--descriptions', '["Next Thing"]'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.phases[0].phase_number,
+      2,
+      'bracket-tagged Phase 9 is invisible to the counter (max seen is untagged Phase 1) — next is 2',
+    );
+  });
+
   test('no duplicate phase numbers when multiple add-batch calls are made sequentially', () => {
     // Regression for #2165: parallel `phase add` invocations produced duplicates
     // because each read disk state before any write landed. add-batch serializes

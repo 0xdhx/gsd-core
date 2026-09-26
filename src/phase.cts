@@ -1543,12 +1543,16 @@ function cmdPhaseAddBatch(cwd: string, descriptions: string[], raw: boolean): vo
       // bullets, on-disk dirs. The bullet scan was missing here — a bullet-only
       // `Phase N` row was invisible to batch allocation (#3849 secondary).
       // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
-      // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-      const phasePattern = /#{2,4}\s*Phase\s+(\d+)[A-Z]?(?:\.\d+)*(?:\s*\([^)\n]{0,200}\))?:/gi;
+      // #5007 (Phase 6 / ADR-4910 §8): migrated onto buildPhaseHeadingScanRegex
+      // (src/phase-id.cjs) with the LABEL_ONLY baseline and no convention
+      // argument — same counter-site migration as cmdPhaseAdd's identical
+      // regex above.
+      const { regex: phasePattern, phaseNumGroup } =
+        buildPhaseHeadingScanRegex(PHASE_HEADING_BASELINE.LABEL_ONLY);
       const bulletPattern = /^[ \t]*-[ \t]*\[[^\]]{0,200}\][ \t]*\*{0,2}Phase[ \t]+(\d+)(?=[:.\s*]|$)/gim;
       let m: RegExpExecArray | null;
       while ((m = phasePattern.exec(content)) !== null) {
-        const num = parseInt(m[1], 10);
+        const num = parseInt(m[phaseNumGroup], 10);
         // #3185: canonical sentinel predicate (SENTINEL_RANGES [0,999]) — this was a local 999-only literal that admitted Phase 0.
         if (isSentinelPhaseId(num)) continue;
         if (num > maxPhase) maxPhase = num;
