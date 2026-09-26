@@ -964,6 +964,27 @@ function classifyMilestoneWindow(input: {
   );
 }
 
+// #5007 (Phase 6 / ADR-4910 §8): the bulk phase-heading-block strip (heading
+// line + body through to the next heading of any level) used by BOTH the
+// <details>-fallback branch and preambleWithoutPhaseDetails inside
+// extractCurrentMilestoneScoped below — literally the same regex, previously
+// duplicated verbatim at both call sites. Composed from
+// phaseHeadingPrefixSrcFor (LABEL_ONLY, no convention argument — reproduces
+// the prior bare `Phase\s+` literal byte-for-byte, same non-widening
+// discipline as the phase.cts counter sites) rather than routed through
+// buildPhaseHeadingScanRegex, since this site needs the whole matched block
+// (heading + body), not a phase-number/title capture. The one real behavior
+// change here is the phase-number token itself: the prior literal admitted
+// any `[\w][\w.-]*` (including non-numeric garbage); PHASE_NUMBER_TOKEN_SOURCE
+// tightens it to the real phase-number grammar (digits, optional trailing
+// letter, dotted subphases) — verified against real phase-number fixtures
+// (plain, decimal, and bracket-tag-bearing) in tests/roadmap-parser.test.cjs.
+const PHASE_HEADING_BLOCK_STRIP_RE = new RegExp(
+  // #1729: `(?:\s*\([^)\n]{0,200}\))?` (OPTIONAL_PHASE_TAG_SOURCE) tolerates a pre-colon ( ) tag.
+  `^#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY)}${PHASE_NUMBER_TOKEN_SOURCE}${OPTIONAL_PHASE_TAG_SOURCE}\\s*:[^\\n]*(?:\\n(?!#{1,6}\\s)[^\\n]*)*\\n?`,
+  'gim',
+);
+
 /**
  * Extract the current milestone section from ROADMAP.md by positive lookup,
  * carrying a `scope` discriminator (ADR-3180 Decision 2) alongside the value.
@@ -1096,9 +1117,9 @@ function extractCurrentMilestoneScoped(content: string, cwd?: string, ws?: strin
         const firstMilestoneMatch = content.match(anyMilestoneOrDetails);
         const preambleCutoff = firstMilestoneMatch ? firstMilestoneMatch.index! : detailsOpenIdx;
         const preamble = stripTaggedBlocks(content.slice(0, preambleCutoff), 'details')
-          // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
-          // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-          .replace(/^#{2,4}\s*Phase\s+[\w][\w.-]*(?:\s*\([^)\n]{0,200}\))?\s*:[^\n]*(?:\n(?!#{1,6}\s)[^\n]*)*\n?/gim, '')
+          // #5007 (Phase 6 / ADR-4910 §8): shared owner, see
+          // PHASE_HEADING_BLOCK_STRIP_RE above.
+          .replace(PHASE_HEADING_BLOCK_STRIP_RE, '')
           .replace(/^#{1,4}\s*Phase Details\b[^\n]*\n?/gim, '');
         const value = preamble + content.slice(detailsOpenIdx, detailsEnd);
         return {
@@ -1353,10 +1374,9 @@ function extractCurrentMilestoneScoped(content: string, cwd?: string, ws?: strin
   // strip regex and a `/$/` sentinel, which made the do-not-strip branch an identity replacement
   // (CodeQL js/identity-replacement, alert 53) -- correct, but it left both branches sharing one
   // replacement argument, so changing `''` would silently give the no-op branch a real effect.
-  // #1729: `(?:\s*\([^)\n]{0,200}\))?` tolerates a pre-colon ( ) tag (literal mirror of OPTIONAL_PHASE_TAG_SOURCE).
+  // #5007 (Phase 6 / ADR-4910 §8): shared owner, see PHASE_HEADING_BLOCK_STRIP_RE above.
   const preambleWithoutPhaseDetails = currentSectionHasPhaseDetails
-    // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-    ? preambleBase.replace(/^#{2,4}\s*Phase\s+[\w][\w.-]*(?:\s*\([^)\n]{0,200}\))?\s*:[^\n]*(?:\n(?!#{1,6}\s)[^\n]*)*\n?/gim, '')
+    ? preambleBase.replace(PHASE_HEADING_BLOCK_STRIP_RE, '')
     : preambleBase;
   // Unconditional in BOTH branches -- the #730 `Phase Details` heading strip is independent of
   // whether the selected milestone section carries phase details of its own.

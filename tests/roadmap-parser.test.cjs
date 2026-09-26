@@ -552,6 +552,76 @@ describe('roadmap-parser: extractCurrentMilestone', () => {
     assert.ok(result.includes('Phase 1: Alpha'), 'selected milestone phases retained');
   });
 
+  // #5007 (Phase 6 / ADR-4910 §8): the preamble strip's phase-number token was
+  // tightened from the generic `[\w][\w.-]*` to the real PHASE_NUMBER_TOKEN_SOURCE
+  // grammar (digits, optional trailing letter, dotted subphases) when the strip
+  // moved onto phaseHeadingPrefixSrcFor. Prove real phase-number shapes —
+  // plain digits and a decimal subphase — still match and strip correctly.
+  test('#5007 — preamble strip still removes a decimal-subphase heading after the token tightening', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Preamble',
+      '',
+      '### Phase 04.1: DecimalGhost',
+      '',
+      '**Goal:** should be stripped',
+      '',
+      '## 🚧 v9.0 Current',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(!result.includes('DecimalGhost'), 'a decimal subphase (`04.1`) still matches PHASE_NUMBER_TOKEN_SOURCE and is stripped');
+    assert.ok(result.includes('Phase 1: Alpha'), 'selected milestone phases retained');
+  });
+
+  // #5007: the SAME strip regex is also reached from extractCurrentMilestoneScoped's
+  // <details>-fallback branch (no version-bearing heading anywhere in the document,
+  // the current milestone is identified only via a <summary> tag inside a <details>
+  // block) — no prior pinning test exercised this branch directly. Cover it here so
+  // the token-tightening is verified against BOTH call sites of the shared const,
+  // not just the preambleWithoutPhaseDetails site above.
+  test('#5007 — <details>-fallback branch strips preamble phase blocks (plain and decimal) after the token tightening', () => {
+    writeState(tmpDir, { milestone: 'v9.0' });
+    const content = [
+      '# ROADMAP',
+      '',
+      '## Preamble',
+      '',
+      '### Phase 3: PreambleGhost',
+      '',
+      '**Goal:** should be stripped',
+      '',
+      '### Phase 04.1: PreambleDecimalGhost',
+      '',
+      '**Goal:** should also be stripped',
+      '',
+      '<details>',
+      '<summary>v9.0 Archived</summary>',
+      '',
+      '### Phase 1: Alpha',
+      '',
+      '**Goal:** do alpha',
+      '',
+      '</details>',
+      '',
+    ].join('\n');
+    writeRoadmap(tmpDir, content);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    const result = extractCurrentMilestone(roadmap, tmpDir);
+    assert.ok(!result.includes('PreambleGhost'), 'plain-digit preamble phase block is stripped on the <details>-fallback branch');
+    assert.ok(!result.includes('PreambleDecimalGhost'), 'decimal-subphase preamble phase block is stripped on the <details>-fallback branch');
+    assert.ok(result.includes('Phase 1: Alpha'), 'the archived phase inside the located <details> block is retained');
+    assert.ok(result.includes('<summary>v9.0 Archived</summary>'), 'the summary tag that located the block is retained');
+  });
+
   // The fixture below carries its own `## Phase Details` heading in the preamble.
   // The LF-only sibling test above can't catch a CRLF-specific regression in the
   // `[^\n]*` / `\n?` tail of the Phase Details strip regex — those tail tokens are
