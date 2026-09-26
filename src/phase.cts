@@ -2688,8 +2688,19 @@ function writePlanningFileSet(writes: WriteSpec[]): number {
 function phaseDisplayNameFromRoadmap(roadmapContent: string | null, phaseNum: string | null): string | null {
   if (!roadmapContent || !phaseNum) return null;
   const phaseEscaped = phaseMarkdownRegexSource(phaseNum);
-  // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-  const heading = roadmapContent.match(new RegExp(`^#{2,4}\\s*Phase\\s+${phaseEscaped}${OPTIONAL_PHASE_TAG_SOURCE}\\s*:\\s*([^\\n]+)`, 'im'));
+  // #5007 (Phase 6 / ADR-4910 §8): buildPhaseHeadingRegex (src/roadmap.cts) is
+  // anchored `^...$` with no 'm' flag by design — it expects one
+  // already-tokenized heading LINE, not a `^`/`m` scan against multi-line
+  // content directly. Routed through tokenizeHeadings first (the same real
+  // refactor searchPhaseInContent's own usage already requires), not a pure
+  // regex-literal swap. Adopts buildPhaseHeadingRegex's ANY_BRACKET baseline —
+  // a deliberate widening, matching getRoadmapModeForPhase's identical choice
+  // above: this is a real-heading reader, so it inherits the same bracket-tag
+  // tolerance searchPhaseInContent already applies everywhere else.
+  const headingPattern = buildPhaseHeadingRegex(phaseEscaped);
+  const matchedHeading = tokenizeHeadings(roadmapContent).find((h) => headingPattern.test(h.text));
+  if (!matchedHeading) return null;
+  const heading = matchedHeading.text.match(headingPattern);
   if (!heading) return null;
   const name = heading[1].replace(/\(INSERTED\)/i, '').trim();
   return name || null;

@@ -5005,6 +5005,84 @@ describe('phase complete command', () => {
     assert.ok(roadmap.includes('completed'), 'completion date should be added');
   });
 
+  // Phase 6 (#5007): phaseDisplayNameFromRoadmap migrated off its hand-rolled
+  // `^#{2,4}\s*Phase\s+...` literal onto buildPhaseHeadingRegex, routed
+  // through tokenizeHeadings first (the owner is anchored with no 'm' flag).
+  // These three cases (single heading, multiple headings, no heading found)
+  // are the design doc's "new — no pinning test found" ask for this site.
+  test('#5007: next-phase display name resolves from a multi-heading ROADMAP (tokenize-first correctness)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] Phase 1: Foundation
+- [ ] Phase 2: API
+- [ ] Phase 3: Polish
+
+### Phase 1: Foundation
+**Goal:** Setup
+**Plans:** 1 plans
+
+### Phase 2: API
+**Goal:** Build API
+
+### Phase 3: Polish
+**Goal:** Finish up
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Current Phase:** 01\n**Current Phase Name:** Foundation\n**Status:** In progress\n**Current Plan:** 01-01\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working on phase 1\n`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-api'), { recursive: true });
+
+    const result = runVerifiedPhaseComplete('phase complete 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(
+      state.includes('**Current Phase Name:** API'),
+      'next-phase display name must resolve to the SECOND heading (API), not the third or a stale value',
+    );
+  });
+
+  test('#5007: next-phase display name falls back to the slug when no ROADMAP heading is found', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] Phase 1: Foundation
+- [ ] Phase 2: Some Follow Up Work
+
+### Phase 1: Foundation
+**Goal:** Setup
+**Plans:** 1 plans
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Current Phase:** 01\n**Current Phase Name:** Foundation\n**Status:** In progress\n**Current Plan:** 01-01\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working on phase 1\n`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-some-follow-up-work'), { recursive: true });
+
+    const result = runVerifiedPhaseComplete('phase complete 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(
+      state.includes('**Current Phase Name:** some follow up work'),
+      'no ### Phase 2 heading exists — falls back to phaseDisplayNameFromSlug (dashes -> spaces)',
+    );
+  });
+
   // #2067: the checkbox regex in cmdPhaseComplete used a greedy `.*` between
   // `]` and `Phase N`, so completing Phase 1 (already checked → idempotent
   // re-run) matched a LATER phase whose description merely mentioned "Phase 1".
