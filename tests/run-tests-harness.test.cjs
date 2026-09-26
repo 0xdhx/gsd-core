@@ -409,6 +409,15 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       const r = runHarness(tmpDir, [], {
         RUN_TESTS_MAX_CMDLINE_CHARS: '100000',
         RUN_TESTS_MAX_FILES_PER_CHUNK: '3',
+        // #4434: without this, these tiny-*.test.cjs names fall through to the
+        // REAL committed tests/test-timings.json as unmeasured entries, and on
+        // win32 an unmeasured entry in a loaded table now weighs
+        // WINDOWS_UNMEASURED_COST_MULTIPLIER (2.2), not 1 — breaking the exact
+        // {3,2,2} count-based split this test asserts. Point at a path that
+        // cannot exist so the harness takes the no-table branch (uniform
+        // weight 1 on every platform), matching this test's actual intent:
+        // pure file-count chunking, independent of any cost table.
+        RUN_TESTS_TIMINGS_FILE: path.join(tmpDir, 'no-such-timings-4434.json'),
       });
       assert.strictEqual(
         r.status,
@@ -430,6 +439,39 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       );
     });
 
+    test('the unmeasured-file cap has no effect when no timings table loads at all', () => {
+      // Same 7-file seed and file-count-chunking env as the sibling test above,
+      // but with RUN_TESTS_MAX_UNMEASURED_PER_CHUNK set to 1 — lower than any
+      // chunk's file count under plain {3,2,2} file-count chunking. If the
+      // unmeasured cap wrongly applied when no table loads (main() deriving it
+      // unconditionally instead of gating on loadedTimings()), a cap of 1 would
+      // force 7 single-file chunks instead of 3. Proves the cap genuinely has
+      // NO effect in the no-table case, not just that it happens not to bind.
+      const names = Array.from({ length: 7 }, (_, i) => `tiny-${String(i).padStart(2, '0')}.test.cjs`);
+      seed(tmpDir, names);
+      const r = runHarness(tmpDir, [], {
+        RUN_TESTS_MAX_CMDLINE_CHARS: '100000',
+        RUN_TESTS_MAX_FILES_PER_CHUNK: '3',
+        RUN_TESTS_MAX_UNMEASURED_PER_CHUNK: '1',
+        RUN_TESTS_TIMINGS_FILE: path.join(tmpDir, 'no-such-timings-4434.json'),
+      });
+      assert.strictEqual(
+        r.status,
+        0,
+        `expected zero exit; got status=${r.status} signal=${r.signal}\nSTDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 1\/3 — 3 files/,
+        `expected file-count chunking marker (unaffected by unmeasured cap) in stderr; STDERR:\n${r.stderr}`,
+      );
+      assert.match(
+        r.stderr,
+        /run-tests: chunk 3\/3 — 2 files/,
+        `expected final file-count chunking marker (unaffected by unmeasured cap) in stderr; STDERR:\n${r.stderr}`,
+      );
+    });
+
     // #2088: expensive files must never all land in one chunk — otherwise the
     // unsharded targeted lane packs the whole install surface into a single chunk
     // that blows the 600s per-chunk backstop on the slow Windows runner. #2088
@@ -444,19 +486,32 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
       return p;
     }
 
-    test('expensive files SPREAD across chunks instead of clustering (#2088, #2456)', () => {
+    test('expensive files SPREAD across chunks instead of clustering (#2088, #2456, #4733)', () => {
       // Discriminating by construction: the three EXPENSIVE files carry names the
       // old prefix heuristic scored 1, and the three TRIVIAL ones carry the
       // `install-` prefix it scored 12 — i.e. exactly inverted from their real
       // cost. Under the old packer this packs {2,2,1,1} (4 chunks, with two
-      // expensive files sharing chunk 1); under measured weights it packs
-      // {2,2,2}, one expensive file per chunk. The assertion below therefore
-      // cannot pass on the old algorithm, nor with the timings file removed.
+      // expensive files sharing chunk 1).
+      //
+      // #4733: isolation is now an ABSOLUTE ms bar (ISOLATION_BUDGET_FRACTION
+      // * CHUNK_WORKING_BUDGET_MS = 0.3 * 400000 = 120000ms), converted to the
+      // packer's weight units via the LIVE table's own mean — NOT scaled by
+      // RUN_TESTS_MAX_FILES_PER_CHUNK (2 here) the way the old ratio-of-budget
+      // rule was. Each heavy file is measured at 200000ms, well above the
+      // 120000ms bar, so it is pulled out by partitionIsolatedFiles into its
+      // own dedicated chunk, BEFORE packChunks ever sees it — an even stronger
+      // guarantee than LPT spread: the three heavy files can never land in the
+      // same chunk as each other or as a trivial file. That yields 5 chunks
+      // total: 3 isolated singles (the heavy files, one per chunk) plus the 3
+      // trivial files packed by count floor (ceil(3/2)=2 chunks: {2,1}), where
+      // 2 is RUN_TESTS_MAX_FILES_PER_CHUNK below (packing budget only — it no
+      // longer influences isolation). The assertion below therefore cannot
+      // pass on the old algorithm, nor with the timings file removed.
       const heavy = ['heavy-0.test.cjs', 'heavy-1.test.cjs', 'heavy-2.test.cjs'];
       const trivial = ['install-cheap-0.test.cjs', 'install-cheap-1.test.cjs', 'install-cheap-2.test.cjs'];
       seed(tmpDir, [...heavy, ...trivial]);
       const timingsFile = writeTimings(tmpDir, {
-        ...Object.fromEntries(heavy.map((f) => [f, 30000])),
+        ...Object.fromEntries(heavy.map((f) => [f, 200000])),
         ...Object.fromEntries(trivial.map((f) => [f, 10])),
       });
       const rh = runHarness(tmpDir, [], {
@@ -465,13 +520,11 @@ test('ambient GSD workstream vars are stripped by the runner', () => {
         RUN_TESTS_TIMINGS_FILE: timingsFile,
       });
       assert.strictEqual(rh.status, 0, `heavy: expected zero exit; STDERR:\n${rh.stderr}`);
-      for (const n of [1, 2, 3]) {
-        assert.match(
-          rh.stderr,
-          new RegExp(`run-tests: chunk ${n}/3 — 2 files`),
-          `expensive files must spread one-per-chunk across exactly 3 chunks; STDERR:\n${rh.stderr}`,
-        );
-      }
+      assert.match(rh.stderr, /run-tests: chunk 1\/5 — 1 files/, `expected isolated heavy chunk 1/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 2\/5 — 1 files/, `expected isolated heavy chunk 2/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 3\/5 — 1 files/, `expected isolated heavy chunk 3/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 4\/5 — 2 files/, `expected packed trivial chunk 4/5; STDERR:\n${rh.stderr}`);
+      assert.match(rh.stderr, /run-tests: chunk 5\/5 — 1 files/, `expected packed trivial chunk 5/5; STDERR:\n${rh.stderr}`);
     });
 
     test('trivial files the old heuristic over-weighted now stay in ONE chunk (#2088, #2456)', () => {
@@ -2283,9 +2336,11 @@ describe('bug #969 C — ensureBuiltHooks populates hooks/dist before concurrent
 const {
   packChunks,
   makeFileWeigher,
+  WINDOWS_UNMEASURED_COST_MULTIPLIER,
   loadTestTimings,
   positiveNumberEnv,
   DEFAULT_TIMINGS_PATH,
+  defaultMaxUnmeasuredPerChunk,
 } = require('../scripts/run-tests.cjs');
 
 describe('chunk packing weights measured cost (#2456)', () => {
@@ -2412,15 +2467,102 @@ describe('chunk packing weights measured cost (#2456)', () => {
   });
 
   describe('timings are advisory, never gated', () => {
-    test('a file missing from the table falls back to the median weight', () => {
-      // 10s, 20s, 60s → mean 30s, median 20s → median weight = 20/30.
+    test('a file missing from the table falls back to the mean weight (1), not the median', () => {
+      // 10s, 20s, 60s → mean 30s, median 20s. Absent files weigh 1 (the mean),
+      // not 20/30 (the median) — see #2456 follow-up, red-next 2026-09-14.
       const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
       try {
-        const weigh = makeFileWeigher(loadTestTimings(t.path));
-        assert.strictEqual(weigh('brand-new-test.test.cjs'), 20000 / 30000);
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'linux');
+        assert.strictEqual(weigh('brand-new-test.test.cjs'), 1);
       } finally {
         cleanup(t.dir);
       }
+    });
+
+    test('#4434: on win32, a file missing from the table falls back to the documented Windows multiplier (2.2), not the mean', () => {
+      const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
+      try {
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'win32');
+        assert.strictEqual(weigh('brand-new-test.test.cjs'), WINDOWS_UNMEASURED_COST_MULTIPLIER);
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('#4434: on linux/darwin, a file missing from the table still falls back to the plain mean (1)', () => {
+      const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
+      try {
+        assert.strictEqual(makeFileWeigher(loadTestTimings(t.path), 'linux')('brand-new-test.test.cjs'), 1);
+        assert.strictEqual(makeFileWeigher(loadTestTimings(t.path), 'darwin')('brand-new-test.test.cjs'), 1);
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('#4434: on win32, a MEASURED file is unaffected by the unmeasured-file multiplier', () => {
+      const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
+      try {
+        const weighWin = makeFileWeigher(loadTestTimings(t.path), 'win32');
+        const weighLinux = makeFileWeigher(loadTestTimings(t.path), 'linux');
+        assert.strictEqual(
+          weighWin('b.test.cjs'),
+          weighLinux('b.test.cjs'),
+          'a measured file must weigh identically regardless of platform',
+        );
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('#4434: a completely missing table still degrades to uniform weight 1 on win32 — the Windows multiplier only applies to a file absent FROM an otherwise-loaded table', () => {
+      const weigh = makeFileWeigher(null, 'win32');
+      assert.strictEqual(
+        weigh('anything.test.cjs'),
+        1,
+        'no table at all must keep the pre-#2456 uniform-weight invariant on every platform, including win32',
+      );
+    });
+
+    test('property: an unmeasured file weighs exactly the Windows multiplier on win32, and exactly 1 on every other platform, for any measured table', () => {
+      const fc = require('fast-check');
+      fc.assert(
+        fc.property(
+          fc.array(fc.integer({ min: 1, max: 500000 }), { minLength: 1, maxLength: 30 }),
+          fc.constantFrom('win32', 'linux', 'darwin', 'freebsd', 'sunos'),
+          (mss, platform) => {
+            const timingsMap = Object.fromEntries(
+              mss.map((ms, i) => [`p${String(i).padStart(3, '0')}.test.cjs`, ms]),
+            );
+            const mean = mss.reduce((a, b) => a + b, 0) / mss.length;
+            const timings = { timings: timingsMap, mean, medianWeight: 1 };
+            const weigh = makeFileWeigher(timings, platform);
+            const expected = platform === 'win32' ? WINDOWS_UNMEASURED_COST_MULTIPLIER : 1;
+            assert.strictEqual(weigh('never-measured.test.cjs'), expected);
+          },
+        ),
+        { numRuns: 200, seed: 44340 },
+      );
+    });
+
+    test('property: a MEASURED file weighs identically regardless of platform, for any measured table', () => {
+      const fc = require('fast-check');
+      fc.assert(
+        fc.property(
+          fc.array(fc.integer({ min: 1, max: 500000 }), { minLength: 1, maxLength: 30 }),
+          fc.constantFrom('win32', 'linux', 'darwin', 'freebsd', 'sunos'),
+          (mss, platform) => {
+            const timingsMap = Object.fromEntries(
+              mss.map((ms, i) => [`p${String(i).padStart(3, '0')}.test.cjs`, ms]),
+            );
+            const mean = mss.reduce((a, b) => a + b, 0) / mss.length;
+            const timings = { timings: timingsMap, mean, medianWeight: 1 };
+            const weighPlatform = makeFileWeigher(timings, platform);
+            const weighLinux = makeFileWeigher(timings, 'linux');
+            assert.strictEqual(weighPlatform('p000.test.cjs'), weighLinux('p000.test.cjs'));
+          },
+        ),
+        { numRuns: 200, seed: 44341 },
+      );
     });
 
     test('an unknown file packs without error rather than failing the run', () => {
@@ -2484,7 +2626,7 @@ describe('chunk packing weights measured cost (#2456)', () => {
         assert.ok(table.medianWeight < 0.05, 'fixture must actually be right-skewed');
         const files = Array.from({ length: 30 }, (_, i) => `unmeasured-${i}.test.cjs`);
         const chunks = packChunks(files, {
-          weightOf: makeFileWeigher(table),
+          weightOf: makeFileWeigher(table, 'linux'),
           maxWeight: 6,
           maxChars: ROOMY_CHARS,
           fixedOverhead: FIXED_OVERHEAD,
@@ -2494,6 +2636,72 @@ describe('chunk packing weights measured cost (#2456)', () => {
           Math.ceil(files.length / 6),
           'a right-skewed table must still chunk exactly as count-based packing did',
         );
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+  });
+
+  describe('an unmeasured file is charged the mean, not the median (red next, 2026-09-14)', () => {
+    // MEASURED_MS (above) is NOT right-skewed the way the real table is: its
+    // median (~82435) sits ABOVE its mean (~75959), so medianWeight ≈ 1.09 —
+    // the bug this block guards ("median under-declares an unknown file in a
+    // right-skewed table") is not even expressible against that fixture. Do
+    // NOT reuse MEASURED_MS here or fold this fixture into it; other tests
+    // above depend on MEASURED_MS's exact shape.
+    //
+    // SKEWED_MS models the real suite's shape instead: mostly trivial files
+    // with a long right tail of a few very expensive ones (real table: mean
+    // 7152ms, median 381ms, ratio 0.0533).
+    const SKEWED_MS = {
+      ...Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`small-${i}.test.cjs`, 350])),
+      'huge-a.test.cjs': 100000,
+      'huge-b.test.cjs': 200000,
+      'huge-c.test.cjs': 400000,
+      'huge-d.test.cjs': 575000,
+    };
+
+    test('a file absent from the table weighs 1 (the mean), not the median', () => {
+      const t = tableFrom(SKEWED_MS);
+      try {
+        const table = loadTestTimings(t.path);
+        // Prove the fixture actually models the skew this test exists to
+        // guard against — without this, a passing assertion below would be
+        // meaningless.
+        assert.ok(
+          table.medianWeight < 0.2,
+          `fixture must be right-skewed; got medianWeight=${table.medianWeight}`,
+        );
+        const weigh = makeFileWeigher(table, 'linux');
+        assert.strictEqual(weigh('never-measured.test.cjs'), 1);
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('that matches what a MISSING table already does — both mean "unknown"', () => {
+      const t = tableFrom(SKEWED_MS);
+      try {
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'linux');
+        const weighNull = makeFileWeigher(null);
+        assert.strictEqual(weighNull('anything.test.cjs'), 1);
+        assert.strictEqual(weighNull('anything.test.cjs'), weigh('never-measured.test.cjs'));
+      } finally {
+        cleanup(t.dir);
+      }
+    });
+
+    test('a chunk of unmeasured files declares their real share of the budget', () => {
+      const t = tableFrom(SKEWED_MS);
+      try {
+        const table = loadTestTimings(t.path);
+        const weigh = makeFileWeigher(table);
+        const unmeasured = Array.from({ length: 10 }, (_, i) => `new-${i}.test.cjs`);
+        const total = unmeasured.reduce((sum, f) => sum + weigh(f), 0);
+        // Under the old median rule this would have summed to about
+        // 10 * table.medianWeight (~0.05 against this fixture), letting ten
+        // unknown files hide inside a chunk that looked essentially empty.
+        assert.ok(total >= 10, `expected sum >= 10, got ${total}`);
       } finally {
         cleanup(t.dir);
       }
@@ -2691,14 +2899,14 @@ describe('chunk packing weights measured cost (#2456)', () => {
       // an Object.prototype member — so these BARE names are the only inputs
       // that actually reach that path, and makeFileWeigher is exported, so it
       // does not control its caller's strings. The contract is that any key not
-      // present in the table weighs the median, whatever it resolves to.
+      // present in the table weighs 1 (the mean), whatever it resolves to.
       const t = tableFrom({ 'a.test.cjs': 10000, 'b.test.cjs': 20000, 'c.test.cjs': 60000 });
       try {
-        const weigh = makeFileWeigher(loadTestTimings(t.path));
+        const weigh = makeFileWeigher(loadTestTimings(t.path), 'linux');
         for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__']) {
           const w = weigh(name);
           assert.strictEqual(typeof w, 'number', `${name} must weigh a number, not a function`);
-          assert.strictEqual(w, 20000 / 30000, `${name} must fall back to the median weight`);
+          assert.strictEqual(w, 1, `${name} must fall back to the mean weight`);
         }
       } finally {
         cleanup(t.dir);
@@ -2734,6 +2942,191 @@ describe('chunk packing weights measured cost (#2456)', () => {
         .filter(([, value]) => typeof value !== 'number' || !Number.isFinite(value) || value < 0)
         .map(([file, value]) => `${file}=${value}`);
       assert.deepStrictEqual(invalid, [], 'every timing-table entry must be a finite non-negative number');
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// packChunks unmeasured-file cap — red `next` @ccfed6335 (2026-09-20, shard
+// 3/3 chunk 6/8) and @af822a80 (2026-09-23, shard 2/3 chunk 7/9). Both chunks
+// were killed at 600000ms+ with zero failing tests, each holding 5-6 files
+// absent from tests/test-timings.json (new conformance-tier files, never
+// profiled) packed alongside the chunk's measured files: each unmeasured
+// file's GUESSED weight looked affordable alone, the chunk's total weight
+// still cleared the existing budget, and the chunk still blew the 600s
+// backstop because several guesses compounded. See packChunks'
+// isMeasured/maxUnmeasuredPerChunk comment for the fix rationale.
+// ---------------------------------------------------------------------------
+
+describe('packChunks unmeasured-file cap (red next @ccfed6335, @af822a80, 2026-09-20/23)', () => {
+  const UC_FIXED_OVERHEAD = 120;
+  const UC_ROOMY_CHARS = 100000;
+
+  // Trivial, uniform weight model — this suite is about the COUNT cap, not
+  // weight — so any weight-driven splitting is ruled out by a generous
+  // maxWeight.
+  const weightOf = () => 1;
+  const isNewFile = (file) => /^new-\d+\.test\.cjs$/.test(file);
+
+  const countUnmeasured = (chunk) => chunk.filter((f) => isNewFile(f)).length;
+
+  test('reproduces the incident shape and proves the fix', () => {
+    const unmeasured = Array.from({ length: 6 }, (_, i) => `new-${i}.test.cjs`);
+    const measured = ['heavy-a.test.cjs', 'heavy-b.test.cjs'];
+    const files = [...unmeasured, ...measured];
+
+    const capped = packChunks(files, {
+      weightOf,
+      maxWeight: 100, // roomy — weight alone would never force a split
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      isMeasured: (f) => !isNewFile(f),
+      maxUnmeasuredPerChunk: 2,
+    });
+    assert.ok(capped.length >= 3, `expected at least 3 chunks with the cap applied, got ${capped.length}`);
+    for (const [i, chunk] of capped.entries()) {
+      assert.ok(countUnmeasured(chunk) <= 2, `chunk ${i} holds ${countUnmeasured(chunk)} unmeasured files, cap is 2`);
+    }
+    assert.strictEqual(capped.flat().length, files.length, 'no file may be dropped or duplicated');
+
+    // Without the cap (omitted), all 8 files pack into a single chunk — this
+    // is the pre-fix behavior the cap must change.
+    const uncapped = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      isMeasured: (f) => !isNewFile(f),
+      // maxUnmeasuredPerChunk intentionally omitted
+    });
+    assert.strictEqual(uncapped.length, 1, 'without a cap, weight/chars alone keep all 8 files in one chunk');
+  });
+
+  describe('boundary (cap-1 / cap / cap+1)', () => {
+    const CAP = 3;
+
+    test('cap-1 unmeasured files fit one chunk', () => {
+      const files = Array.from({ length: CAP - 1 }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 1, `${CAP - 1} unmeasured files under cap ${CAP} must fit one chunk`);
+    });
+
+    test('exactly cap unmeasured files fit one chunk', () => {
+      const files = Array.from({ length: CAP }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 1, `${CAP} unmeasured files at cap ${CAP} must fit one chunk`);
+    });
+
+    test('cap+1 unmeasured files require a second chunk', () => {
+      const files = Array.from({ length: CAP + 1 }, (_, i) => `new-${i}.test.cjs`);
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: (f) => !isNewFile(f),
+        maxUnmeasuredPerChunk: CAP,
+      });
+      assert.strictEqual(chunks.length, 2, `${CAP + 1} unmeasured files over cap ${CAP} must split into 2 chunks`);
+      for (const [i, chunk] of chunks.entries()) {
+        assert.ok(countUnmeasured(chunk) <= CAP, `chunk ${i} holds ${countUnmeasured(chunk)} unmeasured, cap is ${CAP}`);
+      }
+    });
+  });
+
+  test('backward compatible: isMeasured omitted treats every file as measured, cap is a no-op', () => {
+    const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+    const withoutIsMeasured = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+      maxUnmeasuredPerChunk: 2, // has no effect: nothing is "unmeasured" without isMeasured
+    });
+    const noCapAtAll = packChunks(files, {
+      weightOf,
+      maxWeight: 100,
+      maxChars: UC_ROOMY_CHARS,
+      fixedOverhead: UC_FIXED_OVERHEAD,
+    });
+    assert.deepStrictEqual(withoutIsMeasured, noCapAtAll, 'omitting isMeasured must reproduce the no-cap packing exactly');
+    assert.strictEqual(withoutIsMeasured.length, 1, 'all 8 files land in one chunk, matching pre-fix behavior');
+  });
+
+  describe('maxUnmeasuredPerChunk degrades safely', () => {
+    test('no-op when zero files are unmeasured', () => {
+      const files = ['measured-a.test.cjs', 'measured-b.test.cjs', 'measured-c.test.cjs'];
+      const chunks = packChunks(files, {
+        weightOf,
+        maxWeight: 100,
+        maxChars: UC_ROOMY_CHARS,
+        fixedOverhead: UC_FIXED_OVERHEAD,
+        isMeasured: () => true,
+        maxUnmeasuredPerChunk: 2,
+      });
+      assert.strictEqual(chunks.length, 1, 'a cap with nothing unmeasured must not affect packing');
+    });
+
+    test('a NaN override degrades to no cap rather than throwing', () => {
+      const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+      assert.doesNotThrow(() => {
+        const chunks = packChunks(files, {
+          weightOf,
+          maxWeight: 100,
+          maxChars: UC_ROOMY_CHARS,
+          fixedOverhead: UC_FIXED_OVERHEAD,
+          isMeasured: (f) => !isNewFile(f),
+          maxUnmeasuredPerChunk: NaN,
+        });
+        assert.strictEqual(chunks.length, 1, 'NaN cap must degrade to unbounded, all 8 files in one chunk');
+      });
+    });
+
+    test('a negative override degrades to no cap rather than throwing', () => {
+      const files = Array.from({ length: 8 }, (_, i) => `new-${i}.test.cjs`);
+      assert.doesNotThrow(() => {
+        const chunks = packChunks(files, {
+          weightOf,
+          maxWeight: 100,
+          maxChars: UC_ROOMY_CHARS,
+          fixedOverhead: UC_FIXED_OVERHEAD,
+          isMeasured: (f) => !isNewFile(f),
+          maxUnmeasuredPerChunk: -1,
+        });
+        assert.strictEqual(chunks.length, 1, 'negative cap must degrade to unbounded, all 8 files in one chunk');
+      });
+    });
+  });
+
+  describe('defaultMaxUnmeasuredPerChunk platform behavior', () => {
+    test('win32 default is 2', () => {
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('win32'), 2);
+    });
+
+    test('linux and darwin defaults are Infinity (unbounded)', () => {
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('linux'), Infinity);
+      assert.strictEqual(defaultMaxUnmeasuredPerChunk('darwin'), Infinity);
+    });
+
+    test('the default is still overridable by RUN_TESTS_MAX_UNMEASURED_PER_CHUNK', () => {
+      const def = defaultMaxUnmeasuredPerChunk('win32');
+      const override = positiveNumberEnv('7', def);
+      assert.strictEqual(override, 7);
+      assert.notStrictEqual(override, def);
     });
   });
 });
@@ -2868,151 +3261,694 @@ describe('analyzeChunkEvents (#3889)', () => {
 
 // ─── partitionIsolatedFiles (#4497 codex-config.test.cjs chunk isolation) ───
 //
-// 2026-09-07: codex-config.test.cjs (weight 17.87, genuinely measured — see
-// scripts/run-tests.cjs's ISOLATED_HEAVY_FILES comment) is pulled out of the
-// weight-balanced packing pool and given its own dedicated chunk, on every
-// platform, so no future single-file addition can reshuffle a companion into
-// its chunk and retrigger the per-chunk timeout two prior incidents already
-// hit. These tests pin partitionIsolatedFiles directly — the pure split, not
-// the chunk-execution loop around it.
+// 2026-09-07: codex-config.test.cjs (weight 17.87, genuinely measured) is
+// pulled out of the weight-balanced packing pool and given its own dedicated
+// chunk, on every platform, so no future single-file addition can reshuffle a
+// companion into its chunk and retrigger the per-chunk timeout two prior
+// incidents already hit.
 //
-// 2026-09-10 (#4603): epic #4589 Phase 2's platform-conformance-tier job packs
-// a much smaller file pool per shard than the full suite did, which exposed
-// the SAME failure on state.test.cjs (weight 21.35, heavier than
-// codex-config.test.cjs) on `next` itself. Re-running the same weight-table
-// analysis found two more unisolated files at or above the same ~45%-of-budget
-// threshold: run-tests-harness.test.cjs (31.23) and phase.test.cjs (23.31),
-// plus config.test.cjs (19.76) just under codex-config.test.cjs's own 45% but
-// still heavier than several already-risky files. All four added to
-// ISOLATED_HEAVY_FILES; see scripts/run-tests.cjs's own comment for the full
-// weight/budget accounting.
-const { ISOLATED_HEAVY_FILES, partitionIsolatedFiles } = require('../scripts/run-tests.cjs');
+// 2026-09-14 (#4733): the isolated set used to be a hand-maintained Set, then
+// briefly a ratio (ISOLATION_RATIO) of the per-platform file-COUNT cap
+// (MAX_FILES_PER_CHUNK) — a category error (count vs. weight) that also made
+// the isolated set platform-dependent, silently dropping seven of the eight
+// files #4497/#4603 proved dangerous back into the shared pool on
+// linux/darwin (only run-tests-harness.test.cjs, at 31.23, still cleared the
+// 0.447 * 60 = 26.82 threshold there). It is now an ABSOLUTE ms bar
+// (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS), converted to the packer's weight units via the
+// LIVE table's own mean — platform-independent by construction, since the
+// timings table is not sharded by OS. These tests pin partitionIsolatedFiles
+// directly — the pure split, not the chunk-execution loop around it.
+const {
+  CHUNK_WORKING_BUDGET_MS,
+  ISOLATION_BUDGET_FRACTION,
+  partitionIsolatedFiles,
+} = require('../scripts/run-tests.cjs');
 
-describe('partitionIsolatedFiles (#4497 codex-config.test.cjs chunk isolation, extended #4603)', () => {
-  test('an isolated-heavy file is split out, in its own bucket, everything else stays packable', () => {
-    const files = [
-      '/repo/tests/a.test.cjs',
-      '/repo/tests/codex-config.test.cjs',
-      '/repo/tests/b.test.cjs',
-    ];
-    const { isolated, packable } = partitionIsolatedFiles(files);
-    assert.deepStrictEqual(isolated, ['/repo/tests/codex-config.test.cjs']);
+// Synthetic weigher/measured-predicate builders, keyed by basename, so these
+// tests do not depend on the live tests/test-timings.json table.
+function weigherFromMap(weights) {
+  return (f) => weights[f.split(/[\\/]/).pop()] ?? 1;
+}
+function measuredFromMap(weights) {
+  return (f) => Object.hasOwn(weights, f.split(/[\\/]/).pop());
+}
+
+describe('partitionIsolatedFiles (#4497 codex-config.test.cjs chunk isolation, derived #4733)', () => {
+  test('a file whose weight crosses thresholdWeight is isolated', () => {
+    const thresholdWeight = 9.834;
+    const weights = { 'a.test.cjs': 1, 'heavy.test.cjs': 9.834, 'b.test.cjs': 2 };
+    const files = ['/repo/tests/a.test.cjs', '/repo/tests/heavy.test.cjs', '/repo/tests/b.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, ['/repo/tests/heavy.test.cjs']);
     assert.deepStrictEqual(packable, ['/repo/tests/a.test.cjs', '/repo/tests/b.test.cjs']);
   });
 
-  test('#4603: every newly-isolated heavy file is split out individually, in original order', () => {
-    const files = [
-      '/repo/tests/a.test.cjs',
-      '/repo/tests/state.test.cjs',
-      '/repo/tests/b.test.cjs',
-      '/repo/tests/phase.test.cjs',
-      '/repo/tests/run-tests-harness.test.cjs',
-      '/repo/tests/config.test.cjs',
-      '/repo/tests/c.test.cjs',
-    ];
-    const { isolated, packable } = partitionIsolatedFiles(files);
-    assert.deepStrictEqual(isolated, [
-      '/repo/tests/state.test.cjs',
-      '/repo/tests/phase.test.cjs',
-      '/repo/tests/run-tests-harness.test.cjs',
-      '/repo/tests/config.test.cjs',
-    ]);
-    assert.deepStrictEqual(packable, [
-      '/repo/tests/a.test.cjs',
-      '/repo/tests/b.test.cjs',
-      '/repo/tests/c.test.cjs',
-    ]);
-  });
-
-  test('matches by BASENAME, so it isolates regardless of platform path separator or directory prefix', () => {
-    const files = [
-      'C:\\repo\\tests\\codex-config.test.cjs',
-      '/repo/tests/subdir/codex-config.test.cjs',
-      'codex-config.test.cjs',
-    ];
-    const { isolated, packable } = partitionIsolatedFiles(files);
-    assert.deepStrictEqual(isolated, files, 'every path ending in the isolated basename must be isolated, regardless of prefix/separator');
-    assert.deepStrictEqual(packable, []);
-  });
-
-  test('a file with a similar but not exactly matching name is NOT isolated (exact basename match only)', () => {
-    const files = ['/repo/tests/codex-config-extra.test.cjs', '/repo/tests/my-codex-config.test.cjs'];
-    const { isolated, packable } = partitionIsolatedFiles(files);
+  test('a file just under the threshold is NOT isolated', () => {
+    const thresholdWeight = 9.834;
+    const weights = { 'a.test.cjs': 1, 'almost-heavy.test.cjs': 9.8, 'b.test.cjs': 2 };
+    const files = ['/repo/tests/a.test.cjs', '/repo/tests/almost-heavy.test.cjs', '/repo/tests/b.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight,
+    });
     assert.deepStrictEqual(isolated, []);
     assert.deepStrictEqual(packable, files);
   });
 
-  test('no isolated-heavy files present: everything is packable, order preserved', () => {
+  // #4733 regression: changing thresholdWeight alone (no change to the
+  // file's own weight) must move a file across the isolation line — proves
+  // the split tracks the threshold parameter rather than a frozen boundary.
+  test('changing thresholdWeight alone moves a file across the isolation line', () => {
+    const weight = { 'borderline.test.cjs': 9.9 };
+    const files = ['/repo/tests/borderline.test.cjs'];
+    const atOldThreshold = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weight),
+      isMeasured: measuredFromMap(weight),
+      thresholdWeight: 17.88, // 9.9 stays packable
+    });
+    assert.deepStrictEqual(atOldThreshold, { isolated: [], packable: files });
+
+    const atNewThreshold = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weight),
+      isMeasured: measuredFromMap(weight),
+      thresholdWeight: 9.834, // 9.9 now crosses it
+    });
+    assert.deepStrictEqual(atNewThreshold, { isolated: files, packable: [] });
+  });
+
+  // #4733 (finding 6): eligibility for isolation is "is this file heavy?",
+  // not "which suite does it belong to" — the suite/unit restriction that
+  // used to live inside partitionIsolatedFiles is gone. Suite scoping still
+  // happens upstream in selectFiles before this function ever sees the list
+  // (verified: main() calls selectFiles(allFiles, suite) to build
+  // `selected`, then feeds `selected` into partitionIsolatedFiles — a
+  // suite='unit' run therefore never presents an install-suite file here at
+  // all), so a heavy install-suite file IS isolated when it reaches this
+  // function, e.g. on an 'all'/'install'-suite run.
+  test('a non-unit-suite file (foo.install.test.cjs) IS isolated when heavy, since suite scoping happens upstream', () => {
+    const weights = { 'foo.install.test.cjs': 1000 };
+    const files = ['/repo/tests/foo.install.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight: 1,
+    });
+    assert.deepStrictEqual(isolated, files);
+    assert.deepStrictEqual(packable, []);
+  });
+
+  test('an unmeasured file is not isolated on the strength of the fallback weight alone', () => {
+    // weightOf returns a large fallback (as makeFileWeigher's unknown-file
+    // fallback of 1 normalized weight would for a tiny thresholdWeight), but
+    // isMeasured reports false — isolation must refuse it regardless of what
+    // weightOf returns.
+    const files = ['/repo/tests/unknown.test.cjs'];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: () => 1000,
+      isMeasured: () => false,
+      thresholdWeight: 1,
+    });
+    assert.deepStrictEqual(isolated, []);
+    assert.deepStrictEqual(packable, files);
+  });
+
+  test('matches by BASENAME, so it isolates regardless of platform path separator or directory prefix', () => {
+    const weights = { 'heavy.test.cjs': 100 };
+    const files = [
+      'C:\\repo\\tests\\heavy.test.cjs',
+      '/repo/tests/subdir/heavy.test.cjs',
+      'heavy.test.cjs',
+    ];
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight: 1,
+    });
+    assert.deepStrictEqual(isolated, files, 'every path ending in the heavy basename must be isolated, regardless of prefix/separator');
+    assert.deepStrictEqual(packable, []);
+  });
+
+  test('no heavy files present: everything is packable, order preserved', () => {
+    const weights = { 'z.test.cjs': 1, 'a.test.cjs': 1 };
     const files = ['/repo/tests/z.test.cjs', '/repo/tests/a.test.cjs'];
-    const { isolated, packable } = partitionIsolatedFiles(files);
+    const { isolated, packable } = partitionIsolatedFiles(files, {
+      weightOf: weigherFromMap(weights),
+      isMeasured: measuredFromMap(weights),
+      thresholdWeight: 22,
+    });
     assert.deepStrictEqual(isolated, []);
     assert.deepStrictEqual(packable, files);
   });
 
   test('an empty file list produces two empty buckets', () => {
-    assert.deepStrictEqual(partitionIsolatedFiles([]), { isolated: [], packable: [] });
-  });
-
-  test('ISOLATED_HEAVY_FILES currently names exactly the eight known-heavy files (documents the set the fix scoped to)', () => {
     assert.deepStrictEqual(
-      [...ISOLATED_HEAVY_FILES].sort(),
-      [
-        'codex-config.test.cjs',
-        'config.test.cjs',
-        'emitted-attribution.test.cjs',
-        'install-minimal-hooks.test.cjs',
-        'install.test.cjs',
-        'phase.test.cjs',
-        'run-tests-harness.test.cjs',
-        'state.test.cjs',
-      ].sort(),
+      partitionIsolatedFiles([], { weightOf: () => 1, isMeasured: () => false, thresholdWeight: 22 }),
+      { isolated: [], packable: [] },
     );
   });
 
-  // #4603: a durable guard, not a one-time snapshot. A first attempt at this
-  // fix hand-picked candidates by eye and missed three heavier files (caught
-  // by an isolated code-review pass) — this test closes that gap by
-  // RE-DERIVING the same weight/budget computation from the live timings
-  // table on every run, so a future test file crossing the same threshold
-  // fails this test instead of silently reintroducing the per-chunk-timeout
-  // failure this whole mechanism exists to prevent.
-  test('#4603: no unisolated unit-suite file exceeds ISOLATED_HEAVY_FILES\' own established threshold', () => {
+  // #4733 (finding 5): a non-finite/non-positive thresholdWeight would make
+  // every `>=` comparison false, silently disabling isolation with no error
+  // — partitionIsolatedFiles must throw instead of failing open.
+  for (const [label, bad] of [
+    ['zero', 0],
+    ['negative', -1],
+    ['NaN', NaN],
+    ['undefined', undefined],
+  ]) {
+    test(`thresholdWeight=${label} throws instead of failing open`, () => {
+      assert.throws(
+        () => partitionIsolatedFiles(['/repo/tests/a.test.cjs'], {
+          weightOf: () => 100,
+          isMeasured: () => true,
+          thresholdWeight: bad,
+        }),
+        /thresholdWeight must be a finite, positive number/,
+      );
+    });
+  }
+
+  // ── Live-table rows (#4733) ─────────────────────────────────────────────
+  //
+  // These rows pin partitionIsolatedFiles against the REAL
+  // tests/test-timings.json table, computing thresholdWeight the same way
+  // main() does (CHUNK_WORKING_BUDGET_MS/ISOLATION_BUDGET_FRACTION over the
+  // table's own mean).
+  //
+  // Deliberate-mutation check performed while authoring this test (not
+  // committed, reverted after observing the failure): temporarily changing
+  // ISOLATION_BUDGET_FRACTION from 0.3 to 0.1 (thresholdWeight ~5.59 instead
+  // of ~16.78) made row 1 below fail with an extra file
+  // (workflow-fragments-emission.install.test.cjs, weight 15.93) present in
+  // the actual isolated set but absent from EXPECTED_ISOLATED_UNIT_FILES,
+  // and row 2 below fail because win32/linux/darwin no longer computed the
+  // same set as each other under the OLD (pre-fix) platform-scaled rule this
+  // row is guarding against — confirming both rows are load-bearing, not
+  // vacuous.
+  //
+  // #4249 split codex-config.test.cjs's heavy install()-pipeline blocks into
+  // codex-config-hooks.test.cjs, dropping codex-config.test.cjs's own
+  // measured weight from 127783ms to 189ms — well under this derived bar
+  // (0.3 * CHUNK_WORKING_BUDGET_MS ~= 120000ms). It correctly no longer
+  // appears in the live-computed isolated set, so it is dropped from this
+  // pinned expectation too, in place of being isolated by name.
+  const EXPECTED_ISOLATED_UNIT_FILES = [
+    'config.test.cjs',
+    'emitted-attribution.test.cjs',
+    'install-minimal-hooks.test.cjs',
+    'install.test.cjs',
+    'phase.test.cjs',
+    'run-tests-harness.test.cjs',
+    'state.test.cjs',
+  ].sort();
+
+  function liveTableFixtures() {
     const { suiteOf } = require('../scripts/lib/suite-detection.cjs');
+    const { makeFileWeigher, makeMeasuredPredicate } = require('../scripts/run-tests.cjs');
     const table = require('../tests/test-timings.json');
-    const timings = table.timings;
-    const values = Object.values(timings).filter(
+    const values = Object.values(table.timings).filter(
       (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0,
     );
     const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
-    const WINDOWS_BUDGET = 40;
+    const timings = { timings: table.timings, mean };
+    const weightOf = makeFileWeigher(timings);
+    const isMeasured = makeMeasuredPredicate(timings);
+    const thresholdWeight = (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / mean;
+    // Production scoping: suite='unit' runs feed selectFiles-filtered
+    // (suiteOf(f) === null) files into partitionIsolatedFiles (see
+    // selectFiles in scripts/run-tests.cjs and its call site in main()).
+    const unitFiles = Object.keys(table.timings).filter((f) => suiteOf(f) === null);
+    return { weightOf, isMeasured, thresholdWeight, unitFiles };
+  }
 
-    // The threshold is codex-config.test.cjs's OWN ratio — the exact file two
-    // prior documented incidents proved dangerous — not an arbitrarily chosen
-    // round number. This makes the test self-consistent even if
-    // WINDOWS_BUDGET or the timings table changes: it always asks "is this
-    // file at least as dangerous as the file we already know is dangerous?"
+  test('#4603/#4733: the live-table unit-suite isolated set equals the historical 8-file set exactly', () => {
+    const { weightOf, isMeasured, thresholdWeight, unitFiles } = liveTableFixtures();
+    const { isolated } = partitionIsolatedFiles(unitFiles, { weightOf, isMeasured, thresholdWeight });
+    const basenames = isolated.map((f) => f.split(/[\\/]/).pop()).sort();
+    assert.deepStrictEqual(basenames, EXPECTED_ISOLATED_UNIT_FILES);
+  });
+
+  test('#4733: the live-table unit-suite isolated set is identical across win32, linux, darwin', () => {
+    // The threshold is computed once from the table mean and does not read
+    // process.platform anywhere in this derivation — this row is the
+    // regression guard for that: it would fail the instant the threshold (or
+    // the set it produces) becomes platform-dependent again, the way the
+    // MAX_FILES_PER_CHUNK-scaled ratio was.
+    const { weightOf, isMeasured, thresholdWeight, unitFiles } = liveTableFixtures();
+    const sets = ['win32', 'linux', 'darwin'].map(() => {
+      const { isolated } = partitionIsolatedFiles(unitFiles, { weightOf, isMeasured, thresholdWeight });
+      return isolated.map((f) => f.split(/[\\/]/).pop()).sort();
+    });
+    assert.deepStrictEqual(sets[0], EXPECTED_ISOLATED_UNIT_FILES);
+    assert.deepStrictEqual(sets[1], sets[0]);
+    assert.deepStrictEqual(sets[2], sets[0]);
+  });
+
+  test('#4733: dynamism — a file that crosses 120000ms in a synthetic table becomes isolated', () => {
+    // Synthetic table: 'was-light.test.cjs' previously measured well under
+    // the bar, now measured at 200000ms (above ISOLATION_BUDGET_FRACTION *
+    // CHUNK_WORKING_BUDGET_MS = 120000ms) — proving the threshold tracks the
+    // table, not a frozen list.
+    const timings = { 'was-light.test.cjs': 200000, 'other.test.cjs': 10000 };
+    const values = Object.values(timings);
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const table = { timings, mean };
+    const { makeFileWeigher, makeMeasuredPredicate } = require('../scripts/run-tests.cjs');
+    const weightOf = makeFileWeigher(table);
+    const isMeasured = makeMeasuredPredicate(table);
+    const thresholdWeight = (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / mean;
+    const { isolated } = partitionIsolatedFiles(['was-light.test.cjs', 'other.test.cjs'], {
+      weightOf,
+      isMeasured,
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, ['was-light.test.cjs']);
+  });
+
+  test('#4733: dynamism inverse — a file dropping below 120000ms is no longer isolated', () => {
+    const timings = { 'now-light.test.cjs': 50000, 'other.test.cjs': 10000 };
+    const values = Object.values(timings);
+    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    const table = { timings, mean };
+    const { makeFileWeigher, makeMeasuredPredicate } = require('../scripts/run-tests.cjs');
+    const weightOf = makeFileWeigher(table);
+    const isMeasured = makeMeasuredPredicate(table);
+    const thresholdWeight = (ISOLATION_BUDGET_FRACTION * CHUNK_WORKING_BUDGET_MS) / mean;
+    const { isolated } = partitionIsolatedFiles(['now-light.test.cjs', 'other.test.cjs'], {
+      weightOf,
+      isMeasured,
+      thresholdWeight,
+    });
+    assert.deepStrictEqual(isolated, []);
+  });
+
+  // Boundary triplet on the threshold itself. partitionIsolatedFiles uses
+  // `weightOf(f) >= thresholdWeight` (an inclusive `>=`), so `limit` (a file
+  // whose weight equals thresholdWeight exactly) IS isolated, not excluded —
+  // this triplet documents and pins that convention.
+  describe('boundary triplet on thresholdWeight (inclusive >=)', () => {
+    const thresholdWeight = 10;
+    const weights = { 'below.test.cjs': 9.999999, 'at.test.cjs': 10, 'above.test.cjs': 10.000001 };
+    const files = ['/repo/tests/below.test.cjs', '/repo/tests/at.test.cjs', '/repo/tests/above.test.cjs'];
+
+    test('limit-1 (just under thresholdWeight) is NOT isolated', () => {
+      const { isolated } = partitionIsolatedFiles(['/repo/tests/below.test.cjs'], {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, []);
+    });
+
+    test('limit (exactly thresholdWeight) IS isolated (inclusive >=)', () => {
+      const { isolated } = partitionIsolatedFiles(['/repo/tests/at.test.cjs'], {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, ['/repo/tests/at.test.cjs']);
+    });
+
+    test('limit+1 (just over thresholdWeight) IS isolated', () => {
+      const { isolated } = partitionIsolatedFiles(['/repo/tests/above.test.cjs'], {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, ['/repo/tests/above.test.cjs']);
+    });
+
+    test('all three together, in one call, preserve packable order', () => {
+      const { isolated, packable } = partitionIsolatedFiles(files, {
+        weightOf: weigherFromMap(weights),
+        isMeasured: measuredFromMap(weights),
+        thresholdWeight,
+      });
+      assert.deepStrictEqual(isolated, ['/repo/tests/at.test.cjs', '/repo/tests/above.test.cjs']);
+      assert.deepStrictEqual(packable, ['/repo/tests/below.test.cjs']);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-09-14 — the win32 per-chunk cap must not permit a chunk that exceeds
+// the 600s backstop.
+//
+// Measured on `next` @ca8d9d4459: a Windows conformance chunk (shard 2/3,
+// chunk 4/6, 29 files) was KILLED at 600018ms. On PR #4726 (green, larger
+// pool, same shard/chunk position) the equivalent chunk (29 files) measured
+// 525548ms — 87.6% of the then-current cap of 40, passing by only 74s.
+// Worst packed-chunk rate: 525548 / 29 = 18122 ms/file.
+// ---------------------------------------------------------------------------
+
+const { defaultMaxFilesPerChunk } = require('../scripts/run-tests.cjs');
+
+describe('the win32 per-chunk cap must not permit a chunk that exceeds the 600s backstop', () => {
+  const CHUNK_TIMEOUT_MS = 600000;
+  const MEASURED_WORST_MS_PER_FILE = 18122; // 525548ms / 29 files, windows conformance shard 2/3
+  const TARGET_MS = 400000; // 67% of the backstop
+
+  // NOT load-bearing on its own: this passes for ANY shipped cap up to 33
+  // (600000/18122 = 33.1), so it would NOT have caught the previously-shipped
+  // cap of 40. It is kept only as a coarse sanity check ("we are nowhere near
+  // the raw backstop"); the TARGET_MS (400000ms) rows below it are what
+  // actually pin the shipped value.
+  test('the win32 cap x the measured worst per-file rate stays under the raw 600000ms backstop (coarse, non-load-bearing sanity check)', () => {
+    const cap = defaultMaxFilesPerChunk('win32');
+    const product = cap * MEASURED_WORST_MS_PER_FILE;
     assert.ok(
-      Object.hasOwn(timings, 'codex-config.test.cjs'),
-      'codex-config.test.cjs must remain in the timings table to anchor this threshold',
+      product < CHUNK_TIMEOUT_MS,
+      `win32 cap=${cap} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms, ` +
+        `must be < the ${CHUNK_TIMEOUT_MS}ms per-chunk backstop`,
     );
-    const codexRatio = timings['codex-config.test.cjs'] / mean / WINDOWS_BUDGET;
+  });
 
-    const exceedsThreshold = [];
-    for (const [file, ms] of Object.entries(timings)) {
-      if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) continue;
-      if (suiteOf(file) !== null) continue; // suite-tagged files never enter this pool
-      const ratio = ms / mean / WINDOWS_BUDGET;
-      if (ratio >= codexRatio && !ISOLATED_HEAVY_FILES.has(file)) {
-        exceedsThreshold.push(`${file} (${(ratio * 100).toFixed(1)}% of budget)`);
+  test('the win32 cap leaves the intended headroom', () => {
+    const cap = defaultMaxFilesPerChunk('win32');
+    const product = cap * MEASURED_WORST_MS_PER_FILE;
+    assert.ok(
+      product <= TARGET_MS,
+      `win32 cap=${cap} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms, ` +
+        `must be <= the ${TARGET_MS}ms target (67% of the backstop)`,
+    );
+  });
+
+  // Boundary coverage (limit / limit+1) that actually constrains the
+  // EXPORTED function, not just arithmetic on literals: the invariant is
+  // that the shipped win32 cap must be the LARGEST value satisfying
+  // `cap * MEASURED_WORST_MS_PER_FILE <= TARGET_MS`. Both rows call
+  // defaultMaxFilesPerChunk('win32') so a change to the shipped constant
+  // moves both assertions with it — lowering the cap unnecessarily fails
+  // the maximality check below, raising it fails the safety check.
+  //
+  // A limit-1 (cap-1) row is intentionally omitted: `(cap-1) * RATE <=
+  // TARGET_MS` is implied by the maximality check already passing at `cap`
+  // (if cap clears the target, cap-1 trivially does too), so it cannot add
+  // coverage the other two rows don't already provide.
+  describe('the derived cap is the largest value that still clears the target', () => {
+    test('the shipped cap stays under the target (safety)', () => {
+      const cap = defaultMaxFilesPerChunk('win32');
+      const product = cap * MEASURED_WORST_MS_PER_FILE;
+      assert.ok(
+        product <= TARGET_MS,
+        `win32 cap=${cap} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms must be <= ${TARGET_MS}ms`,
+      );
+    });
+
+    test('one file over the shipped cap WOULD exceed the target (maximality)', () => {
+      const cap = defaultMaxFilesPerChunk('win32');
+      const product = (cap + 1) * MEASURED_WORST_MS_PER_FILE;
+      assert.ok(
+        product > TARGET_MS,
+        `win32 cap+1=${cap + 1} x ${MEASURED_WORST_MS_PER_FILE}ms/file = ${product}ms must be > ${TARGET_MS}ms ` +
+          `(if this fails, the shipped cap has slack and could safely be raised)`,
+      );
+    });
+  });
+
+  test('non-win32 platforms are unchanged', () => {
+    assert.strictEqual(defaultMaxFilesPerChunk('linux'), 60);
+    assert.strictEqual(defaultMaxFilesPerChunk('darwin'), 60);
+  });
+
+  test('the cap is still overridable by RUN_TESTS_MAX_FILES_PER_CHUNK', () => {
+    const cap = defaultMaxFilesPerChunk('win32');
+    const override = positiveNumberEnv('99', cap);
+    assert.strictEqual(override, 99);
+    assert.notStrictEqual(override, cap);
+  });
+});
+
+// #4936: the per-chunk watchdog. The chunk used to run under
+// execFileSync({ timeout }), whose diagnostic lived in a catch arm reachable
+// only once the child's exit was OBSERVED — so on a Windows run where that
+// observation never came, a chunk sat 37 minutes past its 600000ms bound with
+// no kill line and no in-flight-file report. A real "kill sent, exit never
+// reported" Windows process cannot be produced on demand, so these tests drive
+// runChunk through its injected seams (a fake child that never emits 'exit',
+// a recording spawnSync, a forced platform), plus one real child that ignores
+// its first kill signal.
+const { runChunk, killChunkTree } = require('../scripts/run-tests.cjs');
+const { EventEmitter } = require('node:events');
+
+// Watchdog bounds for these tests — a distinct class from every subprocess
+// timeout in tests/helpers/timeouts.cjs. The fake-child bounds only need to
+// ORDER the timeout before the grace expiry, so they are tiny; nothing real
+// runs under them.
+const FAKE_CHUNK_TIMEOUT_MS = 20;
+const FAKE_CHUNK_GRACE_MS = 50;
+// A grace long enough that a child exiting on its first kill is always
+// observed inside it.
+const FAKE_CHUNK_LONG_GRACE_MS = 5000;
+// A bound that must never fire: the chunk under it exits on its own at once.
+const UNREACHED_CHUNK_TIMEOUT_MS = 60000;
+// The real-child test: long enough for `node -e` to install its SIGTERM trap
+// before the kill lands, so the first kill is genuinely ignored on POSIX.
+const REAL_CHILD_TIMEOUT_MS = 2000;
+const REAL_CHILD_GRACE_MS = 1000;
+
+// A stand-in ChildProcess. It never exits unless `exitOn` names the signal
+// whose delivery should make it exit.
+function fakeChunkChild({ pid = 4242, exitOn = null } = {}) {
+  const child = new EventEmitter();
+  child.pid = pid;
+  child.kills = [];
+  child.unrefCalls = 0;
+  child.kill = (signal) => {
+    child.kills.push(signal);
+    if (exitOn === signal) setImmediate(() => child.emit('exit', null, signal));
+    return true;
+  };
+  child.unref = () => {
+    child.unrefCalls += 1;
+  };
+  return child;
+}
+
+// A stand-in for the spawned tree reaper. `exitCode` undefined = it never
+// exits (a wedged reaper); `emitError` = it fails to spawn asynchronously.
+function fakeReaper({ exitCode, emitError = false } = {}) {
+  const calls = [];
+  const reapers = [];
+  const impl = (command, args) => {
+    calls.push([command, args]);
+    const reaper = new EventEmitter();
+    reaper.unrefCalls = 0;
+    reaper.unref = () => {
+      reaper.unrefCalls += 1;
+    };
+    reapers.push(reaper);
+    if (emitError) setImmediate(() => reaper.emit('error', new Error('spawn taskkill ENOENT')));
+    else if (exitCode !== undefined) setImmediate(() => reaper.emit('exit', exitCode, null));
+    return reaper;
+  };
+  return { calls, reapers, impl };
+}
+
+const nextTick = () => new Promise((r) => setImmediate(r));
+
+describe('runChunk per-chunk watchdog (#4936)', () => {
+  test('a chunk that exits on its own resolves with its code and never fires the timeout', async () => {
+    let fired = 0;
+    const r = await runChunk(process.execPath, ['-e', 'process.exit(3)'], {
+      env: process.env,
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      onTimeout: () => {
+        fired += 1;
+      },
+    });
+    assert.deepStrictEqual(
+      { code: r.code, timedOut: r.timedOut, exitObserved: r.exitObserved },
+      { code: 3, timedOut: false, exitObserved: true },
+    );
+    assert.strictEqual(fired, 0, 'onTimeout must not fire for a chunk that exits inside its bound');
+  });
+
+  test('REGRESSION: a child whose exit is never observed still gets its diagnostic at the bound and a bounded return', async () => {
+    // The #4936 shape: the kill is sent and the exit is never reported back.
+    // Pre-#4936 this was an unbounded wait with the diagnostic unreachable.
+    const child = fakeChunkChild();
+    const order = [];
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => order.push('diagnostic'),
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved'],
+      'the diagnostic must fire at the bound, before (not instead of) the runner moving on');
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGTERM', 'SIGKILL'],
+      'first the ordinary kill, then one escalation once the grace window expires');
+    assert.strictEqual(child.unrefCalls, 1, 'an unconfirmed child must be unref\'d so the runner process can exit');
+  });
+
+  test('a child that exits after the kill reports a timeout with its exit observed, and is not abandoned', async () => {
+    const child = fakeChunkChild({ exitOn: 'SIGTERM' });
+    let fired = 0;
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_LONG_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => {
+        fired += 1;
+      },
+    });
+    assert.strictEqual(fired, 1);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, true);
+    assert.deepStrictEqual(child.kills, ['SIGTERM'], 'no escalation once the exit is observed');
+    assert.strictEqual(child.unrefCalls, 0);
+  });
+
+  test('a diagnostic that throws does not stop the bound from being enforced', async () => {
+    const child = fakeChunkChild();
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'linux',
+      spawnImpl: () => child,
+      onTimeout: () => {
+        throw new Error('diagnostic blew up');
+      },
+    });
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+  });
+
+  test('a spawn failure resolves as a failed, non-timed-out chunk instead of throwing', async () => {
+    const r = await runChunk('unused', [], {
+      timeoutMs: UNREACHED_CHUNK_TIMEOUT_MS,
+      spawnImpl: () => {
+        throw new Error('spawn EMFILE');
+      },
+    });
+    assert.strictEqual(r.timedOut, false);
+    assert.strictEqual(r.code, 1);
+    assert.match(r.error.message, /EMFILE/);
+  });
+
+  test('on win32 the first kill reaps the whole tree (#4601 shape), not just the direct child', async () => {
+    const child = fakeChunkChild({ pid: 4242 });
+    const reap = fakeReaper({ exitCode: 0 });
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
+    });
+    assert.deepStrictEqual(reap.calls, [['taskkill', ['/PID', '4242', '/T', '/F']]]);
+    assert.strictEqual(reap.reapers[0].unrefCalls, 1, 'the reaper must never keep the runner alive');
+    assert.deepStrictEqual(child.kills, ['SIGKILL'],
+      'a successful tree reap replaces the direct first kill; only the grace escalation follows');
+    assert.strictEqual(r.exitObserved, false);
+  });
+
+  test('REGRESSION: a tree reaper that never exits delays neither the diagnostic nor the bound', async () => {
+    // A synchronous reap (spawnSync) returns only once the reaper's own exit is
+    // observed, so it could re-create the #4936 stall one layer down. The
+    // reaper is spawned and never awaited.
+    const child = fakeChunkChild();
+    const reap = fakeReaper();
+    const order = [];
+    const r = await runChunk('unused', [], {
+      timeoutMs: FAKE_CHUNK_TIMEOUT_MS,
+      graceMs: FAKE_CHUNK_GRACE_MS,
+      platform: 'win32',
+      spawnImpl: () => child,
+      reapSpawnImpl: reap.impl,
+      onTimeout: () => order.push('diagnostic'),
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    assert.strictEqual(r.exitObserved, false);
+    assert.deepStrictEqual(child.kills, ['SIGKILL']);
+  });
+
+  test('on win32 a failed tree reap falls through to the direct kill', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ exitCode: 128 });
+    assert.strictEqual(killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl }), 'tree');
+    assert.deepStrictEqual(child.kills, [], 'the direct kill waits for the reaper\'s verdict');
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+  });
+
+  test('on win32 a reaper that cannot start falls through to the direct kill, once', async () => {
+    const child = fakeChunkChild();
+    const reap = fakeReaper({ emitError: true });
+    killChunkTree(child, { platform: 'win32', reapSpawnImpl: reap.impl });
+    await nextTick();
+    assert.deepStrictEqual(child.kills, ['SIGTERM']);
+
+    const child2 = fakeChunkChild();
+    const throwing = () => {
+      throw new Error('spawn EMFILE');
+    };
+    assert.strictEqual(killChunkTree(child2, { platform: 'win32', reapSpawnImpl: throwing }), 'direct');
+    assert.deepStrictEqual(child2.kills, ['SIGTERM']);
+  });
+
+  test('off win32 the kill never spawns a tree reap', () => {
+    for (const platform of ['linux', 'darwin']) {
+      const child = fakeChunkChild();
+      const reap = fakeReaper({ exitCode: 0 });
+      assert.strictEqual(killChunkTree(child, { platform, reapSpawnImpl: reap.impl }), 'direct');
+      assert.deepStrictEqual(reap.calls, [], `${platform} must not spawn a tree reap`);
+      assert.deepStrictEqual(child.kills, ['SIGTERM']);
+    }
+  });
+
+  test('a real child that ignores its first kill signal is still bounded, and its diagnostic still fires first', async (t) => {
+    // On POSIX the child traps SIGTERM, so the first kill does nothing and
+    // only the grace escalation ends the wait — the "kill sent, no exit"
+    // state with a real process. On Windows the kill is TerminateProcess,
+    // which the child cannot trap, so only the bound and ordering are asserted
+    // there. The child writes a marker once its trap is installed; the POSIX
+    // assertion applies only when the trap was armed before the kill, so a
+    // slow child start cannot turn it into a flake.
+    const dir = createTempDir('gsd-4936-real-child-');
+    t.after(() => cleanup(dir));
+    const marker = path.join(dir, 'trap-armed');
+    const script =
+      "process.on('SIGTERM', () => {}); " +
+      "require('fs').writeFileSync(process.argv[1], 'armed'); " +
+      'setInterval(() => {}, 1000);';
+    // Reaching the assertions at all is the bound: pre-#4936 (execFileSync
+    // with a timeout) the same child blocked the runner indefinitely.
+    const order = [];
+    let trapArmedAtKill = false;
+    const r = await runChunk(process.execPath, ['-e', script, marker], {
+      env: process.env,
+      timeoutMs: REAL_CHILD_TIMEOUT_MS,
+      graceMs: REAL_CHILD_GRACE_MS,
+      onTimeout: () => {
+        trapArmedAtKill = fs.existsSync(marker);
+        order.push('diagnostic');
+      },
+    });
+    order.push('resolved');
+    assert.deepStrictEqual(order, ['diagnostic', 'resolved']);
+    assert.strictEqual(r.timedOut, true);
+    if (process.platform !== 'win32') {
+      if (trapArmedAtKill) {
+        assert.strictEqual(r.exitObserved, false, 'a SIGTERM-trapping child must be abandoned after the grace window');
+      } else {
+        // Visible, never silent: the abandonment arm was not exercised this run.
+        t.diagnostic('child had not armed its SIGTERM trap before the kill; abandonment not asserted this run');
       }
     }
-
-    assert.deepStrictEqual(
-      exceedsThreshold,
-      [],
-      `file(s) at/above codex-config.test.cjs's own danger ratio (${(codexRatio * 100).toFixed(1)}%) ` +
-        `are not in ISOLATED_HEAVY_FILES: ${exceedsThreshold.join(', ')} — add them, following ` +
-        `scripts/run-tests.cjs's ISOLATED_HEAVY_FILES comment for the pattern`,
-    );
   });
 });

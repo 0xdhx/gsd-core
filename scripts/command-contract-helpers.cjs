@@ -890,6 +890,7 @@ const VIOLATION_KINDS = Object.freeze({
   LEGACY_READ_TAG: 'legacy_read_tag',
   READ_TAG_GATE_MISSING: 'read_tag_gate_missing',
   UNMATCHED_CONSUMER_TOKEN: 'unmatched_consumer_token',
+  UNRESOLVED_REFERENCE_INCLUDE: 'unresolved_reference_include',
 });
 
 /**
@@ -925,6 +926,8 @@ const REMEDIES = Object.freeze({
     "add the <required_reading> MUST-Read gate clause to this agent's instructions (see docs/AGENTS.md)",
   unmatched_consumer_token:
     'declare the producing agent and marker in the registry, or remove the dispatch — nothing emits this token',
+  unresolved_reference_include:
+    'fix the gsd-core/references/ pointer so it names an existing reference file whole and ends at the name (whitespace, end of line, or closing punctuation)',
 });
 
 /**

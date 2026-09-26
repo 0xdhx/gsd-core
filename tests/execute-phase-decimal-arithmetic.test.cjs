@@ -37,9 +37,12 @@ const TIMEOUT = 5000;
 //   site 1/2 (execute-phase.md):              source PHASE_NUMBER, prefix PHASE
 //   site 3   (completion-reconciliation.md):   source SPOT_PHASE_NUMBER, prefix SPOT_PHASE
 //   site 4   (tdd.md):                         source PHASE, prefix PHASE
+// #4748: the split is at the first NON-DIGIT, not the first dot, so a letter
+// suffix (`03A`, `23A.1.2`) rides through in the rest instead of aborting the
+// base-10 arithmetic; the rest is `_REST`, no longer only a `_FRAC`.
 function fixedSnippet(sourceVar, prefix, indent = '') {
-  return `${indent}${prefix}_INT=\${${sourceVar}%%.*}; ${prefix}_FRAC=\${${sourceVar}#"$${prefix}_INT"}\n` +
-    `${indent}${prefix}_N="$((10#$${prefix}_INT))\${${prefix}_FRAC//./\\\\.}"`;
+  return `${indent}${prefix}_INT=\${${sourceVar}%%[!0-9]*}; ${prefix}_REST=\${${sourceVar}#"$${prefix}_INT"}\n` +
+    `${indent}${prefix}_N="$((10#$${prefix}_INT))\${${prefix}_REST//./\\\\.}"`;
 }
 
 function runFixed(phaseNumberValue) {
@@ -64,6 +67,11 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
     assert.equal(runFixed('01'), '1');
   });
 
+  test('#4748: a letter-suffixed phase number keeps its letter and zero-strips the digit run (03A -> 3A, 23A.1.2 -> 23A\\.1\\.2)', () => {
+    assert.equal(runFixed('03A'), '3A');
+    assert.equal(runFixed('23A.1.2'), '23A\\.1\\.2');
+  });
+
   test('failing-first: the OLD $((10#...)) form is a hard shell syntax error on a decimal phase number', () => {
     assert.throws(() => {
       execFileSync('bash', ['-c', 'echo $((10#01.1))'], { encoding: 'utf8', timeout: TIMEOUT });
@@ -73,6 +81,32 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
   test('the NEW form succeeds on the exact same input that hard-errors the OLD form', () => {
     assert.doesNotThrow(() => runFixed('01.1'));
   });
+
+  // Run every (subject, expected) case for one regex in a SINGLE bash subprocess
+  // instead of one execFileSync per case. This repo's own timeout-vs-cost rule
+  // (never widen a timeout to paper over the real cost) applies here: the
+  // real cost was N real process forks per test, which is what made this test
+  // flaky under a loaded CI runner (each case's spawn+pipe competing for the
+  // same fork/exec budget as every other subprocess-heavy test running
+  // concurrently in the same chunk) -- observed as one case's execFileSync
+  // landing almost exactly on TIMEOUT (5054ms vs the file's 5000ms constant)
+  // while sibling cases ran in single-digit milliseconds, on a run where no
+  // case's grep logic was actually wrong (verified independently against real
+  // macOS bash 3.2 + BSD grep). One spawn evaluating all cases removes every
+  // opportunity for cross-test contention to land on any ONE case's timeout,
+  // without touching TIMEOUT itself.
+  function matchAll(re, cases) {
+    const script = cases
+      .map(([subject], i) => `echo ${JSON.stringify(subject)} | grep -qE ${JSON.stringify(re)} && echo ${i}:1 || echo ${i}:0`)
+      .join('\n');
+    const output = execFileSync('bash', [], { input: script, encoding: 'utf8', timeout: TIMEOUT });
+    const results = new Array(cases.length).fill(null);
+    for (const line of output.trim().split('\n')) {
+      const [idx, flag] = line.split(':');
+      results[Number(idx)] = flag === '1';
+    }
+    return results;
+  }
 
   test('the resulting anchored ERE matches decimal commit scopes and rejects near-miss scopes', () => {
     const phaseN = runFixed('01.1'); // '1\.1'
@@ -86,17 +120,10 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
       ['feat(011-03):', false],
       ['feat(12-03):', false],
     ];
-    for (const [subject, expected] of cases) {
-      const script = `echo ${JSON.stringify(subject)} | grep -qE ${JSON.stringify(re)}`;
-      let matched;
-      try {
-        execFileSync('bash', [], { input: script, encoding: 'utf8', timeout: TIMEOUT });
-        matched = true;
-      } catch {
-        matched = false;
-      }
-      assert.equal(matched, expected, `expected ${subject} match=${expected} against ${re}`);
-    }
+    const results = matchAll(re, cases);
+    cases.forEach(([subject, expected], i) => {
+      assert.equal(results[i], expected, `expected ${subject} match=${expected} against ${re}`);
+});
   });
 
   test('the resulting anchored ERE matches a plain padded-integer phase and rejects near-miss scopes', () => {
@@ -109,27 +136,20 @@ describe('#4619 — execute-phase decimal/N-segment phase-number arithmetic', ()
       ['feat(011-03):', false],
       ['feat(12-03):', false],
     ];
-    for (const [subject, expected] of cases) {
-      const script = `echo ${JSON.stringify(subject)} | grep -qE ${JSON.stringify(re)}`;
-      let matched;
-      try {
-        execFileSync('bash', [], { input: script, encoding: 'utf8', timeout: TIMEOUT });
-        matched = true;
-      } catch {
-        matched = false;
-      }
-      assert.equal(matched, expected, `expected ${subject} match=${expected} against ${re}`);
-    }
+    const results = matchAll(re, cases);
+    cases.forEach(([subject, expected], i) => {
+      assert.equal(results[i], expected, `expected ${subject} match=${expected} against ${re}`);
+});
   });
 
   describe('source parity — each of the 4 production sites carries the fixed logic', () => {
-    test('execute-phase.md safe_resume_gate carries the fixed PHASE_NUMBER/PHASE_INT/PHASE_FRAC/PHASE_N logic', () => {
+    test('execute-phase.md safe_resume_gate carries the fixed PHASE_NUMBER/PHASE_INT/PHASE_REST/PHASE_N logic', () => {
       const w = fs.readFileSync(EXECUTE_PHASE, 'utf8');
       assert.ok(w.includes(fixedSnippet('PHASE_NUMBER', 'PHASE')),
         'safe_resume_gate must carry the byte-identical fixed decimal-tolerant snippet');
     });
 
-    test('execute-phase.md TDD gate carries the fixed PHASE_NUMBER/PHASE_INT/PHASE_FRAC/PHASE_N logic', () => {
+    test('execute-phase.md TDD gate carries the fixed PHASE_NUMBER/PHASE_INT/PHASE_REST/PHASE_N logic', () => {
       const w = fs.readFileSync(EXECUTE_PHASE, 'utf8');
       // The TDD gate block is nested one level deeper (4-space indent) than
       // safe_resume_gate's top-level snippet.

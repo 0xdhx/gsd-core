@@ -1135,9 +1135,13 @@ node gsd-tools.cjs quick-tasks-append --task "<description>"
 # `/gsd-quick` workflow itself renders, instead of a positional `#` and an em-dash `Directory`:
 node gsd-tools.cjs quick-tasks-append --task "<description>" --quick-id <id> --slug <slug>
 node gsd-tools.cjs quick-tasks-append --task "<description>" --directory "[<id>-<slug>](./quick/<id>-<slug>/)"
-# All three flags are optional. Omit them (as `fast.md` does, having neither an id nor a task
+# All four flags are optional. Omit them (as `fast.md` does, having neither an id nor a task
 # directory) and the emitted row is byte-identical to the pre-#3356 behavior. `--directory` wins
 # outright when given; otherwise `--quick-id` + `--slug` together derive the permalink.
+# --status (#4906 Phase 3, #4958) writes the Status column on a table that has one (the
+# $VALIDATE_MODE row shape workflows/quick.md renders) — omitted, the Status cell falls back to
+# `appendQuickTaskRow`'s own '—' default, unchanged for every caller that never sets it:
+node gsd-tools.cjs quick-tasks-append --task "<description>" --quick-id <id> --slug <slug> --status PASS
 # This append touches only the body table — it no longer forces a re-derive of the disk-derived
 # `progress.*` frontmatter, which previously overwrote curated values (#3356).
 # See "Milestone Commands" below for `milestone archive-quick` (#2142) — sweeps .planning/quick/* into
@@ -1164,6 +1168,13 @@ window and sentinel-filtered: `999.*` backlog directories and `0-*`
 pre-milestone directories are not counted as current-milestone phases, and the
 aggregate completion percentage no longer reads `100` while phases from the
 active window are still outstanding.
+
+On a project explicitly configured with `phase_id_convention: "bracket"`, both
+JSON surfaces keep the phase's bare join key in `phases[].number` and add its
+canonical human label in `phases[].display_id` (for example,
+`{"number":"05.03","display_id":"[GSD.02] 05.03"}`). Their
+`milestone_version` and table headings use `[GSD.02]` rather than the legacy
+`v2.0` marker. Other conventions retain their prior object and table shapes.
 
 ```bash
 # Complete a todo
@@ -1280,21 +1291,28 @@ Diagnose and configure the worktree fork base used by Claude Code's `isolation="
 # Returns JSON: { shouldDegrade, reason, message, headSha, forkRef, forkSha }
 node gsd-tools.cjs worktree base-check
 
+# Same check, but against the fork base a worktree this host created was
+# actually observed to have (git rev-parse HEAD inside it, before any commit).
+node gsd-tools.cjs worktree base-check --observed-fork-base <sha>
+
 # Write worktree.baseRef:"head" into .claude/settings.local.json (no-clobber).
 # Returns JSON: { changed, skipped, previous, baseRef, file }
 node gsd-tools.cjs worktree set-baseref
 ```
 
-**`worktree base-check`** reads `worktree.baseRef` from a three-layer cascade — `.claude/settings.local.json`, then `.claude/settings.json`, then the user/global `settings.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`) — and compares the current `HEAD` SHA against `origin/HEAD`. Project-level settings take precedence over the user/global layer, so a machine-wide `worktree.baseRef:"head"` set via `/config` is honored when no project override exists. The `shouldDegrade` field is `true` when the execute-phase orchestrator will fall back to sequential execution. `--mode` declares who creates the isolated worktree (#3659): `harness-worktree` (the default — the runtime harness forks it and does **not** read project-settings `baseRef`, #48) or `orchestrator-worktree` (GSD itself runs `git worktree add` with an explicit start-point and honors `"head"`); invalid values fail closed with an error. Possible `reason` values:
+**`worktree base-check`** reads `worktree.baseRef` from a three-layer cascade — `.claude/settings.local.json`, then `.claude/settings.json`, then the user/global `settings.json` under `CLAUDE_CONFIG_DIR` (or `~/.claude`) — and compares the current `HEAD` SHA against `origin/HEAD`. Project-level settings take precedence over the user/global layer, so a machine-wide `worktree.baseRef:"head"` set via `/config` is honored when no project override exists. The `shouldDegrade` field is `true` when the execute-phase orchestrator will fall back to sequential execution. `--mode` declares who creates the isolated worktree (#3659): `harness-worktree` (the default — the runtime harness forks it) or `orchestrator-worktree` (GSD itself runs `git worktree add` with an explicit start-point). `worktree.baseRef:"head"` is honored by the orchestrator by construction and by the Claude Code harness as measured from all three settings layers (#4588; the #48 finding that the harness did not read the setting predates upstream claude-code#54940); Cursor, the other `harness-worktree` host, is unmeasured. With `"head"` set the check does not compare in either mode unless `--observed-fork-base` is given (below), with one further exception under `harness-worktree` and no observation: when a Claude Code `WorktreeCreate` hook is configured in any of the same three settings files, or one of them does not parse, the hook creates the agent worktree and Claude Code does not apply `worktree.baseRef` to it, so the check compares `HEAD` against `origin/HEAD` as if the setting were absent (#4588). The #4868 prior-worktree observation is **not** consulted on that path: a worktree sitting at `HEAD` records nothing about which creator made it, so one the plain harness left there before the hook was configured would read as evidence for the hook (#4881). Pass `--observed-fork-base` for a trusted verdict on a hook host. Hooks from managed policy settings, a `--settings` file, plugins, agent frontmatter or SDK registrations are not visible to the check; the exit-42 guard remains the backstop for those. `--observed-fork-base <sha>` supplies the fork base a worktree created for a dispatch was actually measured to have (`git rev-parse HEAD` inside it, before any commit — a full 40- or 64-hex sha, case-insensitive; abbreviations are refused because the comparison is exact); when given, it replaces the `origin/HEAD` inference as the fork side of the comparison and `"head"` no longer short-circuits — the verdict then reports a measurement, and a mismatch under `"head"` means the worktree was not forked from HEAD despite the setting. Invalid values for either flag fail closed with an error. Possible `reason` values:
 
 | `reason` | `shouldDegrade` | Meaning |
 |---|---|---|
-| `baseref-head` | `false` | `worktree.baseRef:"head"` is set and `--mode orchestrator-worktree` declares GSD-managed worktrees — the fork base is the orchestrator HEAD by construction |
-| `baseref-head-ignored-by-harness` | `true` | `worktree.baseRef:"head"` is set but HEAD differs from `origin/HEAD` in harness (default) mode — the harness does not read the setting (#48), so the run degrades to sequential (#3659) |
-| `head-matches-fork` | `false` | HEAD and `origin/HEAD` are the same commit |
-| `head-diverged-from-fork` | `true` | Branch is ahead of or diverged from `origin/HEAD` |
+| `baseref-head-bypassed-by-hook` | `true` | `worktree.baseRef:"head"` is set under `harness-worktree` with no fork base observed, but a Claude Code `WorktreeCreate` hook is configured in one of the three settings files (or one of them does not parse, so a hook cannot be ruled out), and `HEAD` differs from the inferred fork base. The hook creates the agent worktree and Claude Code does not apply `worktree.baseRef` to it, so the setting is not trusted; `message` names the file (#4588). The #4868 prior-worktree observation does **not** lift it: a worktree sitting at `HEAD` carries no record of which creator left it there, so one the plain harness created before the hook was configured is indistinguishable from one the hook created (#4881). Only `--observed-fork-base` restores a trusted verdict here. The fallback comparison is not a measurement of the hook: when `HEAD` matches the inferred fork base the check does not degrade, and the exit-42 guard remains the backstop. `--observed-fork-base` gives a measured verdict |
+| `baseref-head` | `false` | `worktree.baseRef:"head"` is set and no fork base was observed (and, under `harness-worktree`, no `WorktreeCreate` hook was found in the settings files) — the fork base is the orchestrator HEAD in either mode (by construction under `orchestrator-worktree`; under `harness-worktree` as measured on Claude Code, #4588 — Cursor is unmeasured). The spawn-time `worktree-branch-check` exit-42 guard remains the backstop on a host that does not honor it |
+| `baseref-head-ignored-by-harness` | `true` | `worktree.baseRef:"head"` is set but the fork base passed via `--observed-fork-base` differs from HEAD — the worktree was not forked from HEAD despite the setting (in either mode), so the run degrades to sequential (#3659, #4588) |
+| `observed-fork-matches-head` | `false` | The fork base passed via `--observed-fork-base` equals HEAD (#4588) |
+| `fork-from-head-observed` | `false` | Under `harness-worktree` with no `--observed-fork-base`, a clean linked worktree under `.claude/worktrees/agent-*` sits at the current `HEAD` — positive evidence that this host's worktree creator forks from `HEAD` (#4868). Reached only when `"head"` is absent or not `"head"` — with the setting trusted the check returns `baseref-head` first, and under a `WorktreeCreate` hook with `"head"` set the observation is withheld rather than consulted, because it cannot be attributed to the hook (#4881). Cached per `HEAD` in `.gsd/harness-fork-probe.json`; a dirty worktree, one at another commit, none at all, or a git failure is inconclusive and falls through |
+| `head-matches-fork` | `false` | HEAD and the inferred fork base (`origin/HEAD`, or its symbolic-ref fallback such as `origin/next` — reported in `forkRef`) are the same commit |
+| `head-diverged-from-fork` | `true` | Branch is ahead of or diverged from the fork base — the inferred `origin/HEAD` (or its fallback), or the `--observed-fork-base` value when one was given (`forkRef: "observed"`) |
 | `fork-ref-unknown` | `true` | `origin/HEAD` could not be resolved |
-| `no-head` | `false` | Not in a git repo (no `HEAD`) — `git rev-parse HEAD` exited 128 (definitive), or exited 0 with empty stdout |
+| `no-head` | `true` for exit 128, `false` for exit 0 with empty stdout | Exit 128 is git's definitive "no resolvable HEAD here" answer — not a git repository, or a repository with no commits; no harness worktree can be created, so the check degrades to sequential (#4734), with a `message` explaining why. Exit 0 with empty stdout is ambiguous (git completed without a definitive answer) and stays non-degrading (`headAbsenceVerified` distinguishes the two: `true` / `false`) |
 | `head-unresolvable` | `true` | `git rev-parse HEAD` did not return a definitive answer (timed out, `git` missing, or any other non-128 failure) — fails closed rather than being treated as `no-head` |
 
 **`worktree set-baseref`** applies a no-clobber write of `worktree.baseRef:"head"` to `.claude/settings.local.json`. If the file already contains an explicit `baseRef` value other than `"head"`, the existing value is preserved and `skipped:"explicit-other"` is returned. Malformed JSON causes an error rather than a silent overwrite. Both fresh installs and upgrades of GSD Core run this automatically when `workflow.use_worktrees` is enabled (the default); the command is also available for manual use — for example, to apply the setting when worktrees were toggled on after installation, or to re-apply it after a settings change.
@@ -1357,6 +1375,18 @@ When a manifest entry carries a declared `files_modified`, `cleanup-wave` compar
 This is advisory: it does not change `ok`, `reason`, the per-entry `status`, or the exit code, and the merge proceeds either way. Promotion to a hard gate would be a separate, disclosed change.
 
 Two deliberate limits keep it from crying wolf. `.planning/**/*SUMMARY.md` paths are always exempt — the executor writes a SUMMARY by orchestration contract and no plan declares it. Glob patterns are matched by their literal prefix only, so `src/**/*.ts` covers everything under `src/`, and a pattern with no literal prefix (`*.md`) suppresses warnings for that entry rather than reporting every file.
+
+**Merge timeout and a killed merge's residue (#4721)**
+
+The merge step is the one git call in `cleanup-wave` that runs the commit-family hooks (`pre-merge-commit`, `prepare-commit-msg`, `commit-msg`, `post-merge`), so it runs under its own budget — 10 minutes by default (`DEFAULT_MERGE_TIMEOUT_MS`; `deps.mergeTimeoutMs` for callers of the module) — rather than the 10-second timeout every other git call in the wave keeps. (`worktree add` runs `post-checkout` and every ref update runs `reference-transaction`; those are plumbing-cheap and stay on the default.) A repo whose pre-merge hook is a test-suite gate therefore merges instead of being killed mid-hook.
+
+When the merge does exceed its budget the entry blocks on `reason: "merge_timed_out"`, and its `stderr` names the budget, says the hook may still be running, and labels whatever the hook had printed as output before the kill — instead of the old `merge_failed`, which carried that partial output as though it were git's own error. `merge_failed` is otherwise unchanged — a merge git refused, one that conflicted, or one killed by a signal from outside (which the seam reports with the signal, not as a timeout; that case still takes the restore below).
+
+A merge killed while its hook runs has already staged the merged tree into the primary checkout's index but never wrote `MERGE_HEAD`, so `git merge --abort` finds nothing and the mid-merge check (#2852) reads the primary as clean. Left there, a plain `git commit` from the primary would squash the executor's history into a single-parent commit. After a merge that was **killed** — at its budget, or by a signal from outside — and only then, `cleanup-wave` reads the index, runs `git reset --merge` (which restores exactly the paths the merge staged and keeps unrelated unstaged edits), and re-reads it. Each restored path is reported as a `code: "merge_residue_restored"` warning and the wave continues. If the index is still dirty afterwards, or cannot be read at all, each remaining path (or a single `path: null` when the read itself failed) is reported as `code: "merge_residue_left_staged"` and the remaining entries are moved to `pending` — the same repo-level halt an unfinished merge triggers, because every later merge would run against that dirty index.
+
+The kill gate is what makes the staged set attributable to the merge. A merge git *refuses* (`error: Your local changes to the following files would be overwritten by merge`) is the immediate exit a pre-existing dirty index earns, and it leaves that index untouched; on that path nothing is read or reset, because anything staged is your own work. The one exception is `merge.autoStash`: git then parks your staged work in `MERGE_AUTOSTASH` and starts anyway, and a merge killed before `MERGE_HEAD` exists never re-applies it. `git reset --merge` moves that autostash into the stash list, and `cleanup-wave` then runs `git stash pop --index` to put it back with its staged state intact. If the pop fails, or the autostash state could not be determined, the entry carries a `code: "merge_autostash_unrestored"` warning (`path: null`) and your work stays in `git stash list`; the index is then re-read, and the wave continues only if it is clean — a pop that left conflict entries behind halts the remaining entries as `merge_residue_left_staged`, since the next merge would fail on unmerged files. A kill that lands once `MERGE_HEAD` exists (inside `commit-msg`, say) is the ordinary abort path: `git merge --abort` restores the tree and re-applies an autostash itself — unstaged, as git does for any aborted autostashed merge — and the residue step finds nothing to do.
+
+Known limit: the kill terminates `git`, not the hook process it spawned. A hook that keeps running and itself stages files after the wave has verified the index clean can re-dirty the primary; the `merge_timed_out` detail says so, and a hook that takes minutes belongs under a larger `mergeTimeoutMs`, not under this recovery.
 
 ---
 
@@ -1423,7 +1453,7 @@ User-facing entry point: `/gsd-graphify` (see [Command Reference](COMMANDS.md#gs
 
 ```bash
 node gsd-tools.cjs config-set review.models.codex    "gpt-5"
-node gsd-tools.cjs config-set review.models.gemini   "gemini-2.5-pro"
+node gsd-tools.cjs config-set review.models.agy      "gemini-3.1-pro-preview"
 node gsd-tools.cjs config-set review.models.opencode "claude-sonnet-4"
 node gsd-tools.cjs config-set review.models.claude   ""   # clear — fall back to session model
 ```

@@ -190,16 +190,16 @@ Every task has four required fields:
 
 **Nyquist Rule:** Every `<verify>` includes `<automated>`. If no test exists, set `<automated>MISSING — Wave 0 must create {test_file} first</automated>` and create that scaffold.
 
-**Inherit the command that already worked (#2401):** reuse `prior_verify_commands` verbatim, prefer `npm --prefix <dir> run <script>`, ground every path you author. @gsd-core/references/planner-verify-command-grounding.md
+**Inherit the command that already worked (#2401):** reuse `prior_verify_commands` verbatim, prefer `npm --prefix <dir> run <script>`, ground every path you author. @~/.claude/gsd-core/references/planner-verify-command-grounding.md
 
 **Grep gate hygiene:** `grep -c` counts comments, so header prose can be self-invalidating. Use `grep -v '^#' | grep -c token`. Bare `== 0` gates on unfiltered files are forbidden.
 
 <comment_text_discipline>
-**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Full rules + `<!-- planner-discipline-allow: LIT -->` allowlist + worked examples: @gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
+**Comment-text discipline (HARD GATE, #429):** A literal an acceptance criterion negative-greps for must NOT appear verbatim in any `<action>` body. Rules + `<!-- planner-discipline-allow: LIT -->` allowlist + examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("Comment-Text Discipline").
 </comment_text_discipline>
 
 <region_scoped_negative_gate>
-**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @gsd-core/references/planner-antipatterns.md.
+**Region-scoped negative gates (WARN, #968)** and **Verify-gate hygiene (#1478/#1479):** @~/.claude/gsd-core/references/planner-antipatterns.md.
 </region_scoped_negative_gate>
 
 **<done>:** Acceptance criteria - measurable state of completion.
@@ -371,6 +371,8 @@ Output: [Artifacts created]
 | {e.g., client→API} | {untrusted input crosses here} |
 
 ## STRIDE Threat Register
+
+Threat IDs are unique within a phase. Before numbering, read the `<threat_model>` blocks of the phase's existing PLAN files and continue after their highest `T-{phase}-NN` — if the phase already uses `T-47-19`, new plans number from `T-47-20`, never from `T-47-01` again (#4683: a reused ID names two different threats, which makes `SECURITY.md` rows and `VALIDATION.md`'s Threat Ref column ambiguous). `T-{phase}-SC` is the exception: reserved, and every plan keeps it.
 
 | Threat ID | Category | Component | Severity | Disposition | Mitigation Plan |
 |-----------|----------|-----------|----------|-------------|-----------------|
@@ -566,8 +568,9 @@ start of execution when `--reviews` flag is present or reviews mode is active.
 <step name="load_project_state" priority="first">
 Load planning context:
 
+@~/.claude/gsd-core/references/gsd-run-resolver.md
+
 ```bash
-_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="${RUNTIME_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"; GSD_TOOLS="${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}"; _gsd_at() { for _p; do if [ -f "$_p" ]; then GSD_TOOLS="$_p"; return 0; fi; done; return 1; }; if _gsd_at "${_GSD_RUNTIME_ROOT}/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.claude/gsd-core/bin/${_GSD_SHIM_NAME}" "${_GSD_RUNTIME_ROOT}/.codex/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; elif unset -f gsd_run; _G="$(command -v gsd_run)"; then GSD_TOOLS="$_G"; gsd_run() { "$GSD_TOOLS" "$@"; }; elif _gsd_at "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/${_GSD_SHIM_NAME}" "${HERMES_HOME:-$HOME/.hermes}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CURSOR_CONFIG_DIR:-$HOME/.cursor}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEX_HOME:-$HOME/.codex}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GEMINI_CONFIG_DIR:-$HOME/.gemini}/gsd-core/bin/${_GSD_SHIM_NAME}" "${COPILOT_CONFIG_DIR:-$HOME/.copilot}/gsd-core/bin/${_GSD_SHIM_NAME}" "${WINDSURF_CONFIG_DIR:-$HOME/.codeium/windsurf}/gsd-core/bin/${_GSD_SHIM_NAME}" "${AUGMENT_CONFIG_DIR:-$HOME/.augment}/gsd-core/bin/${_GSD_SHIM_NAME}" "${TRAE_CONFIG_DIR:-$HOME/.trae}/gsd-core/bin/${_GSD_SHIM_NAME}" "${QWEN_CONFIG_DIR:-$HOME/.qwen}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CODEBUDDY_CONFIG_DIR:-$HOME/.codebuddy}/gsd-core/bin/${_GSD_SHIM_NAME}" "${CLINE_CONFIG_DIR:-$HOME/.cline}/gsd-core/bin/${_GSD_SHIM_NAME}" "${GROK_AGENTS_HOME:-$HOME/.agents}/gsd-core/bin/${_GSD_SHIM_NAME}" "${ANTIGRAVITY_CONFIG_DIR:-$HOME/.gemini/antigravity}/gsd-core/bin/${_GSD_SHIM_NAME}" "${OPENCODE_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}/gsd-core/bin/${_GSD_SHIM_NAME}" "${KILO_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/kilo}/gsd-core/bin/${_GSD_SHIM_NAME}"; then gsd_run() { node "$GSD_TOOLS" "$@"; }; else echo "ERROR: gsd-tools.cjs not found at $GSD_TOOLS and gsd_run is not on PATH. Run: npx -y @opengsd/gsd-core@latest --claude --local" >&2; exit 1; fi; GSD_IDENTITY_STATUS=unverified; case "$(gsd_run runtime-identity --raw 2>/dev/null || true)" in '{"packageName":"@opengsd/gsd-core"'*'}') GSD_IDENTITY_STATUS=ok;; esac; export GSD_IDENTITY_STATUS; [ "$GSD_IDENTITY_STATUS" = ok ] || echo "WARNING: \"$GSD_TOOLS\" did not prove it is @opengsd/gsd-core - it is either a different package or an @opengsd/gsd-core older than the runtime-identity verb. See docs/how-to/diagnose-a-foreign-gsd-tools.md" >&2; if [ -n "${CLAUDE_ENV_FILE:-}" ] && [ -n "${GSD_TOOLS:-}" ]; then printf "export PATH='%s':\"\$PATH\"\n" "${GSD_TOOLS%/*}" >> "$CLAUDE_ENV_FILE" 2>/dev/null || true; fi
 INIT=$(gsd_run query init.plan-phase "${PHASE}")
 if [[ "$INIT" == @file:* ]]; then INIT=$(cat "${INIT#@file:}"); fi
 ```
@@ -617,9 +620,10 @@ If exists, load relevant documents by phase type:
 
 <step name="load_graph_context">
 Read `gsd-core/references/planner-load-graph-context.md` and execute it. It checks for a
-knowledge graph and, if `.planning/graphs/graph.json` exists, reads freshness and
-phase-relevant dependency context via the `gsd_run` launcher and incorporates the results
-into planning. If the graph is absent, skip and continue without graph context.
+knowledge graph and, if one exists, reads freshness and phase-relevant dependency context
+— through the `graphify` CLI when it is on PATH, otherwise through the `gsd_run` launcher
+— and incorporates the results into planning. If the graph is absent, skip and continue
+without graph context.
 </step>
 
 <step name="identify_phase">
@@ -756,7 +760,7 @@ for each plan B in plan_order:
 
 **Rule:** Same-wave plans must have zero `files_modified`/`files_deleted` overlap. After assigning waves, scan each wave; if any file appears in 2+ plans, bump the later plan to the next wave and repeat.
 
-**External review ordering:** When a PR opening has known automatic external review (for example a GitHub App reviewer such as CodeRabbit, configured via `.coderabbit.yaml`, which reviews automatically on PR open) and the plan includes internal review lanes, run internal review and apply the accepted internal-review fixes before the final open. If an open-time property exists (for example a not-behind-base check that must legitimately be measured at PR-open instant), re-check it immediately before opening, with nothing intervening; post-open CI, review, and tracking may follow. Examples: @gsd-core/references/planner-antipatterns.md ("External Review Before PR Open (#4107)").
+**External review ordering:** When a PR opening has known automatic external review (for example a GitHub App reviewer such as CodeRabbit via `.coderabbit.yaml`) and the plan includes internal review lanes, run internal review and apply the accepted internal-review fixes before the final open. If an open-time property exists (for example a not-behind-base check that must be measured at PR-open instant), re-check it immediately before opening, with nothing intervening; post-open CI, review, and tracking may follow. Examples: @~/.claude/gsd-core/references/planner-antipatterns.md ("External Review Before PR Open (#4107)").
 
 Non-file coupling: @~/.claude/gsd-core/references/planner-coupling.md
 </step>

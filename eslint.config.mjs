@@ -126,6 +126,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/resolution.cjs',
       'gsd-core/bin/lib/unusable-input.cjs',
       'gsd-core/bin/lib/plan-drift-guard.cjs',
+      // #4917 (epic #4906 Phase 1, ADR-4910): lint src/planning-document.cts, not this.
+      'gsd-core/bin/lib/planning-document.cjs',
       // #2401: tsc-generated runtime artifact — lint the src/verify-command-grounding.cts source.
       'gsd-core/bin/lib/verify-command-grounding.cjs',
       'gsd-core/bin/lib/cli-exit.cjs',
@@ -136,6 +138,10 @@ export default tseslint.config(
       'gsd-core/bin/lib/prohibition-enforcement.cjs',
       // #3770: tsc-generated runtime artifact — lint the src/tdd-red-evidence.cts source.
       'gsd-core/bin/lib/tdd-red-evidence.cjs',
+      // #4984: tsc-generated — lint the src/pr-branch-patterns.cts source.
+      'gsd-core/bin/lib/pr-branch-patterns.cjs',
+      // #4984: tsc-generated — lint the src/undo-commit-selection.cts source.
+      'gsd-core/bin/lib/undo-commit-selection.cjs',
       // #4145: tsc-generated runtime artifact — lint the src/pristine-baseline.cts source.
       'gsd-core/bin/lib/pristine-baseline.cjs',
       'gsd-core/bin/lib/ui-consideration-probe.cjs',
@@ -271,6 +277,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/core-utils.cjs',
       'gsd-core/bin/lib/io.cjs',
       'gsd-core/bin/lib/phase-id.cjs',
+      'gsd-core/bin/lib/phase-id-card.cjs',
+      'gsd-core/bin/lib/phase-id-display.cjs',
       'gsd-core/bin/lib/phase-estimation.cjs',
       'gsd-core/bin/lib/estimate-cli.cjs',
       'gsd-core/bin/lib/normalize-test-command.cjs',

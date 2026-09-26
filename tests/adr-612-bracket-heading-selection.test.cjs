@@ -52,6 +52,8 @@ const BASE_SITES = [
     baseline: B.ANY_BRACKET, src: '(?:\\[[^\\]]{1,200}\\]\\s*)?Phase\\s+' },
   { file: 'roadmap-parser.cts', site: 'getMilestonePhaseFilter phaseHeadingPattern',
     baseline: B.ANY_BRACKET, src: '(?:\\[[^\\]]{1,200}\\]\\s*)?Phase\\s+' },
+  { file: 'commands.cts', site: 'cmdStats headingPattern',
+    baseline: B.ANY_BRACKET, src: '(?:\\[[^\\]]{1,200}\\]\\s*)?Phase\\s+' },
   // #2761 B2: BRACKET_PHASE_TAIL_RE (isBracketMilestoneBoundary's phase-tail
   // discriminator) always passes the literal 'bracket' convention — it is not
   // itself convention-gated (the CALLER, isBracketMilestoneBoundary, is only
@@ -122,6 +124,18 @@ const BASE_SITES = [
   { file: 'planning-snapshot.cts', site: 'buildCurrentMilestoneRoadmapPhaseIdsField (W026, ex-verify.cts B6)',
     baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
   { file: 'planning-snapshot.cts', site: 'buildRoadmapPhaseCheckboxesField (W011/W006 not-started)',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'init.cts', site: 'cmdInitManager phaseHeadingPrefix',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  { file: 'init.cts', site: 'cmdInitManager phaseHeadingPrefixNoCapture',
+    baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
+  // #4144 round 6 B4: the bracket migrator's checklist-bullet matcher, built
+  // from the readers' own checklist grammar (src/roadmap.cts's
+  // `cmdRoadmapAnalyze checklistPattern`) instead of a private, stricter
+  // colon-requiring copy — see roadmap-upgrade.cts's own CHECKLIST_BULLET_INTRO_SRC
+  // comment. Its SOURCE is always non-bracket (the migrator reads a
+  // pre-migration roadmap), so it always compiles the LABEL_ONLY base.
+  { file: 'roadmap-upgrade.cts', site: 'computeBracketPlan CHECKLIST_BULLET_INTRO_SRC',
     baseline: B.LABEL_ONLY, src: 'Phase\\s+' },
 ];
 
@@ -681,11 +695,14 @@ describe('#612 PR-2: every selector call site declares the right baseline (live 
 
   // file -> [ANY_BRACKET count, LABEL_ONLY count]
   const EXPECTED = {
+    'commands.cts': [1, 0],
+    'init.cts': [0, 2],
     'roadmap.cts': [3, 3],
     'validate.cts': [1, 2],
     'state.cts': [0, 3],
     'planning-snapshot.cts': [0, 2],
     'roadmap-parser.cts': [2, 0],
+    'roadmap-upgrade.cts': [0, 1],
   };
 
   for (const [file, [anyBracket, labelOnly]] of Object.entries(EXPECTED)) {

@@ -29,6 +29,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { extractTaggedBlocks, stripTaggedBlocks } from './markdown-sectionizer.cjs';
+import { tryWithinRootLexical } from './security.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-id.cjs is an export= CommonJS module
 import phaseIdMod = require('./phase-id.cjs');
 const { stripProjectCodePrefix, extractPhaseToken, comparePhaseNum } = phaseIdMod;
@@ -530,6 +531,26 @@ function splitSegments(cmd: string): string[] {
     .filter(s => s.length > 0);
 }
 
+/**
+ * Decode entity-escaped ampersands (`&amp;` → `&`) — #4730, the grounding
+ * gate's share of the #3611 defect. Planners emit `<automated>` bodies with
+ * `&amp;&amp;` as the chain operator, and the executing agent reads the
+ * decoded (rendered) form. Without this decode, `splitSegments` cuts
+ * `&amp;&amp;` at its semicolons and a `cd` target absorbs the trailing
+ * `&amp` fragment (`rawTarget: "src &amp"`), reporting an existing directory
+ * as a `missing_dir` blocker. Applied to the command text inside
+ * `resolveVerifyCommandTarget` — before any segment splitting or target
+ * resolution, after `result.command` has captured the text verbatim — so the
+ * escaped and literal forms of the same command produce identical verdicts.
+ * Kept module-private beside `splitSegments`, mirroring the sibling
+ * `src/verify.cts`'s own private `decodeEntityAmps` (#3611): the two gates
+ * are separate modules that independently parse `<automated>` text, and
+ * neither imports the other.
+ */
+function decodeEntityAmps(s: string): string {
+  return s.replace(/&amp;/g, '&');
+}
+
 /** Strip a single matching pair of surrounding quotes, if present. */
 function stripQuotes(s: string): string {
   if (s.length >= 2) {
@@ -593,6 +614,16 @@ function stripLeadingDotSlash(s: string): string {
  * without touching the filesystem. A climb that names a concrete sibling (e.g.
  * `cd ../../frontend`, the exact #2401 shape) still names something checkable
  * and falls through to the normal filesystem probe below.
+ *
+ * An ABSOLUTE target outside the project root takes the same `outside_root`
+ * exit (#4767). It is more ambiguous across worktrees, not less: it is pinned
+ * to exactly one checkout, and when a planner copies the orchestrator's cwd
+ * into `<automated>` that checkout is the main tree — so under worktree
+ * isolation the command exists, runs, and passes against code the worktree
+ * changed and the main tree did not. Existence is therefore not evidence for
+ * an absolute target outside the root, and the filesystem is not consulted.
+ * Containment goes through `tryWithinRootLexical` (#4636) — lexical because the
+ * probe is read-only and must not depend on the target existing.
  */
 function isPureAncestorClimb(rel: string): boolean {
   if (rel.length === 0) return false;
@@ -655,7 +686,10 @@ function resolveVerifyCommandTarget(command: unknown, options?: ResolveOptions):
   if (typeof command !== 'string') return result;
   result.command = command;
 
-  const trimmed = command.trim();
+  // #4730: decode entity-escaped ampersands BEFORE segment splitting (see
+  // decodeEntityAmps) so the chain operator is visible to the splitter and
+  // the verdict matches what the executing agent's decoded form grounds to.
+  const trimmed = decodeEntityAmps(command.trim());
   if (trimmed === '') return result;
 
   // Nyquist "MISSING — Wave 0 must create …" sentinel; Dimension 8 owns it.
@@ -709,7 +743,17 @@ function resolveVerifyCommandTarget(command: unknown, options?: ResolveOptions):
   result.rawTarget = rawTarget;
   result.target = target;
 
-  if (!isAbs) {
+  if (isAbs) {
+    // #4767: an absolute target outside projectRoot is `outside_root`, same
+    // as the bare climb — see isPureAncestorClimb's doc for why existence is
+    // not evidence here and the filesystem is deliberately not consulted.
+    if (tryWithinRootLexical(target, base) === null) {
+      result.status = 'ok';
+      result.severity = 'warning';
+      result.reason = 'outside_root';
+      return result;
+    }
+  } else {
     const rel = path.relative(base, target);
     if (isPureAncestorClimb(rel)) {
       result.status = 'ok';

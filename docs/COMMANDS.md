@@ -9,7 +9,7 @@
 - **Claude Code / Copilot / OpenCode / Kilo:** `/gsd-command-name [args]` (hyphen form)
 - **Codex:** `$gsd-command-name [args]`
 
-The hyphen and colon forms are *runtime-specific spellings of the same command*. Whichever runtime you're on, the installer writes the correct form into your runtime's command directory.
+Whichever runtime you're on, the installer writes the correct form into your runtime's command directory.
 
 ### Skill Runtime Behavior (Claude Code)
 
@@ -118,7 +118,7 @@ Clarify WHAT a phase delivers through Socratic questioning with quantitative amb
 
 | Flag | Description |
 |------|-------------|
-| `--auto` | Skip interactive questions; Claude selects recommended defaults and writes SPEC.md |
+| `--auto` | Skip interactive questions; Claude selects recommended defaults and writes SPEC.md. An existing SPEC.md is **reused as-is**, never regenerated |
 | `--text` | Use plain-text numbered lists instead of TUI menus (required for `/rc` remote sessions) |
 
 **Position in workflow:** `spec-phase → discuss-phase → plan-phase → execute-phase → verify`
@@ -178,11 +178,17 @@ Generate UI design contract for frontend phases.
 |----------|----------|-------------|
 | `N` | No | Phase number (defaults to current phase) |
 
+| Flag | Description |
+|------|-------------|
+| `--auto` | Skip interactive questions. An existing UI-SPEC.md is **reused as-is** and sent straight to the checker, never re-researched |
+| `--text` | Use plain-text numbered lists instead of TUI menus |
+
 **Prerequisites:** `.planning/ROADMAP.md` exists, phase has frontend/UI work
 **Produces:** `{phase}-UI-SPEC.md`
 
 ```bash
 /gsd-ui-phase 2                     # Design contract for phase 2
+/gsd-ui-phase 2 --auto              # Non-interactive; reuses an existing UI-SPEC
 ```
 
 ---
@@ -266,7 +272,7 @@ Cross-AI plan convergence loop — replan with review feedback until no HIGH con
 | Argument / Flag | Required | Description |
 |-----------------|----------|-------------|
 | `N` | **Yes** | Phase number to plan and review |
-| Reviewer flags | No | Pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
+| Reviewer flags | No | Pass through every reviewer lane flag: `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code` |
 | `--all` | No | Run every configured reviewer. Lanes are dispatched **sequentially by default**; set `review.parallel_lanes` to `true` to dispatch them concurrently within a single review pass |
 | `--max-cycles N` | No | Override cycle cap (default 3) |
 
@@ -426,9 +432,14 @@ Retroactive 6-pillar visual audit of implemented frontend.
 
 For richer visual evidence, pair this with `gsd-browser` or another browser MCP server so the audit can capture screenshots, state, console/network context, and reproducible interaction steps.
 
+| Flag | Description |
+|------|-------------|
+| `--auto` | Skip interactive questions. An existing UI-REVIEW.md is **reused as-is**, never re-audited |
+
 ```bash
 /gsd-ui-review                      # Audit current phase
 /gsd-ui-review 3                    # Audit phase 3
+/gsd-ui-review 3 --auto             # Non-interactive; reuses an existing UI-REVIEW
 ```
 
 ---
@@ -754,7 +765,7 @@ Show status, next steps, and automatically advance to the next logical workflow 
 | `--next --auto` | Like `--next`, but chains steps automatically until milestone completion or a blocking decision |
 | `--next --converge` | When the next action is planning, route it through `/gsd-plan-review-convergence`; requires `workflow.plan_review_convergence=true` |
 | `--cross-ai` | Alias for `--converge` |
-| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
+| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
 | `--do "task description"` | Analyze freeform intent and dispatch to the most appropriate GSD command |
 | `--forensic` | Append a 6-check integrity audit after the standard report (STATE consistency, orphaned handoffs, deferred scope drift, memory-flagged pending work, blocking todos, uncommitted code) |
 
@@ -1033,9 +1044,9 @@ Run all remaining phases autonomously.
 | `--to N` | Stop after completing a specific phase number |
 | `--only N` | Restrict execution to phase N; lifecycle step is skipped |
 | `--interactive` | Lean context with user input |
-| `--converge` | Route each planning step through `/gsd-plan-review-convergence`; requires `workflow.plan_review_convergence=true` |
+| `--converge` | Route each planning step through `/gsd-plan-review-convergence`; the explicit flag overrides the gate — works even when `workflow.plan_review_convergence` is `false` (the gate `workflow.plan_review_convergence=true` governs standalone `/gsd-plan-review-convergence`); without it, planning runs `gsd-plan-phase` |
 | `--cross-ai` | Alias for `--converge` |
-| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--gemini`, `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
+| Reviewer flags | With `--converge`, pass through every reviewer lane flag: `--claude`, `--codex`, `--coderabbit`, `--opencode`, `--qwen`, `--cursor`, `--agy` / `--antigravity`, `--ollama`, `--lm-studio`, `--llama-cpp`, `--kimi-code`, `--all`, and `--max-cycles N` |
 | `--text` | Replace `AskUserQuestion` prompts with plain numbered lists |
 
 ```bash
@@ -1288,15 +1299,16 @@ Extract reusable patterns, anti-patterns, and architectural decisions from compl
 ### `gsd-tools check verify-command-paths`
 
 Deterministic resolvability probe over a phase's `<automated>` verify commands (#2401). Run
-automatically by `/gsd-plan-phase` before the plan-check pass and handed to `gsd-plan-checker`;
-runnable by hand to see what the checker saw.
+automatically by `/gsd-plan-phase` and by `/gsd-quick --validate` (#4767) before the plan-check
+pass and handed to `gsd-plan-checker`; runnable by hand to see what the checker saw.
 
 | Argument | Required | Description |
 |----------|----------|-------------|
-| `N` | **Yes** | Phase number whose `-PLAN.md` files are probed |
+| `N` | One of `N` / `--dir` | Phase number whose `-PLAN.md` files are probed |
 
 | Flag | Description |
 |------|-------------|
+| `--dir <path>` | Probe the `-PLAN.md` files in this directory instead of a phase (quick mode's `.planning/quick/<id>/`); resolved against the project root (#4767) |
 | `--raw` | Emit the JSON payload with no surrounding prose |
 
 **Prerequisites:** none — an unresolvable phase degrades to a JSON payload with `readError` set
@@ -1328,7 +1340,7 @@ the replacement to the planner.
 | `missing_dir` | `blocker` | The resolved directory does not exist, or is not a directory |
 | `no_manifest` | `blocker` | The directory exists but holds no `package.json` / `Makefile` the command needs |
 | `dynamic_path` | `warning` | The path contains `$`, a backtick, `*`, `?`, or `~` — refused, not guessed |
-| `outside_root` | `warning` | A bare ancestor climb (`cd ../..`); the base differs under worktree execution |
+| `outside_root` | `warning` | A bare ancestor climb (`cd ../..`), or an absolute target outside the project root (#4767); the base differs under worktree execution, and an absolute target is pinned to one checkout — the filesystem is not consulted |
 | `script_missing` | `warning` | `npm run <script>` names a script the manifest does not define — this phase may add it |
 | `manifest_unreadable` | `warning` | `package.json` is oversized, unparseable, or not a JSON object |
 | `null` | `none` | Nothing to report |
@@ -1337,6 +1349,7 @@ A non-empty `readError` means the probe **could not look** — distinct from fin
 
 ```bash
 gsd-tools check verify-command-paths 3 --raw    # probe phase 3's verify commands
+gsd-tools check verify-command-paths --dir .planning/quick/260915-abc-task --raw   # a quick plan's dir
 ```
 
 See [Resolve verify-command path findings](how-to/resolve-verify-command-path-findings.md).
@@ -1659,9 +1672,14 @@ Generate an AI-SPEC.md design contract for phases that involve building AI syste
 
 **Spawns:** 3 parallel specialist agents: domain-researcher, framework-selector, ai-researcher, and eval-planner
 
+| Flag | Description |
+|------|-------------|
+| `--auto` | Skip interactive questions. An existing AI-SPEC.md is **reused as-is**, never regenerated |
+
 ```bash
 /gsd-ai-integration-phase              # Wizard for the current phase
 /gsd-ai-integration-phase 3           # Wizard for a specific phase
+/gsd-ai-integration-phase 3 --auto    # Non-interactive; reuses an existing AI-SPEC
 ```
 
 ---
@@ -1673,9 +1691,14 @@ Audit an executed AI phase's evaluation coverage and produce an EVAL-REVIEW.md r
 **Prerequisites:** Phase has been executed and has an `AI-SPEC.md`
 **Produces:** `{phase}-EVAL-REVIEW.md` with findings, gaps, and remediation guidance
 
+| Flag | Description |
+|------|-------------|
+| `--auto` | Skip interactive questions. An existing EVAL-REVIEW.md is **reused as-is**, never re-audited |
+
 ```bash
 /gsd-eval-review                       # Audit current phase
 /gsd-eval-review 3                     # Audit a specific phase
+/gsd-eval-review 3 --auto              # Non-interactive; reuses an existing EVAL-REVIEW
 ```
 
 ---
@@ -1807,7 +1830,6 @@ Reviewers are prompted to verify the plan's claims against the actual repository
 
 | Flag | Description |
 |------|-------------|
-| `--gemini` | Include Gemini CLI review |
 | `--claude` | Include Claude CLI review (separate session) |
 | `--codex` | Include Codex CLI review |
 | `--coderabbit` | Include CodeRabbit review |
@@ -1823,7 +1845,7 @@ Reviewers are prompted to verify the plan's claims against the actual repository
 
 **No `jq`, `curl`, or `timeout` prerequisite.** Reviewer lanes used to shell out to these for JSON parsing, HTTP calls, and wall-clock bounding, which made five lanes unavailable on a stock Windows/Git-Bash host (no `jq`) and left one lane unbounded on stock macOS (no `timeout` or `gtimeout`). GSD now does all three itself, so every lane runs with nothing on your `PATH` but the reviewer's own CLI. A lane that declares an external tool it genuinely needs still reports itself unavailable with an install hint rather than running into an empty review.
 
-**Unavailable reviewers:** an explicit reviewer flag is an assertion. If you name a reviewer that cannot run on this host — its CLI is not installed, a required external tool is missing, its local server is unreachable, or its egress destination changed (see below) — `/gsd-review` reports an **error** for that reviewer and does not proceed with a reduced set. This holds even when other named reviewers are available: `--gemini --qwen` on a host without `qwen` fails rather than silently becoming a Gemini-only review.
+**Unavailable reviewers:** an explicit reviewer flag is an assertion. If you name a reviewer that cannot run on this host — its CLI is not installed, a required external tool is missing, its local server is unreachable, or its egress destination changed (see below) — `/gsd-review` reports an **error** for that reviewer and does not proceed with a reduced set. This holds even when other named reviewers are available: `--codex --qwen` on a host without `qwen` fails rather than silently becoming a Codex-only review.
 
 Reviewers reached through `--all` or `review.default_reviewers` behave differently: an undetected reviewer there is reported as an info note and skipped. Use `--all` for "whatever is available on this host", and `review.default_reviewers` for a preferred subset that may vary by host.
 
@@ -1831,7 +1853,7 @@ Reviewers reached through `--all` or `review.default_reviewers` behave different
 
 **Default reviewer behavior (no flags):**
 - If `review.default_reviewers` is **unset**, `/gsd-review` runs all detected reviewers (current default behavior).
-- If `review.default_reviewers` is **set**, `/gsd-review` runs only that subset (for example `["gemini","codex"]`).
+- If `review.default_reviewers` is **set**, `/gsd-review` runs only that subset (for example `["codex","claude"]`).
 - `review.default_reviewers` may include names from `review.reviewer_instances`; each instance runs as its own reviewer identity using its configured adapter/model. Instance names are not CLI flags.
 - `--all` always overrides config and runs the full detected set.
 - Explicit flags (for example `--cursor`) override both `--all` and config defaults for that run.
@@ -1844,11 +1866,11 @@ Its frontmatter records the model each reviewer resolved to, as `models:` (the m
 
 ```bash
 # set project default reviewers for no-flag /gsd-review runs
-gsd config-set review.default_reviewers '["gemini","codex"]'
+gsd config-set review.default_reviewers '["codex","claude"]'
 
-/gsd-review --phase 2             # runs gemini+codex from config
+/gsd-review --phase 2             # runs codex+claude from config
 /gsd-review --phase 3 --all
-/gsd-review --phase 2 --gemini
+/gsd-review --phase 2 --codex
 /gsd-review --phase 2 --cursor    # one-off override
 ```
 
@@ -1940,7 +1962,7 @@ Capture ideas, tasks, notes, and seeds to their appropriate destination. Default
 **Backlog:** 999.x numbering keeps items outside the active phase sequence; phase directories are created immediately so `/gsd-discuss-phase` and `/gsd-plan-phase` work on them.
 **Seeds:** Preserve full WHY, WHEN to surface, and breadcrumbs — consumed by `/gsd-new-milestone`. Audit parked seeds anytime with `--list-seeds` (optionally `--list-seeds dormant`).
 
-**Produces:** `.planning/todos/` (default), note files (--note), ROADMAP.md backlog section (--backlog), `.planning/seeds/SEED-NNN-slug.md` (--seed)
+**Produces:** `.planning/todos/` (default), note files (--note), ROADMAP.md backlog section (--backlog), `.planning/seeds/SEED-YYMMDD-xxx-slug.md` (--seed)
 
 **STATE.md rendering:** each capture (or `--list` action that changes the pending count) refreshes STATE.md's "### Pending Todos" section to one bullet per pending todo, each capped at 240 characters — `- [date] [area] title — [todo file](path) — Needs ...`. The todo-file link is repo-relative (`.planning/todos/pending/...`), so the cap is independent of where the repo is checked out — a long absolute path never consumes the budget or drops the "Needs ..." clause. A todo with no clear next step omits the "Needs ..." clause rather than the bullet. Refresh is fail-safe: a failed or malformed lookup leaves the existing section untouched rather than clearing it.
 
@@ -2013,21 +2035,57 @@ node gsd-tools.cjs roadmap validate
 
 ---
 
-### `roadmap upgrade --convention milestone-prefixed`
+### `roadmap upgrade --convention <target>`
 
-Migrate legacy `Phase N` IDs to the milestone-prefixed `Phase M-NN` convention.
+Migrate an existing roadmap to a phase-ID convention. The historical
+`milestone-prefixed` target converts legacy `Phase N` IDs to `Phase M-NN`.
+The `bracket` target converts either legacy or M-NN IDs to `[CODE.MM] NN`,
+renames matching phase directories, and writes `phase_id_convention: "bracket"`.
+When a renamed directory's phase token changes, the bracket target also
+renames every phase-qualified artifact inside it (`03-VERIFICATION.md`,
+`03-01-PLAN.md`, and similar) to the new token, so existing plans and
+verification reports stay attached to their phase, rewrites any
+`depends_on` reference inside that same directory's plan files that named a
+renamed sibling by its old token (`depends_on: ["03-01"]` becomes
+`["01-01"]`), so the dependency still resolves after migration, and rewrites
+that artifact's own `phase:` frontmatter scalar to its new token so
+`history-digest` keys the phase's decisions correctly after renumbering.
+Legacy sentinel phases (`Phase 999.x` icebox, `Phase 0.x` backlog) are lifted
+into their own sentinel bracket milestone (`[CODE.999]` / `[CODE.00]`) rather
+than folded into the enclosing real milestone. Checklist bullets convert
+using the same reader-recognized bold-checkbox grammar `roadmap analyze`
+scores `missing_phase_details` against (no colon required after the token),
+attributed to their own milestone section when two sections share a leading
+major integer, and skipped inside a fenced code block the same way a fenced
+heading is skipped.
+It refuses before writing when: a source phase has no bracket spelling; a
+multi-milestone phase (or a checklist bullet outside every section) has no
+unambiguous reader-recognized milestone section; the same legacy phase
+number appears twice within one milestone section; a directory matches more
+than one candidate phase heading and its slug does not disambiguate exactly
+one of them; two directories resolve to the same phase heading (a stale
+same-number copy beside the real directory), so that neither can be left
+unrenamed on disk; or a rename's target directory name already exists on disk
+and is not itself part of the same migration.
 
 | Flag | Required | Description |
 |------|----------|-------------|
-| `--convention milestone-prefixed` | Yes | Target convention to migrate to |
+| `--convention milestone-prefixed` | No | Historical target; also the default when the flag is omitted |
+| `--convention bracket` | No | Bracket target; requires `project_code` in `.planning/config.json` |
 | `--apply` | No | Write changes to disk (default: dry-run only) |
 
 **Prerequisites:** `.planning/ROADMAP.md` exists
-**Produces:** Dry-run diff (default) or in-place ROADMAP.md rewrite (`--apply`)
+**Produces:** Dry-run JSON plan (default) or in-place ROADMAP/config updates and phase-directory renames (`--apply`)
+
+An apply refuses a dirty tracked working tree. If a later migration operation
+fails, it reverses completed renames and restores the exact files it changed;
+this rollback also works when `.planning/` is ignored by Git.
 
 ```bash
 node gsd-tools.cjs roadmap upgrade --convention milestone-prefixed         # dry-run
 node gsd-tools.cjs roadmap upgrade --convention milestone-prefixed --apply  # apply
+node gsd-tools.cjs roadmap upgrade --convention bracket                    # dry-run
+node gsd-tools.cjs roadmap upgrade --convention bracket --apply            # apply
 ```
 
 ---
