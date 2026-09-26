@@ -51,6 +51,9 @@ const {
   OPTIONAL_PROJECT_CODE_PREFIX_SOURCE,
   OPTIONAL_PHASE_TAG_SOURCE,
   PHASE_NUMBER_TOKEN_SOURCE,
+  phaseHeadingPrefixSrcFor,
+  PHASE_HEADING_BASELINE,
+  buildPhaseHeadingScanRegex,
 } = phaseIdMod;
 import { escapeRegex } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- phase-locator.cjs is an export= CommonJS module
@@ -80,7 +83,10 @@ import { formatGsdSlash, resolveRuntime } from './runtime-slash.cjs';
 import { realClock } from './clock.cjs';
 import { transitionCore } from './state-transition.cjs';
 import { updateTableCell, deleteTableRow, escapeCell } from './markdown-table.cjs';
-import { deleteSection, updateBullet } from './markdown-sectionizer.cjs';
+import { deleteSection, updateBullet, tokenizeHeadings } from './markdown-sectionizer.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- roadmap.cjs is an export= CommonJS module
+import roadmapMod = require('./roadmap.cjs');
+const { buildPhaseHeadingRegex } = roadmapMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- uat-predicate.cjs is an export= CommonJS module
 import uatPredicate = require('./uat-predicate.cjs');
 const { evaluateUatPassed } = uatPredicate;
@@ -399,18 +405,27 @@ function getRoadmapModeForPhase(cwd: string, phaseNum: string): string | null {
   const milestoneContent = extractCurrentMilestone(rawContent, cwd);
   const fullContent = stripShippedMilestones(rawContent);
   const escapedPhase = phaseMarkdownRegexSource(phaseNum);
-  // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-  const phaseHeader = new RegExp(`#{2,4}\\s*Phase\\s+${escapedPhase}${OPTIONAL_PHASE_TAG_SOURCE}\\s*:`, 'i');
+  // #5007 (Phase 6 / ADR-4910 §8): buildPhaseHeadingRegex (src/roadmap.cts) is
+  // anchored `^...$` with no 'm' flag — it is designed to test ONE
+  // already-tokenized heading LINE (mirroring searchPhaseInContent's own
+  // usage), not to `.match()` against multi-line content directly. Routing
+  // through tokenizeHeadings first is therefore required here, not a pure
+  // regex-literal swap (the design doc's "direct swap" plan does not hold
+  // once the anchor is accounted for).
+  const phaseHeader = buildPhaseHeadingRegex(escapedPhase);
 
   for (const content of [milestoneContent, fullContent]) {
-    const headerMatch = content.match(phaseHeader);
-    if (!headerMatch || headerMatch.index === undefined) continue;
+    const heading = tokenizeHeadings(content).find((h) => phaseHeader.test(h.text));
+    if (!heading) continue;
+    const headingLineEnd = content.indexOf('\n', heading.offset);
+    const headerMatchLength =
+      (headingLineEnd === -1 ? content.length : headingLineEnd) - heading.offset;
 
-    const sectionStart = headerMatch.index;
+    const sectionStart = heading.offset;
     const rest = content.slice(sectionStart);
-    const nextHeader = rest.slice(headerMatch[0].length).match(/\n#{2,4}\s+Phase\s+\S/i);
+    const nextHeader = rest.slice(headerMatchLength).match(/\n#{2,4}\s+Phase\s+\S/i);
     const sectionEnd = nextHeader
-      ? sectionStart + headerMatch[0].length + (nextHeader.index as number)
+      ? sectionStart + headerMatchLength + (nextHeader.index as number)
       : content.length;
     const section = content.slice(sectionStart, sectionEnd);
     const modeMatch = section.match(/\*\*Mode(?::\*\*|\*\*:)\s*([^\n]+)/i);
