@@ -4113,12 +4113,13 @@ function cmdPhaseComplete(cwd: string, phaseNum: string, raw: boolean): void {
           // section BODY through to the next heading (via its own
           // `[\s\S]*?` lookahead-to-next-heading structure) — neither shared
           // owner returns that shape, so phaseHeadingPrefixSrcFor is composed
-          // directly, keeping this site's own lookahead. The prior literal
-          // `#{2,4}\s*Phase\s+` appeared TWICE in this source (the main
-          // capture prefix AND the lookahead) — both occurrences are the
-          // literal-drift detector's target (findPhaseHeadingScanLiteralDrift
-          // is a pure literal-text match, blind to what surrounds it), so
-          // both are replaced with the same composed prefix, built once and
+          // directly, keeping this site's own lookahead. The prior hand-rolled
+          // heading-marker-plus-label literal appeared TWICE in this source
+          // (the main capture prefix AND the lookahead) — both occurrences
+          // were the literal-drift detector's target
+          // (findPhaseHeadingScanLiteralDrift is a pure literal-text match,
+          // blind to what surrounds it), so both are replaced with the same
+          // composed prefix, built once via phaseHeadingPrefixSrcFor and
           // reused, so the two halves cannot drift from each other. No
           // convention argument: LABEL_ONLY with convention=undefined
           // reproduces the prior `Phase\s+` literal byte-for-byte — this
