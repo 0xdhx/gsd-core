@@ -3071,6 +3071,26 @@ describe('no-adhoc-markdown-parsing rule', () => {
       invalid: [],
     });
   });
+
+  // Regression pin: getNewRegExpSource joins a TemplateLiteral's static
+  // quasis with an empty string wherever a `${...}` expression is dropped.
+  // A checkbox-toggle regex whose interpolated id sits between two adjacent
+  // OPTIONAL non-capturing bold-wrapper groups — `(?:\*\*)?${id}(?:\*\*)?`,
+  // the real shape in roadmap.cts's plan-checkbox toggle — collapses into
+  // `...(?:\*\*)?(?:\*\*)?...`, and the `:` opening the second group used to
+  // be misread as a markdown field-label colon even though it is pure regex
+  // metasyntax with no matched text. This must NOT be flagged.
+  test('valid: roadmapContent.replace(new RegExp(<template with (?:\\*\\*)? groups around an interpolated id>), ...) does not false-positive on the group-opener colon', () => {
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [
+        {
+          code: "roadmapContent.replace(new RegExp(`(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${planId}(?:\\*\\*)?)`, 'i'), '$1x$2');",
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
 });
 
 // ─── no-duplicate-fold-marker ────────────────────────────────────────

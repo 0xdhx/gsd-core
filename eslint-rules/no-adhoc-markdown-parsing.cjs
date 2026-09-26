@@ -317,6 +317,27 @@ const rule = {
       return hasBoldLabelColon(src);
     }
 
+    // A `:` at `colonIndex` is regex GROUP-OPENER syntax — not literal
+    // matched text — when it is the colon of a `(?:` non-capturing-group
+    // opener (i.e. the two preceding characters are `(` and `?`). This is
+    // the only JS regex construct that produces a bare `:` as syntax: the
+    // other `(?`-prefixed forms (lookahead `(?=`, negative lookahead `(?!`,
+    // named group `(?<name>`, lookbehind `(?<=`/`(?<!`) use `=`, `!`, or `>`
+    // instead of `:`. This matters because `getNewRegExpSource` joins a
+    // TemplateLiteral's static quasis with an empty string wherever a
+    // `${...}` expression was dropped: when the dropped expression sits
+    // between two adjacent optional non-capturing groups (e.g. an
+    // interpolated id wrapped `(?:\*\*)?<expr>(?:\*\*)?`, as in
+    // roadmap.cts's plan-checkbox toggle pattern), the join collapses them
+    // into `...(?:\*\*)?(?:\*\*)?...` — and the `:` opening the second group
+    // then sits immediately after the first group's `\*\*` (or immediately
+    // before the next `\*\*`), coincidentally shaped like a markdown
+    // bold-label colon even though it is pure regex metasyntax with no
+    // matched text at all.
+    function isNonCapturingGroupOpenerColon(src, colonIndex) {
+      return src[colonIndex - 1] === '?' && src[colonIndex - 2] === '(';
+    }
+
     // Single-pass scan (same cheap-scan discipline as
     // hasQualifyingNegatedPipeClass above): from each `\*\*` occurrence, walk
     // forward only as far as the next `\*\*` (the end of this field's own
@@ -327,17 +348,26 @@ const rule = {
     // never re-enter consumed bytes" style as the rest of the file rather
     // than introducing a second idiom. Every character between one `\*\*`
     // occurrence and the next is visited at most once across the whole
-    // outer loop, so the total walk stays O(n) in `src.length`.
+    // outer loop, so the total walk stays O(n) in `src.length`. A `:` that
+    // is `(?:` group-opener syntax (see isNonCapturingGroupOpenerColon
+    // above) never counts as a field-label colon, in either direction: the
+    // forward walk skips over it and keeps scanning, and the O(1) backward
+    // peek below (which independently catches the reverse `Label:\*\*`
+    // ordering, colon immediately before the bold run) applies the same
+    // exclusion.
     function hasBoldLabelColon(src) {
       const BOLD = '\\*\\*';
       let i = src.indexOf(BOLD);
       while (i !== -1) {
+        if (src[i - 1] === ':' && !isNonCapturingGroupOpenerColon(src, i - 1)) {
+          return true;
+        }
         let j = i + BOLD.length;
         let sawColon = false;
         while (j < src.length) {
           if (src.startsWith(BOLD, j)) break;
           const ch = src[j];
-          if (ch === ':') {
+          if (ch === ':' && !isNonCapturingGroupOpenerColon(src, j)) {
             sawColon = true;
             break;
           }
