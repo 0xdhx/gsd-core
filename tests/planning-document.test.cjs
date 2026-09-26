@@ -779,3 +779,71 @@ describe('row 30: setFieldValue refuses a value containing the trailing separato
     assert.strictEqual(outcome.value, source);
   });
 });
+
+// ─── Row 32: setFieldValue's `{ allowSeparator: true }` option (#5007) ─────────
+//
+// #4917's review finding 2 (the round-trip check row 30 above pins) is: a
+// value containing the grammar's own ` — ` separator token gets silently
+// TRUNCATED on serialize, because `parseBoldFieldLine` always splits `rest`
+// at the FIRST ` — ` it finds — there is no substring/position rule that can
+// tell "the caller's atomic value happens to contain ` — `" apart from "the
+// caller meant value + a separate trailing annotation": both are the
+// identical input shape to the reader. Narrowing the round-trip check's
+// regex can never fix this safely — see setFieldValue's own comment.
+//
+// `{ allowSeparator: true }` (#5007 / ADR-4910 Phase 6 amendment) is
+// therefore not a narrower version of the SAME check — it is a different,
+// explicitly opt-in WRITE TARGET (the full rest-of-line span, not just
+// valueSpan) that makes finding 2's failure mode structurally impossible:
+// nothing is ever reparsed or split, so nothing can be silently dropped.
+describe('row 32: setFieldValue({ allowSeparator: true }) writes a separator-containing value losslessly', () => {
+  test('a value containing " — " is REFUSED by default (finding 2 stays fixed) but ACCEPTED with allowSeparator', () => {
+    const source = ['**Phase:** 1', '**Owner:** alice', ''].join('\n');
+    const doc = parseOk(source);
+    const id = findField(doc, 'Phase');
+
+    const defaultResult = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`);
+    assert.strictEqual(defaultResult.ok, false, 'default (non-opted-in) path must still refuse — finding 2 pin');
+
+    const widenedResult = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`, { allowSeparator: true });
+    assert.strictEqual(widenedResult.ok, true);
+
+    const outcome = serialize(widenedResult.value);
+    assert.strictEqual(outcome.ok, true);
+    assert.strictEqual(outcome.value, ['**Phase:** 1 — COMPLETE', '**Owner:** alice', ''].join('\n'));
+  });
+
+  test('allowSeparator replaces the FULL rest-of-line span — a pre-existing trailing annotation is clobbered, not preserved', () => {
+    const source = [`**Plans:** short ${EM_DASH} a hand-written annotation`, '**Owner:** alice', ''].join('\n');
+    const doc = parseOk(source);
+    const id = findField(doc, 'Plans');
+
+    const staged = setFieldValue(doc, id, `new ${EM_DASH} value`, { allowSeparator: true });
+    assert.strictEqual(staged.ok, true);
+
+    const outcome = serialize(staged.value);
+    assert.strictEqual(outcome.ok, true);
+    assert.strictEqual(outcome.value, [`**Plans:** new ${EM_DASH} value`, '**Owner:** alice', ''].join('\n'));
+  });
+
+  test('allowSeparator does not weaken the line-break refusal — a value containing \\n is still refused', () => {
+    const source = ['**Plans:** initial value', ''].join('\n');
+    const doc = parseOk(source);
+    const id = findField(doc, 'Plans');
+
+    const result = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE\nforged sibling`, { allowSeparator: true });
+    assert.strictEqual(result.ok, false);
+  });
+
+  test('a value with no separator still writes correctly with allowSeparator (no-op-shaped input)', () => {
+    const source = ['**Plans:** initial value', ''].join('\n');
+    const doc = parseOk(source);
+    const id = findField(doc, 'Plans');
+
+    const staged = setFieldValue(doc, id, 'plain replacement', { allowSeparator: true });
+    assert.strictEqual(staged.ok, true);
+    const outcome = serialize(staged.value);
+    assert.strictEqual(outcome.ok, true);
+    assert.strictEqual(outcome.value, ['**Plans:** plain replacement', ''].join('\n'));
+  });
+});

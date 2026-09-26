@@ -112,6 +112,15 @@ export interface PlanningDoc {
   readonly artifact: string;
   readonly nodes: readonly PlanningNode[];
   readonly staged: ReadonlyMap<NodeId, string>;
+  /**
+   * Ids staged via `setFieldValue`'s `{ allowSeparator: true }` option
+   * (#5007 / Phase 6 amendment). For these ids, `serialize` replaces the
+   * FULL rest-of-line span (`valueSpan.start` .. `trailingSpan.end`)
+   * instead of just `valueSpan` — see `setFieldValue`'s comment for why
+   * this is the safe shape of the widening. Every other id continues to
+   * splice only `valueSpan`, unchanged.
+   */
+  readonly stagedFullLine: ReadonlySet<NodeId>;
 }
 
 export type NodeRead = { ok: true; value: string } | { ok: false; reason: string; span: Span };
@@ -427,7 +436,10 @@ export function parsePlanningDoc(source: string, artifact: string): Result<Plann
   }
 
   if (source.length === 0) {
-    return { ok: true, value: { source, artifact, nodes: [], staged: new Map() } };
+    return {
+      ok: true,
+      value: { source, artifact, nodes: [], staged: new Map(), stagedFullLine: new Set() },
+    };
   }
 
   const lines = splitLinesInfo(source);
@@ -454,7 +466,10 @@ export function parsePlanningDoc(source: string, artifact: string): Result<Plann
 
   nodes.sort((a, b) => a.span.start - b.span.start);
 
-  return { ok: true, value: { source, artifact, nodes, staged: new Map() } };
+  return {
+    ok: true,
+    value: { source, artifact, nodes, staged: new Map(), stagedFullLine: new Set() },
+  };
 }
 
 /** Find the id of the (first, document-order) `boldField` node whose label
@@ -482,13 +497,33 @@ export function readNode(doc: PlanningDoc, id: NodeId): NodeRead {
   return { ok: true, value: doc.source.slice(node.span.start, node.span.end) };
 }
 
+/** Options for `setFieldValue`. See the `allowSeparator` comment inline. */
+export interface SetFieldValueOptions {
+  /**
+   * #5007 / ADR-4910 Phase 6 amendment. When `true`, the caller is staging
+   * an ATOMIC value that legitimately contains the grammar's own trailing-
+   * separator token (` — `, `TRAILING_SEPARATOR_RE`) as part of the value
+   * itself — e.g. `"1 — COMPLETE"` — not a hand-written annotation to be
+   * preserved separately. Default `false` preserves Phase 1's exact refusal
+   * behaviour unchanged (see the round-trip check below).
+   */
+  allowSeparator?: boolean;
+}
+
 /**
  * Stage a new value for a `boldField` node, returning a NEW `PlanningDoc`
  * (immutable — `doc` itself is never mutated). Refuses an id this doc did
  * not mint, and refuses any node kind other than `boldField` — only the
- * `valueSpan` is ever writable this phase (ADR-4910 §1).
+ * `valueSpan` (or, with `{ allowSeparator: true }`, the full rest-of-line
+ * span through `trailingSpan.end`) is ever writable this phase (ADR-4910
+ * §1, amended #5007).
  */
-export function setFieldValue(doc: PlanningDoc, id: NodeId, value: string): Result<PlanningDoc> {
+export function setFieldValue(
+  doc: PlanningDoc,
+  id: NodeId,
+  value: string,
+  options?: SetFieldValueOptions,
+): Result<PlanningDoc> {
   const node = doc.nodes.find((n) => n.id === id);
   if (!node) {
     return { ok: false, reason: 'unknown node id' };
@@ -502,9 +537,60 @@ export function setFieldValue(doc: PlanningDoc, id: NodeId, value: string): Resu
   // once spliced back into the source. Decision 4 licenses refusal for any
   // value the grammar cannot represent; Phase 3 may widen this to escaping,
   // but Phase 1 refuses outright. Do not remove this as an over-restriction.
+  // This check applies UNCONDITIONALLY — `allowSeparator` below narrows only
+  // the separator refusal, never this one: an embedded newline still forges
+  // a sibling node regardless of which span it lands in on splice.
   if (/[\r\n]/.test(value)) {
     return { ok: false, reason: 'field value must not contain a line break (\\r or \\n)' };
   }
+
+  if (options?.allowSeparator) {
+    // #5007 / ADR-4910 Phase 6 amendment: the DEFAULT round-trip check below
+    // (kept byte-for-byte as Phase 1 wrote it) can never accept a value
+    // containing ` — `, by construction — `parseBoldFieldLine` always splits
+    // `rest` at the FIRST ` — ` it finds, so re-parsing a candidate line
+    // whose `value` itself contains that token always reclassifies part of
+    // the caller's own value as `trailingSpan` prose, making
+    // `reparsed.value !== value` unconditionally. That is not a bug to work
+    // around with a narrower regex: Phase 1's review (#4917, finding 2)
+    // fixed exactly this shape — a value staged as `"sneaky — annotation"`
+    // silently truncated to `"sneaky"` on serialize, with the caller never
+    // told. There is no substring or position rule that distinguishes "the
+    // caller's atomic value happens to contain ` — `" from "the caller meant
+    // to write a short value plus a separate hand-annotation" — both are the
+    // identical input shape to `parseBoldFieldLine`. Narrowing the refusal
+    // regex would silently reopen finding 2 for any default caller who
+    // passes such a value without realizing it.
+    //
+    // The safe fix is therefore not a narrower regex but a different WRITE
+    // TARGET, opted into explicitly per call: `allowSeparator: true` tells
+    // `serialize` (via `stagedFullLine`) to replace the FULL rest-of-line
+    // span — `valueSpan.start` through `trailingSpan.end` — with `value`,
+    // instead of splicing only `valueSpan` and leaving `trailingSpan`
+    // untouched. Because the entire rest of the line becomes exactly
+    // `value` (no reparse, no split, nothing left over to silently drop),
+    // finding 2's failure mode — a caller's content vanishing without being
+    // told — cannot occur: whatever the caller passed is exactly what lands
+    // in the file, byte for byte, on that line. Any PRE-EXISTING trailing
+    // annotation on that field's line is deliberately clobbered by this
+    // path (the caller owns the whole rest of the line once they opt in) —
+    // this mirrors `stateReplaceField`'s prior behaviour at this exact call
+    // site, which also rewrote the field's entire captured tail.
+    //
+    // The default (non-opted-in) path immediately below is completely
+    // unchanged: every existing caller keeps Phase 1's exact refusal
+    // semantics, so finding 2's regression pin (tests/planning-document.
+    // test.cjs row 30) continues to pass unmodified.
+    const stagedFullLine = new Set(doc.stagedFullLine);
+    stagedFullLine.add(id);
+    const staged = new Map(doc.staged);
+    staged.set(id, value);
+    return {
+      ok: true,
+      value: { source: doc.source, artifact: doc.artifact, nodes: doc.nodes, staged, stagedFullLine },
+    };
+  }
+
   // #4917 / ADR-4910 Decision 4: "a value that cannot be represented in the
   // grammar is refused by the writer, with a report." This is a GENERAL
   // round-trip representability check, not a blacklist of forbidden
@@ -534,7 +620,10 @@ export function setFieldValue(doc: PlanningDoc, id: NodeId, value: string): Resu
   }
   const staged = new Map(doc.staged);
   staged.set(id, value);
-  return { ok: true, value: { source: doc.source, artifact: doc.artifact, nodes: doc.nodes, staged } };
+  return {
+    ok: true,
+    value: { source: doc.source, artifact: doc.artifact, nodes: doc.nodes, staged, stagedFullLine: doc.stagedFullLine },
+  };
 }
 
 /** True when any node in `doc` failed to parse. */
@@ -569,7 +658,12 @@ export function serialize(doc: PlanningDoc): SerializeOutcome {
   for (const [id, value] of doc.staged) {
     const node = doc.nodes.find((n) => n.id === id);
     if (!node || node.kind !== 'boldField') continue; // unreachable: setFieldValue already gated this
-    edits.push({ start: node.valueSpan.start, end: node.valueSpan.end, value });
+    // #5007: an id staged via `{ allowSeparator: true }` owns the FULL
+    // rest-of-line span through `trailingSpan.end`, not just `valueSpan` —
+    // see `setFieldValue`'s comment for why this is the safe write target
+    // for a value that legitimately contains the grammar's separator token.
+    const end = doc.stagedFullLine.has(id) ? node.trailingSpan.end : node.valueSpan.end;
+    edits.push({ start: node.valueSpan.start, end, value });
   }
   edits.sort((a, b) => a.start - b.start);
 
