@@ -3445,16 +3445,15 @@ describe('phase insert command', () => {
       roadmap.includes('Phase 01.1: Fix Critical Bug (INSERTED)'),
       'roadmap should include inserted phase',
     );
-    // NOT asserted: insertion position relative to the next phase header. The
-    // neighboring next-phase-boundary regex (`/\r?\n#{2,4}\s+Phase\s+\d[\d.]*/i`,
-    // a few lines below headerPattern) is NOT one of the 11 #5007-marked
-    // grandfathered sites and has its own pre-existing, unrelated bracket-blind
-    // gap: under the bracket convention it fails to recognize `[GSD.01] Phase 2:`
-    // as a heading boundary, so the new entry falls through to the
-    // rawContent.length branch and is appended at the end of the file instead
-    // of directly after the target section. This is a real, pre-existing
-    // behavior gap, but it belongs to a different (unmarked) regex outside
-    // this migration's scope — out of scope to fix here.
+    // The neighboring next-phase-boundary regex (a few lines below
+    // headerPattern, NOT one of the 11 originally-marked sites but the same
+    // defect class) is now also convention-aware, so the inserted entry must
+    // land directly after the target section — not fall through to
+    // end-of-file because `[GSD.01] Phase 2:` was unrecognized as a boundary.
+    assert.ok(
+      roadmap.indexOf('Phase 01.1') < roadmap.indexOf('[GSD.01] Phase 2'),
+      'inserted phase must land between the bracket-tagged target header and the next phase, not at the end of the document',
+    );
   });
 
   // Phase 6 (#5007) test matrix: anyHeadingPattern ("does ANY phase heading

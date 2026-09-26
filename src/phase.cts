@@ -1876,7 +1876,27 @@ function cmdPhaseInsert(
 
       const headerIdx = rawContent.indexOf(headerMatch![0]);
       const afterHeader = rawContent.slice(headerIdx + headerMatch![0].length);
-      const nextPhaseMatch = afterHeader.match(/\r?\n#{2,4}\s+Phase\s+\d[\d.]*/i);
+      // #5007 (Phase 6 / ADR-4910 §8): this next-phase-boundary lookup was NOT
+      // one of the 15 originally-marked grandfathered sites, but it hand-rolls
+      // the identical `#{2,4}...Phase\s+` heading-marker shape and sits right
+      // next to headerPattern above, which this same commit series just
+      // widened (via insertConvention) to recognize a bracket-tagged target
+      // heading. Left bracket-blind, this regex would silently defeat that
+      // widening: under the bracket convention a freshly-recognized
+      // bracket-tagged target could still fail to find the NEXT heading as a
+      // boundary (`[CODE.MM] Phase N+1:` never matches a bare `Phase\s+`
+      // literal), so the newly inserted entry falls through to the
+      // rawContent.length branch and lands appended at end-of-file instead of
+      // directly after the target section. Found while migrating the
+      // neighboring sites, not deferred: this is the same defect class the
+      // whole Phase 6 effort exists to drain, just an unmarked instance of it.
+      // Composed with the SAME baseline/convention as headerPattern above so
+      // target-discovery and next-boundary-discovery agree. The base
+      // `#{2,4}\s+` (mandatory whitespace after the hashes, not `\s*`) is
+      // preserved exactly as the prior literal had it — a pre-existing,
+      // deliberately-unchanged asymmetry with the other sites in this file.
+      const nextPhaseHeadingPrefix = `#{2,4}\\s+${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY, insertConvention)}`;
+      const nextPhaseMatch = afterHeader.match(new RegExp(`\\r?\\n${nextPhaseHeadingPrefix}\\d[\\d.]*`, 'i'));
 
       let insertIdx: number;
       if (nextPhaseMatch) {
