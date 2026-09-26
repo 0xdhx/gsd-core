@@ -1673,9 +1673,20 @@ function scanExistingDecimalPhaseNumbers(phasesDir: string, rawContent: string, 
     }
   }
 
+  // #5007 (Phase 6 / ADR-4910 §8): composes phaseHeadingPrefixSrcFor directly
+  // rather than routing through buildPhaseHeadingScanRegex — the owner has no
+  // decimal-subphase capture group. The design doc's suggested composition
+  // passed `capturing=true` to phaseHeadingPrefixSrcFor, but this site has no
+  // use for the bracket-id capture it would add, and doing so would silently
+  // shift `rmMatch[1]` (the decimal digits) to group 2 — a real correctness
+  // hazard. `capturing` is left at its default (false), and the `#{2,4}\s*`
+  // heading marker (also omitted from the design's snippet) is kept explicit,
+  // since phaseHeadingPrefixSrcFor never includes it — callers always add it
+  // themselves (see buildPhaseHeadingScanRegex's own usage). No convention
+  // argument: LABEL_ONLY with convention=undefined reproduces the prior
+  // `Phase\s+` literal byte-for-byte.
   const rmPhasePattern = new RegExp(
-    // phase-id-owner: pre-existing hand-rolled Phase-heading pattern — grandfathered pending Phase 6 migration (ADR-4910 §8, epic #4906)
-    `#{2,4}\\s*Phase\\s+${phaseMarkdownRegexSource(base)}\\.(\\d+)${OPTIONAL_PHASE_TAG_SOURCE}\\s*:`,
+    `#{2,4}\\s*${phaseHeadingPrefixSrcFor(PHASE_HEADING_BASELINE.LABEL_ONLY)}${phaseMarkdownRegexSource(base)}\\.(\\d+)${OPTIONAL_PHASE_TAG_SOURCE}\\s*:`,
     'gi',
   );
   let rmMatch: RegExpExecArray | null;

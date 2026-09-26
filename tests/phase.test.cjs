@@ -31,6 +31,7 @@ const {
 const PHASE_COMPLETE_TIMEOUT_MS = 60000;
 const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
 const { splitTableRow } = require('../gsd-core/bin/lib/markdown-table.cjs');
+const fc = require('fast-check');
 
 const GSD_TOOLS_BIN = path.resolve(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
@@ -555,6 +556,87 @@ describe('phase next-decimal command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.next, '03.2', 'checklist-only 3.1 must be counted, not just headings/dirs');
     assert.deepStrictEqual(output.existing, ['03.1'], 'checklist-only decimal listed as existing');
+  });
+
+  // Phase 6 (#5007): scanExistingDecimalPhaseNumbers's ROADMAP-heading regex
+  // migrated off its hand-rolled `#{2,4}\s*Phase\s+` literal. Boundary
+  // coverage at the decimal-count edges the migration must not disturb.
+  test('#5007: decimal count boundary — base.1, base.9, base.10', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '### Phase 7: Base',
+        '**Goal:** Setup',
+        '',
+        '### Phase 7.1: First decimal',
+        '**Goal:** One',
+        '',
+        '### Phase 7.9: Ninth decimal',
+        '**Goal:** Nine',
+        '',
+        '### Phase 7.10: Tenth decimal',
+        '**Goal:** Ten',
+        '',
+      ].join('\n'),
+    );
+    const result = runGsdTools('phase next-decimal 7', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.existing.sort(), ['07.1', '07.10', '07.9'].sort());
+    assert.strictEqual(output.next, '07.11', 'next after the max existing decimal (10) is 11');
+  });
+
+  test('#5007: no-decimal-siblings case — next is base.1', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      ['# Roadmap', '', '### Phase 8: Base only', '**Goal:** Setup', ''].join('\n'),
+    );
+    const result = runGsdTools('phase next-decimal 8', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.existing, []);
+    assert.strictEqual(output.next, '08.1');
+  });
+
+  // fast-check property (CLAUDE.md RULESET.TESTS.property-based-testing):
+  // for any generated set of sibling decimal headings under a base phase,
+  // the scan never returns a duplicate or an out-of-range subphase number.
+  test('#5007 property: decimal scan never returns a duplicate or out-of-range subphase for generated siblings', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 90 }),
+        fc.uniqueArray(fc.integer({ min: 1, max: 40 }), { minLength: 0, maxLength: 8 }),
+        (base, siblings) => {
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-decimal-fc-'));
+          try {
+            fs.mkdirSync(path.join(dir, '.planning', 'phases'), { recursive: true });
+            const lines = ['# Roadmap', '', `### Phase ${base}: Base`, '**Goal:** Setup', ''];
+            for (const n of siblings) {
+              lines.push(`### Phase ${base}.${n}: Sibling ${n}`, '**Goal:** Work', '');
+            }
+            fs.writeFileSync(path.join(dir, '.planning', 'ROADMAP.md'), lines.join('\n'));
+
+            const result = runGsdTools(`phase next-decimal ${base}`, dir);
+            if (!result.success) return false;
+            const output = JSON.parse(result.output);
+            const existingNums = output.existing.map((tok) => parseInt(tok.split('.')[1], 10));
+
+            // No duplicates.
+            if (new Set(existingNums).size !== existingNums.length) return false;
+            // Every reported number is exactly one of the generated siblings
+            // (no out-of-range / spurious values).
+            const expected = new Set(siblings);
+            if (existingNums.length !== expected.size) return false;
+            return existingNums.every((n) => expected.has(n));
+          } finally {
+            cleanup(dir);
+          }
+        },
+      ),
+      { numRuns: 20 },
+    );
   });
 });
 
@@ -14047,7 +14129,6 @@ describe('issue #3697: phase complete must warn when the Requirements line under
 // `cmdPhaseComplete` in the same round.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fc = require('fast-check');
 const {
   analyzeRequirementsLine,
   formatRequirementsLineWarning,
