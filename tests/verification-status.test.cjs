@@ -3228,7 +3228,6 @@ describe('#4987: verification query verbs distinguish a non-directory path from 
     const oldDir = path.join(projectDir, '.planning', 'phases', '03-auth');
     fs.mkdirSync(oldDir, { recursive: true });
     fs.writeFileSync(path.join(oldDir, '03-VERIFICATION.md'), '---\nphase: 03-auth\nstatus: passed\n---\n');
-    fs.writeFileSync(path.join(oldDir, '03-01-SUMMARY.md'), '');
     assert.equal(status(projectDir, '.planning/phases/03-auth').status, 'passed', 'precondition: passed before archiving');
 
     const archiveParent = path.join(projectDir, '.planning', 'milestones', 'v1.0-phases');
