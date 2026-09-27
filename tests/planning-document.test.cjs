@@ -779,3 +779,73 @@ describe('row 30: setFieldValue refuses a value containing the trailing separato
     assert.strictEqual(outcome.value, source);
   });
 });
+
+// ─── Row 32: setFieldValue has NO separator-widening escape hatch (#5007) ──────
+//
+// #4917's review finding 2 (the round-trip check row 30 above pins) is: a
+// value containing the grammar's own ` — ` separator token gets silently
+// TRUNCATED on serialize, because `parseBoldFieldLine` always splits `rest`
+// at the FIRST ` — ` it finds — there is no substring/position rule that can
+// tell "the caller's atomic value happens to contain ` — `" apart from "the
+// caller meant value + a separate trailing annotation": both are the
+// identical input shape to the reader. Narrowing the round-trip check's
+// regex can never fix this safely — see setFieldValue's own comment.
+//
+// An earlier version of #5007 added a `{ allowSeparator: true }` option that
+// spliced the caller's value across the FULL rest-of-line span instead of
+// just `valueSpan`, reasoning that skipping the reparse-and-split made
+// finding 2's failure mode "structurally impossible". A failing-first
+// reproduction proved that reasoning wrong: the option only avoided the
+// refusal AT WRITE TIME. The bytes it wrote were correct, but
+// `parseBoldFieldLine` splits on ` — ` unconditionally on every READ, with
+// no escaping/metadata in this grammar to tell the two cases apart — so the
+// NEXT fresh `parsePlanningDoc` of that exact text (not the in-memory doc
+// the option's own tests checked) silently re-truncated the value via
+// `findField`/`readNode`, reporting a confident `ok: true` and no error.
+// That is finding 2 itself, just moved one parse cycle downstream of where
+// the check could catch it. The option was removed; this seam now has
+// exactly ONE write path, and it round-trips safely by refusing outright,
+// not by silently mis-splitting.
+describe('row 32: setFieldValue has no way to accept a separator-containing value', () => {
+  test('a value containing " — " is refused (finding 2 stays fixed) — setFieldValue has no options parameter', () => {
+    const source = ['**Phase:** 1', '**Owner:** alice', ''].join('\n');
+    const doc = parseOk(source);
+    const id = findField(doc, 'Phase');
+
+    const result = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`);
+    assert.strictEqual(result.ok, false, 'the round-trip check must still refuse — finding 2 pin');
+
+    // Regression pin: a 3rd "options" argument (the removed allowSeparator
+    // shape) must have NO effect — proves the escape hatch cannot silently
+    // be reintroduced by a caller who copies the old call shape.
+    const withIgnoredOptions = setFieldValue(doc, id, `1 ${EM_DASH} COMPLETE`, { allowSeparator: true });
+    assert.strictEqual(withIgnoredOptions.ok, false, 'a stray options arg must not reopen the refusal');
+  });
+
+  // ROUND-TRIP CORRUPTION PROOF (why the removed option was unsafe, kept as
+  // a permanent regression pin against reintroducing it under any name):
+  // this grammar has no escaping convention, so ANY line whose rest-of-line
+  // text contains " — " — however it got written — is split at the FIRST
+  // occurrence on every parse. There is no way for a value legitimately
+  // containing that token to round-trip through parsePlanningDoc/findField/
+  // readNode; the only representable-by-construction contract this seam can
+  // offer is refuse-at-write, which is what setFieldValue does.
+  test('a line whose rest-of-line text contains " — " is ALWAYS split on (re)parse — the grammar has no escape', () => {
+    // Simulates what a full-rest-of-line write (with no reparse/refusal)
+    // would have produced on disk, bypassing setFieldValue entirely to
+    // isolate the parser's own behaviour from any writer.
+    const written = ['**Phase:** 1 — COMPLETE', '**Owner:** alice', ''].join('\n');
+
+    const reparsed = parseOk(written);
+    const id = findField(reparsed, 'Phase');
+    const read = readNode(reparsed, id);
+
+    assert.strictEqual(read.ok, true);
+    assert.notStrictEqual(
+      read.value,
+      '1 — COMPLETE',
+      'reparsing must NOT recover the full atomic value — proves no safe round-trip exists in this grammar',
+    );
+    assert.strictEqual(read.value, '1', 'the grammar unconditionally truncates at the first " — "');
+  });
+});

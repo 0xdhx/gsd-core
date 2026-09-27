@@ -4804,6 +4804,100 @@ describe('feat-3251: generated aliases dispatch through real gsd-tools behavior'
       cleanup(projectDir);
     }
   });
+
+  // Phase 6 (#5007): before/after fixture for getRoadmapModeForPhase's
+  // migration off its hand-rolled `#{2,4}\s*Phase\s+` literal onto
+  // buildPhaseHeadingRegex (src/roadmap.cts). These three cases must produce
+  // byte-identical output before and after the migration.
+  test('#5007: phase.mvp-mode reports mode absent when no **Mode:** line exists', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '## v1.0.0',
+          '',
+          '### Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '',
+        ].join('\n'),
+      );
+      const result = runGsdTools(['phase', 'mvp-mode', '1'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, false);
+      assert.equal(output.roadmap_mode, null);
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  test('#5007: phase.mvp-mode finds Mode on the second of several phase headings', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '## v1.0.0',
+          '',
+          '### Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '',
+          '### Phase 2: Second Phase',
+          '**Goal:** Do the second thing.',
+          '**Mode:** mvp',
+          '',
+          '### Phase 3: Third Phase',
+          '**Goal:** Do the third thing.',
+          '',
+        ].join('\n'),
+      );
+      const result = runGsdTools(['phase', 'mvp-mode', '2'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, true);
+      assert.equal(output.roadmap_mode, 'mvp');
+    } finally {
+      cleanup(projectDir);
+    }
+  });
+
+  // Post-migration-only: buildPhaseHeadingRegex's ANY_BRACKET baseline
+  // deliberately widens getRoadmapModeForPhase to tolerate an arbitrary
+  // `[tag] Phase N:` prefix — the same real-heading grammar searchPhaseInContent
+  // already uses. This is a DESIGNED widening (ADR-4910 Phase 6 design doc §2),
+  // not a behavior-preservation case, so it is asserted only for the AFTER state.
+  test('#5007: phase.mvp-mode tolerates a bracket-tagged heading under the bracket convention', () => {
+    const projectDir = createProject();
+    try {
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'config.json'),
+        JSON.stringify({ phase_id_convention: 'bracket', project_code: 'GSD' }),
+      );
+      fs.writeFileSync(
+        path.join(projectDir, '.planning', 'ROADMAP.md'),
+        [
+          '# Roadmap',
+          '',
+          '### [GSD.01] Phase 1: User Auth',
+          '**Goal:** Users can sign in.',
+          '**Mode:** mvp',
+          '',
+        ].join('\n'),
+      );
+      const result = runGsdTools(['phase', 'mvp-mode', '1'], projectDir);
+      assert.equal(result.status, 0, result.stderr);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.active, true);
+      assert.equal(output.roadmap_mode, 'mvp');
+    } finally {
+      cleanup(projectDir);
+    }
+  });
 });
   });
 }

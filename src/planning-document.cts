@@ -427,7 +427,10 @@ export function parsePlanningDoc(source: string, artifact: string): Result<Plann
   }
 
   if (source.length === 0) {
-    return { ok: true, value: { source, artifact, nodes: [], staged: new Map() } };
+    return {
+      ok: true,
+      value: { source, artifact, nodes: [], staged: new Map() },
+    };
   }
 
   const lines = splitLinesInfo(source);
@@ -454,7 +457,10 @@ export function parsePlanningDoc(source: string, artifact: string): Result<Plann
 
   nodes.sort((a, b) => a.span.start - b.span.start);
 
-  return { ok: true, value: { source, artifact, nodes, staged: new Map() } };
+  return {
+    ok: true,
+    value: { source, artifact, nodes, staged: new Map() },
+  };
 }
 
 /** Find the id of the (first, document-order) `boldField` node whose label
@@ -485,8 +491,46 @@ export function readNode(doc: PlanningDoc, id: NodeId): NodeRead {
 /**
  * Stage a new value for a `boldField` node, returning a NEW `PlanningDoc`
  * (immutable — `doc` itself is never mutated). Refuses an id this doc did
- * not mint, and refuses any node kind other than `boldField` — only the
+ * not mint, and refuses any node kind other than `boldField` — only
  * `valueSpan` is ever writable this phase (ADR-4910 §1).
+ *
+ * #5007 / ADR-4910 Phase 6: a prior amendment here added a `{ allowSeparator:
+ * true }` escape hatch that spliced the caller's value across the FULL
+ * rest-of-line span (`valueSpan.start`..`trailingSpan.end`) to let a value
+ * legitimately containing the grammar's ` — ` trailing-separator token
+ * (`TRAILING_SEPARATOR_RE`) be written without triggering the round-trip
+ * refusal below. That option was REMOVED (still #5007, same phase) after a
+ * failing-first reproduction proved it only avoided the refusal AT WRITE
+ * TIME: the written bytes are correct, but `parseBoldFieldLine` splits on
+ * ` — ` unconditionally and without any escaping/metadata to distinguish
+ * "atomic value containing the token" from "value plus hand-annotation" —
+ * the same input shape either way. So the NEXT fresh `parsePlanningDoc` of
+ * that exact text (not the in-memory `doc` the option's own tests checked)
+ * silently re-truncates the value and demotes the rest to `trailingSpan`,
+ * with `findField`/`readNode` reporting a confident, wrong `ok: true`
+ * result and no error — reproduced live: staging `"Phase — COMPLETE"` this
+ * way, serializing, and re-parsing the output through a fresh
+ * `parsePlanningDoc` read back `"Phase"` via `readNode`, silently losing
+ * ` — COMPLETE`. This is exactly the #4917 finding-2 corruption this
+ * module's round-trip check exists to prevent, just moved one parse cycle
+ * downstream of where the check could still catch it. There is no escaping
+ * convention anywhere in this grammar (`BOLD_FIELD_RE`/`TRAILING_SEPARATOR_
+ * RE` are unconditional, unversioned regexes with no metadata channel), and
+ * `TRAILING_SEPARATOR_RE`'s split is relied on by every other reader of this
+ * seam (`findField`/`readNode`, used today for ROADMAP.md's `Plans`/
+ * `Depends on` fields) — narrowing or version-gating it here would be a
+ * grammar change with its own blast radius, not a local bug fix. Widening
+ * `setFieldValue`'s PUBLIC, shared contract to include a write path that is
+ * only safe for a caller who never reads the field back through this same
+ * module is an attractive nuisance: nothing stops a future `findField`/
+ * `readNode` caller from reaching for it and hitting this exact corruption.
+ * The one real caller (`stateReplaceField`, src/state-document.cts) never
+ * reads STATE.md fields back through `parsePlanningDoc`/`findField` (it uses
+ * `stateExtractField`'s own non-splitting regex instead), so it does its own
+ * local full-rest-of-line splice directly against `content`, using this
+ * module only to LOCATE the field's spans — keeping the dangerous affordance
+ * out of this shared seam's public surface entirely, rather than fixing it
+ * with a narrower version of the same false-safety option.
  */
 export function setFieldValue(doc: PlanningDoc, id: NodeId, value: string): Result<PlanningDoc> {
   const node = doc.nodes.find((n) => n.id === id);
@@ -505,6 +549,7 @@ export function setFieldValue(doc: PlanningDoc, id: NodeId, value: string): Resu
   if (/[\r\n]/.test(value)) {
     return { ok: false, reason: 'field value must not contain a line break (\\r or \\n)' };
   }
+
   // #4917 / ADR-4910 Decision 4: "a value that cannot be represented in the
   // grammar is refused by the writer, with a report." This is a GENERAL
   // round-trip representability check, not a blacklist of forbidden
@@ -534,7 +579,10 @@ export function setFieldValue(doc: PlanningDoc, id: NodeId, value: string): Resu
   }
   const staged = new Map(doc.staged);
   staged.set(id, value);
-  return { ok: true, value: { source: doc.source, artifact: doc.artifact, nodes: doc.nodes, staged } };
+  return {
+    ok: true,
+    value: { source: doc.source, artifact: doc.artifact, nodes: doc.nodes, staged },
+  };
 }
 
 /** True when any node in `doc` failed to parse. */

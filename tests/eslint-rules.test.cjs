@@ -2991,6 +2991,106 @@ describe('no-adhoc-markdown-parsing rule', () => {
       { numRuns: 200, seed: 2880 },
     );
   });
+
+  // ── FIELD-SHAPED-REPLACE-MUTATION: bold-label markdown field (ADR-4910 §6) ──
+  // The real-world paradigm (#4852, the old "Plans:" line mutation) was
+  // already migrated off its hand-rolled regex onto the PlanningDoc
+  // `boldField` seam in an earlier phase, so the fixture below is a
+  // SYNTHESIZED regex source modeling that shape — not copied from any live
+  // production code (none remains).
+
+  test('invalid: roadmapContent.replace(<synthesized bold-label field regex>, ...) is flagged as field-shaped', () => {
+    // Red-first evidence: this exact fixture, run against the unmodified
+    // rule (before isFieldShapedRegex existed), reported ZERO messages —
+    // confirmed via a standalone Linter.verify() probe before wiring in the
+    // detector. Neither the table nor section-collect fingerprint matches
+    // /\*\*Plans:\*\*[^\n]*/ (no escaped pipe, no [\s\S] cross-line body), so
+    // this is a genuine regression pin, not a vacuous always-passes case.
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [],
+      invalid: [
+        {
+          code: String.raw`roadmapContent.replace(/\*\*Plans:\*\*[^\n]*/, 'x');`,
+          filename: 'src/some-module.cts',
+          errors: [{ messageId: 'fieldShapedReplaceMutation' }],
+        },
+      ],
+    });
+  });
+
+  test('valid: roadmapContent.replace(<plain string>, ...) — not a regex at all, does not false-positive', () => {
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [
+        {
+          code: `roadmapContent.replace('Plans:', 'x');`,
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('invalid: roadmapContent.replace(<table-shaped regex>, ...) still reports via the EXISTING table/adhocReplaceMutation detector, not the new field-shaped one', () => {
+    // Confirms the new field-shaped check does not double-report or
+    // otherwise interfere with the existing table-shaped fingerprint: the
+    // table/section-collect check runs FIRST inside
+    // resolveAdhocReplaceMutationMessageId and always wins when it matches,
+    // so a table-shaped pattern is never also reported as field-shaped.
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [],
+      invalid: [
+        {
+          code: String.raw`roadmapContent.replace(/\|[^|]*\|/, 'x');`,
+          filename: 'src/some-module.cts',
+          errors: [{ messageId: 'adhocReplaceMutation' }, { messageId: 'tableRegex' }],
+        },
+      ],
+    });
+  });
+
+  test('valid: someUnrelatedVar.replace(<field-shaped regex>, ...) — receiver name does not match REPLACE_RECEIVER_RE, not flagged', () => {
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [
+        {
+          code: String.raw`someUnrelatedVar.replace(/\*\*Plans:\*\*[^\n]*/, 'x');`,
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  test('valid: allow-adhoc-markdown suppresses a field-shaped .replace() mutation', () => {
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [
+        {
+          code: String.raw`roadmapContent.replace(/\*\*Plans:\*\*[^\n]*/, 'x'); // allow-adhoc-markdown: pre-seam write path`,
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  // Regression pin: getNewRegExpSource joins a TemplateLiteral's static
+  // quasis with an empty string wherever a `${...}` expression is dropped.
+  // A checkbox-toggle regex whose interpolated id sits between two adjacent
+  // OPTIONAL non-capturing bold-wrapper groups — `(?:\*\*)?${id}(?:\*\*)?`,
+  // the real shape in roadmap.cts's plan-checkbox toggle — collapses into
+  // `...(?:\*\*)?(?:\*\*)?...`, and the `:` opening the second group used to
+  // be misread as a markdown field-label colon even though it is pure regex
+  // metasyntax with no matched text. This must NOT be flagged.
+  test('valid: roadmapContent.replace(new RegExp(<template with (?:\\*\\*)? groups around an interpolated id>), ...) does not false-positive on the group-opener colon', () => {
+    ruleTester.run('no-adhoc-markdown-parsing', noAdhocMarkdownParsing, {
+      valid: [
+        {
+          code: "roadmapContent.replace(new RegExp(`(-\\s*\\[) (\\]\\s*(?:\\*\\*)?${planId}(?:\\*\\*)?)`, 'i'), '$1x$2');",
+          filename: 'src/some-module.cts',
+        },
+      ],
+      invalid: [],
+    });
+  });
 });
 
 // ─── no-duplicate-fold-marker ────────────────────────────────────────

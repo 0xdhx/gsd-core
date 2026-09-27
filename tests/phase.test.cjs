@@ -31,6 +31,7 @@ const {
 const PHASE_COMPLETE_TIMEOUT_MS = 60000;
 const { runGsdTools, createTempProject, cleanup } = require('./helpers.cjs');
 const { splitTableRow } = require('../gsd-core/bin/lib/markdown-table.cjs');
+const fc = require('fast-check');
 
 const GSD_TOOLS_BIN = path.resolve(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 
@@ -555,6 +556,87 @@ describe('phase next-decimal command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.next, '03.2', 'checklist-only 3.1 must be counted, not just headings/dirs');
     assert.deepStrictEqual(output.existing, ['03.1'], 'checklist-only decimal listed as existing');
+  });
+
+  // Phase 6 (#5007): scanExistingDecimalPhaseNumbers's ROADMAP-heading regex
+  // migrated off its hand-rolled `#{2,4}\s*Phase\s+` literal. Boundary
+  // coverage at the decimal-count edges the migration must not disturb.
+  test('#5007: decimal count boundary — base.1, base.9, base.10', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '### Phase 7: Base',
+        '**Goal:** Setup',
+        '',
+        '### Phase 7.1: First decimal',
+        '**Goal:** One',
+        '',
+        '### Phase 7.9: Ninth decimal',
+        '**Goal:** Nine',
+        '',
+        '### Phase 7.10: Tenth decimal',
+        '**Goal:** Ten',
+        '',
+      ].join('\n'),
+    );
+    const result = runGsdTools('phase next-decimal 7', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.existing.sort(), ['07.1', '07.10', '07.9'].sort());
+    assert.strictEqual(output.next, '07.11', 'next after the max existing decimal (10) is 11');
+  });
+
+  test('#5007: no-decimal-siblings case — next is base.1', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      ['# Roadmap', '', '### Phase 8: Base only', '**Goal:** Setup', ''].join('\n'),
+    );
+    const result = runGsdTools('phase next-decimal 8', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.deepStrictEqual(output.existing, []);
+    assert.strictEqual(output.next, '08.1');
+  });
+
+  // fast-check property (CLAUDE.md RULESET.TESTS.property-based-testing):
+  // for any generated set of sibling decimal headings under a base phase,
+  // the scan never returns a duplicate or an out-of-range subphase number.
+  test('#5007 property: decimal scan never returns a duplicate or out-of-range subphase for generated siblings', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 1, max: 90 }),
+        fc.uniqueArray(fc.integer({ min: 1, max: 40 }), { minLength: 0, maxLength: 8 }),
+        (base, siblings) => {
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-decimal-fc-'));
+          try {
+            fs.mkdirSync(path.join(dir, '.planning', 'phases'), { recursive: true });
+            const lines = ['# Roadmap', '', `### Phase ${base}: Base`, '**Goal:** Setup', ''];
+            for (const n of siblings) {
+              lines.push(`### Phase ${base}.${n}: Sibling ${n}`, '**Goal:** Work', '');
+            }
+            fs.writeFileSync(path.join(dir, '.planning', 'ROADMAP.md'), lines.join('\n'));
+
+            const result = runGsdTools(`phase next-decimal ${base}`, dir);
+            if (!result.success) return false;
+            const output = JSON.parse(result.output);
+            const existingNums = output.existing.map((tok) => parseInt(tok.split('.')[1], 10));
+
+            // No duplicates.
+            if (new Set(existingNums).size !== existingNums.length) return false;
+            // Every reported number is exactly one of the generated siblings
+            // (no out-of-range / spurious values).
+            const expected = new Set(siblings);
+            if (existingNums.length !== expected.size) return false;
+            return existingNums.every((n) => expected.has(n));
+          } finally {
+            cleanup(dir);
+          }
+        },
+      ),
+      { numRuns: 20 },
+    );
   });
 });
 
@@ -2668,6 +2750,38 @@ describe('phase add allocation vs sibling git worktrees (#3849)', () => {
     );
   });
 
+  // Phase 6 (#5007): collectSiblingWorktreePhaseNums migrated its hand-rolled
+  // header regex onto buildPhaseHeadingScanRegex with the LABEL_ONLY baseline
+  // and no convention argument — a deliberate non-widening, since this is a
+  // "counter" site (phase-id.cts's own LABEL_ONLY docstring guidance). A
+  // bracket-tagged sibling heading must stay unrecognized before AND after
+  // the migration — proving the swap did not (accidentally) start admitting
+  // the ANY_BRACKET grammar the real-heading readers use.
+  test('#5007: a bracket-tagged sibling heading does not corrupt (or widen) the numeric allocation horizon', () => {
+    const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-bracket-'));
+    activeDirs.push(repoDir);
+    initRepo(repoDir);
+    const sha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoDir, encoding: 'utf-8', timeout: GIT_TIMEOUT_MS }).trim();
+    const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-bracket-sib-'));
+    execFileSync('git', ['worktree', 'add', '--detach', worktreeDir, sha], { cwd: repoDir, encoding: 'utf-8', timeout: GIT_TIMEOUT_MS });
+    activeWorktrees.push({ repoDir, worktreeDir });
+    fs.mkdirSync(path.join(worktreeDir, '.planning', 'phases'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktreeDir, '.planning', 'ROADMAP.md'),
+      ['# Roadmap v1.0', '', '### [GSD.01] Phase 441: bracket-tagged sibling phase', '**Goal:** Talk', '', '---', ''].join('\n')
+    );
+
+    const result = runGsdTools('phase add anything', repoDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.phase_number,
+      441,
+      '#5007: the bracket-tagged sibling heading is not counted (LABEL_ONLY baseline, no convention widening) — next is 441, not 442'
+    );
+  });
+
   test('phase add-batch counts bullet-only Phase N rows (#1229 reached the batch path)', () => {
     const tmp = createTempProject();
     try {
@@ -3032,6 +3146,36 @@ describe('phase add-batch command (#2165)', () => {
     assert.ok(roadmap.includes('### Phase 4: Gamma'), 'roadmap should include Phase 4');
   });
 
+  // Phase 6 (#5007): cmdPhaseAddBatch's header-counting regex migrated onto
+  // buildPhaseHeadingScanRegex (LABEL_ONLY, no convention argument) — a
+  // bracket-tagged header must stay invisible to the max-phase scan before
+  // and after, same parity guarantee as cmdPhaseAdd's identical regex.
+  test('#5007: a bracket-tagged header is not counted by add-batch (LABEL_ONLY parity)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      [
+        '# Roadmap v1.0',
+        '',
+        '### Phase 1: Foundation',
+        '**Goal:** Setup',
+        '',
+        '### [GSD.09] Phase 9: Bracket-tagged',
+        '**Goal:** Later work',
+        '',
+        '---',
+        '',
+      ].join('\n')
+    );
+    const result = runGsdTools(['phase', 'add-batch', '--descriptions', '["Next Thing"]'], tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.phases[0].phase_number,
+      2,
+      'bracket-tagged Phase 9 is invisible to the counter (max seen is untagged Phase 1) — next is 2',
+    );
+  });
+
   test('no duplicate phase numbers when multiple add-batch calls are made sequentially', () => {
     // Regression for #2165: parallel `phase add` invocations produced duplicates
     // because each read disk state before any write landed. add-batch serializes
@@ -3264,6 +3408,96 @@ describe('phase insert command', () => {
     assert.ok(roadmap.includes('Phase 05.1: Hotfix (INSERTED)'), 'roadmap should include inserted phase');
   });
 
+  // Phase 6 (#5007): cmdPhaseInsert's targetPattern/anyHeadingPattern/
+  // headerPattern migrated off their hand-rolled `#{2,4}\s*Phase\s+` literals
+  // onto buildPhaseHeadingRegex (tokenize-first) and phaseHeadingPrefixSrcFor
+  // compositions, threading resolvePhaseIdConvention so a bracket-convention
+  // repo's `[CODE.MM] Phase N:` heading is now found by target/header lookup
+  // — matching the widening the design doc / test matrix call for on this
+  // pair, unlike the "counter" sites (collectSiblingWorktreePhaseNums,
+  // cmdPhaseAdd/-Batch) which deliberately stay non-widened.
+  test('#5007: finds and inserts after a bracket-tagged target heading under the bracket convention', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'config.json'),
+      JSON.stringify({ phase_id_convention: 'bracket', project_code: 'GSD' }),
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+### [GSD.01] Phase 1: Foundation
+**Goal:** Setup
+
+### [GSD.01] Phase 2: API
+**Goal:** Build API
+`
+    );
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', 'GSD.01-01-foundation'), { recursive: true });
+
+    const result = runGsdTools('phase insert 1 Fix Critical Bug', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_number, '01.1', 'should be 01.1');
+
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.ok(
+      roadmap.includes('Phase 01.1: Fix Critical Bug (INSERTED)'),
+      'roadmap should include inserted phase',
+    );
+    // The neighboring next-phase-boundary regex (a few lines below
+    // headerPattern, NOT one of the 11 originally-marked sites but the same
+    // defect class) is now also convention-aware, so the inserted entry must
+    // land directly after the target section — not fall through to
+    // end-of-file because `[GSD.01] Phase 2:` was unrecognized as a boundary.
+    assert.ok(
+      roadmap.indexOf('Phase 01.1') < roadmap.indexOf('[GSD.01] Phase 2'),
+      'inserted phase must land between the bracket-tagged target header and the next phase, not at the end of the document',
+    );
+  });
+
+  // Phase 6 (#5007) test matrix: anyHeadingPattern ("does ANY phase heading
+  // exist") boundary cases — zero headings (bullet-style-only doc) and one
+  // heading present.
+  test('#5007: zero headings — a purely bullet-style ROADMAP inserts a bullet, not a section', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] **Phase 1: Foundation**
+- [ ] **Phase 2: API**
+`
+    );
+    const result = runGsdTools('phase insert 1 Fix Critical Bug', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.ok(
+      /- \[ \] \*?\*?Phase 01\.1: Fix Critical Bug\*?\*?/.test(roadmap),
+      'no section headings exist anywhere, so anyHeadingPattern is false and insert takes the bullet-style path',
+    );
+    assert.ok(!roadmap.includes('### Phase 01.1'), 'must not create a section heading in a bullet-only doc');
+  });
+
+  test('#5007: one heading present forces the heading-style path even when a bullet also matches', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] **Phase 1: Foundation**
+
+### Phase 1: Foundation
+**Goal:** Setup
+`
+    );
+    const result = runGsdTools('phase insert 1 Fix Critical Bug', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const roadmap = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+    assert.ok(
+      roadmap.includes('### Phase 01.1: Fix Critical Bug (INSERTED)'),
+      'a real heading exists (anyHeadingPattern is true), so insert takes the heading-style section path, not the bullet path',
+    );
+  });
+
   // #4569: cmdPhaseInsert's decimal allocation must count an existing decimal
   // regardless of WHICH of the three representations (on-disk directory,
   // `### Phase N.M:` heading, `- [ ] Phase N.M:` checklist bullet) carries it —
@@ -3392,6 +3626,64 @@ describe('phase remove command', () => {
 
   afterEach(() => {
     cleanup(tmpDir);
+  });
+
+  // fast-check property (CLAUDE.md RULESET.TESTS.property-based-testing):
+  // the renumber rewrite (phase.cts's migrated `(prefix)(TOKEN)(suffix)`
+  // regex) must round-trip every heading UNRELATED to the removed phase
+  // byte-for-byte — headings before the removed number stay untouched, and
+  // headings after it are decremented by exactly one with prefix/suffix text
+  // preserved verbatim. Re-removing an already-renumbered phase (idempotence)
+  // is exercised by asserting the post-removal sequence is a single
+  // contiguous 1..N-1 run with no gaps and no duplicate numbers.
+  test('#5007 property: renumber round-trips unrelated headings unchanged and decrements the rest exactly once', () => {
+    fc.assert(
+      fc.property(
+        fc.integer({ min: 3, max: 8 }).chain((totalPhases) =>
+          fc.record({
+            totalPhases: fc.constant(totalPhases),
+            target: fc.integer({ min: 1, max: totalPhases }),
+          }),
+        ),
+        ({ totalPhases, target }) => {
+          const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-5007-renumber-fc-'));
+          try {
+            fs.mkdirSync(path.join(dir, '.planning', 'phases'), { recursive: true });
+            const lines = ['# Roadmap', ''];
+            for (let i = 1; i <= totalPhases; i++) {
+              lines.push(`### Phase ${i}: Title${i}`, '**Goal:** Work', '');
+              fs.mkdirSync(path.join(dir, '.planning', 'phases', `${String(i).padStart(2, '0')}-title${i}`), { recursive: true });
+            }
+            fs.writeFileSync(path.join(dir, '.planning', 'ROADMAP.md'), lines.join('\n'));
+
+            const result = runGsdTools(`phase remove ${target} --force`, dir);
+            if (!result.success) return false;
+            const roadmap = fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf-8');
+
+            // Headings before the target are byte-identical, untouched.
+            for (let i = 1; i < target; i++) {
+              if (!roadmap.includes(`### Phase ${i}: Title${i}`)) return false;
+            }
+            // Headings after the target are decremented by exactly one, title
+            // text preserved verbatim.
+            for (let i = target + 1; i <= totalPhases; i++) {
+              if (!roadmap.includes(`### Phase ${i - 1}: Title${i}`)) return false;
+            }
+            // The removed phase's own title is gone entirely.
+            if (roadmap.includes(`Title${target}`)) return false;
+            // No duplicate phase numbers and no gaps: exactly totalPhases-1
+            // contiguous headings numbered 1..totalPhases-1.
+            const nums = [...roadmap.matchAll(/^### Phase (\d+): /gm)].map((m) => parseInt(m[1], 10));
+            const expected = Array.from({ length: totalPhases - 1 }, (_, i) => i + 1);
+            if (new Set(nums).size !== nums.length) return false;
+            return JSON.stringify([...nums].sort((a, b) => a - b)) === JSON.stringify(expected);
+          } finally {
+            cleanup(dir);
+          }
+        },
+      ),
+      { numRuns: 15 },
+    );
   });
 
   test('removes phase directory and renumbers subsequent', () => {
@@ -3914,6 +4206,72 @@ Plans:
         `phase directory ${n} should preserve original phase slug ${n + 1}`,
       );
     }
+  });
+
+  test('#5007: Depends-on field decrement preserves absent field, non-numeric value, and trailing annotation (PlanningDoc seam migration)', () => {
+    const roadmap = [
+      '# Roadmap',
+      '',
+      '## Progress',
+      '',
+      '| Phase | Plans | Status | Notes |',
+      '|---|---:|---|---|',
+      '| 1. Phase 1 | 0/1 | Planned | - |',
+      '| 2. Phase 2 | 0/1 | Planned | - |',
+      '| 3. Phase 3 | 0/1 | Planned | - |',
+      '| 4. Phase 4 | 0/1 | Planned | - |',
+      '',
+      '### Phase 1: First',
+      '**Goal:** Bootstrap',
+      '',
+      '### Phase 2: No dependency field at all',
+      '**Goal:** Independent work',
+      '',
+      '### Phase 3: Non-numeric dependency',
+      '**Goal:** Root-adjacent',
+      '**Depends on:** Nothing',
+      '',
+      '### Phase 4: Dependency with a trailing annotation',
+      '**Goal:** Downstream',
+      '**Depends on:** Phase 3 — blocks release until 3 ships',
+      '',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+    for (const [n, slug] of [[1, '01-first'], [2, '02-no-dep'], [3, '03-non-numeric'], [4, '04-trailing']]) {
+      fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', `${String(n).padStart(2, '0')}-${slug}`), {
+        recursive: true,
+      });
+    }
+
+    const result = runGsdTools('phase remove 1 --force', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const updated = fs.readFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), 'utf-8');
+
+    // Phase 2 (renumbered to 1) never had a "Depends on" field — the seam
+    // migration must not invent one; the section stays exactly as authored
+    // (scoped to just this section, up to the next heading, so a later
+    // section's own "Depends on" field can't leak into the check). Plain
+    // indexOf slicing, not a regex, to stay CRLF-safe.
+    const noDepHeadingStart = updated.indexOf('### Phase 1: No dependency field at all');
+    assert.ok(noDepHeadingStart !== -1, 'renumbered "no dependency" section heading found');
+    const nextHeadingStart = updated.indexOf('### Phase 2:', noDepHeadingStart);
+    assert.ok(nextHeadingStart !== -1, 'next section heading found');
+    const noDepSection = updated.slice(noDepHeadingStart, nextHeadingStart);
+    assert.ok(noDepSection.includes('**Goal:** Independent work'), 'section body preserved');
+    assert.ok(!noDepSection.includes('**Depends on'), 'absent Depends-on field must not be synthesized');
+
+    // Phase 3 (renumbered to 2) had a non-numeric "Nothing" value — no
+    // "Phase N" prefix to decrement, so it must be left byte-for-byte intact.
+    assert.ok(updated.includes('**Depends on:** Nothing'), 'non-numeric Depends-on value is left untouched');
+
+    // Phase 4 (renumbered to 3) depended on Phase 3 (now Phase 2) — the
+    // numeric token decrements but the ` — ` trailing annotation must survive
+    // verbatim (this is exactly the boldField grammar's trailingSpan).
+    assert.ok(
+      updated.includes('**Depends on:** Phase 2 — blocks release until 3 ships'),
+      'trailing annotation after the decremented dependency number must be preserved verbatim',
+    );
   });
 
   test('#2245 F3: Progress-ordinal renumber re-escapes an escaped pipe in the Phase cell', () => {
@@ -4712,6 +5070,84 @@ describe('phase complete command', () => {
     assert.ok(roadmap.includes('completed'), 'completion date should be added');
   });
 
+  // Phase 6 (#5007): phaseDisplayNameFromRoadmap migrated off its hand-rolled
+  // `^#{2,4}\s*Phase\s+...` literal onto buildPhaseHeadingRegex, routed
+  // through tokenizeHeadings first (the owner is anchored with no 'm' flag).
+  // These three cases (single heading, multiple headings, no heading found)
+  // are the design doc's "new — no pinning test found" ask for this site.
+  test('#5007: next-phase display name resolves from a multi-heading ROADMAP (tokenize-first correctness)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] Phase 1: Foundation
+- [ ] Phase 2: API
+- [ ] Phase 3: Polish
+
+### Phase 1: Foundation
+**Goal:** Setup
+**Plans:** 1 plans
+
+### Phase 2: API
+**Goal:** Build API
+
+### Phase 3: Polish
+**Goal:** Finish up
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Current Phase:** 01\n**Current Phase Name:** Foundation\n**Status:** In progress\n**Current Plan:** 01-01\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working on phase 1\n`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-api'), { recursive: true });
+
+    const result = runVerifiedPhaseComplete('phase complete 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(
+      state.includes('**Current Phase Name:** API'),
+      'next-phase display name must resolve to the SECOND heading (API), not the third or a stale value',
+    );
+  });
+
+  test('#5007: next-phase display name falls back to the slug when no ROADMAP heading is found', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] Phase 1: Foundation
+- [ ] Phase 2: Some Follow Up Work
+
+### Phase 1: Foundation
+**Goal:** Setup
+**Plans:** 1 plans
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Current Phase:** 01\n**Current Phase Name:** Foundation\n**Status:** In progress\n**Current Plan:** 01-01\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working on phase 1\n`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-foundation');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-some-follow-up-work'), { recursive: true });
+
+    const result = runVerifiedPhaseComplete('phase complete 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const state = fs.readFileSync(path.join(tmpDir, '.planning', 'STATE.md'), 'utf-8');
+    assert.ok(
+      state.includes('**Current Phase Name:** some follow up work'),
+      'no ### Phase 2 heading exists — falls back to phaseDisplayNameFromSlug (dashes -> spaces)',
+    );
+  });
+
   // #2067: the checkbox regex in cmdPhaseComplete used a greedy `.*` between
   // `]` and `Phase N`, so completing Phase 1 (already checked → idempotent
   // re-run) matched a LATER phase whose description merely mentioned "Phase 1".
@@ -5201,6 +5637,63 @@ describe('phase complete command', () => {
     assert.ok(req.includes('| AUTH-02 | Phase 1 | Complete |'), 'AUTH-02 status should be Complete');
     assert.ok(req.includes('| AUTH-03 | Phase 2 | Pending |'), 'AUTH-03 should remain Pending');
     assert.ok(req.includes('| API-01 | Phase 2 | Pending |'), 'API-01 should remain Pending');
+  });
+
+  // Phase 6 (#5007): phaseSectionMatch (the Requirements-citation section
+  // extractor feeding cmdPhaseComplete) migrated off its hand-rolled
+  // `#{2,4}\s*Phase\s+` literal (which appeared TWICE in this source — the
+  // main capture prefix AND the to-next-heading lookahead — onto one
+  // phaseHeadingPrefixSrcFor composition reused for both. Boundary case: an
+  // EMPTY section body (heading immediately followed by the next heading,
+  // no Requirements field at all) must not error and must simply skip the
+  // citation scan.
+  test('#5007: phase complete tolerates an empty phase section body (heading immediately followed by next heading)', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      `# Roadmap
+
+- [ ] Phase 1: Auth
+### Phase 1: Auth
+### Phase 2: API
+**Goal:** Build API
+**Requirements:** API-01
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'REQUIREMENTS.md'),
+      `# Requirements
+
+## v1 Requirements
+
+### API
+
+- [ ] **API-01**: REST endpoints
+
+## Traceability
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| API-01 | Phase 2 | Pending |
+`
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'STATE.md'),
+      `# State\n\n**Current Phase:** 01\n**Current Phase Name:** Auth\n**Status:** In progress\n**Current Plan:** 01-01\n**Last Activity:** 2025-01-01\n**Last Activity Description:** Working\n`
+    );
+    const p1 = path.join(tmpDir, '.planning', 'phases', '01-auth');
+    fs.mkdirSync(p1, { recursive: true });
+    fs.writeFileSync(path.join(p1, '01-01-PLAN.md'), '# Plan');
+    fs.writeFileSync(path.join(p1, '01-01-SUMMARY.md'), '# Summary');
+    fs.mkdirSync(path.join(tmpDir, '.planning', 'phases', '02-api'), { recursive: true });
+
+    const result = runVerifiedPhaseComplete('phase complete 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const req = fs.readFileSync(path.join(tmpDir, '.planning', 'REQUIREMENTS.md'), 'utf-8');
+    // No AUTH-* requirement exists to cite (phase 1 has no Requirements field
+    // at all) — the empty-body match must not throw and must not touch
+    // Phase 2's own (unrelated) API-01 row.
+    assert.ok(req.includes('| API-01 | Phase 2 | Pending |'), 'unrelated phase 2 requirement must stay untouched');
   });
 
   test('#2245 F1: phase complete traceability write is not fooled by an earlier Out of Scope table', () => {
@@ -8709,6 +9202,36 @@ describe('bug #1229: phase.add must count bullet-only phases to avoid number col
     assert.ok(
       !fs.existsSync(path.join(tmpDir, '.planning', 'phases', '11-new-feature')),
       'phases/11-new-feature must NOT be created (collision guard)',
+    );
+  });
+
+  // Phase 6 (#5007): cmdPhaseAdd's header-counting regex migrated onto
+  // buildPhaseHeadingScanRegex (LABEL_ONLY, no convention argument) — a
+  // bracket-tagged header must stay unrecognized before and after, same as
+  // the collectSiblingWorktreePhaseNums migration above.
+  test('#5007: a bracket-tagged header is not counted (LABEL_ONLY parity)', () => {
+    const roadmap = [
+      '# Roadmap v1.0',
+      '',
+      '### [GSD.01] Phase 5: Bracket-tagged',
+      '',
+      '**Goal:** Setup',
+      '',
+      '### Phase 6: Untagged',
+      '',
+      '**Goal:** Build',
+      '',
+      '---',
+    ].join('\n');
+    fs.writeFileSync(path.join(tmpDir, '.planning', 'ROADMAP.md'), roadmap);
+
+    const result = runGsdTools('phase add New Feature', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    assert.strictEqual(
+      output.phase_number,
+      7,
+      'bracket-tagged Phase 5 is invisible to the counter (max seen is untagged Phase 6) — next is 7',
     );
   });
 
@@ -13955,7 +14478,6 @@ describe('issue #3697: phase complete must warn when the Requirements line under
 // `cmdPhaseComplete` in the same round.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const fc = require('fast-check');
 const {
   analyzeRequirementsLine,
   formatRequirementsLineWarning,
