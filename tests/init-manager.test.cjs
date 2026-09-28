@@ -160,6 +160,26 @@ describe('init manager', () => {
     assert.strictEqual(output.phases[0].disk_status, 'partial');
   });
 
+  // #5060 (ADR-3180 §7.5, row 25): a stray unpaired *-SUMMARY.md that does
+  // not match any plan must not inflate summary_count — the raw summary-list
+  // length previously read the count too high and reported an in-progress
+  // disk_status for a phase with zero matched summaries.
+  test('#5060: a stray unpaired *-GAPCLOSURE-SUMMARY.md does not inflate summary_count or flip disk_status', () => {
+    writeState(tmpDir);
+    writeRoadmap(tmpDir, [
+      { number: '1', name: 'Stray Summary Phase' },
+    ]);
+    const phaseDir = scaffoldPhase(tmpDir, 1, { slug: 'stray-summary-phase', plans: 1 });
+    fs.writeFileSync(path.join(phaseDir, '01-GAPCLOSURE-SUMMARY.md'), '# gap closure summary');
+
+    const result = runGsdTools('init manager', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phases[0].summary_count, 0, 'the unpaired stray summary must not be matched to the plan');
+    assert.strictEqual(output.phases[0].disk_status, 'planned', 'zero matched summaries against one plan is planned, not executed/partial');
+  });
+
   test('dependency satisfaction: deps on complete phases = satisfied', () => {
     writeState(tmpDir);
     writeRoadmap(tmpDir, [
@@ -1827,6 +1847,56 @@ describe('#4764 dep_phases extracts only Phase-prefixed references', () => {
         },
       ),
       { numRuns: 20 },
+    );
+  });
+
+  // #5060 review finding: buildPhaseCompletionProjection's own isPhaseComplete
+  // call used to omit `convention`, while `disk_status`/`status` already came
+  // from `phaseStatus(..., { convention })` — under the bracket convention the
+  // two owners could disagree (the completion read cannot resolve the phase's
+  // own bracket-qualified `-VERIFICATION.md`, so `phase_complete`/
+  // `completion_status` stay stuck below `disk_status`). Threading the same
+  // resolved convention into both calls makes them agree.
+  test('#5060: bracket convention — disk_status, phase_complete and completion_status agree on a passed report', () => {
+    const planning = path.join(tmpDir, '.planning');
+    fs.writeFileSync(
+      path.join(planning, 'config.json'),
+      JSON.stringify({ phase_id_convention: 'bracket', project_code: 'GSD' }),
+    );
+    fs.writeFileSync(
+      path.join(planning, 'ROADMAP.md'),
+      [
+        '# Roadmap',
+        '',
+        '## [GSD.02] v2.0: Verify',
+        '',
+        '- [ ] **[GSD.02] 01: Verify Fix**',
+        '',
+        '### [GSD.02] 01: Verify Fix',
+        '',
+        '**Goal:** Confirm the convention thread',
+        '',
+      ].join('\n'),
+    );
+    writeState(tmpDir);
+    const phaseDir = path.join(planning, 'phases', 'GSD.02-01-verify-fix');
+    fs.mkdirSync(phaseDir, { recursive: true });
+    fs.writeFileSync(path.join(phaseDir, '01-01-PLAN.md'), '# Plan\n');
+    fs.writeFileSync(path.join(phaseDir, '01-01-SUMMARY.md'), '# Summary\n');
+    writePassedVerification(phaseDir, '01');
+
+    const result = runGsdTools('init manager', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+    const output = JSON.parse(result.output);
+    const row = output.phases.find((p) => p.number === '01');
+    assert.ok(row, 'the bracket phase must be reported');
+    assert.deepEqual(
+      {
+        disk_status: row.disk_status,
+        phase_complete: row.phase_complete,
+        completion_status: row.completion_status,
+      },
+      { disk_status: 'complete', phase_complete: true, completion_status: 'complete' },
     );
   });
 });

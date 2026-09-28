@@ -1346,6 +1346,67 @@ describe('init plan-phase zero-padded phase number (bug #2391)', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// init plan-phase — Phase Status Module consumers (#5060)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('init plan-phase — Phase Status Module consumers (#5060)', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = fs.realpathSync(createFixture());
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  test('a stale-passed phase 1 reports phase_status Executed, not Complete', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n### Phase 1: Foo\n**Goal**: do the thing\n'
+    );
+    seedPhase(tmpDir, '01-foo', {
+      '01-01-PLAN.md': '# Plan',
+      '01-01-SUMMARY.md': '# Summary',
+      // Written last: covered_digest never matches, so the report is stale
+      // despite `status: passed`.
+      '01-VERIFICATION.md': [
+        '---',
+        'status: passed',
+        'covered_files:',
+        '  - 01-01-PLAN.md',
+        'covered_digest: sha256-v2:0000000000000000',
+        '---',
+        '# Verification',
+        '',
+      ].join('\n'),
+    });
+
+    const result = runGsdTools('init plan-phase 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_status, 'Executed', 'a stale-passed verification must not report Complete');
+  });
+
+  test('a zero-plan phase with a fresh passed report reports phase_status Complete', () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.planning', 'ROADMAP.md'),
+      '# Roadmap\n\n### Phase 1: Foo\n**Goal**: do the thing\n'
+    );
+    seedPhase(tmpDir, '01-foo', {
+      '01-VERIFICATION.md': '---\nstatus: passed\n---\n# Verification',
+    });
+
+    const result = runGsdTools('init plan-phase 1', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_status, 'Complete', 'a zero-plan phase with a fresh passed report is disk-strict Complete');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // cmdInitTodos (INIT-01)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1543,6 +1604,10 @@ describe('cmdInitMilestoneOp', () => {
     fs.mkdirSync(phase2, { recursive: true });
     fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary');
+    // #5060: a completed phase is now the ladder's own PHASE_STATUS.COMPLETE
+    // (isPhaseComplete's disk-strict verdict), not "has any *-SUMMARY.md" — a
+    // passing verification is required for phase1 to still count here.
+    fs.writeFileSync(path.join(phase1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
     fs.writeFileSync(path.join(phase2, '02-01-PLAN.md'), '# Plan');
 
     const result = runGsdTools('init milestone-op', tmpDir);
@@ -1559,6 +1624,9 @@ describe('cmdInitMilestoneOp', () => {
     fs.mkdirSync(phase1, { recursive: true });
     fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary');
+    // #5060: see "mix of complete and incomplete phases" above — a passing
+    // verification is required for the ladder to report COMPLETE.
+    fs.writeFileSync(path.join(phase1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
 
     const result = runGsdTools('init milestone-op', tmpDir);
     assert.ok(result.success, `Command failed: ${result.error}`);
@@ -1569,10 +1637,33 @@ describe('cmdInitMilestoneOp', () => {
     assert.strictEqual(output.all_phases_complete, true);
   });
 
+  // #5060 review finding: cmdInitMilestoneOp used to count a phase as
+  // completed when its directory had ANY `*-SUMMARY.md` — a counts-only
+  // verdict that bypasses isPhaseComplete. A phase with 2 plans and only 1
+  // matched summary (and no verification at all) must not count as complete.
+  test('#5060: a phase with unsummarized plans and no verification does not count as completed', () => {
+    const phase1 = path.join(tmpDir, '.planning', 'phases', '01-setup');
+    fs.mkdirSync(phase1, { recursive: true });
+    fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan 1');
+    fs.writeFileSync(path.join(phase1, '01-02-PLAN.md'), '# Plan 2');
+    fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary 1');
+
+    const result = runGsdTools('init milestone-op', tmpDir);
+    assert.ok(result.success, `Command failed: ${result.error}`);
+
+    const output = JSON.parse(result.output);
+    assert.strictEqual(output.phase_count, 1);
+    assert.strictEqual(output.completed_phases, 0);
+    assert.strictEqual(output.all_phases_complete, false);
+  });
+
   test('project_code-prefixed phase directories count as completed milestone phases (#1836)', () => {
+    // #5060: a passing verification is required for the ladder to report
+    // COMPLETE (see "mix of complete and incomplete phases" above).
     seedPhase(tmpDir, 'PROJ-01-setup', {
       'PROJ-01-01-PLAN.md': '# Plan',
       'PROJ-01-01-SUMMARY.md': '# Summary',
+      '01-VERIFICATION.md': '---\nstatus: passed\n---\n# Verification\n',
     });
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'config.json'),
@@ -1616,6 +1707,9 @@ describe('cmdInitMilestoneOp', () => {
     fs.mkdirSync(phase1, { recursive: true });
     fs.writeFileSync(path.join(phase1, '01-01-PLAN.md'), '# Plan');
     fs.writeFileSync(path.join(phase1, '01-01-SUMMARY.md'), '# Summary');
+    // #5060: a passing verification is required for the ladder to report
+    // COMPLETE (see "mix of complete and incomplete phases" above).
+    fs.writeFileSync(path.join(phase1, '01-VERIFICATION.md'), '---\nstatus: passed\n---\n# Verification\n');
     fs.writeFileSync(
       path.join(tmpDir, '.planning', 'STATE.md'),
       [
