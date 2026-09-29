@@ -135,6 +135,7 @@ const {
   describeUnresolvedWorkstreamReason,
   findContextMdIn,
   resolvePhaseIdConvention,
+  worktreesOptedOut,
 } = planningWorkspace;
 
 const { extractFrontmatter, frontmatterBlock } = frontmatterMod;
@@ -590,7 +591,8 @@ function detectHasPriorPhases(cwd: string, phaseInfo: Record<string, unknown> | 
  * `false` — strict `=== true`, never coerced, mirrors `detectHasPriorPhases`'s
  * degrade-to-false discipline. `keyPath` is always a fixed literal supplied
  * by this module, never attacker/user input, so a plain bracket traversal
- * carries no prototype hazard here.
+ * carries no prototype hazard here. Only for keys whose default is OFF — a
+ * default-ON key read here silently inverts its unset value (#4977).
  */
 function readConfigJsonBoolean(cwd: string, keyPath: readonly string[]): boolean {
   try {
@@ -869,7 +871,13 @@ function buildSectionManifestField(
     flags,
     phaseNumber,
     hasPriorPhases: detectHasPriorPhases(cwd, phaseInfo),
-    worktreesEnabled: readConfigJsonBoolean(cwd, ['workflow', 'use_worktrees']),
+    // #4977: `workflow.use_worktrees` defaults ON, so this fact must come from
+    // the #3972 owner `query dispatch-isolation` and the isolation guard
+    // already share — not `readConfigJsonBoolean`, whose absent ⇒ false
+    // polarity (right for the opt-in keys around it) excluded the quick
+    // pre-dispatch plan commit while the executor was still dispatched
+    // isolated. The ladder also brings root→workstream inheritance along.
+    worktreesEnabled: !worktreesOptedOut(cwd),
     phaseMvpMode: detectPhaseMvpMode(cwd, phaseNumber),
     needsCodebaseMap: overrides.needsCodebaseMap,
     chunkedMode,

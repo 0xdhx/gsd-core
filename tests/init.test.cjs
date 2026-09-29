@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const processSeam = require('./helpers/process-seam.cjs');
-const { runGsdTools, cleanup, absPlanningPath, TOOLS_PATH, parseFrontmatter, captureFdSync, homeSandboxEnv } = require('./helpers.cjs');
+const { runGsdTools, cleanup, absPlanningPath, TOOLS_PATH, parseFrontmatter, captureFdSync, homeSandboxEnv, TEST_ENV_BASE } = require('./helpers.cjs');
 const { createFixture, seedPhase } = require('./fixtures/index.cjs');
 const { createTempProject, createTempDir } = require('./helpers.cjs');
 const { executionContextRefs } = require('../scripts/command-contract-helpers.cjs');
@@ -3843,11 +3843,15 @@ describe('init section manifest', () => {
    * by a shell — the process seam bypasses the shell entirely. Always runs
    * with GSD_JSON_ERRORS=1 so an error path yields a typed `{ ok, reason, message }`
    * envelope instead of prose, per CONTRIBUTING.md "Prohibited: Raw Text Matching".
+   * TEST_ENV_BASE goes under the caller's env, exactly as runGsdTools layers it:
+   * it blanks every GSD location var, so an ambient GSD_PROJECT / GSD_WORKSTREAM
+   * exported by the developer's shell can never redirect planningDir and change
+   * a scope-dependent fact; a case's own scope is applied after it.
    */
   function runSectionManifestCli(args, cwd, env = {}) {
     const seamResult = processSeam.runNode([TOOLS_PATH, 'query', ...args], {
       cwd,
-      env: { ...process.env, GSD_JSON_ERRORS: '1', ...env },
+      env: { ...process.env, ...TEST_ENV_BASE, GSD_JSON_ERRORS: '1', ...env },
       timeoutMs: GSD_TOOLS_CLI_MODERATE_TIMEOUT_MS,
     });
     let stdout = seamResult.stdout || '';
@@ -4376,12 +4380,21 @@ describe('init section manifest', () => {
 
   // ── D9/D10/D11 (#2992, prod-shape): state:* detector degradation ─────────
   // Drives the REAL cmdInitExecutePhase -> buildSectionManifestField ->
-  // readConfigJsonBoolean/detectPhaseMvpMode seam through the real CLI with a
-  // fixture manifest naming the two config-backed atoms, never a hand-built
-  // InvocationFacts (matrix note: "(prod-shape)" rows must drive the options
-  // path). `seedSinglePhaseProject` writes no `.planning/config.json` and no
-  // `.planning/ROADMAP.md` at all, so D9 (absent config) and D11 (absent
-  // ROADMAP) are the fixture's natural, un-monkeypatched state.
+  // worktreesOptedOut/readConfigJsonBoolean/detectPhaseMvpMode seam through the
+  // real CLI with a fixture manifest naming the config- and ROADMAP-backed
+  // atoms, never a hand-built InvocationFacts (matrix note: "(prod-shape)" rows
+  // must drive the options path). `seedSinglePhaseProject` writes no
+  // `.planning/config.json` and no `.planning/ROADMAP.md` at all, so D9 (absent
+  // config) and D11 (absent ROADMAP) are the fixture's natural,
+  // un-monkeypatched state.
+  //
+  // #4977: `state:worktrees-enabled` is the one DEFAULT-ON atom here — its fact
+  // is the negation of the #3972 `worktreesOptedOut` owner, so an absent config
+  // resolves it ON (the documented `workflow.use_worktrees` default). The
+  // default-off atoms (`state:chunked-mode` via `workflow.plan_chunked`,
+  // `state:phase-mvp-mode` via ROADMAP) must still degrade to false: the
+  // `chunked-section` row is the negative proof that the fix did not flip
+  // `readConfigJsonBoolean`'s absent ⇒ false polarity for every key.
 
   describe('init execute-phase: state:* detector degradation (#2992 rows D9-D11)', () => {
     function writeDetectorManifest(dir) {
@@ -4391,40 +4404,187 @@ describe('init section manifest', () => {
           'execute-phase': [
             { id: 'worktrees-section', when: 'state:worktrees-enabled', read: 'x.md' },
             { id: 'mvp-section', when: 'state:phase-mvp-mode', read: 'y.md' },
+            { id: 'chunked-section', when: 'state:chunked-mode', read: 'z.md' },
           ],
         },
       }));
       return manifestPath;
     }
 
-    test('absentConfigAndAbsentRoadmapDegradeBothStateAtomsToFalse (rows D9/D11)', (t) => {
+    test('absentConfigResolvesWorktreesOnWhileDefaultOffAtomsDegradeToFalse (rows D9/D11, #4977)', (t) => {
       const dir = seedSinglePhaseProject(t, 'gsd-d9-');
       assert.equal(fs.existsSync(path.join(dir, '.planning', 'config.json')), false, 'sanity: no config.json');
       assert.equal(fs.existsSync(path.join(dir, '.planning', 'ROADMAP.md')), false, 'sanity: no ROADMAP.md');
       const manifestPath = writeDetectorManifest(dir);
       const body = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd9-d11');
-      assert.deepStrictEqual(body.section_manifest.excluded, ['worktrees-section', 'mvp-section']);
-      assert.deepStrictEqual(body.section_manifest.included, []);
+      assert.deepStrictEqual(body.section_manifest.included, ['worktrees-section'],
+        'an unset workflow.use_worktrees is the documented default (worktrees on), never off');
+      assert.deepStrictEqual(body.section_manifest.excluded, ['mvp-section', 'chunked-section'],
+        'default-off atoms keep absent ⇒ false (negative proof: the polarity change is scoped to worktrees)');
     });
 
-    test('nonBooleanConfigValueDegradesToFalse (row D10 — strict boolean, string "true" is not true)', (t) => {
+    test('nonBooleanConfigValuesNeverCoerce (row D10 — strict: string "true" is not true, string "false" is not an opt-out)', (t) => {
       const dir = seedSinglePhaseProject(t, 'gsd-d10-');
-      fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify({ workflow: { use_worktrees: 'true' } }));
+      fs.writeFileSync(
+        path.join(dir, '.planning', 'config.json'),
+        JSON.stringify({ workflow: { use_worktrees: 'false', plan_chunked: 'true' } }),
+      );
       const manifestPath = writeDetectorManifest(dir);
       const body = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10');
-      assert.ok(
-        body.section_manifest.excluded.includes('worktrees-section'),
-        'a string "true" config value must never coerce to boolean true',
-      );
+      assert.deepStrictEqual(body.section_manifest.included, ['worktrees-section'],
+        'a string "false" is not the boolean opt-out — worktrees stay on (#3972 strict === false)');
+      assert.deepStrictEqual(body.section_manifest.excluded, ['mvp-section', 'chunked-section'],
+        'a string "true" must never coerce a default-off fact to true');
     });
 
-    test('realBooleanTrueConfigValueIncludesTheSection (independence: the strict check still accepts a real boolean)', (t) => {
+    test('realBooleanConfigValuesAreHonored (independence: the strict checks still accept a real boolean)', (t) => {
       const dir = seedSinglePhaseProject(t, 'gsd-d10b-');
-      fs.writeFileSync(path.join(dir, '.planning', 'config.json'), JSON.stringify({ workflow: { use_worktrees: true } }));
+      const configPath = path.join(dir, '.planning', 'config.json');
       const manifestPath = writeDetectorManifest(dir);
-      const body = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10b');
-      assert.ok(body.section_manifest.included.includes('worktrees-section'));
+
+      fs.writeFileSync(configPath, JSON.stringify({ workflow: { use_worktrees: true, plan_chunked: true } }));
+      const on = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10b-true');
+      assert.deepStrictEqual(on.section_manifest.included, ['worktrees-section', 'chunked-section']);
+
+      fs.writeFileSync(configPath, JSON.stringify({ workflow: { use_worktrees: false, plan_chunked: false } }));
+      const off = parseOkJson(runExecutePhase(['1'], dir, { GSD_SECTION_MANIFEST: manifestPath }), 'd10b-false');
+      assert.deepStrictEqual(off.section_manifest.included, [],
+        'the boolean false is the only opt-out — it must still exclude the worktrees section');
     });
+  });
+
+  // ── #4977: state:worktrees-enabled follows the #3972 opt-out ladder ─────
+  //
+  // With `workflow.use_worktrees` unset, `query dispatch-isolation` (which
+  // consumes the #3972 `worktreesOptedOut` owner: absent ⇒ not opted out)
+  // dispatched the quick executor isolated, while `init.quick`'s
+  // `section_manifest` read the same key through `readConfigJsonBoolean`
+  // (absent ⇒ false) and excluded `worktree-pre-dispatch-commit` — the step
+  // that commits PLAN.md so the isolated executor can read it at its worktree
+  // HEAD. Every case drives the REAL `init.quick` against the SHIPPED manifest
+  // and pins both the expected verdict and its parity with the
+  // `query dispatch-isolation` resolver verdict on the same fixture: the
+  // pre-dispatch commit is included exactly when that resolver reports
+  // `harness-worktree`. This is parity with the resolver, not with the
+  // workflow's final dispatch: the Step 2 shell gate
+  // (references/dispatch-isolation-gate.md) additionally forces `none`
+  // whenever `USE_WORKTREES` reads back as `false`, which a string "false"
+  // also does through `config-get --raw`, while the resolver alone still
+  // reports `harness-worktree` for it (the string-"false" row below).
+
+  describe('init quick: state:worktrees-enabled follows the worktreesOptedOut ladder (#4977)', () => {
+    const PRE_DISPATCH = 'worktree-pre-dispatch-commit';
+    const SCOPES = Object.freeze({
+      workstream: { env: { GSD_WORKSTREAM: 'alpha' }, dir: ['workstreams', 'alpha'] },
+      project: { env: { GSD_PROJECT: 'second-product' }, dir: ['second-product'] },
+    });
+
+    /** `undefined` writes no file; a string is written verbatim (malformed shapes); anything else as JSON. */
+    function writeConfigShape(configPath, shape) {
+      if (shape === undefined) return;
+      fs.writeFileSync(configPath, typeof shape === 'string' ? shape : JSON.stringify(shape));
+    }
+
+    /**
+     * runSectionManifestCli already layers TEST_ENV_BASE (no ambient scope);
+     * this adds a pinned runtime and a sandboxed home, then the case's own
+     * `extra` scope.
+     */
+    function hermeticEnv(dir, extra = {}) {
+      return { GSD_RUNTIME: 'claude', ...homeSandboxEnv(dir), ...extra };
+    }
+
+    /** Which partition of the quick manifest holds the pre-dispatch step — exactly one of them must. */
+    function preDispatchVerdict(dir, env, label) {
+      const body = parseOkJson(runSectionManifestCli(['init.quick', 'x'], dir, env), label);
+      const { included, excluded } = body.section_manifest;
+      const inIncluded = included.includes(PRE_DISPATCH);
+      assert.notEqual(inIncluded, excluded.includes(PRE_DISPATCH), `${label}: ${PRE_DISPATCH} must sit in exactly one partition`);
+      return { verdict: inIncluded ? 'included' : 'excluded', sectionManifest: body.section_manifest };
+    }
+
+    function dispatchIsolation(dir, env, label) {
+      return parseOkJson(runSectionManifestCli(['dispatch-isolation', '--json'], dir, env), label).isolation;
+    }
+
+    test('regression fixture from the issue: unset use_worktrees selects the same sections as explicit true', (t) => {
+      const dir = createFixture({ prefix: 'gsd-4977-issue-', planning: true, git: true });
+      t.after(() => cleanup(dir));
+      writePlanningDocs(dir, { requirements: false });
+      const configPath = path.join(dir, '.planning', 'config.json');
+      const env = hermeticEnv(dir);
+
+      writeConfigShape(configPath, { runtime: 'claude', workflow: { plan_check: true } });
+      const unset = preDispatchVerdict(dir, env, 'unset');
+      assert.equal(dispatchIsolation(dir, env, 'unset-isolation'), 'harness-worktree',
+        'fixture self-check: the unset key dispatches the executor isolated');
+      assert.equal(unset.verdict, 'included', 'an isolated dispatch must be preceded by the pre-dispatch plan commit');
+
+      writeConfigShape(configPath, { runtime: 'claude', workflow: { plan_check: true, use_worktrees: true } });
+      const explicitTrue = preDispatchVerdict(dir, env, 'explicit-true');
+      assert.deepStrictEqual(unset.sectionManifest, explicitTrue.sectionManifest,
+        'unset must resolve identically to the documented default (explicit true)');
+
+      writeConfigShape(configPath, { runtime: 'claude', workflow: { plan_check: true, use_worktrees: false } });
+      assert.equal(preDispatchVerdict(dir, env, 'explicit-false').verdict, 'excluded', 'explicit false is still the opt-out');
+      assert.equal(dispatchIsolation(dir, env, 'explicit-false-isolation'), 'none');
+    });
+
+    const LADDER_CASES = [
+      // Flat project (no workstream/project scope): the root config IS the scoped config.
+      { name: 'missing config.json', root: undefined, expected: 'included' },
+      { name: 'empty config.json', root: '', expected: 'included' },
+      { name: 'whitespace-only config.json', root: '  \n\t\n', expected: 'included' },
+      { name: 'malformed config.json', root: '{ not valid json', expected: 'included' },
+      { name: 'scalar workflow where an object is expected', root: { workflow: 'false' }, expected: 'included' },
+      { name: 'string "false" is not the boolean opt-out', root: { workflow: { use_worktrees: 'false' } }, expected: 'included' },
+      { name: 'numeric 0 is not the boolean opt-out', root: { workflow: { use_worktrees: 0 } }, expected: 'included' },
+      { name: 'null is not the boolean opt-out', root: { workflow: { use_worktrees: null } }, expected: 'included' },
+      {
+        name: 'an inherited __proto__ key never counts as an own opt-out',
+        root: '{"workflow":{"__proto__":{"use_worktrees":false}}}',
+        expected: 'included',
+      },
+      {
+        name: 'duplicate keys resolve last-wins, same as every JSON.parse reader',
+        root: '{"workflow":{"use_worktrees":true,"use_worktrees":false}}',
+        expected: 'excluded',
+      },
+      { name: 'CRLF-formatted explicit false', root: '{\r\n  "workflow": {\r\n    "use_worktrees": false\r\n  }\r\n}\r\n', expected: 'excluded' },
+      // Workstream scope: the scoped key wins; otherwise the root key is inherited under GSD_WORKSTREAM.
+      { name: 'workstream: root false, workstream key absent → inherits the opt-out', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: { model_profile: 'balanced' }, expected: 'excluded' },
+      { name: 'workstream: root false, no workstream config file → inherits the opt-out', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: undefined, expected: 'excluded' },
+      { name: 'workstream: root key absent, workstream false → own opt-out', scope: 'workstream', root: { runtime: 'claude' }, scoped: { workflow: { use_worktrees: false } }, expected: 'excluded' },
+      { name: 'workstream: root false, workstream true → the scoped key wins', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: { workflow: { use_worktrees: true } }, expected: 'included' },
+      { name: 'workstream: root true, workstream key absent → inherits true', scope: 'workstream', root: { workflow: { use_worktrees: true } }, scoped: { model_profile: 'balanced' }, expected: 'included' },
+      { name: 'workstream: key absent at both levels → default on', scope: 'workstream', root: { runtime: 'claude' }, scoped: { runtime: 'claude' }, expected: 'included' },
+      { name: 'workstream: root false, malformed workstream config → falls back to the root view', scope: 'workstream', root: { workflow: { use_worktrees: false } }, scoped: '{ not valid json', expected: 'excluded' },
+      // Project scope: config-get does NOT inherit the root under GSD_PROJECT alone (#3963), and neither may this fact.
+      { name: 'project: root false, project key absent → no root inheritance', scope: 'project', root: { workflow: { use_worktrees: false } }, scoped: { runtime: 'claude' }, expected: 'included' },
+    ];
+
+    for (const c of LADDER_CASES) {
+      test(`${c.name}: ${PRE_DISPATCH} ${c.expected}, in parity with dispatch-isolation`, (t) => {
+        const dir = createTempProject('gsd-4977-ladder-');
+        t.after(() => cleanup(dir));
+        writeConfigShape(path.join(dir, '.planning', 'config.json'), c.root);
+        let scopeEnv = {};
+        if (c.scope) {
+          const scopedDir = path.join(dir, '.planning', ...SCOPES[c.scope].dir);
+          fs.mkdirSync(scopedDir, { recursive: true });
+          writeConfigShape(path.join(scopedDir, 'config.json'), c.scoped);
+          scopeEnv = SCOPES[c.scope].env;
+        }
+        const env = hermeticEnv(dir, scopeEnv);
+
+        assert.equal(preDispatchVerdict(dir, env, c.name).verdict, c.expected);
+        assert.equal(
+          dispatchIsolation(dir, env, `${c.name} (isolation)`),
+          c.expected === 'included' ? 'harness-worktree' : 'none',
+          'the pre-dispatch commit must be selected in parity with the query dispatch-isolation resolver verdict',
+        );
+      });
+    }
   });
 
   // ── #2992 review finding: state:needs-codebase-map wiring (real CLI) ─────
