@@ -11,7 +11,7 @@ const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { runGsdTools, createTempProject, cleanup, delay, homeSandboxEnv } = require('./helpers.cjs');
+const { runGsdTools, createTempDir, createTempProject, cleanup, delay, withIsolatedProcessState, homeSandboxEnv } = require('./helpers.cjs');
 
 // ─── ADR-612 PR-5: phase_id_convention enum validation ──────────────────────
 
@@ -129,6 +129,17 @@ async function ensureConfigReady(tmpDir, attempts = 5) {
   );
 }
 
+/**
+ * Seed `.planning/config.json` with both OS home variables pointed at the
+ * project dir through homeSandboxEnv, so the seed never inherits the
+ * developer's `~/.gsd/defaults.json` (#5016). Every `beforeEach` seed whose
+ * tests assert values a global defaults file can override goes through here,
+ * so the #5016 regression case below guards all of them at once.
+ */
+function seedProjectConfig(dir) {
+  return runGsdTools('config-ensure-section', dir, homeSandboxEnv(dir));
+}
+
 // ─── config-ensure-section ───────────────────────────────────────────────────
 
 describe('config-ensure-section command', () => {
@@ -189,8 +200,7 @@ describe('config-set command', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    // Create initial config
-    runGsdTools('config-ensure-section', tmpDir);
+    seedProjectConfig(tmpDir);
   });
 
   afterEach(() => {
@@ -339,7 +349,7 @@ describe('config-set git.protected_branches (#3552)', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir);
+    seedProjectConfig(tmpDir);
   });
 
   afterEach(() => {
@@ -412,6 +422,34 @@ describe('config-set git.protected_branches (#3552)', () => {
     assert.ok(
       !Object.prototype.hasOwnProperty.call(readConfig(tmpDir).git, 'protected_branches'),
       'git.protected_branches must be absent after unset',
+    );
+  });
+
+  test('#5016: the seed ignores protected_branches in the ambient ~/.gsd/defaults.json', (t) => {
+    const ambientHome = createTempDir('gsd-5016-ambient-home-');
+    t.after(() => cleanup(ambientHome));
+    fs.mkdirSync(path.join(ambientHome, '.gsd'));
+    fs.writeFileSync(
+      path.join(ambientHome, '.gsd', 'defaults.json'),
+      JSON.stringify({ git: { protected_branches: ['release'] } }),
+    );
+    const controlDir = createTempProject();
+    const seededDir = createTempProject();
+    t.after(() => { cleanup(controlDir); cleanup(seededDir); });
+
+    const [control, seeded] = withIsolatedProcessState(() => {
+      Object.assign(process.env, homeSandboxEnv(ambientHome));
+      return [runGsdTools('config-ensure-section', controlDir), seedProjectConfig(seededDir)];
+    });
+
+    // Positive control: an unsandboxed seed must pick up the canary, or the
+    // assertion below would pass without proving anything.
+    assert.ok(control.success, `Control seed failed: ${control.error}`);
+    assert.deepStrictEqual(readConfig(controlDir).git.protected_branches, ['release']);
+    assert.ok(seeded.success, `Seed failed: ${seeded.error}`);
+    assert.ok(
+      !Object.prototype.hasOwnProperty.call(readConfig(seededDir).git, 'protected_branches'),
+      'seedProjectConfig must not inherit protected_branches from the ambient defaults.json',
     );
   });
 });
@@ -1200,7 +1238,7 @@ describe('config-set workflow.skip_discuss', () => {
 
   beforeEach(() => {
     tmpDir = createTempProject();
-    runGsdTools('config-ensure-section', tmpDir);
+    seedProjectConfig(tmpDir);
   });
 
   afterEach(() => {
