@@ -139,7 +139,9 @@ const {
 } = planningWorkspace;
 
 const { extractFrontmatter, frontmatterBlock } = frontmatterMod;
-const { isPhaseComplete, resolveVerificationFile, resolveUatFile } = verificationMod;
+const { isPhaseComplete, resolveVerificationFile, resolveUatFile, VERIFICATION_STATUS, VerificationStatusError } = verificationMod;
+type VerificationStatus = verificationMod.VerificationStatus;
+type VerificationStatusResult = verificationMod.VerificationStatusResult;
 const { evaluateUatPassed } = uatPredicateMod;
 const { resolveLoopHooks } = loopResolverMod;
 const { loadRegistry } = capabilityLoaderMod;
@@ -265,12 +267,18 @@ function listPhasePlanFiles(phaseDir: string): string[] {
 
 interface PhaseCompletionProjection {
   implementation_complete: boolean;
-  verification_status: string;
+  verification_status: VerificationStatus;
   verification_passed: boolean;
   phase_complete: boolean;
   completion_status: string;
   verification_next_action: string;
   verification_next_command: string;
+  /**
+   * #5118: the BARE command the verification owner routes this status to
+   * (`''`, `execute-phase`, `plan-phase`, `verify-work`) — the same table entry
+   * `verification_next_command` is projected from. Additive.
+   */
+  verification_route: string;
   /**
    * #3057 B3: true when readVerificationStatus's internal staleness check could
    * NOT run to completion (an fs / scanPhasePlans / clock failure) — routing
@@ -315,10 +323,16 @@ function buildPhaseCompletionProjection(
   // projection; init passes the phase number it already knows (its phaseDir
   // is unresolved in some branches, where the router could not derive one).
   const completionResult = isPhaseComplete(phaseFullDir, { runtime: slashRuntime, phaseNumber, convention });
-  const verificationStatus = completionResult.value.verification;
+  // #5118: the owner carried an out-of-set report status in its result
+  // (`statusError`, `verification.status: null`); an init bundle is never
+  // assembled over a report the owner refused — the carried error is raised
+  // here and every `init *` surface built on this projection fails with the
+  // error's own reason (the CLI entry seam), printing nothing.
+  if (completionResult.value.statusError) throw completionResult.value.statusError;
+  const verificationStatus = completionResult.value.verification as VerificationStatusResult;
   const projectedVerificationStatus = verificationStatus.status;
   const projectedVerificationAction = verificationStatus.next_action;
-  const verificationPassed = projectedVerificationStatus === 'passed';
+  const verificationPassed = projectedVerificationStatus === VERIFICATION_STATUS.PASSED;
   const phaseComplete = completionResult.value.complete;
 
   return {
@@ -336,6 +350,7 @@ function buildPhaseCompletionProjection(
     })),
     verification_next_action: projectedVerificationAction,
     verification_next_command: verificationStatus.next_command,
+    verification_route: verificationStatus.route,
     // #3057 B3: readVerificationStatus's result carries this flag when its
     // internal staleness check could not run to completion.
     verification_stale_check_indeterminate: 'staleCheckIndeterminate' in verificationStatus
@@ -3859,8 +3874,11 @@ function cmdInitProgress(cwd: string, raw: boolean, options: Record<string, unkn
         nextPhase = phaseInfo;
       }
     }
-  } catch {
-    /* intentionally empty */
+  } catch (err) {
+    // #5118: the owner's out-of-set report error is not a scan failure to
+    // degrade over — the bundle is never assembled over a refused report.
+    if (err instanceof VerificationStatusError) throw err;
+    /* otherwise intentionally empty */
   }
 
   for (const [num, name] of roadmapPhaseNames) {

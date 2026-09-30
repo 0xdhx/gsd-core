@@ -4673,11 +4673,15 @@ describe('phase complete canonical verification gate (#1522)', () => {
     cleanup(tmpDir);
   });
 
-  for (const [name, verificationStatus, expectedMessage] of [
-    ['missing verification report', null, /No verification report found/i],
-    ['unknown verification status', 'unexpected_value', /Unexpected verification status/i],
-    ['human-needed verification status', 'human_needed', /Human verification required/i],
-    ['gap-bearing verification status', 'gaps_found', /Gaps found/i],
+  // #5118: an out-of-set report status (`unexpected_value`) is no longer a
+  // routed "unknown" status that the gate refuses — it is the owner's hard
+  // error, `verification_status_invalid`, naming the value and the accepted
+  // set. Decision B: it still fails before ROADMAP or STATE is touched.
+  for (const [name, verificationStatus, expectedMessage, expectedReason] of [
+    ['missing verification report', null, /No verification report found/i, 'phase_verification_incomplete'],
+    ['unknown verification status', 'unexpected_value', /"unexpected_value".*passed \| gaps_found \| human_needed/i, 'verification_status_invalid'],
+    ['human-needed verification status', 'human_needed', /Human verification required/i, 'phase_verification_incomplete'],
+    ['gap-bearing verification status', 'gaps_found', /Gaps found/i, 'phase_verification_incomplete'],
   ]) {
     test(`blocks ${name} before mutating ROADMAP or STATE`, () => {
       writePhaseCompleteVerificationGateFixture(tmpDir, verificationStatus);
@@ -4690,7 +4694,7 @@ describe('phase complete canonical verification gate (#1522)', () => {
 
       assert.equal(result.success, false, 'phase complete must fail when verification has not passed');
       const errorPayload = JSON.parse(result.error);
-      assert.equal(errorPayload.reason, 'phase_verification_incomplete');
+      assert.equal(errorPayload.reason, expectedReason);
       assert.match(errorPayload.message, expectedMessage);
       assert.equal(fs.readFileSync(roadmapPath, 'utf-8'), beforeRoadmap);
       assert.equal(fs.readFileSync(statePath, 'utf-8'), beforeState);
@@ -9714,16 +9718,16 @@ describe('phase uat-passed — --require-verification flag', () => {
     );
   });
 
-  test('--require-verification with non-canonical complete verification → passed:false', () => {
+  // #5118: `complete` is outside the closed VerificationStatus writer set —
+  // a hard error from the owner (verification_status_invalid), never a
+  // routed "not passed" answer.
+  test('--require-verification with non-canonical complete verification → verification_status_invalid (#5118)', () => {
     writeUatFile(phaseDir, 'feature-UAT.md', makePassingUat());
     writeUatFile(phaseDir, 'feature-VERIFICATION.md', '---\nstatus: complete\n---\n\nLegacy OK.');
-    const result = runGsdTools('phase uat-passed 1 --require-verification', tmpDir);
-    assert.ok(result.success, `Command failed: ${result.error}`);
-
-    const out = JSON.parse(result.output);
-    assert.strictEqual(out.passed, false);
-    assert.ok(out.blockers.some(b => /verification required/i.test(b)),
-      `Expected verification-required blocker, got: ${JSON.stringify(out.blockers)}`);
+    const result = runGsdTools(['--json-errors', 'phase', 'uat-passed', '1', '--require-verification'], tmpDir);
+    assert.strictEqual(result.success, false, `an out-of-set report status must not answer: ${result.output}`);
+    const envelope = JSON.parse(String(result.error).trim().split(/\r?\n/).filter(Boolean).pop());
+    assert.strictEqual(envelope.reason, 'verification_status_invalid');
   });
 });
 
@@ -10360,7 +10364,9 @@ function setupFixture2853(tmpDir, plansSummaryLine, opts = {}) {
   fs.writeFileSync(
     path.join(phaseDir, '10-VERIFICATION.md'),
     incomplete
-      ? '---\nstatus: pending\n---\n# Verification\nPending.\n'
+      // #5118: an incomplete verdict is an in-set, non-passed status —
+      // `pending` is outside the closed set and would be a hard error.
+      ? '---\nstatus: gaps_found\n---\n# Verification\nGaps found.\n'
       : '---\nstatus: passed\nscore: "1/1"\n---\n# Verification\nPassed.\n'
   );
 

@@ -68,7 +68,7 @@ import coreUtilsMod = require('./core-utils.cjs');
 import planDependencyGraphMod = require('./plan-dependency-graph.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verificationMod = require('./verification.cjs');
-const { isPhaseComplete } = verificationMod;
+const { isPhaseComplete, VerificationStatusError } = verificationMod;
 // #4129: the single owner of "count the ROADMAP's milestone Complete rows"
 // (phase-lifecycle.cts) — reused for the completed-phases numerator floor so
 // this scan cannot grow a second ROADMAP parser. Pure computation module (no
@@ -2769,6 +2769,114 @@ function countRoadmapPhaseHeadings(
 }
 
 /**
+ * The phase directories every STATE.md frontmatter rebuild scans, and the
+ * ROADMAP facts derived alongside them — the ONE owner of that set (#5118).
+ *
+ * `phaseDirs` is milestone-scoped (`listMilestonePhaseDirs`), drops retired
+ * phases (#1514) and holds exactly one directory per normalized phase key
+ * (Bug #2445, deterministic tie-break #3355). `buildStateFrontmatter` counts
+ * from it, and `statePhaseDirsToScan` hands it to `phase remove`'s pre-write
+ * validation, so the two cannot disagree about which reports a rebuild reads.
+ */
+function scanStatePhaseDirs(
+  cwd: string,
+  phasesDir: string,
+  phaseConvention: string | null,
+  storedMilestone?: string | null,
+  // `quiet` suppresses ONLY the duplicate-phase-key stderr warning. A pre-write
+  // validation pass that is followed by the real rebuild scan sets it, so the
+  // one command prints the warning once (the rebuild scan owns the warning).
+  options: { quiet?: boolean } = {},
+): {
+  phaseDirs: string[];
+  phaseDirScope: Scope;
+  roadmapScope: string | null;
+  roadmapRaw: string | null;
+  retiredPhaseNums: Set<string>;
+} {
+  // Read the current-milestone ROADMAP scope once: it feeds both the
+  // heading-based phase count and the retired/folded-phase
+  // exclusion (#1514). Computed before the disk scan so retired phases
+  // can be dropped from the dir set too.
+  let roadmapScope: string | null = null;
+  let roadmapRaw: string | null = null;
+  let retiredPhaseNums = new Set<string>();
+  try {
+    const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
+    roadmapRaw = platformReadSync(roadmapPath);
+    if (roadmapRaw !== null) {
+      roadmapScope = extractCurrentMilestone(roadmapRaw, cwd);
+      retiredPhaseNums = extractRetiredPhaseNumbers(roadmapScope, phaseConvention);
+    }
+  } catch { /* fall through: no roadmap scope → no retired exclusion */ }
+
+  // #3017: scope the milestone filter to the STORED milestone when available,
+  // so a state.* write doesn't auto-derive (and mis-bind) to a different
+  // milestone's heading and clobber the stored value + progress counts.
+  // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
+  // CURRENT (stored) milestone" — routed through the canonical owner
+  // instead of a hand-rolled readdirSync + isDirInMilestone filter
+  // (which also never excluded sentinels, unlike the owner).
+  const { value: allMatchingDirs, scope: phaseDirScope } = listMilestonePhaseDirs(phasesDir, {
+    cwd,
+    versionOverride: storedMilestone ?? null,
+    phaseIdConvention: phaseConvention,
+  });
+
+  // Bug #2445: when stale phase dirs from a prior milestone remain in
+  // .planning/phases/ alongside new dirs with the same phase number,
+  // de-duplicate by normalized phase number keeping exactly one dir
+  // per key (deterministic tie-break: see #3355 below). This prevents
+  // double-counting (e.g. two "Phase 1" dirs).
+  const seenPhaseNums = new Map<string, string>(); // normalizedNum -> dirName
+  for (const dir of allMatchingDirs) {
+    // #1514: a retired/folded phase keeps a directory but no completion
+    // artifact; drop it from the disk phase set so it counts toward
+    // neither the denominator nor the numerator (mirrors the heading
+    // exclusion below). Project-code-aware via phaseKeyFromDir.
+    if (retiredPhaseNums.size > 0 && retiredPhaseNums.has(phaseKeyFromDir(dir, phaseConvention))) continue;
+    // #3185: dedup grouping routed through the canonical phaseKeyFromDir
+    // (src/phase-id.cts) instead of a local leading-digits regex that
+    // diverged from extractPhaseToken/phaseKeyFromDir on
+    // project-code-prefixed dirs (whole dirname fell through as the key,
+    // so a `PROJ-05`/`PROJ-05-slug` pair never deduped) and on
+    // multi-segment milestone dirs. Same key surface used two lines
+    // above for the retiredPhaseNums exclusion, so both filters agree.
+    const key = phaseKeyFromDir(dir, phaseConvention);
+    if (!seenPhaseNums.has(key)) {
+      seenPhaseNums.set(key, dir);
+    } else {
+      // #3355: the survivor of a same-milestone collision must be
+      // chosen from repository CONTENT, never from filesystem state.
+      // The pre-#3355 tie-break was `mtimeMs` — a checkout-order
+      // signal — so two byte-identical checkouts of the same commit
+      // that wrote the colliding dirs in a different order picked
+      // different survivors, and progress.total_plans /
+      // completed_plans drifted across clones and CI runs. The
+      // directory NAME is git-tracked content and a total order, so
+      // the lexicographically-first dir wins deterministically. The
+      // collision is still a project-level defect (duplicate phase
+      // number in scope), so it is surfaced on stderr instead of
+      // being silently resolved. The Bug #2445 invariant — exactly
+      // one survivor per normalized phase number — is unchanged.
+      const incumbent = seenPhaseNums.get(key) as string;
+      const survivor = dir < incumbent ? dir : incumbent;
+      seenPhaseNums.set(key, survivor);
+      if (options.quiet !== true) process.stderr.write(
+        `gsd: warning — phase directories '${incumbent}' and '${dir}' both normalize to phase key '${key}' (duplicate phase number in .planning/phases/); keeping '${survivor}' by deterministic lexicographic order. (#3355)\n`
+      );
+    }
+  }
+  return {
+    phaseDirs: [...seenPhaseNums.values()],
+    phaseDirScope,
+    roadmapScope,
+    roadmapRaw,
+    retiredPhaseNums,
+  };
+}
+
+/**
  * Extract machine-readable fields from STATE.md markdown body and build
  * a YAML frontmatter object. Allows hooks and scripts to read state
  * reliably via `state json` instead of fragile regex parsing.
@@ -2892,80 +3000,16 @@ function buildStateFrontmatter(
         // on repeated buildStateFrontmatter invocations within the same process (#1967)
         let cached = _diskScanCache.get(cwd);
         if (!cached) {
-          // Read the current-milestone ROADMAP scope once: it feeds both the
-          // heading-based phase count below and the retired/folded-phase
-          // exclusion (#1514). Computed before the disk scan so retired phases
-          // can be dropped from the dir set too.
-          let roadmapScope: string | null = null;
-          let roadmapRaw: string | null = null;
-          let retiredPhaseNums = new Set<string>();
-          try {
-            const roadmapPath = path.join(planningDir(cwd), 'ROADMAP.md');
-            roadmapRaw = platformReadSync(roadmapPath);
-            if (roadmapRaw !== null) {
-              roadmapScope = extractCurrentMilestone(roadmapRaw, cwd);
-              retiredPhaseNums = extractRetiredPhaseNumbers(roadmapScope, phaseConvention);
-            }
-          } catch { /* fall through: no roadmap scope → no retired exclusion */ }
-
-          // #3017: scope the milestone filter to the STORED milestone when available,
-          // so a state.* write doesn't auto-derive (and mis-bind) to a different
-          // milestone's heading and clobber the stored value + progress counts.
-          // #3185 (ADR-3180 Decision 1): "which phase directories belong to the
-          // CURRENT (stored) milestone" — routed through the canonical owner
-          // instead of a hand-rolled readdirSync + isDirInMilestone filter
-          // (which also never excluded sentinels, unlike the owner).
-          const { value: allMatchingDirs, scope: phaseDirScope } = listMilestonePhaseDirs(phasesDir, {
-            cwd,
-            versionOverride: storedMilestone ?? null,
-            phaseIdConvention: phaseConvention,
-          });
-
-          // Bug #2445: when stale phase dirs from a prior milestone remain in
-          // .planning/phases/ alongside new dirs with the same phase number,
-          // de-duplicate by normalized phase number keeping exactly one dir
-          // per key (deterministic tie-break: see #3355 below). This prevents
-          // double-counting (e.g. two "Phase 1" dirs).
-          const seenPhaseNums = new Map<string, string>(); // normalizedNum -> dirName
-          for (const dir of allMatchingDirs) {
-            // #1514: a retired/folded phase keeps a directory but no completion
-            // artifact; drop it from the disk phase set so it counts toward
-            // neither the denominator nor the numerator (mirrors the heading
-            // exclusion below). Project-code-aware via phaseKeyFromDir.
-            if (retiredPhaseNums.size > 0 && retiredPhaseNums.has(phaseKeyFromDir(dir, phaseConvention))) continue;
-            // #3185: dedup grouping routed through the canonical phaseKeyFromDir
-            // (src/phase-id.cts) instead of a local leading-digits regex that
-            // diverged from extractPhaseToken/phaseKeyFromDir on
-            // project-code-prefixed dirs (whole dirname fell through as the key,
-            // so a `PROJ-05`/`PROJ-05-slug` pair never deduped) and on
-            // multi-segment milestone dirs. Same key surface used two lines
-            // above for the retiredPhaseNums exclusion, so both filters agree.
-            const key = phaseKeyFromDir(dir, phaseConvention);
-            if (!seenPhaseNums.has(key)) {
-              seenPhaseNums.set(key, dir);
-            } else {
-              // #3355: the survivor of a same-milestone collision must be
-              // chosen from repository CONTENT, never from filesystem state.
-              // The pre-#3355 tie-break was `mtimeMs` — a checkout-order
-              // signal — so two byte-identical checkouts of the same commit
-              // that wrote the colliding dirs in a different order picked
-              // different survivors, and progress.total_plans /
-              // completed_plans drifted across clones and CI runs. The
-              // directory NAME is git-tracked content and a total order, so
-              // the lexicographically-first dir wins deterministically. The
-              // collision is still a project-level defect (duplicate phase
-              // number in scope), so it is surfaced on stderr instead of
-              // being silently resolved. The Bug #2445 invariant — exactly
-              // one survivor per normalized phase number — is unchanged.
-              const incumbent = seenPhaseNums.get(key) as string;
-              const survivor = dir < incumbent ? dir : incumbent;
-              seenPhaseNums.set(key, survivor);
-              process.stderr.write(
-                `gsd: warning — phase directories '${incumbent}' and '${dir}' both normalize to phase key '${key}' (duplicate phase number in .planning/phases/); keeping '${survivor}' by deterministic lexicographic order. (#3355)\n`
-              );
-            }
-          }
-          const phaseDirs = [...seenPhaseNums.values()];
+          // The ROADMAP scope + the deduped, milestone-scoped disk phase set:
+          // one owner (scanStatePhaseDirs, above buildStateFrontmatter) so the
+          // #5118 pre-write validation in `phase remove` reads exactly this set.
+          const {
+            phaseDirs,
+            phaseDirScope,
+            roadmapScope,
+            roadmapRaw,
+            retiredPhaseNums,
+          } = scanStatePhaseDirs(cwd, phasesDir, phaseConvention, storedMilestone);
 
           let diskTotalPlans = 0;
           let diskTotalSummaries = 0;
@@ -2987,7 +3031,14 @@ function buildStateFrontmatter(
             // #612: `phaseConvention` threaded so a bracket phase dir resolves
             // and scopes its verification report like its legacy twin — the
             // read-side half of the same thread cmdStateSync gets below.
-            if (isPhaseComplete(phaseDir, { convention: phaseConvention }).value.complete) diskCompletedPhases++;
+            const completion = isPhaseComplete(phaseDir, { convention: phaseConvention });
+            // #5118 (no write before the error): every STATE.md write rebuilds
+            // this frontmatter BEFORE its write, so a report whose `status` is
+            // outside the closed set fails the write here — the owner's error,
+            // rethrown past the best-effort catch below, nothing persisted and
+            // nothing cached.
+            if (completion.value.statusError) throw completion.value.statusError;
+            if (completion.value.complete) diskCompletedPhases++;
           }
           // Count phase headings from ROADMAP — single source of truth for
           // total_phases (#549). #612 round-4: shared with cmdStateSync's
@@ -3187,8 +3238,11 @@ function buildStateFrontmatter(
        * crash `state show`; on failure this simply keeps whatever
        * frontmatter-derived totals/completedPhases/etc. were already set
        * above, a graceful degrade rather than a corrupted write (nothing is
-       * persisted from this block). */
-    } catch { /* intentionally empty */ }
+       * persisted from this block). #5118: an out-of-set verification
+       * report status is not a read failure to degrade over — rethrown. */
+    } catch (err) {
+      if (err instanceof VerificationStatusError) throw err;
+    }
   }
 
   // Derive percent from disk counts when available (ground truth).
@@ -6115,7 +6169,12 @@ function cmdStateSync(cwd: string, options: StateSyncOptions | undefined, raw: b
     // #612: `syncConvention` threaded — the write-side half of
     // buildStateFrontmatter's thread above, so `state sync` and `state json`
     // keep agreeing on completed_phases under the bracket convention.
-    if (isPhaseComplete(dirPath, { convention: syncConvention }).value.complete) diskCompletedPhases++;
+    // #5118 (no write before the error): `state sync` writes STATE.md only
+    // after this scan, so an out-of-set report status fails it here, having
+    // written nothing.
+    const completion = isPhaseComplete(dirPath, { convention: syncConvention });
+    if (completion.value.statusError) throw completion.value.statusError;
+    if (completion.value.complete) diskCompletedPhases++;
 
     // Track the highest phase with incomplete plans (or any plans)
     const phaseMatch = dir.match(new RegExp(`^(${PHASE_NUMBER_TOKEN_SOURCE})`, 'i'));
@@ -6774,6 +6833,36 @@ function cmdStateCompletePhase(cwd: string, raw: boolean, overridePhase?: string
   if (wrote) publishStateContract(cwd);
 }
 
+/**
+ * #5118 (no write before the error): throws `VerificationStatusError` when a
+ * verification report in the set every STATE.md write rebuilds its frontmatter
+ * from carries a `status` outside the closed set — and returns having done
+ * nothing else. It runs `buildStateFrontmatter` itself (the SAME disk scan,
+ * milestone scoping and dedupe every write performs), so a caller that writes
+ * OTHER files before STATE.md (`phase complete`, `phase remove`, `quick
+ * archive`, `validate health --repair`) refuses for exactly the phases the
+ * STATE.md write would refuse for — the set cannot drift from a second copy.
+ */
+function assertVerificationReportsReadable(bodyContent: string, cwd: string): void {
+  buildStateFrontmatter(bodyContent, cwd);
+}
+
+/**
+ * The phase directory NAMES (under `.planning/phases/`) a STATE.md frontmatter
+ * rebuild scans — milestone-scoped, retired phases dropped, one per phase key
+ * (`scanStatePhaseDirs`). For a caller that must validate the reports a rebuild
+ * WILL read after it has removed a directory of its own (`phase remove`): it
+ * takes this set and drops the directory it is about to delete (#5118).
+ */
+function statePhaseDirsToScan(cwd: string): string[] {
+  const phasesDir = planningPaths(cwd).phases;
+  if (!fs.existsSync(phasesDir)) return [];
+  // quiet: this is a pre-write validation pass, always followed by the real
+  // rebuild scan (buildStateFrontmatter), which owns the duplicate-phase-key
+  // stderr warning — so the command prints it once, not twice.
+  return scanStatePhaseDirs(cwd, phasesDir, resolvePhaseIdConvention(cwd), undefined, { quiet: true }).phaseDirs;
+}
+
 export = {
   stateExtractField,
   stateReplaceField,
@@ -6783,6 +6872,8 @@ export = {
   writeStateMd,
   readModifyWriteStateMd,
   syncStateFrontmatter,
+  assertVerificationReportsReadable,
+  statePhaseDirsToScan,
   // #3374: the shared post-sync preservation pass (snapshots + table-driven
   // applyStatePreservation + #2736 re-assert).
   applyPostSyncPreservation,

@@ -39,6 +39,10 @@ const { listMilestonePhaseDirs, getAllArchivedPhaseDirs } = phaseLocator;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import auditMod = require('./audit.cjs');
 const { isAuditItemAcknowledged, deriveUatGapSnapshotValue } = auditMod;
+// #5118: the verification-status owner's report reader and closed enum.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import verificationMod = require('./verification.cjs');
+const { reportStatusOf, isReportContained, VERIFICATION_STATUS } = verificationMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pristineBaseline = require('./pristine-baseline.cjs');
 const { gitExec } = pristineBaseline;
@@ -204,6 +208,12 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     // the reason scopeToPhase has no unfiltered fallback.
     for (const file of selectPhaseUatFiles(files, dir)) {
       const uatFilePath = path.join(phaseDir, file);
+      // #5118 security review (SEC-1): containment BEFORE the read, exactly as
+      // for the VERIFICATION loop below — a `*-UAT.md` / `*-HUMAN-UAT.md`
+      // symlinked outside the phase directory is treated as absent, so the
+      // `### N. <name>` and `expected:` text it points at never reaches the
+      // audit output.
+      if (!isReportContained(phaseDir, uatFilePath)) continue;
       const content = readNormalizedDocument(uatFilePath);
       const { items, headingsSeen } = parseUatItemsWithStats(content);
       const uatFm = extractFrontmatter(content, uatFilePath) as Record<string, unknown>;
@@ -274,14 +284,19 @@ function cmdAuditUat(cwd: string, raw: boolean): void {
     // for the same reason as the UAT loop above.
     for (const file of scopeToPhase(files.filter(f => f.includes('-VERIFICATION') && f.endsWith('.md')), dir)) {
       const verificationFilePath = path.join(phaseDir, file);
+      // #5118 security review (S1): containment BEFORE the read — an escaping
+      // report reads `missing` and never reaches `reportStatusOf`'s message.
+      if (!isReportContained(phaseDir, verificationFilePath)) continue;
       const content = readNormalizedDocument(verificationFilePath);
       const verFm = extractFrontmatter(content, verificationFilePath) as Record<string, unknown>;
-      const status = ((verFm.status as string) || 'unknown').toLowerCase();
+      // #5118: the owner's report reader judges `status` (exact match, no case
+      // folding); an out-of-set value throws VerificationStatusError.
+      const status = reportStatusOf(verFm, verificationFilePath);
       // #3805: same marker, same 'status' snapshot key as scanVerificationGaps,
       // and the same ORDERING — the open-status gate runs FIRST (a marker on
       // a file that would never surface is not a suppressed item), then the
       // acknowledgement suppresses what the gate surfaced.
-      if (status === 'human_needed' || status === 'gaps_found') {
+      if (status === VERIFICATION_STATUS.HUMAN_NEEDED || status === VERIFICATION_STATUS.GAPS_FOUND) {
         if (isAuditItemAcknowledged(verFm, { snapshotKey: 'status', currentValue: status })) {
           acknowledgedFiles++;
           continue;
@@ -4163,12 +4178,12 @@ function parseVerificationGapsItems(content: string): UatItem[] {
  */
 function parseVerificationItems(content: string, status: string, sourcePath?: string): UatItem[] {
   const items: UatItem[] = [];
-  if (status === 'gaps_found') {
+  if (status === VERIFICATION_STATUS.GAPS_FOUND) {
     items.push(...parseHumanVerificationItems(content, sourcePath));
     items.push(...parseVerificationGapsItems(content));
     return items;
   }
-  if (status === 'human_needed') {
+  if (status === VERIFICATION_STATUS.HUMAN_NEEDED) {
     return parseHumanVerificationItems(content, sourcePath);
   }
   return items;

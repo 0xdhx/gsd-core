@@ -493,6 +493,7 @@ function dispatchCapabilityCommand({ command, args, cwd, raw, error, registry, r
     _result = fn({ args, cwd, raw, error });
   } catch (e) {
     if (e instanceof ExitError) throw e; // intentional structured error from the router (honors --json-errors) — propagate untouched
+    if (isVerificationStatusError(e)) throw e; // #5118: translated once, centrally, by main()
     error(
       'capability command "' + command + '" router "' + entry.router + '" in module "' + entry.module + '" threw: ' + (e && e.message ? e.message : String(e)),
       ERROR_REASON.SDK_FAIL_FAST,
@@ -608,6 +609,7 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
     _result = fn({ args, cwd, raw, error });
   } catch (e) {
     if (e instanceof ExitError) throw e;
+    if (isVerificationStatusError(e)) throw e; // #5118: translated once, centrally, by main()
     error(
       'capability command "' + command + '" router "' + entry.router + '" in module "' + entry.module + '" threw: ' + (e && e.message ? e.message : String(e)),
       ERROR_REASON.SDK_FAIL_FAST,
@@ -5129,6 +5131,28 @@ function resolveMainWorktreeCwd(cwd, deps = {}) {
   return worktreeRoot;
 }
 
+// ─── #5118: an out-of-set verification status thrown past a command ─────────
+// ADR-5057 Phase 4 closed the verification-status vocabulary: a
+// *-VERIFICATION.md whose frontmatter `status` is outside `passed |
+// gaps_found | human_needed` is a hard error (verification.cjs's
+// VerificationStatusError). A command that reads one report directly
+// (`verification status`, `phase uat-passed`, `phase complete`) lets it throw;
+// aggregates carry it in their own results and fail themselves. Either way
+// the CLI fails through the owner's `failOnVerificationStatusError` — the
+// error's own message and its own `.reason`; nothing here restates either.
+function isVerificationStatusError(err) {
+  return err instanceof verification.VerificationStatusError;
+}
+
+async function captureTranslatingVerificationStatus(run) {
+  try {
+    return await captureStdoutSyncWrites(run);
+  } catch (err) {
+    if (isVerificationStatusError(err)) verification.failOnVerificationStatusError(err);
+    throw err;
+  }
+}
+
 async function main() {
   let args = process.argv.slice(2);
 
@@ -5394,7 +5418,7 @@ async function main() {
   // themselves JSON text, so resolving late would make every large result a
   // false "output was not JSON" (negative space N8).
   if (pickField) {
-    const captured = await captureStdoutSyncWrites(async () => {
+    const captured = await captureTranslatingVerificationStatus(async () => {
       await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext, preWorktreeRemapCwd);
     });
     const resolved = resolveAtFileOutput(captured);
@@ -5426,7 +5450,7 @@ async function main() {
   // already resolves this, but the normal path wrote @file: to stdout, forcing
   // every workflow to have a bash-specific `if [[ "$INIT" == @file:* ]]` check
   // that breaks on PowerShell and other non-bash shells.
-  const captured = await captureStdoutSyncWrites(async () => {
+  const captured = await captureTranslatingVerificationStatus(async () => {
     await runCommand(command, args, cwd, raw, defaultValue, originalCommand, workstreamContext, preWorktreeRemapCwd);
   });
   fs.writeSync(1, resolveAtFileOutput(captured));

@@ -1,6 +1,8 @@
+Apply response_language to all user-facing prose — narration between tool calls, status updates, progress notes, and findings included; preserve code, paths, and identifiers.
+
 # `code_review_gate` — report the review and record a per-finding disposition
 
-Read and executed by `execute-phase.md`'s `code_review_gate` step, immediately after code review
+Read and executed by the `code_review_gate` step of `execute-phase/steps/verify-phase-goal.md` (the shared verification action `execute-phase.md`'s `verify_phase_goal` runs), immediately after code review
 returns. It consumes `PHASE_DIR` and `PHASE_NUMBER` and derives everything else.
 
 It lives here rather than inline in the parent because `execute-phase.md` sits against two size

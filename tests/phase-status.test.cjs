@@ -209,7 +209,9 @@ describe('phaseStatusFromFacts — the ladder', () => {
   });
 
   test('all summaries with any other non-passing verdict is EXECUTED', () => {
-    for (const v of ['gaps_found', 'missing', 'unknown', 'stale', 'unparseable', 'passed', null]) {
+    // #5118: `unknown` left the closed enum (it is a TypeError now — see V38);
+    // `phase_dir_not_found` joined it.
+    for (const v of ['gaps_found', 'missing', 'phase_dir_not_found', 'stale', 'unparseable', 'passed', null]) {
       assert.equal(
         phaseStatusFromFacts(facts({ planCount: 2, summaryCount: 2, verificationStatus: v })),
         PHASE_STATUS.EXECUTED,
@@ -521,5 +523,51 @@ describe('phaseStatus(phaseDir)', () => {
         assert.notEqual(status, PHASE_STATUS.COMPLETE, 'positive control: stale never projects to COMPLETE');
       }
     }), { numRuns: 60 });
+  });
+});
+
+// ─── #5118 (ADR-5057 :223): the ladder reads the closed VerificationStatus ──
+//
+// Phase 4 closes the verification vocabulary in src/verification.cts, and the
+// Phase Status Module imports it in the same PR. `phaseStatusFromFacts`
+// asserts `verificationStatus` against that enum when non-null — the same
+// fail-where-produced rule as its own `assertPhaseStatus`. Rows V38–V40
+// (#5118, ADR-5057 §3).
+
+describe('#5118: phaseStatusFromFacts accepts exactly the closed VerificationStatus enum', () => {
+  const MEMBERS = ['passed', 'gaps_found', 'human_needed', 'stale', 'missing', 'unparseable', 'phase_dir_not_found'];
+
+  test('V38: an out-of-enum verificationStatus is a TypeError, never a silent EXECUTED', () => {
+    for (const bad of ['verified', 'unknown', 'Passed', 5]) {
+      assert.throws(
+        () => phaseStatusFromFacts(facts({ planCount: 2, summaryCount: 2, verificationStatus: bad })),
+        TypeError,
+        `must refuse ${JSON.stringify(bad)}`,
+      );
+    }
+  });
+
+  test('V39: every enum member and null is accepted; only human_needed changes the rung (boundary: exactly the enum)', () => {
+    for (const v of [...MEMBERS, null]) {
+      const expected = v === 'human_needed' ? PHASE_STATUS.NEEDS_REVIEW : PHASE_STATUS.EXECUTED;
+      assert.equal(
+        phaseStatusFromFacts(facts({ planCount: 2, summaryCount: 2, verificationStatus: v })),
+        expected,
+        `verification ${JSON.stringify(v)}`,
+      );
+    }
+  });
+
+  test('V40: phaseStatus on a report holding an out-of-set status degrades to an unreadable scope, never COMPLETE', (t) => {
+    const tmpDir = createTempProject('phase-status-5118-');
+    t.after(() => cleanup(tmpDir));
+    const dir = path.join(tmpDir, '.planning', 'phases', '07-thing');
+    writePhase(dir, { plans: 1, summaries: 1, verification: 'verified' });
+    let r = null;
+    assert.doesNotThrow(() => {
+      r = phaseStatus(dir);
+    });
+    assert.equal(r.scope, 'unreadable');
+    assert.notEqual(r.value.status, PHASE_STATUS.COMPLETE);
   });
 });
