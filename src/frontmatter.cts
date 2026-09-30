@@ -29,6 +29,7 @@ import { platformReadSync as safeReadFile, platformWriteSync } from './shell-com
 import { textEncodingError } from './validate.cjs';
 import { splitLines } from './text-lines.cjs';
 import { locateFrontmatterFence } from './frontmatter-fence.cjs';
+import { escapeRegex } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import unusableInputMod = require('./unusable-input.cjs');
 const { UNUSABLE_REASON, warnUnusableInput } = unusableInputMod;
@@ -746,6 +747,46 @@ function frontmatterBlock(content: string): { bom: string; block: string; rest: 
     block: content.slice(fence.bom.length, fence.closingFenceEnd),
     rest: content.slice(fence.closingFenceEnd),
   };
+}
+
+/**
+ * One top-level frontmatter key's block as RAW TEXT: the rest of the key's line plus every
+ * following blank or indented line (its nested value), or '' when the closed frontmatter block
+ * has no such key. The block is the one `frontmatterRegion` finds — the same fence every reader
+ * agrees on — and, unlike `rawFrontmatterField`, the text is returned WITHOUT parsing the YAML, so
+ * it survives frontmatter the parser refuses (a `--- x` line inside the block, say). For a caller
+ * that scans a block's text for a citation rather than reading its value — the decision-coverage
+ * gate's `must_haves` / `truths` / `objective` scan (#5139, moved here from the router).
+ * `key` is matched LITERALLY (regex-escaped), so no caller-supplied key can change the pattern.
+ */
+function frontmatterKeyBlockText(content: string, key: string): string {
+  const found = frontmatterRegion(content);
+  if (!found || !found.terminated) return '';
+  const match = found.region.match(new RegExp(`^${escapeRegex(key)}\\s*:(.*)$`, 'm'));
+  if (!match) return '';
+  const startIdx = (match.index || 0) + match[0].length;
+  const rest = found.region.slice(startIdx + 1).split(/\r?\n/);
+  const block = [match[1] || ''];
+  for (const line of rest) {
+    if (line === '' || /^\s/.test(line)) block.push(line);
+    else break;
+  }
+  return block.join('\n');
+}
+
+/**
+ * True when the closed frontmatter block has a line `<key>:<spaces><value><spaces>` — the
+ * multiline test `^<key>:\s*<value>\s*$` over the fence owner's region, key and value matched
+ * LITERALLY (regex-escaped). The pattern is deliberately the one the `check tdd-review-checkpoint`
+ * gate always ran (`^type:\s*tdd\s*$`), so its detection is byte-equivalent to the old regex
+ * whatever the block holds (a duplicate key, a value on the next line, CRLF): the block is raw
+ * text, never parsed, so it classifies even when the YAML parser refuses the frontmatter. An
+ * unterminated or absent block is false. #5139.
+ */
+function frontmatterKeyHasValue(content: string, key: string, value: string): boolean {
+  const found = frontmatterRegion(content);
+  if (!found || !found.terminated) return false;
+  return new RegExp(`^${escapeRegex(key)}:\\s*${escapeRegex(value)}\\s*$`, 'm').test(found.region);
 }
 
 function extractFrontmatter(content: string, sourcePath?: string): Frontmatter {
@@ -1693,6 +1734,16 @@ export = {
   // branch on an entry's `status:`/`resolution:` rather than print it. Off the
   // same parse path as `extractFrontmatter`, minus only the display flattening.
   frontmatterListEntries,
+  // #5139: one top-level key's value VERBATIM (before display flattening), off the same guarded
+  // parse path — the decision-coverage gates read `must_haves`/`truths`/`objective` and the
+  // SUMMARY `files_modified` list through it instead of a hand-rolled `^key:` scan / regex.
+  rawFrontmatterField,
+  // #5139: one key's block as unparsed text, for a citation scan that must survive frontmatter
+  // the YAML parser refuses.
+  frontmatterKeyBlockText,
+  // #5139: `^<key>:\s*<value>\s*$` over the fence owner's region, both escaped — the tdd gate's
+  // `type: tdd` test, equivalent to the regex it replaced.
+  frontmatterKeyHasValue,
   // #3850: the display rendering itself, so a caller deriving a name from those
   // objects produces the byte-identical string `extractFrontmatter` would have.
   flattenObjectListItem,

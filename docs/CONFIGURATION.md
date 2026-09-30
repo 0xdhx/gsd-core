@@ -1390,7 +1390,7 @@ plans and shipped code (issue #2492).
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `workflow.context_coverage_gate` | boolean | `true` | Toggle for both decision-coverage gates. When `false`, both the plan-phase translation gate and the verify-phase validation gate skip silently. |
+| `workflow.context_coverage_gate` | boolean | `true` | Toggle for both decision-coverage gates. When `false`, both the plan-phase translation gate and the verify-phase validation gate skip silently. Only the nested key under `workflow` is read, exactly as `config-get workflow.context_coverage_gate` answers; a top-level `context_coverage_gate` is ignored (the config loader warns about it) and the gates stay enabled. The gates read the active workstream's `config.json` when `GSD_WORKSTREAM` is set. |
 
 ### What the gates do
 

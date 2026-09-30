@@ -355,6 +355,25 @@ describe('verify schema-drift CLI command', () => {
     const output = JSON.parse(result.output);
     assert.strictEqual(output.blocking, false);
   });
+
+  test('an invalid GSD_WORKSTREAM is a non-blocking payload, exit 0 (planningDir throws)', () => {
+    // The CLI rejects a bad workstream before any verb runs; call the command directly.
+    const { spawnSync } = require('node:child_process');
+    const verifyPath = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'verify.cjs');
+    const script = `require(${JSON.stringify(verifyPath)}).cmdVerifySchemaDrift(${JSON.stringify(tmpDir)}, '01-setup', false, false);`;
+    const r = spawnSync(process.execPath, ['-e', script], {
+      cwd: tmpDir,
+      encoding: 'utf-8',
+      timeout: require('./helpers/timeouts.cjs').PROBE_TIMEOUT_MS,
+      env: { ...process.env, GSD_WORKSTREAM: '../x' },
+    });
+    assert.strictEqual(r.status, 0, r.stderr);
+    const output = JSON.parse(r.stdout);
+    assert.strictEqual(output.block, false);
+    assert.strictEqual(output.drift_detected, false);
+    assert.strictEqual(output.blocking, false);
+    assert.match(output.message, /^exception: .*GSD_WORKSTREAM contains invalid path characters/);
+  });
 });
 
 describe('#1571 regression: verify schema-drift resolves the phase by token, not substring', () => {

@@ -66,6 +66,7 @@ const { buildPlanningSnapshot } = planningSnapshotMod;
 import onboardProjectionMod = require('./onboard-projection.cjs');
 const { REQUIRED_CODEBASE_MAP_FILES } = onboardProjectionMod;
 import { realClock } from './clock.cjs';
+import { readWorkflowConfigValue } from './gate-config.cjs';
 
 const { planningDir, planningRoot, withPlanningLock } = planningWorkspace;
 const { defaultPhaseCleanCommitTimesMs } = verificationMod;
@@ -2189,6 +2190,25 @@ function cmdVerifyContextDrift(cwd: string, phaseArg: string | undefined, raw: b
     return;
   }
 
+  // Non-blocking contract: a throw anywhere (an invalid GSD_WORKSTREAM, an unreadable file)
+  // yields the skip payload, exactly as cmdVerifyCodebaseDrift does.
+  try {
+    runVerifyContextDrift(cwd, phaseArg, raw);
+  } catch (err) {
+    output(
+      {
+        block: false,
+        skipped: true,
+        reason: 'exception: ' + (err instanceof Error ? err.message : String(err)),
+        stale_artifacts: [],
+        message: '',
+      },
+      raw,
+    );
+  }
+}
+
+function runVerifyContextDrift(cwd: string, phaseArg: string, raw: boolean): void {
   const pDir = planningDir(cwd);
   const phasesDir = path.join(pDir, 'phases');
   const emitSkip = (reason: string, message = ''): void => {
@@ -2248,14 +2268,9 @@ function cmdVerifyContextDrift(cwd: string, phaseArg: string | undefined, raw: b
   const driftEntries: ContextDriftEntry[] = upstreamFiles.map((f) => ({ file: f, effectiveMs: effectiveTimeMs(f) }));
   const staleArtifacts = computeContextDrift(contextMs, driftEntries);
 
-  let wf: Record<string, unknown> | undefined;
-  try {
-    const rawCfg = JSON.parse(fs.readFileSync(path.join(pDir, 'config.json'), 'utf-8')) as Record<string, unknown>;
-    wf = rawCfg['workflow'] as Record<string, unknown> | undefined;
-  } catch {
-    wf = undefined;
-  }
-  const action = wf?.context_drift_action === 'block' ? 'block' : 'warn';
+  // Through the quiet gate-config reader (workstream config first, then the project root's; a
+  // missing or malformed config is "key absent", nothing is printed).
+  const action = readWorkflowConfigValue(cwd, 'workflow.context_drift_action').value === 'block' ? 'block' : 'warn';
   const block = staleArtifacts.length > 0 && action === 'block';
   const message = staleArtifacts.length > 0 ? buildContextDriftMessage(staleArtifacts, phaseArg) : '';
 
@@ -2282,6 +2297,28 @@ function cmdVerifySchemaDrift(
     return;
   }
 
+  // Non-blocking contract: a throw anywhere yields a non-blocking payload, never a crash.
+  try {
+    runVerifySchemaDrift(cwd, phaseArg, skipFlag, raw);
+  } catch (err) {
+    output(
+      {
+        block: false,
+        drift_detected: false,
+        blocking: false,
+        message: 'exception: ' + (err instanceof Error ? err.message : String(err)),
+      },
+      raw,
+    );
+  }
+}
+
+function runVerifySchemaDrift(
+  cwd: string,
+  phaseArg: string,
+  skipFlag: boolean | undefined,
+  raw: boolean,
+): void {
   const pDir = planningDir(cwd);
   const phasesDir = path.join(pDir, 'phases');
   if (!fs.existsSync(phasesDir)) {
@@ -2662,22 +2699,15 @@ function cmdVerifyCodebaseDrift(cwd: string, raw: boolean): void {
     }
 
     // loadConfig() returns a flattened object — there is no nested `workflow`
-    // key. Read the raw config.json directly to access workflow-scoped keys,
-    // matching the pattern used in check-command-router.cts:readWorkflowConfig.
-    let wf: Record<string, unknown> | undefined;
-    try {
-      const rawCfg = JSON.parse(
-        fs.readFileSync(path.join(planningDir(cwd), 'config.json'), 'utf-8'),
-      ) as Record<string, unknown>;
-      wf = rawCfg['workflow'] as Record<string, unknown> | undefined;
-    } catch {
-      wf = undefined;
-    }
+    // key. Read the workflow-scoped keys through the quiet gate-config reader (the dot-path
+    // resolver `config-get workflow.*` shares: workstream config first, then the project
+    // root's; a missing or malformed config is "key absent", nothing is printed).
+    const configuredThreshold = readWorkflowConfigValue(cwd, 'workflow.drift_threshold').value;
     const threshold =
-      Number.isInteger(wf?.drift_threshold) && (wf?.drift_threshold as number) >= 1
-        ? (wf?.drift_threshold as number)
+      Number.isInteger(configuredThreshold) && (configuredThreshold as number) >= 1
+        ? (configuredThreshold as number)
         : 3;
-    const action = wf?.drift_action === 'auto-remap' ? 'auto-remap' : 'warn';
+    const action = readWorkflowConfigValue(cwd, 'workflow.drift_action').value === 'auto-remap' ? 'auto-remap' : 'warn';
 
     const driftResult = (drift['detectDrift'] as (opts: unknown) => Record<string, unknown>)({
       addedFiles: added,

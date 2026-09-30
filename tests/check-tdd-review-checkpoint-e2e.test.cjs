@@ -400,7 +400,8 @@ describe('check tdd.review-checkpoint — CLI subprocess E2E with git fixtures',
   });
 
   test('[crlf] type:tdd plan with CRLF endings is still detected (#2449)', () => {
-    // src/check-command-router.cts:751 used /^---\n...\n---/ which can't match
+    // The pre-#2449 router detection (a `/^---\n...\n---/` frontmatter regex, now
+    // `frontmatterKeyHasValue` in src/frontmatter.cts over the fence owner's block) could not match
     // CRLF frontmatter delimiters, so a CRLF PLAN.md was silently classified
     // as "no type:tdd plans" — output indistinguishable from a phase that
     // genuinely contains no TDD plans. The advisory gate then short-circuited

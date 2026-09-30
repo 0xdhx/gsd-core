@@ -132,6 +132,25 @@ export default tseslint.config(
       'gsd-core/bin/lib/planning-document.cjs',
       // #2401: tsc-generated runtime artifact — lint the src/verify-command-grounding.cts source.
       'gsd-core/bin/lib/verify-command-grounding.cjs',
+      // #5139 (epic #5056 Phase 6): tsc-generated runtime artifacts of the gate modules — lint the
+      // src/gate-*.cts, src/decision-coverage-support.cts and src/check-auto-mode.cts sources.
+      'gsd-core/bin/lib/check-auto-mode.cjs',
+      'gsd-core/bin/lib/decision-coverage-support.cjs',
+      'gsd-core/bin/lib/gate-args.cjs',
+      'gsd-core/bin/lib/gate-config.cjs',
+      'gsd-core/bin/lib/gate-decision-coverage-plan.cjs',
+      'gsd-core/bin/lib/gate-decision-coverage-verify.cjs',
+      'gsd-core/bin/lib/gate-api-coverage-verify-pre.cjs',
+      'gsd-core/bin/lib/gate-gap-analysis-plan-post.cjs',
+      'gsd-core/bin/lib/gate-predicate.cjs',
+      'gsd-core/bin/lib/gate-phase-context.cjs',
+      'gsd-core/bin/lib/gate-tdd-red-evidence.cjs',
+      'gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs',
+      'gsd-core/bin/lib/gate-ui-plan.cjs',
+      'gsd-core/bin/lib/gate-ui-safety.cjs',
+      'gsd-core/bin/lib/gate-verdict.cjs',
+      'gsd-core/bin/lib/gate-verify-command-paths.cjs',
+      'gsd-core/bin/lib/gate-verify-failure-directions.cjs',
       'gsd-core/bin/lib/cli-exit.cjs',
       'gsd-core/bin/lib/external-job.cjs',
       'gsd-core/bin/lib/edge-probe.cjs',
@@ -894,6 +913,63 @@ export default tseslint.config(
         args: 'none',
         varsIgnorePattern: '^_',
         caughtErrors: 'none',
+      }],
+    },
+  },
+
+  // ── #5139 (epic #5056, ADR-5057 §4 first bullet): a gate returns a GateVerdict ─────────────
+  // A gate module decides and RETURNS; only the command router formats output. So a gate module
+  // (`src/gate-*.cts`), the decision-coverage support module and the auto-mode state reader may
+  // not import any io module (`./io.cjs` by name, or any `**/io.cjs` / `**/io` path: `output()` /
+  // `error()` / `ERROR_REASON`), and perform no direct console / stdout / stderr write
+  // (`no-console`; `process.stdout` / `process.stderr` are not touched). `@typescript-eslint`'s
+  // import variant is used because it also covers the `import x = require('./io.cjs')` form this
+  // repo's .cts sources use. tests/check-router-gate-boundaries.test.cjs replays this exact
+  // setting over violating snippets and over the real files.
+  {
+    files: ['src/gate-*.cts', 'src/decision-coverage-support.cts', 'src/check-auto-mode.cts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [{
+          name: './io.cjs',
+          message: 'A gate module returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts); only the command router imports ./io.cjs and formats output (#5139).',
+        }],
+        patterns: [{
+          group: ['**/io.cjs', '**/io'],
+          message: 'A gate module imports no io module: it returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts) and only the command router formats output (#5139).',
+        }],
+      }],
+      'no-console': 'error',
+      'no-restricted-properties': ['error',
+        { object: 'process', property: 'stdout', message: 'A gate module performs no direct stdout write: it returns a GateVerdict and only the command router formats output (#5139).' },
+        { object: 'process', property: 'stderr', message: 'A gate module performs no direct stderr write: it returns a GateVerdict / GateUsageFailure and only the command router formats output (#5139).' },
+      ],
+    },
+  },
+
+  // The router parses argv and formats; it reads no file and runs no subprocess (design D6.1). Every
+  // gate that needs either lives in a gate module. The named shell-projection imports are the
+  // exec/git/file-read helpers; the module's pure path helpers stay importable.
+  {
+    files: ['src/check-command-router.cts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [
+          // Every spelling: the bare and `node:` names, and the promise API.
+          ...['fs', 'node:fs', 'fs/promises', 'node:fs/promises'].map((name) => ({
+            name,
+            message: 'The command router parses argv and formats; a gate module reads files (#5139).',
+          })),
+          ...['child_process', 'node:child_process'].map((name) => ({
+            name,
+            message: 'The command router runs no subprocess; a gate module does, through the bounded exec seam (#5139).',
+          })),
+          {
+            name: './shell-command-projection.cjs',
+            importNames: ['execTool', 'execGit', 'platformReadSync', 'platformWriteSync'],
+            message: 'The command router runs no subprocess and reads no file; a gate module does (#5139).',
+          },
+        ],
       }],
     },
   },

@@ -5,7 +5,7 @@
  *
  * These tests capture CURRENT behavior of the two gate-adjacent functions
  * being migrated onto the markdown-sectionizer seam:
- *   1. `extractPlanDesignatedSections` (check-command-router.cts)
+ *   1. `extractPlanDesignatedSections` (decision-coverage-support.cts; re-exported by check-command-router.cts)
  *   2. `parseRequirements` checkbox-bullet path (gap-checker.cts)
  *
  * They are written BEFORE the migration (refactor pattern: tests go green

@@ -1,0 +1,11 @@
+{
+  "argv": [
+    "query",
+    "check.ui-safety-gate",
+    "../../../etc"
+  ],
+  "fixture": "ui",
+  "stdout": "{\n  \"frontend\": false,\n  \"hasUiFiles\": true,\n  \"hasUiSpec\": false,\n  \"block\": false,\n  \"phaseLookupFailed\": true\n}",
+  "stderr": "",
+  "exitCode": 0
+}
