@@ -38,3 +38,8 @@ export function partitionPredicateArgs(args: readonly string[]): { flags: Record
   }
   return { flags, positionals };
 }
+
+/** Parse `--flag value` pairs from an args array into a map (last write wins). */
+export function parsePredicateFlags(args: readonly string[]): Record<string, string> {
+  return partitionPredicateArgs(args).flags;
+}

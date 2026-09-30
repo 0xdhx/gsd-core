@@ -34,6 +34,16 @@ function w(dir, rel, content) {
   fs.writeFileSync(p, content);
 }
 
+/** Replace every spelling of the temp project dir (as created, and its realpath) with one token, deeply. */
+function normalizeTmp(value, dir, real) {
+  if (typeof value === 'string') return value.split(real).join('<tmp>').split(dir).join('<tmp>');
+  if (Array.isArray(value)) return value.map((v) => normalizeTmp(v, dir, real));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalizeTmp(v, dir, real)]));
+  }
+  return value;
+}
+
 function planWith(commands) {
   return ['# Plan', '']
     .concat(
@@ -275,9 +285,12 @@ describe('U7 evaluateVerifyCommandPaths', () => {
       assert.equal(isGateUsageFailure(result), false);
       assert.equal(result.outcome, c.outcome);
       assert.equal(result.block, c.block);
-      const expected = c.expected(dir, real);
-      assert.deepStrictEqual(result.payload, expected);
-      assert.equal(JSON.stringify(result.payload), JSON.stringify(expected), 'payload key order is part of the contract');
+      // The temp dir may be spelled through a symlink (macOS /var -> /private/var) on either side;
+      // both sides go through one normaliser so the comparison is independent of the TMPDIR form.
+      const expected = normalizeTmp(c.expected(dir, real), dir, real);
+      const actual = normalizeTmp(result.payload, dir, real);
+      assert.deepStrictEqual(actual, expected);
+      assert.equal(JSON.stringify(actual), JSON.stringify(expected), 'payload key order is part of the contract');
     });
   }
 });

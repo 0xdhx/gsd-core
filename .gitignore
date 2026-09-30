@@ -286,6 +286,9 @@ build/
 /gsd-core/bin/lib/gate-config.cjs
 /gsd-core/bin/lib/gate-decision-coverage-plan.cjs
 /gsd-core/bin/lib/gate-decision-coverage-verify.cjs
+/gsd-core/bin/lib/gate-api-coverage-verify-pre.cjs
+/gsd-core/bin/lib/gate-gap-analysis-plan-post.cjs
+/gsd-core/bin/lib/gate-predicate.cjs
 /gsd-core/bin/lib/gate-phase-context.cjs
 /gsd-core/bin/lib/gate-tdd-red-evidence.cjs
 /gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs

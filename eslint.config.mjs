@@ -140,6 +140,9 @@ export default tseslint.config(
       'gsd-core/bin/lib/gate-config.cjs',
       'gsd-core/bin/lib/gate-decision-coverage-plan.cjs',
       'gsd-core/bin/lib/gate-decision-coverage-verify.cjs',
+      'gsd-core/bin/lib/gate-api-coverage-verify-pre.cjs',
+      'gsd-core/bin/lib/gate-gap-analysis-plan-post.cjs',
+      'gsd-core/bin/lib/gate-predicate.cjs',
       'gsd-core/bin/lib/gate-phase-context.cjs',
       'gsd-core/bin/lib/gate-tdd-red-evidence.cjs',
       'gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs',
@@ -929,6 +932,26 @@ export default tseslint.config(
           name: './io.cjs',
           message: 'A gate module returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts); only the command router imports ./io.cjs and formats output (#5139).',
         }],
+      }],
+    },
+  },
+
+  // The router parses argv and formats; it reads no file and runs no subprocess (design D6.1). Every
+  // gate that needs either lives in a gate module. The named shell-projection imports are the
+  // exec/git/file-read helpers; the module's pure path helpers stay importable.
+  {
+    files: ['src/check-command-router.cts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [
+          { name: 'node:fs', message: 'The command router parses argv and formats; a gate module reads files (#5139).' },
+          { name: 'node:child_process', message: 'The command router runs no subprocess; a gate module does, through the bounded exec seam (#5139).' },
+          {
+            name: './shell-command-projection.cjs',
+            importNames: ['execTool', 'execGit', 'platformReadSync', 'platformWriteSync'],
+            message: 'The command router runs no subprocess and reads no file; a gate module does (#5139).',
+          },
+        ],
       }],
     },
   },

@@ -77,6 +77,8 @@ module.exports = {
   "tests/features-index-gate.test.cjs",
   "tests/frontmatter.unit.test.cjs",
   "tests/gap-checker.property.test.cjs",
+  "tests/gate-ui-plan.unit.test.cjs",
+  "tests/gate-verify-command-paths.unit.test.cjs",
   "tests/gemini-runtime-removed.test.cjs",
   "tests/gen-context-index.test.cjs",
   "tests/gen-section-manifest.test.cjs",
