@@ -30,7 +30,282 @@ const {
   agentScalarNeedsDoubleQuoting,
   escapeDoubleQuotedScalar,
   propagateCommentChannel,
+  frontmatterKeyHasValue,
+  frontmatterKeyBlockText,
+  frontmatterRegion,
+  rawFrontmatterField,
 } = require('../gsd-core/bin/lib/frontmatter.cjs');
+
+// ─── frontmatterKeyHasValue / frontmatterKeyBlockText / rawFrontmatterField (#5139) ───────────────
+//
+// `frontmatterKeyHasValue(content, key, value)` is the `check tdd-review-checkpoint` gate's
+// `type: tdd` test. It must be byte-equivalent to the regex the gate always ran —
+// `^type:\s*tdd\s*$` (multiline) over the fence owner's CLOSED frontmatter region — including its
+// three pathological forms:
+//   - a duplicate `type:` key with `tdd` second -> matches
+//   - the value on the NEXT line (`\s*` spans it) -> matches
+//   - `type : tdd` (space before the colon)       -> does NOT match
+// and it must match the key and value LITERALLY: no caller-supplied key or value can change the
+// pattern (a regex metacharacter is data, never syntax). Every assertion below is an exact value.
+describe('frontmatterKeyHasValue / frontmatterKeyBlockText / rawFrontmatterField (#5139)', () => {
+  /** The pre-#5139 router test, verbatim: the regex over the fence owner's closed region. */
+  function oldTypeTdd(content) {
+    const found = frontmatterRegion(content);
+    return Boolean(found?.terminated && /^type:\s*tdd\s*$/m.test(found.region));
+  }
+
+  const FM = (inner) => `---\n${inner}\n---\n\n# Plan\n`;
+
+  const FIXTURES = [
+    ['plain', FM('phase: 1\ntype: tdd\nslug: x'), true],
+    ['trailing spaces', FM('type: tdd   '), true],
+    ['trailing tab', FM('type: tdd\t'), true],
+    ['CRLF line endings (#2449)', '---\r\nphase: 1\r\ntype: tdd\r\n---\r\n\r\n# Plan\r\n', true],
+    ['BOM before the fence', String.fromCharCode(0xfeff) + FM('type: tdd'), true],
+    ['no space after the colon', FM('type:tdd'), true],
+    ['tab after the colon', FM('type:\ttdd'), true],
+    ['a `--- x` line before the key (the fence owner does not close on it)', FM('note: x\n--- x\ntype: tdd'), true],
+    ['double-quoted value', FM('type: "tdd"'), false],
+    ['single-quoted value', FM("type: 'tdd'"), false],
+    ['trailing comment', FM('type: tdd # note'), false],
+    ['a longer value', FM('type: tddx'), false],
+    ['different case', FM('type: TDD'), false],
+    ['another type', FM('type: execute'), false],
+    ['indented key', FM('  type: tdd'), false],
+    ['unterminated block', '---\ntype: tdd\nphase: 1\n', false],
+    ['no frontmatter at all', 'type: tdd\n# Plan\n', false],
+    ['`type: tdd` only in the body', `${FM('phase: 1')}type: tdd\n`, false],
+    ['PATHOLOGICAL: a duplicate `type:` key with tdd second', FM('type: execute\ntype: tdd'), true],
+    ['PATHOLOGICAL: the value on the next line', FM('type:\ntdd'), true],
+    ['PATHOLOGICAL: a space before the colon (`type : tdd`)', FM('type : tdd'), false],
+  ];
+
+  describe('frontmatterKeyHasValue("type", "tdd") equals the old `^type:\\s*tdd\\s*$` regex (21-fixture table)', () => {
+    test('the table has 21 fixtures', () => {
+      assert.equal(FIXTURES.length, 21);
+    });
+
+    for (const [label, content, expected] of FIXTURES) {
+      test(`${label} -> ${expected}`, () => {
+        assert.equal(oldTypeTdd(content), expected, 'the recorded expectation is what the OLD regex answers');
+        assert.equal(frontmatterKeyHasValue(content, 'type', 'tdd'), expected);
+        assert.equal(frontmatterKeyHasValue(content, 'type', 'tdd'), oldTypeTdd(content));
+      });
+    }
+  });
+
+  describe('frontmatterKeyHasValue: anchoring and region boundaries', () => {
+    test('the key may sit on the first, a middle, or the last line of the block', () => {
+      assert.equal(frontmatterKeyHasValue('---\nk: v\na: 1\n---\n', 'k', 'v'), true);
+      assert.equal(frontmatterKeyHasValue('---\na: 1\nk: v\nb: 2\n---\n', 'k', 'v'), true);
+      assert.equal(frontmatterKeyHasValue('---\na: 1\nk: v\n---\n', 'k', 'v'), true);
+    });
+
+    test('the key must start the line: a longer key or a prefix before it does not match', () => {
+      assert.equal(frontmatterKeyHasValue(FM('xk: v'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('kk: v'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM(' k: v'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: v'), 'kk', 'v'), false);
+    });
+
+    test('the value must be the whole rest of the line: a prefix, suffix, or different value does not match', () => {
+      assert.equal(frontmatterKeyHasValue(FM('k: vx'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: xv'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: w'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: v w'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k:'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: '), 'k', 'v'), false);
+    });
+
+    test('an empty value matches an empty (or whitespace-only) value', () => {
+      assert.equal(frontmatterKeyHasValue(FM('k:'), 'k', ''), true);
+      assert.equal(frontmatterKeyHasValue(FM('k:   '), 'k', ''), true);
+      assert.equal(frontmatterKeyHasValue(FM('k: v'), 'k', ''), false);
+    });
+
+    test('an absent key is false; a space before the colon is false', () => {
+      assert.equal(frontmatterKeyHasValue(FM('a: 1\nb: 2'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k : v'), 'k', 'v'), false);
+    });
+
+    test('the value on a later line matches (\\s* spans newlines), but not across a non-blank line', () => {
+      assert.equal(frontmatterKeyHasValue(FM('k:\n\nv'), 'k', 'v'), true);
+      assert.equal(frontmatterKeyHasValue(FM('k:\nx\nv'), 'k', 'v'), false);
+    });
+
+    test('a key match in the body, past the closing fence, is not seen', () => {
+      assert.equal(frontmatterKeyHasValue('---\na: 1\n---\nk: v\n', 'k', 'v'), false);
+    });
+
+    test('empty content, the bare fence, a fence pair, and an unterminated block are all false', () => {
+      assert.equal(frontmatterKeyHasValue('', 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue('---', 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue('---\n---', 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue('---\nk: v\n', 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue('---\nk: v', 'k', 'v'), false);
+    });
+
+    test('a closed block with no trailing newline after the fence still matches', () => {
+      assert.equal(frontmatterKeyHasValue('---\nk: v\n---', 'k', 'v'), true);
+      assert.equal(frontmatterKeyHasValue('---\nk: v\n---\n', 'k', 'v'), true);
+    });
+
+    test('the match is case-sensitive on key and value', () => {
+      assert.equal(frontmatterKeyHasValue(FM('K: v'), 'k', 'v'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: V'), 'k', 'v'), false);
+    });
+
+    test('a dash after the key is data, not a fence: a block line `---x` does not close the block', () => {
+      assert.equal(frontmatterKeyHasValue(FM('a: 1\n---x\nk: v'), 'k', 'v'), true);
+    });
+  });
+
+  // One entry per regex metacharacter; `decoys` are lines an UNESCAPED key/value would wrongly match.
+  const METACHARS = ['.', '*', '+', '?', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\'];
+  const DECOYS = ['axb', 'aab', 'ab', 'b', 'a', 'a\u0008b'];
+
+  describe('key and value are matched literally (each metacharacter)', () => {
+    for (const c of METACHARS) {
+      const token = `a${c}b`;
+      test(`frontmatterKeyHasValue: key ${JSON.stringify(token)} matches only itself`, () => {
+        assert.equal(frontmatterKeyHasValue(FM(`${token}: 1`), token, '1'), true);
+        assert.equal(frontmatterKeyHasValue(FM(`${DECOYS.map((d) => `${d}: 1`).join('\n')}`), token, '1'), false);
+      });
+
+      test(`frontmatterKeyHasValue: value ${JSON.stringify(token)} matches only itself`, () => {
+        assert.equal(frontmatterKeyHasValue(FM(`k: ${token}`), 'k', token), true);
+        assert.equal(frontmatterKeyHasValue(FM(DECOYS.map((d) => `k: ${d}`).join('\n')), 'k', token), false);
+      });
+
+      test(`frontmatterKeyBlockText: key ${JSON.stringify(token)} matches only itself`, () => {
+        assert.equal(frontmatterKeyBlockText(FM(`${DECOYS.map((d) => `${d}: 9`).join('\n')}\n${token}: 1\nz: 2`), token), ' 1');
+        assert.equal(frontmatterKeyBlockText(FM(DECOYS.map((d) => `${d}: 9`).join('\n')), token), '');
+      });
+    }
+
+    test('a key or value that is not a valid regex never throws', () => {
+      for (const bad of ['(', ')', '[', ']', '{', '}', '*', '+', '?', '\\', '^', '$', '|', '(?<', '[a-', '\\k<x>']) {
+        assert.doesNotThrow(() => frontmatterKeyHasValue(FM('k: v'), bad, 'v'), `key ${JSON.stringify(bad)}`);
+        assert.doesNotThrow(() => frontmatterKeyHasValue(FM('k: v'), 'k', bad), `value ${JSON.stringify(bad)}`);
+        assert.doesNotThrow(() => frontmatterKeyBlockText(FM('k: v'), bad), `block key ${JSON.stringify(bad)}`);
+      }
+      assert.equal(frontmatterKeyHasValue(FM('\\: \\'), '\\', '\\'), true, 'a backslash matches a backslash');
+    });
+
+    test('a value with regex metacharacters matches only itself (plain cases)', () => {
+      assert.equal(frontmatterKeyHasValue(FM('k: a.c'), 'k', 'a.c'), true);
+      assert.equal(frontmatterKeyHasValue(FM('k: abc'), 'k', 'a.c'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: x'), 'k', '.*'), false);
+      assert.equal(frontmatterKeyHasValue(FM('k: (a|b)'), 'k', '(a|b)'), true);
+    });
+
+    test('a hyphen and a slash in the key or value are plain characters', () => {
+      assert.equal(frontmatterKeyHasValue(FM('a-b/c: x-y/z'), 'a-b/c', 'x-y/z'), true);
+      assert.equal(frontmatterKeyHasValue(FM('a-b/c: x-y/z'), 'a-b/c', 'x-y/q'), false);
+    });
+  });
+
+  describe('frontmatterKeyBlockText: exact return values', () => {
+    test('an inline value is returned with its leading space, without the newline after it', () => {
+      assert.equal(frontmatterKeyBlockText(FM('a: 1\nk: v\nz: 2'), 'k'), ' v');
+      assert.equal(frontmatterKeyBlockText(FM('k: v\na: 1'), 'k'), ' v');
+    });
+
+    test('the key on the LAST line of the block keeps the trailing newline of the region', () => {
+      assert.equal(frontmatterKeyBlockText(FM('a: 1\nk: v'), 'k'), ' v\n');
+      assert.equal(frontmatterKeyBlockText(FM('a: 1\nk:'), 'k'), '\n');
+    });
+
+    test('an empty value followed by another key is the empty string', () => {
+      assert.equal(frontmatterKeyBlockText(FM('k:\na: 1'), 'k'), '');
+    });
+
+    test('nested lines are appended verbatim until the first non-indented, non-blank line', () => {
+      assert.equal(frontmatterKeyBlockText(FM('k:\n  a: 1\n  b: 2\nn: 3'), 'k'), '\n  a: 1\n  b: 2');
+      assert.equal(frontmatterKeyBlockText(FM('k:\n  a: 1\n  b: 2'), 'k'), '\n  a: 1\n  b: 2');
+      assert.equal(frontmatterKeyBlockText(FM('k:\n\ta: 1\nn: 3'), 'k'), '\n\ta: 1');
+    });
+
+    test('a blank line inside the block is kept and does not end it', () => {
+      assert.equal(frontmatterKeyBlockText(FM('k:\n  a: 1\n\n  b: 2\nn: 3'), 'k'), '\n  a: 1\n\n  b: 2');
+    });
+
+    test('an inline value with nested lines keeps both, and trailing spaces on the value line', () => {
+      assert.equal(frontmatterKeyBlockText(FM('k: v  \n  a: 1'), 'k'), ' v  \n  a: 1');
+    });
+
+    test('a space before the colon still finds the key', () => {
+      assert.equal(frontmatterKeyBlockText(FM('k : v\nn: 3'), 'k'), ' v');
+    });
+
+    test('CRLF line endings: the value line loses its CR; the remaining text is split on CRLF', () => {
+      assert.equal(frontmatterKeyBlockText('---\r\nk: v\r\n  a: 1\r\nn: 3\r\n---\r\n', 'k'), ' v\n\n  a: 1');
+      assert.equal(frontmatterKeyBlockText('---\r\nk: v\r\n---\r\n', 'k'), ' v\n');
+    });
+
+    test('a BOM before the fence is skipped', () => {
+      assert.equal(frontmatterKeyBlockText(String.fromCharCode(0xfeff) + FM('k: v'), 'k'), ' v\n');
+    });
+
+    test('a `--- x` line in the block does not hide the key (no YAML parse)', () => {
+      assert.equal(frontmatterKeyBlockText(FM('n: x\n--- x\nk: v'), 'k'), ' v\n');
+    });
+
+    test('the FIRST of a duplicate key wins', () => {
+      assert.equal(frontmatterKeyBlockText(FM('k: 1\nn: 2\nk: 3'), 'k'), ' 1');
+    });
+
+    test('an absent key, an indented key, a prefix or longer key are all the empty string', () => {
+      assert.equal(frontmatterKeyBlockText(FM('a: 1\nb: 2'), 'k'), '');
+      assert.equal(frontmatterKeyBlockText(FM('  k: v'), 'k'), '');
+      assert.equal(frontmatterKeyBlockText(FM('kk: v\nxk: w'), 'k'), '');
+      assert.equal(frontmatterKeyBlockText(FM('k: v'), 'kk'), '');
+    });
+
+    test('unterminated, absent, empty, and fence-only inputs are the empty string', () => {
+      assert.equal(frontmatterKeyBlockText('---\nk: v\n', 'k'), '');
+      assert.equal(frontmatterKeyBlockText('k: v\n', 'k'), '');
+      assert.equal(frontmatterKeyBlockText('', 'k'), '');
+      assert.equal(frontmatterKeyBlockText('---', 'k'), '');
+      assert.equal(frontmatterKeyBlockText('---\n---', 'k'), '');
+      assert.equal(frontmatterKeyBlockText('body\n---\nk: v\n---\n', 'k'), '');
+    });
+
+    test('a key in the body past the closing fence is not seen', () => {
+      assert.equal(frontmatterKeyBlockText('---\na: 1\n---\nk: v\n', 'k'), '');
+    });
+
+    test('the key is followed by optional spaces then a colon: `kx:` is not `k:`', () => {
+      assert.equal(frontmatterKeyBlockText(FM('kx: v'), 'k'), '');
+      assert.equal(frontmatterKeyBlockText(FM('k  : v\nn: 3'), 'k'), ' v');
+    });
+  });
+
+  describe('rawFrontmatterField: the export the gates read (value wrapper, null on refusal)', () => {
+    test('a scalar is returned verbatim inside { value }', () => {
+      assert.deepEqual(rawFrontmatterField(FM('k: v'), 'k'), { value: 'v' });
+      assert.deepEqual(rawFrontmatterField(FM('k: 3'), 'k'), { value: '3' });
+    });
+
+    test('a list and a list of objects are returned structurally', () => {
+      assert.deepEqual(rawFrontmatterField(FM('k: [a, b]'), 'k'), { value: ['a', 'b'] });
+      const listed = rawFrontmatterField(FM('k:\n  - a\n  - b: 1'), 'k');
+      assert.equal(JSON.stringify(listed), '{"value":["a",{"b":"1"}]}');
+    });
+
+    test('a present key with no value is { value: null }', () => {
+      assert.deepEqual(rawFrontmatterField(FM('k:'), 'k'), { value: null });
+    });
+
+    test('an absent key, an unterminated block, no frontmatter, and refused YAML are null', () => {
+      assert.equal(rawFrontmatterField(FM('k: v'), 'z'), null);
+      assert.equal(rawFrontmatterField('---\nk: v\n', 'k'), null);
+      assert.equal(rawFrontmatterField('k: v', 'k'), null);
+      assert.equal(rawFrontmatterField(FM('k: &a v\nz: *a'), 'k'), null, 'anchors/aliases are refused');
+      assert.equal(rawFrontmatterField(FM('k: [unclosed'), 'k'), null, 'a YAML syntax error is refused, not thrown');
+    });
+  });
+});
 
 // ─── extractFrontmatter ───────────────────────────────────────────────────────
 

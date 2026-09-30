@@ -222,7 +222,7 @@ describe('C4 check auto-mode answers exactly what config-get answers', () => {
   function configGetBoolean(dir, key) {
     const result = runGsdTools(['config-get', key], dir);
     if (!result.success) {
-      assert.match(result.error, new RegExp(`Key not found: ${key.replace(/[.]/g, '\\.')}`));
+      assert.ok(result.error.includes(`Key not found: ${key}`), `config-get error names the key: ${result.error}`);
       return false;
     }
     return result.output === 'true';
