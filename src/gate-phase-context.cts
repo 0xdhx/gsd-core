@@ -8,10 +8,20 @@
  * `error(message, 'usage')` the pre-move router raised.
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import { tryWithinRoot, PathAcceptance } from './security.cjs';
 import { gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
 import type { GateUsageFailure } from './gate-verdict.cjs';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import planningWorkspaceMod = require('./planning-workspace.cjs');
+const { planningDir } = planningWorkspaceMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import phaseLocatorMod = require('./phase-locator.cjs');
+const { findPhaseInternal } = phaseLocatorMod;
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+import roadmapModule = require('./roadmap.cjs');
+const { getRoadmapPhaseWithFallback } = roadmapModule;
 
 /**
  * Resolve a caller-supplied path (absolute, or relative to `projectDir`) and require the result to
@@ -25,4 +35,74 @@ export function resolveContainedPath(inputPath: string, projectDir: string): str
     return gateUsageFailure(GATE_FAILURE_CODE.USAGE, `path escapes its allowed directory: ${inputPath}`);
   }
   return contained;
+}
+
+/**
+ * Resolve a phase argument to an absolute phase directory, or '' when it cannot be resolved.
+ * The ONE owner of what three gates (`ui-plan-gate`, `ui-safety-gate`, `tdd-review-checkpoint`)
+ * and the two verify probes each inlined before #5139 (the copies were character-identical).
+ * Never throws — a caller emits a degraded payload instead, because a consumer must be able to
+ * tell "nothing to report" from "could not look".
+ */
+export function resolvePhaseDirOrEmpty(projectDir: string, phase: string): string {
+  try {
+    const result = findPhaseInternal(projectDir, phase);
+    if (result && typeof result === 'object') {
+      // findPhaseInternal returns { directory: '<relative-posix-path>', ... }
+      // directory is relative to cwd — resolve it to absolute.
+      const relDir = typeof result['directory'] === 'string' ? result['directory'] : '';
+      if (relDir) {
+        return path.resolve(projectDir, relDir);
+      }
+    } else if (typeof result === 'string') {
+      return result;
+    }
+  } catch { /* phase dir lookup failure → caller emits degraded payload */ }
+  return '';
+}
+
+/** The `*-UI-SPEC.md` inside `phaseDir` (absolute path), or '' when there is none / it is unreadable. */
+export function findUiSpecInDir(phaseDir: string): string {
+  if (!phaseDir || !fs.existsSync(phaseDir)) return '';
+  try {
+    const files = fs.readdirSync(phaseDir);
+    const found = files.find((f) => /-UI-SPEC\.md$/.test(f));
+    return found ? path.join(phaseDir, found) : '';
+  } catch {
+    return '';
+  }
+}
+
+/** The ROADMAP phase lookup both UI gates share. */
+export interface RoadmapPhaseLookup {
+  /** The phase's ROADMAP section text; '' when there is no ROADMAP.md, the phase is absent, or the read failed. */
+  phaseSection: string;
+  /** True only when ROADMAP.md exists but no phase header matched (surfaced so a missing phase cannot silently bypass). */
+  phaseLookupFailed: boolean;
+}
+
+/**
+ * The ROADMAP phase section for `phase`, through the same two-pass lookup as `roadmap.get-phase`
+ * (current milestone, then the full roadmap). A missing ROADMAP.md means "no roadmap, cannot be
+ * frontend" (`phaseLookupFailed` stays false); a present ROADMAP.md without the phase sets it. A
+ * read failure is treated as empty and does not set it. Shared by `ui-plan-gate` and
+ * `ui-safety-gate`, whose two inline copies were character-identical.
+ */
+export function lookupRoadmapPhase(projectDir: string, phase: string): RoadmapPhaseLookup {
+  let phaseSection = '';
+  let phaseLookupFailed = false;
+  try {
+    const section = getRoadmapPhaseWithFallback(projectDir, phase);
+    if (section === null) {
+      // Distinguish: ROADMAP.md missing (no-roadmap project) vs phase not found in ROADMAP.
+      const planDir: string = planningDir(projectDir);
+      const roadmapPath = path.join(planDir, 'ROADMAP.md');
+      if (fs.existsSync(roadmapPath)) {
+        phaseLookupFailed = true;
+      }
+    } else {
+      phaseSection = section;
+    }
+  } catch { /* roadmap read failure → treat as empty (non-frontend) */ }
+  return { phaseSection, phaseLookupFailed };
 }

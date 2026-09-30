@@ -287,7 +287,13 @@ build/
 /gsd-core/bin/lib/gate-decision-coverage-plan.cjs
 /gsd-core/bin/lib/gate-decision-coverage-verify.cjs
 /gsd-core/bin/lib/gate-phase-context.cjs
+/gsd-core/bin/lib/gate-tdd-red-evidence.cjs
+/gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs
+/gsd-core/bin/lib/gate-ui-plan.cjs
+/gsd-core/bin/lib/gate-ui-safety.cjs
 /gsd-core/bin/lib/gate-verdict.cjs
+/gsd-core/bin/lib/gate-verify-command-paths.cjs
+/gsd-core/bin/lib/gate-verify-failure-directions.cjs
 /gsd-core/bin/lib/verify-command-grounding.cjs
 /gsd-core/bin/lib/frontmatter.cjs
 /gsd-core/bin/lib/frontmatter-fence.cjs
