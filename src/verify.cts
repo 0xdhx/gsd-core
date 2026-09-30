@@ -2190,6 +2190,25 @@ function cmdVerifyContextDrift(cwd: string, phaseArg: string | undefined, raw: b
     return;
   }
 
+  // Non-blocking contract: a throw anywhere (an invalid GSD_WORKSTREAM, an unreadable file)
+  // yields the skip payload, exactly as cmdVerifyCodebaseDrift does.
+  try {
+    runVerifyContextDrift(cwd, phaseArg, raw);
+  } catch (err) {
+    output(
+      {
+        block: false,
+        skipped: true,
+        reason: 'exception: ' + (err instanceof Error ? err.message : String(err)),
+        stale_artifacts: [],
+        message: '',
+      },
+      raw,
+    );
+  }
+}
+
+function runVerifyContextDrift(cwd: string, phaseArg: string, raw: boolean): void {
   const pDir = planningDir(cwd);
   const phasesDir = path.join(pDir, 'phases');
   const emitSkip = (reason: string, message = ''): void => {
@@ -2278,6 +2297,28 @@ function cmdVerifySchemaDrift(
     return;
   }
 
+  // Non-blocking contract: a throw anywhere yields a non-blocking payload, never a crash.
+  try {
+    runVerifySchemaDrift(cwd, phaseArg, skipFlag, raw);
+  } catch (err) {
+    output(
+      {
+        block: false,
+        drift_detected: false,
+        blocking: false,
+        message: 'exception: ' + (err instanceof Error ? err.message : String(err)),
+      },
+      raw,
+    );
+  }
+}
+
+function runVerifySchemaDrift(
+  cwd: string,
+  phaseArg: string,
+  skipFlag: boolean | undefined,
+  raw: boolean,
+): void {
   const pDir = planningDir(cwd);
   const phasesDir = path.join(pDir, 'phases');
   if (!fs.existsSync(phasesDir)) {

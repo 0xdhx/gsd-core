@@ -17,6 +17,12 @@
  * failure `path escapes its allowed directory: <arg>`, so the gate cannot be made to read — and
  * echo the fields of — an arbitrary readable file (#5139 security review). The path echoed in the
  * payload stays the resolved (not realpath'd) form, unchanged.
+ *
+ * Consequence of resolving against the process cwd: the CLI runs with cwd === projectDir in every
+ * workflow, so a project-relative path (`r.json`) works. Invoked with cwd !== projectDir, that same
+ * relative path resolves outside the project and is the usage failure above (it was an
+ * `unreadable_record` verdict before containment); an absolute path inside the project works from
+ * any cwd.
  */
 
 import path from 'node:path';

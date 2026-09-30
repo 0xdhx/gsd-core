@@ -258,6 +258,7 @@ module.exports = {
   "tests/runtime-homes-descriptor-drive.test.cjs",
   "tests/runtime-identity.test.cjs",
   "tests/runtime-launcher-parity.test.cjs",
+  "tests/schema-drift.test.cjs",
   "tests/security.test.cjs",
   "tests/settings-jsonc.test.cjs",
   "tests/sh-hook-paths.test.cjs",

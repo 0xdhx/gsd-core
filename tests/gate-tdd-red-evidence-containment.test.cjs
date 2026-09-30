@@ -106,6 +106,23 @@ describe('tdd-red-evidence record path containment', () => {
     });
   });
 
+  test('cwd != projectDir: a project-relative path resolves against the cwd and is the usage failure; an absolute in-project path works', () => {
+    withDirs((project, elsewhere) => {
+      fs.writeFileSync(path.join(project, 'r.json'), JSON.stringify(RED_OK));
+      const priorCwd = process.cwd();
+      process.chdir(elsewhere);
+      try {
+        const relative = evaluateTddRedEvidence({ projectDir: project, args: ['r.json'] });
+        assert.deepStrictEqual(relative, { failure: { code: 'usage', message: 'path escapes its allowed directory: r.json' } });
+        const absolute = evaluateTddRedEvidence({ projectDir: project, args: [path.join(project, 'r.json')] });
+        assert.equal(absolute.outcome, 'pass');
+        assert.equal(absolute.payload.verdict, 'RED_EVIDENCE_OK');
+      } finally {
+        process.chdir(priorCwd);
+      }
+    });
+  });
+
   test('an absent record inside the project is still the INVALID_RED unreadable_record arm, echoing the resolved path', () => {
     withDirs((project) => {
       const record = path.join(project, 'nope.json');

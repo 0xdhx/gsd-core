@@ -359,6 +359,44 @@ describe('verify context-drift CLI', () => {
     assert.strictEqual(r.success, true, r.error);
   });
 
+  // The CLI's own workstream policy rejects a bad GSD_WORKSTREAM before any verb runs, so the
+  // verb's non-blocking arm is reached by calling the command function directly in a child
+  // process (planningDir is what throws on '../x').
+  function runVerbDirect(env) {
+    const { spawnSync } = require('node:child_process');
+    const { TEST_ENV_BASE } = require('./helpers.cjs');
+    const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+    const script = `require(${JSON.stringify(VERIFY_PATH)}).cmdVerifyContextDrift(${JSON.stringify(tmp)}, '01-setup', false);`;
+    return spawnSync(process.execPath, ['-e', script], {
+      cwd: tmp,
+      encoding: 'utf-8',
+      timeout: PROBE_TIMEOUT_MS,
+      env: { ...process.env, ...TEST_ENV_BASE, HOME: tmp, USERPROFILE: tmp, GSD_WORKSTREAM: '', ...env },
+    });
+  }
+
+  test('an invalid GSD_WORKSTREAM is the non-blocking skip payload, exit 0 (planningDir throws)', () => {
+    const r = runVerbDirect({ GSD_WORKSTREAM: '../x' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    const data = JSON.parse(r.stdout);
+    assert.strictEqual(data.block, false);
+    assert.strictEqual(data.skipped, true);
+    assert.match(data.reason, /^exception: .*GSD_WORKSTREAM contains invalid path characters/);
+    assert.deepStrictEqual(data.stale_artifacts, []);
+    assert.strictEqual(data.message, '');
+  });
+
+  test('a valid GSD_WORKSTREAM still resolves that workstream (control)', () => {
+    const dir = path.join(tmp, '.planning', 'workstreams', 'ws1', 'phases', '01-setup');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '01-CONTEXT.md'), '# context\n');
+    const r = runVerbDirect({ GSD_WORKSTREAM: 'ws1' });
+    assert.strictEqual(r.status, 0, r.stderr);
+    const data = JSON.parse(r.stdout);
+    assert.strictEqual(data.skipped, true);
+    assert.strictEqual(data.reason, 'no-upstream-artifacts');
+  });
+
   test('always exits 0 (query command contract)', () => {
     // Only cases that are legitimately part of the "always exits 0" JSON-output
     // contract belong here — a missing phase arg is a DIFFERENT, already-covered
