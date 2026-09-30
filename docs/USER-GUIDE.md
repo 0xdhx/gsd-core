@@ -298,7 +298,7 @@ The discuss-phase captures implementation decisions in CONTEXT.md under a `<deci
 
 **Opting a decision out.** Move it under the `### Claude's Discretion` heading inside `<decisions>`, or tag it: `- **D-08 [informational]:** …`, `- **D-09 [folded]:** …`, `- **D-10 [deferred]:** …`.
 
-**Disabling the gates.** Set `workflow.context_coverage_gate: false` in `.planning/config.json` (or via `/gsd-settings`). Default is `true`.
+**Disabling the gates.** Set `workflow.context_coverage_gate: false` in `.planning/config.json` (or via `/gsd-settings`). Default is `true`. The key must sit under `workflow`; a top-level `context_coverage_gate` is ignored and the gates stay on.
 
 ### Execution Wave Coordination
 

@@ -320,6 +320,25 @@ CJS command family routers dispatch through `CommandRoutingHub`. The hub owns th
 
 > **Planned (ADR-2346 / epic #2345):** the `runCommand` 73-case switch is being dissolved into a two-layer dispatch — families via the `commandFamilies` registry (ADR-959 mechanism, completed) and single-purpose leaf verbs via a table filling the prepared `_dispatchNonFamily` seam — collapsing `runCommand` to a ~15-line dispatcher. Behavior-preserving; tracked phase-by-phase under epic #2345. The current-state description above holds until each phase lands.
 
+### Check Gate Modules (`src/gate-*.cts`, `src/check-command-router.cts`, #5139, epic #5056)
+
+Every `gsd-tools check <gate>` verb is a module that returns a value; the router only turns that value into output. Each gate module (`gate-decision-coverage-plan`, `gate-decision-coverage-verify`, `gate-ui-plan`, `gate-ui-safety`, `gate-tdd-review-checkpoint`, `gate-tdd-red-evidence`, `gate-verify-command-paths`, `gate-verify-failure-directions`, `gate-gap-analysis-plan-post`, `gate-predicate`, `gate-api-coverage-verify-pre`) returns a `GateResult` from `gate-verdict`: a `GateVerdict` (`outcome`, `block`, a frozen ordered `payload`) or a `GateUsageFailure`. `GATE_FAILURE_CODE` is the closed set of failure codes.
+
+`src/check-command-router.cts` (233 lines) parses argv, calls the gate, and formats the result through one output site, `emitGateResult`. A gate's stdout and exit code are byte-identical to the pre-refactor router; 102 golden files pin them (`tests/check-router-cutover-equivalence.test.cjs`).
+
+Support modules shared by the gates: `gate-config` (workflow switches), `gate-args` (argument parsing), `gate-phase-context` (phase-directory resolution), `decision-coverage-support` (decision extraction and matching), and `check-auto-mode` (the `check auto-mode` state reader).
+
+Two ESLint boundaries in `eslint.config.mjs` keep the split honest: a gate module cannot import `./io.cjs`, and the router cannot import `node:fs`, `node:child_process`, or the shell exec and version-control helpers. Gate config is read through the same dot-path resolver `config-get` uses, so a gate sees the configuration `config-get` reports, including `GSD_WORKSTREAM` routing; only nested `workflow.*` keys are honored.
+
+Behavior differences from the pre-refactor router:
+
+- A top-level `context_coverage_gate` no longer disables the decision-coverage gates, and top-level `auto_advance` / `_auto_chain_active` no longer feed `check auto-mode`; only nested `workflow.*` keys count (#4978).
+- Gate config honors `GSD_WORKSTREAM`; the old router read `<project>/.planning/config.json` only.
+- `decision-coverage-verify` reads a SUMMARY's `files_modified` from its frontmatter (inline `[a, b]` and block lists); a `files_modified:` block in the body is ignored.
+- `tdd-review-checkpoint` detects `type: tdd` through the shared frontmatter parser, so a duplicate `type:` key with `tdd` second, a value on the next line, and `type : tdd` resolve as that parser resolves them.
+- Stderr from the version-control calls in `ui-safety-gate` and `tdd-review-checkpoint` is captured instead of leaking to the process stderr.
+- `api-coverage-verify-pre` resolves a phase's relative directory against the project directory, not the process working directory.
+
 ### Capability Command Dispatch (`gsd-core/bin/gsd-tools.cjs`, ADR-1244 D7)
 
 Command families declared by capabilities (`commands: [{ family, module, router }]`) are dispatched from the registry rather than a hardcoded switch. The `runCommand` default arm tries, in order:
