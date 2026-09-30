@@ -540,6 +540,121 @@ describe('runHook interpreter option', () => {
   });
 });
 
+// #5082: on win32 a bare `bash` can resolve to WSL's System32 launcher, which
+// cannot see the Windows node install or C:\ paths. `interpreter: 'bash'` must
+// resolve through the installer's Git Bash policy there, and nowhere else.
+describe('runHook interpreter: bash resolves Git Bash on win32', () => {
+  let tmpDir;
+
+  beforeEach(() => {
+    tmpDir = createTempDir('process-seam-win32-bash-');
+  });
+
+  afterEach(() => {
+    cleanup(tmpDir);
+  });
+
+  const SEAM_PATH = path.join(__dirname, 'helpers', 'process-seam.cjs');
+
+  /**
+   * Run runHook in a child whose process.platform reads `platform` and whose
+   * spawnSync only records its command, so the resolution is observable on
+   * any host. The stub is installed before the seam loads: the seam
+   * destructures spawnSync at require time.
+   */
+  function runHookUnder(platform, env) {
+    const script = [
+      "const childProcess = require('child_process');",
+      'const spawned = [];',
+      'childProcess.spawnSync = (command, args) => {',
+      '  spawned.push({ command, args });',
+      "  return { status: 0, signal: null, stdout: '', stderr: '' };",
+      '};',
+      `Object.defineProperty(process, 'platform', { value: ${JSON.stringify(platform)} });`,
+      `const { runHook } = require(${JSON.stringify(SEAM_PATH)});`,
+      "const results = [runHook('hook.sh', ['a'], { interpreter: 'bash' }), runHook('hook.cjs', [])]",
+      '  .map(({ outcome, code }) => ({ outcome, code }));',
+      'let invalidTimeoutThrew = null;',
+      "try { runHook('hook.sh', [], { interpreter: 'bash', timeoutMs: 0 }); } catch (e) { invalidTimeoutThrew = e.name; }",
+      'process.stdout.write(JSON.stringify({ spawned, results, invalidTimeoutThrew }));',
+    ].join('\n');
+    const child = runNode(['-e', script], { env, timeoutMs: SEAM_GENEROUS_TIMEOUT_MS });
+    assert.equal(child.outcome, OUTCOME.EXITED, child.stderr);
+    assert.equal(child.exitCode, 0, child.stderr);
+    return JSON.parse(child.stdout);
+  }
+
+  /**
+   * process.env with `overrides` applied and `removed` dropped. Keys match
+   * case-insensitively: Windows env names are, and a Git Bash parent
+   * upper-cases them (PROGRAMFILES), so a plain `ProgramFiles` override would
+   * become a second key that the original could win against.
+   */
+  function envWith(overrides, removed = []) {
+    const replaced = new Set([...Object.keys(overrides), ...removed].map((key) => key.toLowerCase()));
+    const env = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (!replaced.has(key.toLowerCase())) env[key] = value;
+    }
+    return { ...env, ...overrides };
+  }
+
+  test('win32 spawns the Git Bash the installer policy resolves, and leaves other interpreters alone', () => {
+    const gitBash = writeFixture(tmpDir, 'bash.exe', '');
+    const { spawned, results } = runHookUnder('win32', envWith({ GSD_BASH_PATH: gitBash }));
+
+    assert.deepStrictEqual(spawned, [
+      { command: gitBash.replace(/\\/g, '/'), args: ['hook.sh', 'a'] },
+      { command: process.execPath, args: ['hook.cjs'] },
+    ]);
+    assert.deepStrictEqual(results.map((r) => r.outcome), [OUTCOME.EXITED, OUTCOME.EXITED]);
+  });
+
+  test('win32 without a Git Bash reports SPAWN_FAILED instead of a PATH lookup', () => {
+    // No override, and every well-known install root points at an empty dir,
+    // so the policy finds nothing on any host. A bare `bash` spawn here is
+    // what reaches WSL, so nothing may be spawned for the bash call.
+    // ProgramW6432 too: Windows sets a 64-bit child's ProgramFiles from it,
+    // over whatever ProgramFiles the parent passed.
+    const emptyRoot = path.join(tmpDir, 'no-git');
+    fs.mkdirSync(emptyRoot);
+    const env = envWith(
+      { ProgramFiles: emptyRoot, ProgramW6432: emptyRoot, 'ProgramFiles(x86)': emptyRoot, SystemDrive: emptyRoot },
+      ['GSD_BASH_PATH'],
+    );
+    const { spawned, results, invalidTimeoutThrew } = runHookUnder('win32', env);
+
+    assert.deepStrictEqual(spawned, [{ command: process.execPath, args: ['hook.cjs'] }]);
+    assert.deepStrictEqual(results[0], { outcome: OUTCOME.SPAWN_FAILED, code: 'ENOENT' });
+    // A seam-contract violation still throws here, as it does where Git Bash exists.
+    assert.equal(invalidTimeoutThrew, 'TypeError');
+  });
+
+  test('off win32, interpreter: bash stays the bare PATH name', () => {
+    const gitBash = writeFixture(tmpDir, 'bash.exe', '');
+    const { spawned } = runHookUnder('linux', envWith({ GSD_BASH_PATH: gitBash }));
+
+    assert.deepStrictEqual(spawned[0], { command: 'bash', args: ['hook.sh', 'a'] });
+  });
+
+  test('on a real win32 host, interpreter: bash runs Git Bash (MSYS), not WSL', (t) => {
+    if (process.platform !== 'win32') {
+      t.skip('win32 only');
+      return;
+    }
+    const result = runHook('-c', ['printf \'{"os":"%s"}\' "$(uname -o)"'], {
+      interpreter: 'bash',
+      timeoutMs: SEAM_GENEROUS_TIMEOUT_MS,
+    });
+    if (result.outcome === OUTCOME.SPAWN_FAILED) {
+      t.skip('no Git for Windows bash on this host');
+      return;
+    }
+    assert.equal(result.outcome, OUTCOME.EXITED, result.stderr);
+    assert.deepStrictEqual(JSON.parse(result.stdout), { os: 'Msys' });
+  });
+});
+
 describe('runGsdTools adapter (process-seam parity)', () => {
   let tmpDir;
 

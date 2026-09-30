@@ -644,6 +644,14 @@ interface BashRunnerOpts {
   existsSync?: (p: string) => boolean;
 }
 
+/**
+ * The one Git Bash policy: `bash` off win32; on win32 GSD_BASH_PATH, then the
+ * well-known Git for Windows install locations, never a PATH lookup (which
+ * can reach WSL's System32 launcher). null when win32 has no Git Bash.
+ * #5082: the test process seam (tests/helpers/process-seam.cjs) resolves
+ * `bash` through this too, so hooks and bash-driven tests run under the same
+ * bash.
+ */
 function resolveBashExecutable(opts?: BashRunnerOpts): string | null {
   const platform = (opts && opts.platform) || process.platform;
   if (platform !== 'win32') return 'bash';
@@ -3543,6 +3551,7 @@ export = {
   normalizeNodePath,
   resolveNodeRunner,
   buildNodeRunnerChainToken,
+  resolveBashExecutable,
   resolveBashRunner,
   NODE_RUNNER_RESOLVER_HOOK,
 
