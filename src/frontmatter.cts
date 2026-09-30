@@ -29,6 +29,7 @@ import { platformReadSync as safeReadFile, platformWriteSync } from './shell-com
 import { textEncodingError } from './validate.cjs';
 import { splitLines } from './text-lines.cjs';
 import { locateFrontmatterFence } from './frontmatter-fence.cjs';
+import { escapeRegex } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import unusableInputMod = require('./unusable-input.cjs');
 const { UNUSABLE_REASON, warnUnusableInput } = unusableInputMod;
@@ -756,12 +757,12 @@ function frontmatterBlock(content: string): { bom: string; block: string; rest: 
  * it survives frontmatter the parser refuses (a `--- x` line inside the block, say). For a caller
  * that scans a block's text for a citation rather than reading its value — the decision-coverage
  * gate's `must_haves` / `truths` / `objective` scan (#5139, moved here from the router).
- * `key` is a fixed identifier the caller supplies, never document content.
+ * `key` is matched LITERALLY (regex-escaped), so no caller-supplied key can change the pattern.
  */
 function frontmatterKeyBlockText(content: string, key: string): string {
   const found = frontmatterRegion(content);
   if (!found || !found.terminated) return '';
-  const match = found.region.match(new RegExp(`^${key}\\s*:(.*)$`, 'm'));
+  const match = found.region.match(new RegExp(`^${escapeRegex(key)}\\s*:(.*)$`, 'm'));
   if (!match) return '';
   const startIdx = (match.index || 0) + match[0].length;
   const rest = found.region.slice(startIdx + 1).split(/\r?\n/);
@@ -771,6 +772,21 @@ function frontmatterKeyBlockText(content: string, key: string): string {
     else break;
   }
   return block.join('\n');
+}
+
+/**
+ * True when the closed frontmatter block has a line `<key>:<spaces><value><spaces>` — the
+ * multiline test `^<key>:\s*<value>\s*$` over the fence owner's region, key and value matched
+ * LITERALLY (regex-escaped). The pattern is deliberately the one the `check tdd-review-checkpoint`
+ * gate always ran (`^type:\s*tdd\s*$`), so its detection is byte-equivalent to the old regex
+ * whatever the block holds (a duplicate key, a value on the next line, CRLF): the block is raw
+ * text, never parsed, so it classifies even when the YAML parser refuses the frontmatter. An
+ * unterminated or absent block is false. #5139.
+ */
+function frontmatterKeyHasValue(content: string, key: string, value: string): boolean {
+  const found = frontmatterRegion(content);
+  if (!found || !found.terminated) return false;
+  return new RegExp(`^${escapeRegex(key)}:\\s*${escapeRegex(value)}\\s*$`, 'm').test(found.region);
 }
 
 function extractFrontmatter(content: string, sourcePath?: string): Frontmatter {
@@ -1725,6 +1741,9 @@ export = {
   // #5139: one key's block as unparsed text, for a citation scan that must survive frontmatter
   // the YAML parser refuses.
   frontmatterKeyBlockText,
+  // #5139: `^<key>:\s*<value>\s*$` over the fence owner's region, both escaped — the tdd gate's
+  // `type: tdd` test, equivalent to the regex it replaced.
+  frontmatterKeyHasValue,
   // #3850: the display rendering itself, so a caller deriving a name from those
   // objects produces the byte-identical string `extractFrontmatter` would have.
   flattenObjectListItem,

@@ -1,7 +1,7 @@
 /**
  * `check gap-analysis-plan-post` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet):
- * it returns a `GateResult`; the command router formats it. Never imports `./io.cjs`, never writes
- * to stdout/stderr.
+ * it returns a `GateResult`; the command router formats it. Imports no io module and performs no
+ * direct console/stdout/stderr write (ESLint-enforced).
  *
  * Non-blocking advisory check that runs the post-planning gap analysis after all PLAN.md files are
  * generated for a phase. Cross-references every REQ-ID and D-ID from REQUIREMENTS.md and CONTEXT.md

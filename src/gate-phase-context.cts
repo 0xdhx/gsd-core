@@ -2,17 +2,18 @@
  * Gate phase context — path/phase resolution shared by the gate modules (#5139, epic #5056,
  * ADR-5057 §4 first bullet, design D3).
  *
- * Round 1 owns the containment helper only: a caller-supplied path argument is resolved against
- * the project directory and must stay inside it. The helper RETURNS a `GateUsageFailure` on an
- * escape — a gate module never calls `error()` — and the router turns that failure into the same
- * `error(message, 'usage')` the pre-move router raised.
+ * Owns the containment helper (a caller-supplied path argument is resolved against the project
+ * directory and must stay inside it; it RETURNS a `GateUsageFailure` on an escape — a gate module
+ * never calls `error()` — and the router turns that failure into the same `error(message,
+ * 'usage')` the pre-move router raised), the phase-directory / ROADMAP lookups, the tolerant file
+ * read (`readIfExists`) and the degraded verdict of the two verify probes.
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { tryWithinRoot, PathAcceptance } from './security.cjs';
-import { gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
-import type { GateUsageFailure } from './gate-verdict.cjs';
+import { gateVerdict, gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
+import type { GateResult, GateUsageFailure } from './gate-verdict.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planningWorkspaceMod = require('./planning-workspace.cjs');
 const { planningDir } = planningWorkspaceMod;
@@ -35,6 +36,30 @@ export function resolveContainedPath(inputPath: string, projectDir: string): str
     return gateUsageFailure(GATE_FAILURE_CODE.USAGE, `path escapes its allowed directory: ${inputPath}`);
   }
   return contained;
+}
+
+/** The file's UTF-8 text, or '' when it is absent or unreadable (a gate never throws on a read). */
+export function readIfExists(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * The degraded payload the two verify probes (`verify-command-paths`, `verify-failure-directions`)
+ * return when they cannot look: status/commands/counts zeroed, `readError` naming why. A skip, not
+ * a usage failure — the plan-checker parses it and must tell "nothing to report" from "could not
+ * look".
+ */
+export function unresolvableProbeVerdict(readError: string): GateResult {
+  return gateVerdict('skip', false, {
+    status: 'unresolvable',
+    commands: [],
+    counts: { blocker: 0, warning: 0, total: 0 },
+    readError,
+  });
 }
 
 /**

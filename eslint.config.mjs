@@ -920,10 +920,12 @@ export default tseslint.config(
   // ── #5139 (epic #5056, ADR-5057 §4 first bullet): a gate returns a GateVerdict ─────────────
   // A gate module decides and RETURNS; only the command router formats output. So a gate module
   // (`src/gate-*.cts`), the decision-coverage support module and the auto-mode state reader may
-  // not import `./io.cjs` (`output()` / `error()` / `ERROR_REASON`). `@typescript-eslint`'s
-  // variant is used because it also covers the `import x = require('./io.cjs')` form this repo's
-  // .cts sources use. tests/check-router-gate-boundaries.test.cjs replays this exact setting over
-  // violating snippets and over the real files.
+  // not import any io module (`./io.cjs` by name, or any `**/io.cjs` / `**/io` path: `output()` /
+  // `error()` / `ERROR_REASON`), and perform no direct console / stdout / stderr write
+  // (`no-console`; `process.stdout` / `process.stderr` are not touched). `@typescript-eslint`'s
+  // import variant is used because it also covers the `import x = require('./io.cjs')` form this
+  // repo's .cts sources use. tests/check-router-gate-boundaries.test.cjs replays this exact
+  // setting over violating snippets and over the real files.
   {
     files: ['src/gate-*.cts', 'src/decision-coverage-support.cts', 'src/check-auto-mode.cts'],
     rules: {
@@ -932,7 +934,16 @@ export default tseslint.config(
           name: './io.cjs',
           message: 'A gate module returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts); only the command router imports ./io.cjs and formats output (#5139).',
         }],
+        patterns: [{
+          group: ['**/io.cjs', '**/io'],
+          message: 'A gate module imports no io module: it returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts) and only the command router formats output (#5139).',
+        }],
       }],
+      'no-console': 'error',
+      'no-restricted-properties': ['error',
+        { object: 'process', property: 'stdout', message: 'A gate module performs no direct stdout write: it returns a GateVerdict and only the command router formats output (#5139).' },
+        { object: 'process', property: 'stderr', message: 'A gate module performs no direct stderr write: it returns a GateVerdict / GateUsageFailure and only the command router formats output (#5139).' },
+      ],
     },
   },
 
@@ -944,8 +955,15 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-restricted-imports': ['error', {
         paths: [
-          { name: 'node:fs', message: 'The command router parses argv and formats; a gate module reads files (#5139).' },
-          { name: 'node:child_process', message: 'The command router runs no subprocess; a gate module does, through the bounded exec seam (#5139).' },
+          // Every spelling: the bare and `node:` names, and the promise API.
+          ...['fs', 'node:fs', 'fs/promises', 'node:fs/promises'].map((name) => ({
+            name,
+            message: 'The command router parses argv and formats; a gate module reads files (#5139).',
+          })),
+          ...['child_process', 'node:child_process'].map((name) => ({
+            name,
+            message: 'The command router runs no subprocess; a gate module does, through the bounded exec seam (#5139).',
+          })),
           {
             name: './shell-command-projection.cjs',
             importNames: ['execTool', 'execGit', 'platformReadSync', 'platformWriteSync'],

@@ -1,7 +1,8 @@
 /**
  * `check predicate` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet): generic
  * evaluator for capability gate `check.predicate` blocks (#2008). It returns a `GateResult`; the
- * command router formats it. Never imports `./io.cjs`, never writes to stdout/stderr.
+ * command router formats it. Imports no io module and performs no direct console/stdout/stderr
+ * write (ESLint-enforced).
  *
  * The workflow gate-dispatch invokes this for any gate whose `check` carries a `predicate` (instead
  * of a `query`); the predicate object is passed as `--predicate '<json>'`. The standard `{ block,

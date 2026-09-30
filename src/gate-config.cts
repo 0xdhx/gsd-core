@@ -17,9 +17,13 @@
 import capabilityActivationMod = require('./capability-activation.cjs');
 const { resolveConfigKey } = capabilityActivationMod;
 
-/** The resolved raw value of a dotted config key, or `{ found: false }` when absent/unreadable. */
+/**
+ * The resolved raw value of a dotted config key, or `{ found: false }` when absent/unreadable.
+ * QUIET: a malformed config.json is "key absent" with nothing written to stderr (the pre-#5139
+ * gate readers printed nothing either); `config-get` keeps its one-time parse warning.
+ */
 export function readWorkflowConfigValue(projectDir: string, dotKey: string): { found: boolean; value: unknown } {
-  return resolveConfigKey(dotKey, { config: {}, cwd: projectDir, registry: {} });
+  return resolveConfigKey(dotKey, { config: {}, cwd: projectDir, registry: {}, quiet: true });
 }
 
 /**

@@ -281,7 +281,8 @@ function searchPhaseInContent(content: string, escapedPhase: string, phaseNum: s
  * Returns the phase section string if found, null if ROADMAP.md is missing,
  * or throws if ROADMAP.md read fails.
  *
- * Used by check-command-router (computeUiPlanGate) so ui-plan-gate uses the SAME
+ * Used by the shared gate phase context (lookupRoadmapPhase in gate-phase-context.cts, which
+ * computeUiPlanGate in gate-ui-plan.cts calls) so ui-plan-gate uses the SAME
  * phase resolution as `roadmap.get-phase` — not a milestone-only subset.
  */
 function getRoadmapPhaseWithFallback(cwd: string, phaseNum: string): string | null {

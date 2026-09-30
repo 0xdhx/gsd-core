@@ -1,7 +1,7 @@
 /**
  * `check api-coverage.verify-pre` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet):
- * it returns a `GateResult`; the command router formats it. Never imports `./io.cjs`, never writes
- * to stdout/stderr.
+ * it returns a `GateResult`; the command router formats it. Imports no io module and performs no
+ * direct console/stdout/stderr write (ESLint-enforced).
  *
  * BLOCKING seal-time gate for the ai-integration capability (#1562). Enforces "Full API Coverage by
  * Default — Opt Out, Never Opt In." A phase that integrates an external API/SDK/service may not seal
@@ -69,7 +69,7 @@ export interface PhaseScopeRead {
 /** A filesystem error that is NOT "does not exist" — i.e. a real read failure
  *  (EACCES/EIO/…) the gate must not swallow. `ENOENT` is a legitimate "not
  *  there yet" and is treated as absence, not error. */
-export function isRealReadFailure(err: unknown): boolean {
+function isRealReadFailure(err: unknown): boolean {
   const code = (err as NodeJS.ErrnoException | undefined)?.code;
   return err != null && code !== 'ENOENT';
 }

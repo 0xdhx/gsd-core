@@ -27,10 +27,11 @@ const { createTempGitProject, cleanup } = require('./helpers.cjs');
 const { evaluateDecisionCoverageVerify } = require('../gsd-core/bin/lib/gate-decision-coverage-verify.cjs');
 const { evaluateDecisionCoveragePlan } = require('../gsd-core/bin/lib/gate-decision-coverage-plan.cjs');
 const { isGateUsageFailure } = require('../gsd-core/bin/lib/gate-verdict.cjs');
-const {
-  MODIFIED_FILES_MAX_COUNT,
-  MODIFIED_FILES_MAX_BYTES,
-} = require('../gsd-core/bin/lib/decision-coverage-support.cjs');
+
+// The published caps of the shipped-artifact scan (the gate owns the constants privately; the
+// boundary rows below pin them by BEHAVIOUR — a change to either cap fails a row).
+const MODIFIED_FILES_MAX_COUNT = 50;
+const MODIFIED_FILES_MAX_BYTES = 256 * 1024;
 
 const PHASE_DIR = '.planning/phases/01-x';
 const CONTEXT = `${PHASE_DIR}/01-CONTEXT.md`;
@@ -165,7 +166,6 @@ describe('decision-coverage-verify reads files_modified from the SUMMARY frontma
 
 describe('readModifiedFilesContent caps (boundary rows)', () => {
   test('the file cap is 50: file 49 (limit-1) and 50 (limit) are read, file 51 (limit+1) is not', (t) => {
-    assert.equal(MODIFIED_FILES_MAX_COUNT, 50);
     const dir = project(t);
     const names = [];
     for (let i = 1; i <= MODIFIED_FILES_MAX_COUNT + 1; i++) {
@@ -179,7 +179,6 @@ describe('readModifiedFilesContent caps (boundary rows)', () => {
   });
 
   test('the per-file cap is 256 KiB: a marker ending at limit-1 and at limit is read, at limit+1 it is cut', (t) => {
-    assert.equal(MODIFIED_FILES_MAX_BYTES, 256 * 1024);
     const dir = project(t);
     const padded = (markerId, totalLength) => `${'x'.repeat(totalLength - ` ${markerId}`.length)} ${markerId}`;
     w(dir, 'below.txt', padded('D-01', MODIFIED_FILES_MAX_BYTES - 1));

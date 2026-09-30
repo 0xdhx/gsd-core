@@ -462,6 +462,9 @@ arm('E6', 'tdd-red-evidence-empty-object', 'red', 'tdd-red-evidence', ['records/
 arm('E6', 'tdd-red-evidence-record-not-found', 'red', 'tdd-red-evidence', ['records/absent.json']);
 arm('E6', 'tdd-red-evidence-record-not-json', 'red', 'tdd-red-evidence', ['records/not-json.json']);
 arm('E6', 'tdd-red-evidence-missing-arg', 'red', 'tdd-red-evidence', []);
+// Added by the #5139 security review (NOT a pre-move capture): a record path that escapes the project
+// directory is refused BEFORE it is read — the one deliberate behaviour change of the gate move.
+arm('E6', 'tdd-red-evidence-path-escape', 'red', 'tdd-red-evidence', ['../../outside.json']);
 
 // E7 verify-command-paths
 arm('E7', 'verify-command-paths-no-arg', 'vp', 'verify-command-paths', []);

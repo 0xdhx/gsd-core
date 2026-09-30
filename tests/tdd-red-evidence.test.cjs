@@ -4,7 +4,7 @@
  * RED-evidence classification for `type: tdd` plans (#3770).
  *
  * Module: gsd-core/bin/lib/tdd-red-evidence.cjs (compiled from src/tdd-red-evidence.cts)
- * Router: `check tdd-red-evidence <record.json>` in check-command-router.cjs
+ * Gate: `check tdd-red-evidence <record.json>` in gate-tdd-red-evidence.cjs (routed by check-command-router.cjs)
  *
  * #3770: the TDD executor accepted ANY nonzero test command as RED. Syntax
  * errors, zero-test discovery, fixture crashes, parser errors, and unrelated

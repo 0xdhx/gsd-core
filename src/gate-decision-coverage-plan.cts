@@ -2,7 +2,7 @@
  * `check decision-coverage-plan` — blocking plan-phase decision-coverage gate
  * (#2492, #1365 fail-loud, #2770 empty-arg fail-closed), as a gate module (#5139, epic #5056,
  * ADR-5057 §4 first bullet): it returns a `GateResult`; the command router formats it.
- * Never imports `./io.cjs`, never writes to stdout/stderr.
+ * Imports no io module and performs no direct console/stdout/stderr write (ESLint-enforced).
  *
  * Invocation (the context path may be supplied EITHER way; #4130 follow-up), argv after the verb:
  *   <phase-dir> <context-path>          (positional, the workflow caller's form)

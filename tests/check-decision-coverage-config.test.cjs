@@ -1,8 +1,11 @@
 'use strict';
 
 /**
- * C1, C2, C3, C4 — #4978: the top-level `context_coverage_gate` fallback stops being honoured
- * (#5139, epic #5056, ADR-5057 Phase 6 entry, design D5).
+ * C1, C2, C3, C4, C5 — #4978: the top-level `context_coverage_gate` fallback stops being honoured
+ * (#5139, epic #5056, ADR-5057 Phase 6 entry, design D5). The same CLASS covers `check auto-mode`'s
+ * top-level `auto_advance` / `_auto_chain_active` (C4): a top-level alias `config-get` and the loader
+ * reject stops being honoured. C5: a gate reads config quietly (a malformed config.json is "key
+ * absent" with nothing written to stderr, as the pre-#5139 readers behaved).
  *
  * Contract: `workflow.context_coverage_gate` is read through the Configuration Module's dot-path
  * reader (the one `config-get workflow.*` uses). The nested key wins; the top-level
@@ -239,6 +242,14 @@ describe('C4 check auto-mode answers exactly what config-get answers', () => {
     });
   });
 
+  test('C4 (RED): BOTH top-level flags together are not read; auto-mode answers none, as config-get does (same class as #4978)', () => {
+    withProject('{"auto_advance": true, "_auto_chain_active": true}', (dir) => {
+      assert.equal(configGetBoolean(dir, 'workflow.auto_advance'), false);
+      assert.equal(configGetBoolean(dir, 'workflow._auto_chain_active'), false);
+      assert.deepStrictEqual(autoMode(dir), NONE);
+    });
+  });
+
   test('C4: nested workflow.auto_advance is read', () => {
     withProject('{"workflow": {"auto_advance": true}}', (dir) => {
       assert.equal(configGetBoolean(dir, 'workflow.auto_advance'), true);
@@ -276,6 +287,66 @@ describe('C4 check auto-mode answers exactly what config-get answers', () => {
     });
     withProject('{ not json', (dir) => {
       assert.deepStrictEqual(autoMode(dir), NONE);
+    });
+  });
+});
+
+describe('C5 a gate reads its config quietly: a malformed config.json is "key absent", nothing on stderr', () => {
+  const { evaluateDecisionCoveragePlan } = require('../gsd-core/bin/lib/gate-decision-coverage-plan.cjs');
+  const { evaluateDecisionCoverageVerify } = require('../gsd-core/bin/lib/gate-decision-coverage-verify.cjs');
+  const { readAutoModeState } = require('../gsd-core/bin/lib/check-auto-mode.cjs');
+  const { readWorkflowConfigValue } = require('../gsd-core/bin/lib/gate-config.cjs');
+  const { resolveConfigKey } = require('../gsd-core/bin/lib/capability-activation.cjs');
+
+  /** Run `fn` with process.stderr.write / stdout.write spied; returns { result, writes }. */
+  function spied(fn) {
+    const writes = [];
+    const errWrite = process.stderr.write;
+    const outWrite = process.stdout.write;
+    process.stderr.write = (chunk) => { writes.push({ stream: 'stderr', chunk: String(chunk) }); return true; };
+    process.stdout.write = (chunk) => { writes.push({ stream: 'stdout', chunk: String(chunk) }); return true; };
+    try {
+      return { result: fn(), writes };
+    } finally {
+      process.stderr.write = errWrite;
+      process.stdout.write = outWrite;
+    }
+  }
+
+  const MALFORMED = ['{ not json', '', '{"workflow": ', '[1, 2', 'null'];
+
+  for (const text of MALFORMED) {
+    test(`C5: config.json ${JSON.stringify(text)} -> both gates enabled, auto-mode none, no write to stdout/stderr`, () => {
+      withProject(text, (dir) => {
+        const plan = spied(() => evaluateDecisionCoveragePlan({ projectDir: dir, args: [PHASE_DIR, '--context', CONTEXT] }));
+        assert.deepStrictEqual(plan.writes, []);
+        assert.equal(plan.result.outcome, 'block', 'an enabled plan gate reports the uncovered decision');
+        assert.equal(plan.result.payload.skipped, false);
+
+        const verify = spied(() => evaluateDecisionCoverageVerify({ projectDir: dir, args: [PHASE_DIR, CONTEXT] }));
+        assert.deepStrictEqual(verify.writes, []);
+        assert.equal(verify.result.payload.skipped, false);
+
+        const auto = spied(() => readAutoModeState(dir));
+        assert.deepStrictEqual(auto.writes, []);
+        assert.deepStrictEqual(auto.result, { active: false, source: 'none', auto_chain_active: false, auto_advance: false });
+
+        const raw = spied(() => readWorkflowConfigValue(dir, 'workflow.context_coverage_gate'));
+        assert.deepStrictEqual(raw.writes, []);
+        assert.deepStrictEqual(raw.result, { found: false, value: undefined });
+      });
+    });
+  }
+
+  test('C5 control: the default (non-quiet) resolver DOES warn once about the same malformed file, so the spy is live', () => {
+    withProject('{ not json', (dir) => {
+      const loud = spied(() => resolveConfigKey('workflow.context_coverage_gate', { config: {}, cwd: dir, registry: {} }));
+      assert.deepStrictEqual(loud.result, { found: false, value: undefined });
+      assert.equal(loud.writes.length, 1);
+      assert.equal(loud.writes[0].stream, 'stderr');
+      assert.match(loud.writes[0].chunk, /failed to parse .*config\.json as JSON/);
+      const quiet = spied(() => resolveConfigKey('workflow.context_coverage_gate', { config: {}, cwd: dir, registry: {}, quiet: true }));
+      assert.deepStrictEqual(quiet.writes, []);
     });
   });
 });

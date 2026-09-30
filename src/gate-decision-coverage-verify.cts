@@ -2,7 +2,7 @@
  * `check decision-coverage-verify` — advisory verify-phase decision-coverage gate, as a gate
  * module (#5139, epic #5056, ADR-5057 §4 first bullet): it returns a `GateResult`; the command
  * router formats it. Always `blocking:false` — a soft warning, never a verification failure.
- * Never imports `./io.cjs`, never writes to stdout/stderr.
+ * Imports no io module and performs no direct console/stdout/stderr write (ESLint-enforced).
  *
  * Argv after the verb: `<phase-dir> <context-path>` (positional; no `--context` flag here).
  */

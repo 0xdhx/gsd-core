@@ -1,7 +1,7 @@
 /**
  * `check verify-failure-directions` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet,
- * #3172): it returns a `GateResult`; the command router formats it. Never imports `./io.cjs`,
- * never writes to stdout/stderr.
+ * #3172): it returns a `GateResult`; the command router formats it. Imports no io module and
+ * performs no direct console/stdout/stderr write (ESLint-enforced).
  *
  * Probes every `<automated>` verify command declared in a phase's `-PLAN.md` files for a stated
  * `<fails_when>` failing direction — see `verify-command-grounding.cts` for the recognizer
@@ -15,19 +15,10 @@
 
 import { gateVerdict } from './gate-verdict.cjs';
 import type { GateResult } from './gate-verdict.cjs';
-import { resolvePhaseDirOrEmpty } from './gate-phase-context.cjs';
+import { resolvePhaseDirOrEmpty, unresolvableProbeVerdict as unresolvable } from './gate-phase-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verifyCommandGroundingMod = require('./verify-command-grounding.cjs');
 const { probePhaseFailingDirections } = verifyCommandGroundingMod;
-
-function unresolvable(readError: string): GateResult {
-  return gateVerdict('skip', false, {
-    status: 'unresolvable',
-    commands: [],
-    counts: { blocker: 0, warning: 0, total: 0 },
-    readError,
-  });
-}
 
 export function evaluateVerifyFailureDirections(input: { projectDir: string; args: readonly string[] }): GateResult {
   const phase = input.args[0] || '';

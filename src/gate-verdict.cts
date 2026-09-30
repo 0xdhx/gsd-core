@@ -2,8 +2,8 @@
  * GateVerdict — the value a gate module returns instead of printing (#5139, epic #5056,
  * ADR-5057 §4 first bullet, design D1).
  *
- * A gate module decides; the command router formats. A gate never imports `./io.cjs`
- * and never writes to stdout/stderr — it returns one of two shapes:
+ * A gate module decides; the command router formats. A gate imports no io module and performs no
+ * direct console/stdout/stderr write (ESLint-enforced) — it returns one of two shapes:
  *
  *   - `GateVerdict`      the gate reached an answer. `outcome` names it, `block` is the gate's
  *                        own blocking decision (set explicitly by each arm, never derived from

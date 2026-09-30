@@ -1,7 +1,7 @@
 /**
  * `check ui-safety-gate` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet): it returns
- * a `GateResult`; the command router formats it. Never imports `./io.cjs`, never writes to
- * stdout/stderr.
+ * a `GateResult`; the command router formats it. Imports no io module and performs no direct
+ * console/stdout/stderr write (ESLint-enforced).
  *
  * Post-wave check that verifies UI-changed files conform to the active UI-SPEC for the phase.
  * Uses `checkUiPresence` from `ui-safety-gate.cjs` (frontend detection is not reimplemented) and

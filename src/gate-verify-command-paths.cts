@@ -1,7 +1,7 @@
 /**
  * `check verify-command-paths` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet,
- * #2401): it returns a `GateResult`; the command router formats it. Never imports `./io.cjs`,
- * never writes to stdout/stderr.
+ * #2401): it returns a `GateResult`; the command router formats it. Imports no io module and
+ * performs no direct console/stdout/stderr write (ESLint-enforced).
  *
  * Probes every `<automated>` verify command declared in a phase's `-PLAN.md` files against the
  * filesystem WITHOUT executing anything — see `verify-command-grounding.cts` for the recognizer
@@ -32,19 +32,10 @@
 import { gateVerdict, isGateUsageFailure } from './gate-verdict.cjs';
 import type { GateResult } from './gate-verdict.cjs';
 import { partitionPredicateArgs } from './gate-args.cjs';
-import { resolveContainedPath, resolvePhaseDirOrEmpty } from './gate-phase-context.cjs';
+import { resolveContainedPath, resolvePhaseDirOrEmpty, unresolvableProbeVerdict as unresolvable } from './gate-phase-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verifyCommandGroundingMod = require('./verify-command-grounding.cjs');
 const { probePhaseVerifyCommands } = verifyCommandGroundingMod;
-
-function unresolvable(readError: string): GateResult {
-  return gateVerdict('skip', false, {
-    status: 'unresolvable',
-    commands: [],
-    counts: { blocker: 0, warning: 0, total: 0 },
-    readError,
-  });
-}
 
 export function evaluateVerifyCommandPaths(input: { projectDir: string; args: readonly string[] }): GateResult {
   const { projectDir } = input;

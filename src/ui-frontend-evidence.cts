@@ -6,7 +6,7 @@
  * word boundary, so a phase section naming the repo `dashboard-financeiro` matches
  * the token `dashboard` exactly like the real UI compound `micro-frontend` does.
  * That boundary rule is intentional (#3718) and must not be weakened — instead,
- * the plan gate (`computeUiPlanGate` in check-command-router.cjs) corroborates the
+ * the plan gate (`computeUiPlanGate` in gate-ui-plan.cjs) corroborates the
  * token match against the static repo tree before blocking.
  *
  * This mirrors what the sibling post-wave gate (`computeUiSafetyGate`) already
@@ -18,7 +18,7 @@
  *       of file layout;
  *   (b) any `*.tsx` / `*.jsx` / `*.vue` / `*.svelte` file in the tree — the
  *       component-framework subset of `UI_FILE_EXTENSIONS_RE`
- *       (check-command-router.cjs). The weaker members of that list (css, scss,
+ *       (gate-ui-safety.cjs). The weaker members of that list (css, scss,
  *       html, ...) are deliberately NOT static evidence: docs sites and
  *       markdown/bash/config repos routinely carry stray `.html`/`.css`, which
  *       is precisely the false-positive class #3312 reports.

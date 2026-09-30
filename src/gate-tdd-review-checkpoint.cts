@@ -1,15 +1,18 @@
 /**
  * `check tdd-review-checkpoint` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet): it
- * returns a `GateResult`; the command router formats it. Never imports `./io.cjs`, never writes to
- * stdout/stderr.
+ * returns a `GateResult`; the command router formats it. Imports no io module and performs no
+ * direct console/stdout/stderr write (ESLint-enforced).
  *
  * End-of-phase advisory check: scans `type: tdd` plans for RED/GREEN/REFACTOR gate-sequence
  * compliance (`test(<plan>):` / `feat(<plan>):` / `refactor(<plan>):` commits) and builds a review
  * table. `passed` is always true (advisory — never truly blocks); `block` is `violations > 0` so
  * the host loop can read one uniform field.
  *
- * `type: tdd` is read through the Frontmatter Module's key-block reader (`frontmatterKeyBlockText`),
- * not a `^type:\s*tdd` regex over the raw block.
+ * `type: tdd` is detected by the Frontmatter Module's `frontmatterKeyHasValue` (the old
+ * `^type:\s*tdd\s*$` multiline test over the fence owner's block, key and value escaped).
+ *
+ * The plan id (a plan FILE NAME) reaches git as an extended-regex `--grep` pattern with every
+ * metacharacter escaped, so a plan named `.*-PLAN.md` matches only commits that name it literally.
  *
  * Argv after the verb: `<phase>` (a number; an unresolvable phase reports zero plans).
  */
@@ -18,11 +21,11 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { gateVerdict, gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
 import type { GateResult } from './gate-verdict.cjs';
-import { resolvePhaseDirOrEmpty } from './gate-phase-context.cjs';
-import { readIfExists } from './decision-coverage-support.cjs';
+import { resolvePhaseDirOrEmpty, readIfExists } from './gate-phase-context.cjs';
+import { escapeEre } from './pattern.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterMod = require('./frontmatter.cjs');
-const { frontmatterKeyBlockText } = frontmatterMod;
+const { frontmatterKeyHasValue } = frontmatterMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import planScanMod = require('./plan-scan.cjs');
 const { scanPhasePlans } = planScanMod;
@@ -37,23 +40,25 @@ interface TddPlanRow {
 }
 
 /**
- * True when the plan's frontmatter declares `type: tdd` (CRLF included, #2449). The `type` key is
- * read off the one fence owner's block as RAW text (`frontmatterKeyBlockText`), not through the
- * YAML parser: a block the parser refuses (a `--- x` line before `type:`) must still classify, as
- * it did under the old `^type:\s*tdd\s*$` line regex. The value is the key line's remainder,
- * trimmed, and must equal `tdd` exactly — so `type: "tdd"` and `type: tdd # note` stay non-TDD, as
- * before.
+ * True when the plan's frontmatter declares `type: tdd` (CRLF included, #2449). The block is the
+ * one fence owner's, read as RAW text — not through the YAML parser — so a block the parser refuses
+ * (a `--- x` line before `type:`) still classifies, exactly as under the old `^type:\s*tdd\s*$`
+ * multiline regex, whose edge behaviour (a duplicate `type:` key, a value on the next line,
+ * `type : tdd` NOT matching, `type: "tdd"` / `type: tdd # note` NOT matching) is preserved.
  */
 function isTddPlan(content: string): boolean {
-  const firstLine = frontmatterKeyBlockText(content, 'type').split('\n')[0] ?? '';
-  return firstLine.trim() === 'tdd';
+  return frontmatterKeyHasValue(content, 'type', 'tdd');
 }
 
-/** True when `git log --grep=<pattern>` finds at least one commit (a git failure is "none"). */
-function hasCommitMatching(projectDir: string, pattern: string): boolean {
+/**
+ * True when `git log` finds at least one commit whose message has a line `<kind>(<planId>):` (a
+ * git failure is "none"). `planId` is matched LITERALLY: its extended-regex metacharacters are
+ * escaped, so it can never widen the pattern.
+ */
+function hasCommitMatching(projectDir: string, kind: 'test' | 'feat' | 'refactor', planId: string): boolean {
   try {
     const out = execFileSync(
-      'git', ['log', '--oneline', `--grep=${pattern}`, '--', '.'],
+      'git', ['log', '--oneline', '--extended-regexp', `--grep=^${kind}\\(${escapeEre(planId)}\\):`, '--', '.'],
       // stderr piped (and dropped), never inherited: a gate module writes nothing to stderr.
       { cwd: projectDir, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024, windowsHide: true, timeout: 10_000 },
     );
@@ -104,9 +109,9 @@ export function evaluateTddReviewCheckpoint(input: { projectDir: string; args: r
   const rows: TddPlanRow[] = [];
   for (const planPath of tddPlanFiles) {
     const planId = path.basename(planPath, '-PLAN.md');
-    const red = hasCommitMatching(projectDir, `^test(${planId}):`);
-    const green = hasCommitMatching(projectDir, `^feat(${planId}):`);
-    const refactor = hasCommitMatching(projectDir, `^refactor(${planId}):`);
+    const red = hasCommitMatching(projectDir, 'test', planId);
+    const green = hasCommitMatching(projectDir, 'feat', planId);
+    const refactor = hasCommitMatching(projectDir, 'refactor', planId);
 
     const missing: string[] = [];
     if (!red) missing.push('RED');

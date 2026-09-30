@@ -373,3 +373,115 @@ describe('verify context-drift CLI', () => {
     }
   });
 });
+
+// `verify context-drift` reads `workflow.context_drift_action` through the quiet gate-config reader
+// (#5139, epic #5056, ADR-5057 Phase 6 review finding: it parsed config.json by hand, the same
+// class as the router's old `readWorkflowConfig`). The nested key is validated exactly as before
+// (`block`, anything else -> `warn`); a missing or MALFORMED config.json is "key absent" and writes
+// NOTHING to stderr; and config is workstream-aware through the resolver `config-get` shares: with
+// GSD_WORKSTREAM the workstream's config.json is read first, then the project root's.
+describe('verify context-drift: workflow.context_drift_action through the gate-config reader (#5139)', () => {
+  const { spawnSync } = require('node:child_process');
+  const { TEST_ENV_BASE } = require('./helpers.cjs');
+  const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+  const TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+
+  let tmp;
+  beforeEach(() => { tmp = createTempGitProject('gsd-ctx-drift-cfg-'); });
+  afterEach(() => cleanup(tmp));
+
+  const write = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(tmp, rel)), { recursive: true });
+    fs.writeFileSync(path.join(tmp, rel), text);
+  };
+
+  /** A phase whose RESEARCH is older than its CONTEXT (stale), under `planning` ('.planning' or a workstream dir). */
+  function stalePhase(planning = '.planning') {
+    const dir = `${planning}/phases/03-feature`;
+    write(`${dir}/03-CONTEXT.md`, '# context\n');
+    write(`${dir}/03-RESEARCH.md`, '# research\n');
+    gitOrThrow(['add', '-A'], { cwd: tmp });
+    gitOrThrow(['commit', '-m', 'context and research'], { cwd: tmp });
+    fs.appendFileSync(path.join(tmp, dir, '03-CONTEXT.md'), 'D-99\n');
+  }
+
+  function drift(workstream) {
+    const r = spawnSync(process.execPath, [TOOLS, 'verify', 'context-drift', '03-feature'], {
+      cwd: tmp,
+      encoding: 'utf-8',
+      timeout: PROBE_TIMEOUT_MS,
+      env: { ...process.env, ...TEST_ENV_BASE, HOME: tmp, USERPROFILE: tmp, GSD_WORKSTREAM: workstream ?? '' },
+    });
+    assert.equal(r.status, 0, `verify context-drift failed: ${r.stderr}`);
+    return { data: JSON.parse(r.stdout), stderr: r.stderr };
+  }
+
+  test('nested block is honoured: stale drift blocks, nothing on stderr', () => {
+    write('.planning/config.json', JSON.stringify({ workflow: { context_drift_action: 'block' } }));
+    stalePhase();
+    const { data, stderr } = drift();
+    assert.equal(data.action, 'block');
+    assert.equal(data.block, true);
+    assert.deepStrictEqual(data.stale_artifacts, ['03-RESEARCH.md']);
+    assert.equal(stderr, '');
+  });
+
+  for (const [label, text] of [
+    ['an unrecognised value', JSON.stringify({ workflow: { context_drift_action: 'yolo' } })],
+    ['a non-string value', JSON.stringify({ workflow: { context_drift_action: true } })],
+    ['a TOP-LEVEL key (not a workflow.* key)', JSON.stringify({ context_drift_action: 'block' })],
+    ['an empty config', '{}'],
+  ]) {
+    test(`${label} -> warn, no block`, () => {
+      write('.planning/config.json', text);
+      stalePhase();
+      const { data } = drift();
+      assert.equal(data.action, 'warn');
+      assert.equal(data.block, false);
+    });
+  }
+
+  for (const text of ['{ not json', '', '{"workflow": ', '[1, 2', 'null']) {
+    test(`a malformed config.json ${JSON.stringify(text)} -> warn, nothing on stderr`, () => {
+      write('.planning/config.json', text);
+      stalePhase();
+      const { data, stderr } = drift();
+      assert.equal(data.action, 'warn');
+      assert.equal(data.block, false);
+      assert.equal(stderr, '', 'a malformed config is an absent key, not a warning');
+    });
+  }
+
+  test('workstream: the workstream config.json is read (block) when GSD_WORKSTREAM is set', () => {
+    write('.planning/config.json', '{}');
+    write('.planning/workstreams/ws1/config.json', JSON.stringify({ workflow: { context_drift_action: 'block' } }));
+    stalePhase('.planning/workstreams/ws1');
+    const { data, stderr } = drift('ws1');
+    assert.equal(data.action, 'block');
+    assert.equal(data.block, true);
+    assert.equal(stderr, '');
+  });
+
+  test('workstream: the workstream value wins over the project root value', () => {
+    write('.planning/config.json', JSON.stringify({ workflow: { context_drift_action: 'block' } }));
+    write('.planning/workstreams/ws1/config.json', JSON.stringify({ workflow: { context_drift_action: 'warn' } }));
+    stalePhase('.planning/workstreams/ws1');
+    assert.equal(drift('ws1').data.action, 'warn');
+  });
+
+  test('workstream: a workstream config without the key falls back to the project root (as config-get does)', () => {
+    write('.planning/config.json', JSON.stringify({ workflow: { context_drift_action: 'block' } }));
+    write('.planning/workstreams/ws1/config.json', '{}');
+    stalePhase('.planning/workstreams/ws1');
+    assert.equal(drift('ws1').data.action, 'block');
+  });
+
+  test('workstream: a malformed workstream config is an absent key and the root value still applies, silently', () => {
+    write('.planning/config.json', JSON.stringify({ workflow: { context_drift_action: 'block' } }));
+    write('.planning/workstreams/ws1/config.json', '{ not json');
+    stalePhase('.planning/workstreams/ws1');
+    const { data, stderr } = drift('ws1');
+    assert.equal(data.action, 'block');
+    assert.equal(stderr, '');
+  });
+});

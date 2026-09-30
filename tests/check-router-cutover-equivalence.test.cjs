@@ -27,7 +27,14 @@
  *
  * Not reachable through the CLI: the api-coverage "resolved phase dir escapes
  * .planning/" arm (findPhaseInternal only ever returns directories under
- * .planning/phases or .planning/milestones), so it has no golden.
+ * .planning/phases or .planning/milestones; a phase directory symlinked outside
+ * .planning is not resolved at all, and a GSD_WORKSTREAM does not change that),
+ * so it has no golden; it is driven through the gate's injected resolver in
+ * tests/gate-api-coverage-verify-pre-escape.test.cjs.
+ *
+ * `tdd-red-evidence-path-escape` is the one golden NOT captured from the pre-move
+ * code: the record path used to be read uncontained, and a path escaping the
+ * project directory is now the usage failure every sibling gate raises.
  */
 
 const { describe, test, after } = require('node:test');

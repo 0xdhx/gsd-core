@@ -30,7 +30,11 @@ export function partitionPredicateArgs(args: readonly string[]): { flags: Record
     const key = a.slice(2);
     const next = args[i + 1];
     if (key.length > 0 && typeof next === 'string' && !next.startsWith('--')) {
-      flags[key] = next;
+      // defineProperty, not `flags[key] = next`: an own data property for EVERY caller-supplied
+      // key. A plain assignment of `--__proto__ v` set nothing (the pair was consumed and its
+      // value silently lost), and assigning through a caller-controlled key is the
+      // prototype-pollution sink shape.
+      Object.defineProperty(flags, key, { value: next, enumerable: true, writable: true, configurable: true });
       i++;
     } else {
       positionals.push(a);

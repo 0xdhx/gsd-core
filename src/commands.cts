@@ -3630,7 +3630,7 @@ function cmdTodoComplete(cwd: string, filename: string | undefined, options: Tod
   // to a location inside todosRoot (or inside pending/) and would pass
   // containment, yet none of them is a bare filename. Reject on basename
   // shape FIRST, before any path is even joined — same predicate shape as
-  // findPhaseArtifact in check-command-router.cts. Checking both `/` and
+  // findPhaseArtifact in gate-predicate.cts. Checking both `/` and
   // `\` explicitly (not just path.basename) matters on POSIX, where a
   // literal backslash is just an ordinary filename character to
   // path.basename but not to path.win32.basename or to the user's intent.

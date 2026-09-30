@@ -12,7 +12,8 @@
  *   - the XML-tag body extraction lives in `markdown-sectionizer.cts` (`extractXmlTagBodies`).
  *
  * The router-facing gate modules (`gate-decision-coverage-plan.cts`,
- * `gate-decision-coverage-verify.cts`) import from here. This module never imports `./io.cjs`.
+ * `gate-decision-coverage-verify.cts`) import from here. This module imports no io module and
+ * performs no direct console/stdout/stderr write (ESLint-enforced).
  */
 
 import fs from 'node:fs';
@@ -23,6 +24,7 @@ import type { Decision } from './decisions.cjs';
 import { locateFrontmatterFence } from './frontmatter-fence.cjs';
 import { stripFencedCode, collectSections, extractXmlTagBodies } from './markdown-sectionizer.cjs';
 import { tryWithinRoot, PathAcceptance } from './security.cjs';
+import { readIfExists } from './gate-phase-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterMod = require('./frontmatter.cjs');
 const { rawFrontmatterField, frontmatterKeyBlockText } = frontmatterMod;
@@ -32,7 +34,7 @@ const { scanPhasePlans } = planScanMod;
 
 // ─── Decision matching ────────────────────────────────────────────────────────
 
-export function normalizePhrase(text: unknown): string {
+function normalizePhrase(text: unknown): string {
   // eslint-disable-next-line @typescript-eslint/no-base-to-string
   return String(text || '')
     .toLowerCase()
@@ -41,9 +43,9 @@ export function normalizePhrase(text: unknown): string {
     .trim();
 }
 
-export const SOFT_PHRASE_MIN_WORDS = 6;
+const SOFT_PHRASE_MIN_WORDS = 6;
 
-export function softPhrase(text: unknown): string {
+function softPhrase(text: unknown): string {
   const words = normalizePhrase(text).split(' ').filter(Boolean);
   if (words.length < SOFT_PHRASE_MIN_WORDS) return '';
   return words.slice(0, SOFT_PHRASE_MIN_WORDS).join(' ');
@@ -57,14 +59,6 @@ export function decisionMentioned(haystack: string | null | undefined, decision:
 }
 
 // ─── File reading ─────────────────────────────────────────────────────────────
-
-export function readIfExists(filePath: string): string {
-  try {
-    return fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return '';
-  }
-}
 
 export function loadPlanContents(phaseDir: string): string[] {
   if (!fs.existsSync(phaseDir)) return [];
@@ -98,9 +92,9 @@ export function loadDecisionExtraction(contextPath: string): { trackable: Decisi
 
 // ─── Plan surfaces scanned for a decision citation ────────────────────────────
 
-export const DESIGNATED_HEADINGS_RE = /^#{1,6}\s+(?:must[_ ]haves?|truths?|tasks?|objective)\b/i;
+const DESIGNATED_HEADINGS_RE = /^#{1,6}\s+(?:must[_ ]haves?|truths?|tasks?|objective)\b/i;
 
-export function stripCommentsAndFences(text: string): string {
+function stripCommentsAndFences(text: string): string {
   // HTML-comment stripping stays caller-side (the seam does not strip HTML comments).
   // Stop-at-next-open body (ReDoS-safe, #2128); an UNCLOSED `<!--` does not match,
   // so downstream tags are preserved (unlike a `(?:-->|$)` fallback, which would
@@ -188,6 +182,9 @@ export function recentCommitMessages(projectDir: string): string {
     return execFileSync('git', ['log', '-n', '200', '--pretty=%s%n%b'], {
       cwd: projectDir,
       encoding: 'utf-8',
+      // stderr piped (and dropped), never inherited: a gate module writes nothing to stderr
+      // (`fatal: not a git repository` on a non-git project dir must not reach the terminal).
+      stdio: ['ignore', 'pipe', 'pipe'],
       maxBuffer: 4 * 1024 * 1024,
       windowsHide: true,
       timeout: 15_000,
@@ -198,8 +195,8 @@ export function recentCommitMessages(projectDir: string): string {
 }
 
 /** Cap on files read across all SUMMARYs, and on bytes read per file. */
-export const MODIFIED_FILES_MAX_COUNT = 50;
-export const MODIFIED_FILES_MAX_BYTES = 256 * 1024;
+const MODIFIED_FILES_MAX_COUNT = 50;
+const MODIFIED_FILES_MAX_BYTES = 256 * 1024;
 
 /**
  * The contents of every file the SUMMARYs list under frontmatter `files_modified`, contained to

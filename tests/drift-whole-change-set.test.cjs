@@ -1267,3 +1267,144 @@ describe('verify codebase-drift CLI — display safety and document reads (#5134
     ]);
   });
 });
+
+// `verify codebase-drift` reads `workflow.drift_threshold` / `workflow.drift_action` through the quiet
+// gate-config reader (#5139, epic #5056, ADR-5057 Phase 6 review finding: it parsed config.json by
+// hand, the same class as the router's old `readWorkflowConfig`). The values are validated exactly
+// as before (action `auto-remap` else `warn`; threshold an integer >= 1 else 3); a missing or
+// MALFORMED config.json is "key absent" and writes NOTHING to stderr; and config is
+// workstream-aware through the resolver `config-get` shares (GSD_WORKSTREAM: the workstream's
+// config first, then the project root's).
+describe('verify codebase-drift: workflow.drift_threshold / drift_action through the gate-config reader (#5139)', () => {
+  const { spawnSync } = require('node:child_process');
+  const { TEST_ENV_BASE } = require('./helpers.cjs');
+  const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+  const TOOLS = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
+
+  let tmp;
+  beforeEach(() => { tmp = createTempGitProject('gsd-code-drift-cfg-'); });
+  afterEach(() => cleanup(tmp));
+
+  const writeFile = (rel, text) => {
+    fs.mkdirSync(path.dirname(path.join(tmp, rel)), { recursive: true });
+    fs.writeFileSync(path.join(tmp, rel), text);
+  };
+  const gitIn = (...args) => gitOrThrow(args, { cwd: tmp }).trim();
+
+  /** A stamped map (docs under `planning`/codebase) with ONE mapped file edited past the stamp. */
+  function mappedRepo(planning = '.planning') {
+    writeFile('src/f0.js', 'one\n');
+    gitIn('add', '-A');
+    gitIn('commit', '-m', 'seed');
+    for (const doc of SEVEN_DOCS) {
+      writeFile(`${planning}/codebase/${doc}`, doc === 'STRUCTURE.md' ? '# Codebase Structure\n\n- `src/`\n' : `# ${doc}\n`);
+    }
+    writeMappedCommit(path.join(tmp, planning, 'codebase', 'STRUCTURE.md'), gitIn('rev-parse', 'HEAD'), '2026-09-30');
+    gitIn('add', '-A');
+    gitIn('commit', '-m', 'map codebase');
+    writeFile('src/f0.js', 'two\n');
+    gitIn('add', '-A');
+    gitIn('commit', '-m', 'edit a mapped file');
+  }
+
+  function driftCli(workstream) {
+    const r = spawnSync(process.execPath, [TOOLS, 'verify', 'codebase-drift'], {
+      cwd: tmp,
+      encoding: 'utf-8',
+      timeout: PROBE_TIMEOUT_MS,
+      env: { ...process.env, ...TEST_ENV_BASE, HOME: tmp, USERPROFILE: tmp, GSD_WORKSTREAM: workstream ?? '' },
+    });
+    assert.equal(r.status, 0, `verify codebase-drift failed: ${r.stderr}`);
+    return { data: JSON.parse(r.stdout), stderr: r.stderr };
+  }
+  const config = (workflow) => writeFile('.planning/config.json', JSON.stringify({ workflow }));
+
+  test('defaults: threshold 3, action warn — one edit is not enough', () => {
+    mappedRepo();
+    config({});
+    const { data } = driftCli();
+    assert.equal(data.threshold, 3);
+    assert.equal(data.action, 'warn');
+    assert.equal(data.action_required, false);
+  });
+
+  test('nested drift_threshold and drift_action are honoured, nothing on stderr', () => {
+    mappedRepo();
+    config({ drift_threshold: 1, drift_action: 'auto-remap' });
+    const { data, stderr } = driftCli();
+    assert.equal(data.threshold, 1);
+    assert.equal(data.action, 'auto-remap');
+    assert.equal(data.action_required, true);
+    assert.equal(stderr, '');
+  });
+
+  // The threshold must be an integer >= 1 (limit-1 / limit / limit+1 around 1, plus non-integers).
+  for (const [label, value, expected] of [
+    ['0 (limit-1)', 0, 3],
+    ['1 (limit)', 1, 1],
+    ['2 (limit+1)', 2, 2],
+    ['a string "1"', '1', 3],
+    ['a non-integer 1.5', 1.5, 3],
+    ['a negative', -4, 3],
+    ['null', null, 3],
+  ]) {
+    test(`drift_threshold ${label} -> ${expected}`, () => {
+      mappedRepo();
+      config({ drift_threshold: value });
+      assert.equal(driftCli().data.threshold, expected);
+    });
+  }
+
+  for (const [label, value] of [['an unrecognised value', 'sometimes'], ['a non-string', 7]]) {
+    test(`drift_action ${label} -> warn`, () => {
+      mappedRepo();
+      config({ drift_threshold: 1, drift_action: value });
+      assert.equal(driftCli().data.action, 'warn');
+    });
+  }
+
+  for (const text of ['{ not json', '', '{"workflow": ', 'null']) {
+    test(`a malformed config.json ${JSON.stringify(text)} -> defaults, nothing on stderr`, () => {
+      mappedRepo();
+      writeFile('.planning/config.json', text);
+      const { data, stderr } = driftCli();
+      assert.equal(data.threshold, 3);
+      assert.equal(data.action, 'warn');
+      assert.equal(stderr, '', 'a malformed config is an absent key, not a warning');
+    });
+  }
+
+  test('workstream: the workstream config.json is read when GSD_WORKSTREAM is set', () => {
+    mappedRepo('.planning/workstreams/ws1');
+    writeFile('.planning/config.json', '{}');
+    writeFile('.planning/workstreams/ws1/config.json', JSON.stringify({ workflow: { drift_threshold: 1, drift_action: 'auto-remap' } }));
+    const { data, stderr } = driftCli('ws1');
+    assert.equal(data.threshold, 1);
+    assert.equal(data.action, 'auto-remap');
+    assert.equal(data.action_required, true);
+    assert.equal(stderr, '');
+  });
+
+  test('workstream: the workstream value wins over the project root value', () => {
+    mappedRepo('.planning/workstreams/ws1');
+    config({ drift_threshold: 2 });
+    writeFile('.planning/workstreams/ws1/config.json', JSON.stringify({ workflow: { drift_threshold: 1 } }));
+    assert.equal(driftCli('ws1').data.threshold, 1);
+  });
+
+  test('workstream: a workstream config without the key falls back to the project root', () => {
+    mappedRepo('.planning/workstreams/ws1');
+    config({ drift_threshold: 1 });
+    writeFile('.planning/workstreams/ws1/config.json', '{}');
+    assert.equal(driftCli('ws1').data.threshold, 1);
+  });
+
+  test('workstream: a malformed workstream config is an absent key and the root value still applies, silently', () => {
+    mappedRepo('.planning/workstreams/ws1');
+    config({ drift_threshold: 1 });
+    writeFile('.planning/workstreams/ws1/config.json', '{ not json');
+    const { data, stderr } = driftCli('ws1');
+    assert.equal(data.threshold, 1);
+    assert.equal(stderr, '');
+  });
+});

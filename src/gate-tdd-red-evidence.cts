@@ -1,7 +1,7 @@
 /**
  * `check tdd-red-evidence` as a gate module (#5139, epic #5056, ADR-5057 §4 first bullet, #3770):
- * it returns a `GateResult`; the command router formats it. Never imports `./io.cjs`, never
- * writes to stdout/stderr.
+ * it returns a `GateResult`; the command router formats it. Imports no io module and performs no
+ * direct console/stdout/stderr write (ESLint-enforced).
  *
  * Validates a persisted RED-phase test-run record for a `type: tdd` plan. Only an INTENTIONAL
  * failure of the target test (verdict RED_EVIDENCE_OK) may authorize GREEN; zero-test discovery,
@@ -12,13 +12,18 @@
  * `unreadable_record`), never a pass.
  *
  * Argv after the verb: `<record.json>`. The record path resolves against the PROCESS cwd
- * (`path.resolve`), exactly as before the move — it is not contained to the project directory.
+ * (`path.resolve`), as before the move, and must then stay INSIDE the project directory (realpath
+ * containment, ADR-4650) BEFORE anything is read: a record path that escapes it is the usage
+ * failure `path escapes its allowed directory: <arg>`, so the gate cannot be made to read — and
+ * echo the fields of — an arbitrary readable file (#5139 security review). The path echoed in the
+ * payload stays the resolved (not realpath'd) form, unchanged.
  */
 
 import path from 'node:path';
+import { tryWithinRoot, PathAcceptance } from './security.cjs';
 import { gateVerdict, gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
 import type { GateResult } from './gate-verdict.cjs';
-import { readIfExists } from './decision-coverage-support.cjs';
+import { readIfExists } from './gate-phase-context.cjs';
 import { classifyRedEvidence, buildRedEvidenceRecord } from './tdd-red-evidence.cjs';
 
 export function evaluateTddRedEvidence(input: { projectDir: string; args: readonly string[] }): GateResult {
@@ -30,6 +35,11 @@ export function evaluateTddRedEvidence(input: { projectDir: string; args: readon
     );
   }
   const resolved = path.resolve(recordPath);
+  // Containment BEFORE the read (the read follows symlinks, so it is decided on the resolved
+  // target). Only the verdict of the predicate is used; the echoed path stays `resolved`.
+  if (tryWithinRoot(resolved, input.projectDir, PathAcceptance.AbsoluteInsideRoot) === null) {
+    return gateUsageFailure(GATE_FAILURE_CODE.USAGE, `path escapes its allowed directory: ${recordPath}`);
+  }
   const text = readIfExists(resolved);
   const record = ((): Record<string, unknown> | null => {
     if (!text) return null;
