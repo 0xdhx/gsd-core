@@ -26,6 +26,7 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { GIT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { createTempProject, createTempGitProject, cleanup } = require('./helpers.cjs');
+const { tempRootAliases, canonicalizeTempPaths } = require('./helpers/path-compare.cjs');
 
 const gate = require('../gsd-core/bin/lib/gate-ui-safety.cjs');
 const { isGateUsageFailure } = require('../gsd-core/bin/lib/gate-verdict.cjs');
@@ -188,6 +189,7 @@ const CASES = [
 function run(c) {
   const dir = c.git ? createTempGitProject('gate-u4-') : createTempProject('gate-u4-');
   const real = fs.realpathSync(dir);
+  const aliases = tempRootAliases(dir);
   const writes = [];
   const outWrite = process.stdout.write;
   const errWrite = process.stderr.write;
@@ -210,13 +212,13 @@ function run(c) {
     if (typeof restore === 'function') restore();
     cleanup(dir);
   }
-  return { result, writes, dir, real };
+  return { result, writes, dir, real, aliases };
 }
 
 describe('U4 evaluateUiSafetyGate', () => {
   for (const c of CASES) {
     test(`${c.id}: ${c.title}`, () => {
-      const { result, writes, dir, real } = run(c);
+      const { result, writes, dir, real, aliases } = run(c);
       const unexpected = writes.filter(
         (w) => !(c.stderrPrefix && w.stream === 'stderr' && w.chunk.startsWith(c.stderrPrefix)),
       );
@@ -229,9 +231,10 @@ describe('U4 evaluateUiSafetyGate', () => {
       assert.equal(isGateUsageFailure(result), false);
       assert.equal(result.outcome, c.outcome);
       assert.equal(result.block, c.block);
-      const expected = c.expected(dir, real);
-      assert.deepStrictEqual(result.payload, expected);
-      assert.equal(JSON.stringify(result.payload), JSON.stringify(expected), 'payload key order is part of the contract');
+      const expected = canonicalizeTempPaths(c.expected(dir, real), aliases);
+      const actual = canonicalizeTempPaths(result.payload, aliases);
+      assert.deepStrictEqual(actual, expected);
+      assert.equal(JSON.stringify(actual), JSON.stringify(expected), 'payload key order is part of the contract');
     });
   }
 });

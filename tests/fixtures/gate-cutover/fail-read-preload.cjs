@@ -10,12 +10,14 @@
 
 const fs = require('node:fs');
 
-const suffix = process.env.GSD_CUTOVER_FAIL_READ_SUFFIX;
+// The suffix is written with "/"; Windows spells the same path with "\".
+const slashed = (p) => p.replace(/\\/g, '/');
+const suffix = process.env.GSD_CUTOVER_FAIL_READ_SUFFIX && slashed(process.env.GSD_CUTOVER_FAIL_READ_SUFFIX);
 
 if (suffix) {
   const realRead = fs.readFileSync;
   fs.readFileSync = function patchedReadFileSync(target, ...rest) {
-    if (typeof target === 'string' && target.endsWith(suffix)) {
+    if (typeof target === 'string' && slashed(target).endsWith(suffix)) {
       const err = new Error('EACCES: simulated read failure');
       err.code = 'EACCES';
       throw err;

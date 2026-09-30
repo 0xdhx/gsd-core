@@ -21,6 +21,7 @@ const { TEST_ENV_BASE } = require('../../helpers.cjs');
 const { runNode } = require('../../helpers/process-seam.cjs');
 const { gitOrThrow } = require('../../helpers/git-fixture.cjs');
 const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('../../helpers/timeouts.cjs');
+const { tempRootAliases, canonicalizeTempText } = require('../../helpers/path-compare.cjs');
 
 const TOOLS_PATH = path.join(__dirname, '..', '..', '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 const PRELOAD_PATH = path.join(__dirname, 'fail-read-preload.cjs');
@@ -538,18 +539,13 @@ function buildFixture(name) {
   return root;
 }
 
-function tempRootForms(root) {
-  const forms = new Set([root]);
-  try { forms.add(fs.realpathSync(root)); } catch { /* keep the given form */ }
-  if (root.startsWith('/private/')) forms.add(root.slice('/private'.length));
-  return [...forms].sort((a, b) => b.length - a.length);
-}
-
-/** The ONE normaliser used by capture and comparison: temp root -> <TMP>. */
+/**
+ * The ONE normaliser used by capture and comparison: every spelling of the temp
+ * root (raw, realpath, Windows long/short name, JSON-escaped backslashes) ->
+ * <TMP>, and path separators after it -> "/". Goldens stay POSIX text.
+ */
 function normalize(text, root) {
-  let out = text;
-  for (const form of tempRootForms(root)) out = out.split(form).join('<TMP>');
-  return out;
+  return canonicalizeTempText(text, tempRootAliases(root), { token: '<TMP>' });
 }
 
 function runArm(spec, root) {

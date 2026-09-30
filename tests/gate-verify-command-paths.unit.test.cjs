@@ -24,6 +24,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { createTempProject, cleanup } = require('./helpers.cjs');
+const { tempRootAliases, canonicalizeTempPaths } = require('./helpers/path-compare.cjs');
 
 const gate = require('../gsd-core/bin/lib/gate-verify-command-paths.cjs');
 const { isGateUsageFailure } = require('../gsd-core/bin/lib/gate-verdict.cjs');
@@ -32,16 +33,6 @@ function w(dir, rel, content) {
   const p = path.join(dir, rel);
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, content);
-}
-
-/** Replace every spelling of the temp project dir (as created, and its realpath) with one token, deeply. */
-function normalizeTmp(value, dir, real) {
-  if (typeof value === 'string') return value.split(real).join('<tmp>').split(dir).join('<tmp>');
-  if (Array.isArray(value)) return value.map((v) => normalizeTmp(v, dir, real));
-  if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, normalizeTmp(v, dir, real)]));
-  }
-  return value;
 }
 
 function planWith(commands) {
@@ -244,6 +235,7 @@ const CASES = [
 function run(c) {
   const dir = createTempProject('gate-u7-');
   const real = fs.realpathSync(dir);
+  const aliases = tempRootAliases(dir);
   const writes = [];
   const outWrite = process.stdout.write;
   const errWrite = process.stderr.write;
@@ -266,13 +258,13 @@ function run(c) {
     if (typeof restore === 'function') restore();
     cleanup(dir);
   }
-  return { result, writes, dir, real };
+  return { result, writes, dir, real, aliases };
 }
 
 describe('U7 evaluateVerifyCommandPaths', () => {
   for (const c of CASES) {
     test(`${c.id}: ${c.title}`, () => {
-      const { result, writes, dir, real } = run(c);
+      const { result, writes, dir, real, aliases } = run(c);
       const unexpected = writes.filter(
         (w) => !(c.stderrPrefix && w.stream === 'stderr' && w.chunk.startsWith(c.stderrPrefix)),
       );
@@ -285,10 +277,10 @@ describe('U7 evaluateVerifyCommandPaths', () => {
       assert.equal(isGateUsageFailure(result), false);
       assert.equal(result.outcome, c.outcome);
       assert.equal(result.block, c.block);
-      // The temp dir may be spelled through a symlink (macOS /var -> /private/var) on either side;
-      // both sides go through one normaliser so the comparison is independent of the TMPDIR form.
-      const expected = normalizeTmp(c.expected(dir, real), dir, real);
-      const actual = normalizeTmp(result.payload, dir, real);
+      // The temp dir may be spelled through a symlink (macOS /var -> /private/var) or a Windows 8.3 alias with
+      // backslashes; both sides go through one normaliser so the comparison is independent of that spelling.
+      const expected = canonicalizeTempPaths(c.expected(dir, real), aliases);
+      const actual = canonicalizeTempPaths(result.payload, aliases);
       assert.deepStrictEqual(actual, expected);
       assert.equal(JSON.stringify(actual), JSON.stringify(expected), 'payload key order is part of the contract');
     });
