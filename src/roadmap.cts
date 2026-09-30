@@ -419,6 +419,15 @@ type AnalyzePhase = {
   context_scope: Scope;
 };
 
+/**
+ * #4757: the phase records whose `roadmap_complete` was READ from a ROADMAP
+ * checkbox. Table rows and headings with no checklist entry also report
+ * `roadmap_complete: false`, but there is no checkbox behind it, so they must
+ * not be compared against disk status by `checkbox_conflict`. A WeakSet keeps
+ * this out of the emitted `phases[]` shape.
+ */
+const PHASES_WITH_CHECKBOX = new WeakSet<AnalyzePhase>();
+
 type PhaseStatusError = ReturnType<typeof phaseStatus>['value']['statusError'];
 
 type AnalyzePhaseCollection = {
@@ -623,7 +632,7 @@ function collectAnalyzePhases(
     const checkboxMatch = content.match(checkboxPattern);
     const roadmapComplete = checkboxMatch ? checkboxMatch[1] === 'x' : false;
 
-    phases.push({
+    const headingPhase: AnalyzePhase = {
       number: phaseNum,
       name: phaseName,
       goal,
@@ -637,7 +646,9 @@ function collectAnalyzePhases(
       roadmap_complete: roadmapComplete,
       context_read_error: contextReadError,
       context_scope: contextScope,
-    });
+    };
+    if (checkboxMatch) PHASES_WITH_CHECKBOX.add(headingPhase);
+    phases.push(headingPhase);
   }
 
   // #3577: markdown-table row declarations join the enumeration — same
@@ -878,7 +889,7 @@ function cmdRoadmapAnalyze(cwd: string, raw: boolean): void {
         statusError = firstStatusError(statusError, ps.value.statusError);
         diskStatus = toDiskStatus(ps.value.status, { hasResearch, hasContext });
       }
-      phases.push({
+      const synthesized: AnalyzePhase = {
         number: occ.token,
         name: `Phase ${occ.token}`,
         goal: null,
@@ -892,7 +903,9 @@ function cmdRoadmapAnalyze(cwd: string, raw: boolean): void {
         roadmap_complete: occ.checked,
         context_read_error: contextReadError,
         context_scope: contextScope,
-      });
+      };
+      PHASES_WITH_CHECKBOX.add(synthesized);
+      phases.push(synthesized);
     }
   }
   // The EMITTED value stays the bare token, unchanged: `phases[].number` is a
@@ -939,6 +952,30 @@ function cmdRoadmapAnalyze(cwd: string, raw: boolean): void {
     ? clampPercent(scopedTotalSummaries, scopedTotalPlans)
     : null;
 
+  // #4757: `current_phase` / `next_phase` / `completed_phases` are disk-
+  // authoritative (ADR-3180 §7.4, #2957 — a ticked ROADMAP checkbox carries no
+  // machine authority), so a phase whose checkbox disagrees with its disk
+  // status can be handed back as the phase to work on while the operator has
+  // already ticked it (a backfilled phase with a SUMMARY and no PLAN reads
+  // `empty`; an all-summarized phase with no VERIFICATION reads `executed`), or
+  // withheld from `completed_phases` while ticked-complete. The selectors stay
+  // disk-authoritative; the disagreement is SURFACED here rather than silently
+  // resolved either way. Computed after the heading/table/checklist phase
+  // enumeration is final so synthesized phases are covered too. Only phases
+  // that HAVE a checkbox can conflict: a progress-table row or a heading with
+  // no checklist entry reports `roadmap_complete: false` because there is no
+  // checkbox to read, not because one is unticked.
+  const checkboxConflict = phases
+    .filter(p => PHASES_WITH_CHECKBOX.has(p)
+      && p.roadmap_complete !== (p.disk_status === DISK_STATUS.COMPLETE))
+    .map(p => ({
+      number: p.number,
+      roadmap_complete: p.roadmap_complete,
+      disk_status: p.disk_status,
+      plan_count: p.plan_count,
+      summary_count: p.summary_count,
+    }));
+
   const result = {
     milestones,
     phases,
@@ -966,6 +1003,9 @@ function cmdRoadmapAnalyze(cwd: string, raw: boolean): void {
     progress_scope: progressScope,
     current_phase: currentPhase ? currentPhase.number : null,
     next_phase: nextPhase ? nextPhase.number : null,
+    // #4757: phases whose ROADMAP checkbox disagrees with `disk_status`
+    // (`roadmap_complete` vs `disk_status === "complete"`); always an array.
+    checkbox_conflict: checkboxConflict,
     missing_phase_details: missingDetails.length > 0 ? missingDetails : null,
     // #3184/#3165: distinguishes a genuinely empty milestone (`scope:
     // "complete"`, `phase_count: 0`) from a window that could not be fully
