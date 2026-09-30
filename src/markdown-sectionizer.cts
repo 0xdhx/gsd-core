@@ -1127,5 +1127,48 @@ export function deleteSection(
   return collapsedBefore + after;
 }
 
+// ─── extractXmlTagBodies ──────────────────────────────────────────────────────
+
+// #2372: scanned-tag set must match the planner-canonical surfaces where a D-NN citation
+// is meaningful. `<objective>`/`<tasks>`/`<task>`/`<action>` are the historical core. The
+// planner is also explicitly told (plan-phase.md) to cite decisions in `<read_first>`,
+// `<behavior>`, `<verify>`, `<acceptance_criteria>`, and `<done>` — those are scanned too,
+// so the decision-coverage gate does not report a false gap when a decision is cited in any of them.
+//
+// Implementation: per-tag matching, NOT a single wide alternation. A single alternation
+// like `<(?:a|b|c)>...<\/(?:a|b|c)>` halts the outer tag's body capture at any inner tag
+// in the set, dropping any citation in the outer tag's prefix prose — e.g.
+// `<action>per D-05 <verify>npm test</verify></action>` would lose D-05 because `<verify>`
+// halts the `<action>` body before the citation. Per-tag matching avoids this: each tag's
+// body terminates only at its OWN closing tag, so `<verify>` inside `<action>` is absorbed
+// into `<action>`'s body (D-05 caught) AND `<verify>` is matched separately on its own pass.
+// Each per-tag regex keeps the ReDoS-safe negative-lookahead tempering (#2128).
+export const XML_DECISION_TAG_NAMES = ['objective', 'tasks', 'task', 'action', 'read_first', 'behavior', 'verify', 'acceptance_criteria', 'done'] as const;
+
+function buildXmlDecisionTagRegex(tagName: string): RegExp {
+  // Per-tag: body tempering stops only at the SAME tag's reopening or closing — other
+  // scanned tags pass through as text into this body. Non-greedy `*?` to first close.
+  return new RegExp(
+    `<${tagName}(?:\\s[^>]{0,1000})?>((?:(?!<${tagName}[\\s>])[\\s\\S])*?)<\\/${tagName}>`,
+    'gi',
+  );
+}
+
+/**
+ * The bodies of every planner-canonical XML tag (`XML_DECISION_TAG_NAMES`) in `text`,
+ * joined by `\n`. Each tag's body ends only at its OWN closing tag, so an inner scanned tag
+ * is absorbed into the outer body AND matched on its own pass.
+ */
+export function extractXmlTagBodies(text: string): string {
+  const parts: string[] = [];
+  for (const tagName of XML_DECISION_TAG_NAMES) {
+    const re = buildXmlDecisionTagRegex(tagName);
+    for (const match of text.matchAll(re)) {
+      if (match[1]) parts.push(match[1]);
+    }
+  }
+  return parts.join('\n');
+}
+
 // Consumers: require('../gsd-core/bin/lib/markdown-sectionizer.cjs')
 // Named CJS exports are the canonical surface (ADR-457 .cts → .cjs build-at-publish).

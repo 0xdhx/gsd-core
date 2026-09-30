@@ -132,6 +132,16 @@ export default tseslint.config(
       'gsd-core/bin/lib/planning-document.cjs',
       // #2401: tsc-generated runtime artifact — lint the src/verify-command-grounding.cts source.
       'gsd-core/bin/lib/verify-command-grounding.cjs',
+      // #5139 (epic #5056 Phase 6): tsc-generated runtime artifacts of the gate modules — lint the
+      // src/gate-*.cts, src/decision-coverage-support.cts and src/check-auto-mode.cts sources.
+      'gsd-core/bin/lib/check-auto-mode.cjs',
+      'gsd-core/bin/lib/decision-coverage-support.cjs',
+      'gsd-core/bin/lib/gate-args.cjs',
+      'gsd-core/bin/lib/gate-config.cjs',
+      'gsd-core/bin/lib/gate-decision-coverage-plan.cjs',
+      'gsd-core/bin/lib/gate-decision-coverage-verify.cjs',
+      'gsd-core/bin/lib/gate-phase-context.cjs',
+      'gsd-core/bin/lib/gate-verdict.cjs',
       'gsd-core/bin/lib/cli-exit.cjs',
       'gsd-core/bin/lib/external-job.cjs',
       'gsd-core/bin/lib/edge-probe.cjs',
@@ -894,6 +904,25 @@ export default tseslint.config(
         args: 'none',
         varsIgnorePattern: '^_',
         caughtErrors: 'none',
+      }],
+    },
+  },
+
+  // ── #5139 (epic #5056, ADR-5057 §4 first bullet): a gate returns a GateVerdict ─────────────
+  // A gate module decides and RETURNS; only the command router formats output. So a gate module
+  // (`src/gate-*.cts`), the decision-coverage support module and the auto-mode state reader may
+  // not import `./io.cjs` (`output()` / `error()` / `ERROR_REASON`). `@typescript-eslint`'s
+  // variant is used because it also covers the `import x = require('./io.cjs')` form this repo's
+  // .cts sources use. tests/check-router-gate-boundaries.test.cjs replays this exact setting over
+  // violating snippets and over the real files.
+  {
+    files: ['src/gate-*.cts', 'src/decision-coverage-support.cts', 'src/check-auto-mode.cts'],
+    rules: {
+      '@typescript-eslint/no-restricted-imports': ['error', {
+        paths: [{
+          name: './io.cjs',
+          message: 'A gate module returns a GateVerdict / GateUsageFailure (src/gate-verdict.cts); only the command router imports ./io.cjs and formats output (#5139).',
+        }],
       }],
     },
   },

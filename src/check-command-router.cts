@@ -24,13 +24,17 @@ const { planningDir } = planningWorkspaceMod;
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import phaseLocatorMod = require('./phase-locator.cjs');
 const { findPhaseInternal } = phaseLocatorMod;
-import { extractDecisions } from './decisions.cjs';
-import type { Decision } from './decisions.cjs';
+import { isGateUsageFailure } from './gate-verdict.cjs';
+import type { GateResult, GateUsageFailure } from './gate-verdict.cjs';
+import { resolveContainedPath } from './gate-phase-context.cjs';
+import { partitionPredicateArgs } from './gate-args.cjs';
+import { evaluateDecisionCoveragePlan } from './gate-decision-coverage-plan.cjs';
+import { evaluateDecisionCoverageVerify } from './gate-decision-coverage-verify.cjs';
+import { decisionMentioned, extractPlanDesignatedSections, readIfExists } from './decision-coverage-support.cjs';
+import { readAutoModeState } from './check-auto-mode.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterMod = require('./frontmatter.cjs');
 const { extractFrontmatter, frontmatterRegion } = frontmatterMod;
-import { locateFrontmatterFence } from './frontmatter-fence.cjs';
-import { stripFencedCode, collectSections } from './markdown-sectionizer.cjs';
 import { tryWithinRoot, tryWithinRootLexical, PathAcceptance } from './security.cjs';
 import { checkUiPresence } from './ui-safety-gate.cjs';
 import { hasStaticFrontendEvidence } from './ui-frontend-evidence.cjs';
@@ -64,244 +68,39 @@ const { probePhaseVerifyCommands, probePhaseFailingDirections } = verifyCommandG
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function normalizePhrase(text: unknown): string {
-  // eslint-disable-next-line @typescript-eslint/no-base-to-string
-  return String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-const SOFT_PHRASE_MIN_WORDS = 6;
-
-function softPhrase(text: unknown): string {
-  const words = normalizePhrase(text).split(' ').filter(Boolean);
-  if (words.length < SOFT_PHRASE_MIN_WORDS) return '';
-  return words.slice(0, SOFT_PHRASE_MIN_WORDS).join(' ');
-}
-
-function decisionMentioned(haystack: string | null | undefined, decision: Decision): boolean {
-  if (!haystack) return false;
-  if (new RegExp(`\\b${decision.id}\\b`).test(haystack)) return true;
-  const phrase = softPhrase(decision.text);
-  return phrase ? normalizePhrase(haystack).includes(phrase) : false;
-}
-
-function readIfExists(filePath: string): string {
-  try {
-    return fs.readFileSync(filePath, 'utf-8');
-  } catch {
-    return '';
-  }
-}
-
+/**
+ * Resolve a caller-supplied path against `projectDir`, failing through `error()` on an escape.
+ * The containment decision is the gate-phase-context helper's; only the failure formatting is here.
+ */
 function resolvePath(inputPath: string, projectDir: string): string {
-  const candidate = path.isAbsolute(inputPath) ? inputPath : path.join(projectDir, inputPath);
-  const contained = tryWithinRoot(candidate, projectDir, PathAcceptance.AbsoluteInsideRoot);
-  if (contained === null) {
-    error(`path escapes its allowed directory: ${inputPath}`, ERROR_REASON.USAGE);
+  const resolved = resolveContainedPath(inputPath, projectDir);
+  if (isGateUsageFailure(resolved)) {
+    return failGate(resolved);
   }
-  return contained;
+  return resolved;
 }
 
-interface WorkflowConfig {
-  auto_advance?: boolean;
-  _auto_chain_active?: boolean;
-  context_coverage_gate?: boolean | string;
+type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON];
+
+/** A gate's usage failure as `error()`: the gate's own message, and its code when it is a known reason. */
+function failGate(failed: GateUsageFailure): never {
+  const reason: ErrorReason | undefined = Object.values(ERROR_REASON).find((value) => value === failed.failure.code);
+  return error(failed.failure.message, reason);
 }
 
-function readWorkflowConfig(projectDir: string): WorkflowConfig {
-  const configPath = path.join(projectDir, '.planning', 'config.json');
-  try {
-    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
-    const wf = (parsed['workflow'] as Record<string, unknown> | undefined) || {};
-    return {
-      ...wf,
-      auto_advance: (wf['auto_advance'] ?? parsed['auto_advance']) as boolean | undefined,
-      _auto_chain_active: (wf['_auto_chain_active'] ?? parsed['_auto_chain_active']) as boolean | undefined,
-      context_coverage_gate: (wf['context_coverage_gate'] ?? parsed['context_coverage_gate']) as boolean | string | undefined,
-    };
-  } catch {
-    return {};
+/**
+ * The router's single output site for a gate: a verdict prints its payload; a usage failure
+ * fails through `error()` with the gate's own message and code (design D2).
+ */
+function emitGateResult(result: GateResult, raw: boolean): void {
+  if (isGateUsageFailure(result)) {
+    failGate(result);
   }
+  output(result.payload, raw, undefined);
 }
 
 function cmdAutoMode(projectDir: string, raw: boolean): void {
-  const workflow = readWorkflowConfig(projectDir);
-  const autoAdvance = Boolean(workflow.auto_advance ?? false);
-  const autoChainActive = Boolean(workflow._auto_chain_active ?? false);
-  let source = 'none';
-  if (autoChainActive && autoAdvance) source = 'both';
-  else if (autoChainActive) source = 'auto_chain';
-  else if (autoAdvance) source = 'auto_advance';
-
-  output({
-    active: autoChainActive || autoAdvance,
-    source,
-    auto_chain_active: autoChainActive,
-    auto_advance: autoAdvance,
-  }, raw, undefined);
-}
-
-function gateEnabled(projectDir: string): boolean {
-  const value = readWorkflowConfig(projectDir).context_coverage_gate;
-  if (typeof value === 'boolean') return value;
-  if (typeof value === 'string') {
-    const lower = value.toLowerCase();
-    if (lower === 'false' || lower === 'true') return lower !== 'false';
-  }
-  return true;
-}
-
-function loadPlanContents(phaseDir: string): string[] {
-  if (!fs.existsSync(phaseDir)) return [];
-  // #3183 (lint-plan-count-drift): source live plan files from the single
-  // owner (scanPhasePlans) instead of a local `-PLAN.md` readdirSync filter
-  // — picks up bare PLAN.md and nested plans/, and excludes plans marked
-  // `status: superseded`, which the prior root-only exact-suffix filter did
-  // neither for.
-  return scanPhasePlans(phaseDir).planFiles
-    .map((entry) => readIfExists(path.join(phaseDir, entry)));
-}
-
-const DESIGNATED_HEADINGS_RE = /^#{1,6}\s+(?:must[_ ]haves?|truths?|tasks?|objective)\b/i;
-// #2372: scanned-tag set must match the planner-canonical surfaces where a D-NN citation
-// is meaningful. `<objective>`/`<tasks>`/`<task>`/`<action>` are the historical core. The
-// planner is also explicitly told (plan-phase.md) to cite decisions in `<read_first>`,
-// `<behavior>`, `<verify>`, `<acceptance_criteria>`, and `<done>` — those are now scanned too,
-// so the gate no longer reports a false coverage gap when a decision is cited in any of them.
-//
-// Implementation: per-tag matching, NOT a single wide alternation. A single alternation
-// like `<(?:a|b|c)>...<\/(?:a|b|c)>` halts the outer tag's body capture at any inner tag
-// in the set, dropping any citation in the outer tag's prefix prose — e.g.
-// `<action>per D-05 <verify>npm test</verify></action>` would lose D-05 because `<verify>`
-// halts the `<action>` body before the citation. Per-tag matching avoids this: each tag's
-// body terminates only at its OWN closing tag, so `<verify>` inside `<action>` is absorbed
-// into `<action>`'s body (D-05 caught) AND `<verify>` is matched separately on its own pass.
-// Each per-tag regex keeps the ReDoS-safe negative-lookahead tempering (#2128).
-const XML_DECISION_TAG_NAMES = ['objective', 'tasks', 'task', 'action', 'read_first', 'behavior', 'verify', 'acceptance_criteria', 'done'] as const;
-
-function buildXmlDecisionTagRegex(tagName: string): RegExp {
-  // Per-tag: body tempering stops only at the SAME tag's reopening or closing — other
-  // scanned tags pass through as text into this body. Non-greedy `*?` to first close.
-  return new RegExp(
-    `<${tagName}(?:\\s[^>]{0,1000})?>((?:(?!<${tagName}[\\s>])[\\s\\S])*?)<\\/${tagName}>`,
-    'gi',
-  );
-}
-
-function stripCommentsAndFences(text: string): string {
-  // HTML-comment stripping stays caller-side (the seam does not strip HTML comments).
-  // Stop-at-next-open body (ReDoS-safe, #2128); an UNCLOSED `<!--` does not match,
-  // so downstream tags are preserved (unlike a `(?:-->|$)` fallback, which would
-  // wipe to EOF and fail-close the decision-coverage gate).
-  const htmlStripped = text.replace(/<!--(?:(?!<!--)[\s\S])*?-->/g, ' ');
-  // Fenced-code stripping: delegate to the canonical CommonMark-correct seam.
-  // replaces the prior independent regex copy (```` ``` ``` ````  + `~~~ ~~~`).
-  return stripFencedCode(htmlStripped).text;
-}
-
-function extractYamlBlock(frontmatter: string, key: string): string {
-  const match = frontmatter.match(new RegExp(`^${key}\\s*:(.*)$`, 'm'));
-  if (!match) return '';
-  const startIdx = (match.index || 0) + match[0].length;
-  const rest = frontmatter.slice(startIdx + 1).split(/\r?\n/);
-  const block = [match[1] || ''];
-  for (const line of rest) {
-    if (line === '' || /^\s/.test(line)) block.push(line);
-    else break;
-  }
-  return block.join('\n');
-}
-
-function extractXmlTagBodies(text: string): string {
-  const parts: string[] = [];
-  for (const tagName of XML_DECISION_TAG_NAMES) {
-    const re = buildXmlDecisionTagRegex(tagName);
-    for (const match of text.matchAll(re)) {
-      if (match[1]) parts.push(match[1]);
-    }
-  }
-  return parts.join('\n');
-}
-
-function extractPlanDesignatedSections(planContent: string | null | undefined): string {
-  if (!planContent) return '';
-  const cleaned = stripCommentsAndFences(planContent);
-  // The block is the one the one fence owner finds; the body starts after the closing fence
-  // line's line ending.
-  const fence = locateFrontmatterFence(cleaned);
-  const frontmatter = fence?.closed ? cleaned.slice(fence.openEnd, fence.bodyEnd) : '';
-  const body = fence?.closed ? cleaned.slice(fence.closingFenceEnd).replace(/^\r?\n/, '') : cleaned;
-
-  const parts: string[] = [];
-  for (const key of ['must_haves', 'truths', 'objective']) {
-    const block = extractYamlBlock(frontmatter, key);
-    if (block) parts.push(block);
-  }
-
-  // Replace hand-rolled split(/\r?\n/) + heading walk with the seam's collectSections.
-  // stopPredicate fires on EVERY heading (collectSections needs to start a section at
-  // each heading), then we filter to designated ones — same semantics as the prior
-  // inDesignated flag: emit the heading line + body only when DESIGNATED_HEADINGS_RE matches.
-  const sections = collectSections(body, () => true);
-  const bodyParts: string[] = [];
-  for (const section of sections) {
-    const headingLine = '#'.repeat(section.heading.level) + ' ' + section.heading.text;
-    if (DESIGNATED_HEADINGS_RE.test(headingLine)) {
-      bodyParts.push(headingLine);
-      if (section.body) bodyParts.push(section.body);
-    }
-  }
-  parts.push(bodyParts.join('\n'));
-  parts.push(extractXmlTagBodies(cleaned));
-  return parts.join('\n\n');
-}
-
-interface UncoveredItem {
-  id: string;
-  text: string;
-  category: string;
-}
-
-function buildPlanMessage(uncovered: UncoveredItem[]): string {
-  if (uncovered.length === 0) return 'All trackable CONTEXT.md decisions are covered by plans.';
-  return [
-    '## Decision Coverage Gap',
-    '',
-    `${uncovered.length} CONTEXT.md decision(s) are not covered by any plan:`,
-    '',
-    ...uncovered.map((item) => `- **${item.id}** (${item.category || 'uncategorized'}): ${item.text}`),
-    '',
-    'Resolve by citing `D-NN:` in any of the scanned plan surfaces: front-matter',
-    '`must_haves`/`truths`/`objective`, a `## must_haves`/`truths`/`tasks`/`objective`',
-    'heading, or an `<objective>`/`<tasks>`/`<task>`/`<action>`/`<read_first>`/`<behavior>`/`<verify>`/`<acceptance_criteria>`/`<done>`',
-    'tag body. Other locations (prose outside those headings, comments, other XML tags) are not scanned.',
-    'OR move the decision to `### Claude\'s Discretion` / tag it `[informational]` if it should not be tracked.',
-  ].join('\n');
-}
-
-function buildVerifyMessage(notHonored: UncoveredItem[]): string {
-  if (notHonored.length === 0) return 'All trackable CONTEXT.md decisions are honored by shipped artifacts.';
-  return [
-    '### Decision Coverage (warning)',
-    '',
-    `${notHonored.length} decision(s) not found in shipped artifacts:`,
-    '',
-    ...notHonored.map((item) => `- **${item.id}** (${item.category || 'uncategorized'}): ${item.text}`),
-    '',
-    'This is a soft warning - verification status is unchanged.',
-  ].join('\n');
-}
-
-function loadDecisionExtraction(contextPath: string): { trackable: Decision[]; outcome: 'parsed' | 'none-present' | 'could-not-parse'; unreadableIds: string[] } {
-  const extraction = extractDecisions(readIfExists(contextPath));
-  return {
-    trackable: extraction.decisions.filter((d) => d.trackable),
-    outcome: extraction.outcome,
-    unreadableIds: extraction.unreadableIds ?? [],
-  };
+  output(readAutoModeState(projectDir), raw, undefined);
 }
 
 /**
@@ -321,231 +120,16 @@ function loadDecisionExtraction(contextPath: string): { trackable: Decision[]; o
  * check verb deprecates positionals and the plan-phase workflow passes them.
  */
 function cmdDecisionCoveragePlan(projectDir: string, args: string[], raw: boolean): void {
-  // args[0]='check', args[1]=subcommand — partition the REST so flag tokens
-  // and their values never land in a positional slot.
-  const { flags, positionals } = partitionPredicateArgs(args.slice(2));
-  const phaseDir = positionals[0] ? resolvePath(positionals[0], projectDir) : '';
-  // A VALUELESS `--context` stays a bare token in the positionals (sibling
-  // parser semantics); it must not then be read as the context PATH — a
-  // `--`-prefixed "path" is a caller mistake, and #2770's law says a missing
-  // context argument fails CLOSED, never a silent "CONTEXT.md missing" green
-  // skip. So only a non-flag positional may serve as the context.
-  const positionalContext = positionals[1] && !positionals[1].startsWith('--') ? positionals[1] : '';
-  const contextArg = flags['context'] ?? positionalContext ?? '';
-  const contextPath = contextArg ? resolvePath(contextArg, projectDir) : '';
-
-  if (!gateEnabled(projectDir)) {
-    output({ passed: true, skipped: true, reason: 'workflow.context_coverage_gate is false', total: 0, covered: 0, uncovered: [], message: 'Decision coverage gate disabled by config.' }, raw, undefined);
-    return;
-  }
-  // #2770: an EMPTY/MISSING contextPath argument is a CALLER ERROR (the workflow
-  // forgot to pass the path — e.g. a shell variable lost between Bash blocks), not
-  // evidence the phase has no CONTEXT.md. Fail closed (mirrors #1365 fail-loud) so a
-  // blocking gate cannot silently certify success on a caller mistake.
-  if (!contextArg || contextArg === '') {
-    output({ passed: false, skipped: false, reason: 'missing context path argument', total: 0, covered: 0, uncovered: [], message: 'Decision coverage gate called without a context path argument — the caller (e.g. the plan-phase workflow) must pass the CONTEXT.md path. An empty argument is a caller error, not evidence there is nothing to check (#2770).' }, raw, undefined);
-    return;
-  }
-  // A REAL path whose file genuinely does not exist is the LEGITIMATE green skip.
-  if (!fs.existsSync(contextPath)) {
-    output({ passed: true, skipped: true, reason: 'CONTEXT.md missing', total: 0, covered: 0, uncovered: [], message: 'No CONTEXT.md - nothing to check.' }, raw, undefined);
-    return;
-  }
-  // #4794: a NON-FILE path (a directory — the adjacent same-looking positional
-  // swapped, the issue's repro 2) is a caller error like #2770's empty argument:
-  // fs.existsSync is true, the read yields nothing, and the gate used to
-  // certify passed:true on a phase full of decisions. Fail closed, naming it.
-  // The stat is wrapped: a path that vanishes between existsSync and statSync
-  // (or any stat failure) must answer the SAME fail-closed JSON, never a throw.
-  let contextIsFile = false;
-  let contextKind = 'non-file entry';
-  try {
-    const st = fs.statSync(contextPath);
-    contextIsFile = st.isFile();
-    if (st.isDirectory()) contextKind = 'directory';
-  } catch {
-    contextIsFile = false;
-    contextKind = 'unreadable path';
-  }
-  if (!contextIsFile) {
-    output({ passed: false, skipped: false, reason: 'context path is not a file', total: null, covered: null, message: `Decision coverage gate: the context path "${contextArg}" is not a readable file (${contextKind}). Swap the adjacent positionals or pass --context <path-to-CONTEXT.md>.` }, raw, undefined);
-    return;
-  }
-
-  const { trackable: decisions, outcome, unreadableIds } = loadDecisionExtraction(contextPath);
-
-  // #1365 fail-loud gate: any could-not-parse outcome must NOT silently pass —
-  // even when some decisions were extracted (e.g. D-01 valid but D-02 malformed).
-  // A parse-miss on ANY bullet means the gate cannot certify full coverage.
-  // Fire independent of decisions.length so a partial-parse still blocks.
-  if (outcome === 'could-not-parse') {
-    // #4794: nothing was measured — the answer must not carry the fields of a
-    // gate that did. total/covered are null (a type change is the point:
-    // 0 reads as data, null does not), `uncovered` is OMITTED (the list was
-    // never built), and the ids that failed to parse are carried so a caller
-    // capturing stdout knows which decision to fix.
-    const partialParse = decisions.length > 0;
-    output({
-      passed: false,
-      skipped: false,
-      reason: 'could-not-parse',
-      total: null,
-      covered: null,
-      unreadable: unreadableIds,
-      message: (partialParse
-        ? 'Decision coverage gate: decisions could not be fully parsed — one or more ' +
-          '`- **D-NN ...**` bullets appear malformed (missing `:` or ` — ` separator, or a phase ' +
-          'prefix that is not a digit run, e.g. `D4x-01`). Fix the bullet format so all decisions ' +
-          'can be read before re-running the gate.'
-        : 'Decision coverage gate: could not parse decisions — possible format mismatch. ' +
-          'The CONTEXT.md appears to be decision-shaped (has a <decisions> block, a decisions heading, ' +
-          'or D- tokens) but no decision bullets could be extracted. Check the formatting of the decisions ' +
-          'block and ensure bullets follow the `- **D-NN:** text`, `- **D4-NN:** text` (phase-prefixed), ' +
-          'or `- **D-NN — title** body` form. An ID grammar the parser does not support (e.g. `DEC-01`) ' +
-          'also lands here.')
-        + (unreadableIds.length > 0 ? ' Unreadable ids: ' + unreadableIds.join(', ') + '.' : ''),
-    }, raw, undefined);
-    return;
-  }
-
-  if (decisions.length === 0) {
-    output({ passed: true, skipped: true, reason: 'no trackable decisions', total: 0, covered: 0, uncovered: [], message: 'No trackable decisions in CONTEXT.md.' }, raw, undefined);
-    return;
-  }
-
-  const sections = loadPlanContents(phaseDir).map(extractPlanDesignatedSections);
-  const uncovered: UncoveredItem[] = [];
-  let covered = 0;
-  for (const decision of decisions) {
-    if (sections.some((section) => decisionMentioned(section, decision))) covered++;
-    else uncovered.push({ id: decision.id, text: decision.text, category: decision.category });
-  }
-
-  output({
-    passed: uncovered.length === 0,
-    skipped: false,
-    total: decisions.length,
-    covered,
-    uncovered,
-    message: buildPlanMessage(uncovered),
-  }, raw, undefined);
+  // args[0]='check', args[1]=subcommand — the gate takes the argv AFTER the verb.
+  emitGateResult(evaluateDecisionCoveragePlan({ projectDir, args: args.slice(2) }), raw);
 }
 
-function recentCommitMessages(projectDir: string): string {
-  try {
-    return execFileSync('git', ['log', '-n', '200', '--pretty=%s%n%b'], {
-      cwd: projectDir,
-      encoding: 'utf-8',
-      maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true,
-      timeout: 15_000,
-    });
-  } catch {
-    return '';
-  }
-}
-
-function readModifiedFilesContent(projectDir: string, summaries: string[]): string {
-  const out: string[] = [];
-  let total = 0;
-  for (const summary of summaries) {
-    if (!summary) continue;
-    for (const blockMatch of summary.matchAll(/files_modified:\s*\n((?:[ \t]*-\s+.+\n?)+)/g)) {
-      const files = [...(blockMatch[1] || '').matchAll(/-\s+(.+)/g)]
-        .map((match) => match[1].trim().replace(/^["']|["']$/g, ''));
-      for (const file of files) {
-        if (total >= 50) break;
-        if (!file) continue;
-        // Migrated off the hand-rolled prefix check (ADR-4650): resolve+contain in one
-        // step via the canonical realpath predicate — the eventual read below follows
-        // symlinks, so containment must be decided on the resolved target, not a lexical
-        // prefix. Read the value the predicate RETURNED; do not re-derive the path.
-        const candidate = path.isAbsolute(file) ? file : path.join(projectDir, file);
-        const contained = tryWithinRoot(candidate, projectDir, PathAcceptance.AbsoluteInsideRoot);
-        if (contained === null) continue;
-        const raw = readIfExists(contained);
-        out.push(raw.length > 256 * 1024 ? raw.slice(0, 256 * 1024) : raw);
-        total++;
-      }
-      if (total >= 50) break;
-    }
-    if (total >= 50) break;
-  }
-  return out.join('\n\n');
-}
-
+/**
+ * `check decision-coverage-verify` — advisory verify-phase decision-coverage gate. The decision
+ * lives in `gate-decision-coverage-verify.cts`; this only formats its result.
+ */
 function cmdDecisionCoverageVerify(projectDir: string, args: string[], raw: boolean): void {
-  const phaseDir = args[2] ? resolvePath(args[2], projectDir) : '';
-  const contextPath = args[3] ? resolvePath(args[3], projectDir) : '';
-
-  if (!gateEnabled(projectDir)) {
-    output({ skipped: true, blocking: false, reason: 'workflow.context_coverage_gate is false', total: 0, honored: 0, not_honored: [], message: 'Decision coverage gate disabled by config.' }, raw, undefined);
-    return;
-  }
-  if (!contextPath || !fs.existsSync(contextPath)) {
-    output({ skipped: true, blocking: false, reason: 'CONTEXT.md missing', total: 0, honored: 0, not_honored: [], message: 'No CONTEXT.md - nothing to check.' }, raw, undefined);
-    return;
-  }
-
-  const { trackable: decisions, outcome: decisionOutcome } = loadDecisionExtraction(contextPath);
-
-  // Mirror could-not-parse surface for verify (non-blocking advisory WARN).
-  // Fire independent of decisions.length — a parse-miss on any bullet must surface,
-  // even when some decisions were partially extracted (#1365 fix-parity with plan gate).
-  if (decisionOutcome === 'could-not-parse') {
-    const partialParse = decisions.length > 0;
-    output({
-      skipped: false,
-      blocking: false,
-      reason: 'could-not-parse',
-      total: decisions.length,
-      honored: 0,
-      not_honored: [],
-      message: partialParse
-        ? 'Decision coverage verify (warning): decisions could not be fully parsed — one or more ' +
-          '`- **D-NN ...**` bullets appear malformed (missing `:` or ` — ` separator, or a phase ' +
-          'prefix that is not a digit run). Fix the bullet format in the CONTEXT.md decisions block.'
-        : 'Decision coverage verify (warning): could not parse decisions — possible format mismatch. ' +
-          'Check the formatting of the CONTEXT.md decisions block (accepted forms: `- **D-NN:** text`, ' +
-          '`- **D4-NN:** text` (phase-prefixed), `- **D-NN — title** body`).',
-    }, raw, undefined);
-    return;
-  }
-
-  if (decisions.length === 0) {
-    output({ skipped: true, blocking: false, reason: 'no trackable decisions', total: 0, honored: 0, not_honored: [], message: 'No trackable decisions in CONTEXT.md.' }, raw, undefined);
-    return;
-  }
-
-  const planContents = loadPlanContents(phaseDir);
-  // #3183 (lint-plan-count-drift): same single-owner sourcing as
-  // loadPlanContents above — scanPhasePlans's summaryFiles instead of a
-  // local `-SUMMARY.md` readdirSync filter.
-  const summaryParts = fs.existsSync(phaseDir)
-    ? scanPhasePlans(phaseDir).summaryFiles.map((entry) => readIfExists(path.join(phaseDir, entry)))
-    : [];
-  const haystack = [
-    planContents.join('\n\n'),
-    summaryParts.join('\n\n'),
-    readModifiedFilesContent(projectDir, summaryParts),
-    recentCommitMessages(projectDir),
-  ].join('\n\n');
-
-  const notHonored: UncoveredItem[] = [];
-  let honored = 0;
-  for (const decision of decisions) {
-    if (decisionMentioned(haystack, decision)) honored++;
-    else notHonored.push({ id: decision.id, text: decision.text, category: decision.category });
-  }
-
-  output({
-    skipped: false,
-    blocking: false,
-    total: decisions.length,
-    honored,
-    not_honored: notHonored,
-    message: buildVerifyMessage(notHonored),
-  }, raw, undefined);
+  emitGateResult(evaluateDecisionCoverageVerify({ projectDir, args: args.slice(2) }), raw);
 }
 
 // ─── ui-plan-gate ─────────────────────────────────────────────────────────────
@@ -1390,38 +974,6 @@ function buildPredicateDeps() {
       return parsed;
     }
   };
-}
-
-/**
- * Split an args array into `--flag value` pairs and the leftover positional
- * tokens, in ONE pass, with the semantics `check predicate` established
- * (#2008): a `--flag` followed by a non-`--` token consumes it as the value
- * (last write wins); a `--flag` with no value stays a bare token and moves to
- * the positionals; everything else is positional. `parsePredicateFlags` is
- * the flags half of this same pass — there is exactly one parser, so the
- * flag-taking check verbs cannot drift apart (#4130 follow-up: `check
- * decision-coverage-plan --context <path>` shares it).
- */
-function partitionPredicateArgs(args: string[]): { flags: Record<string, string>; positionals: string[] } {
-  const flags: Record<string, string> = {};
-  const positionals: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (typeof a !== 'string') continue;
-    if (!a.startsWith('--')) {
-      positionals.push(a);
-      continue;
-    }
-    const key = a.slice(2);
-    const next = args[i + 1];
-    if (key.length > 0 && typeof next === 'string' && !next.startsWith('--')) {
-      flags[key] = next;
-      i++;
-    } else {
-      positionals.push(a);
-    }
-  }
-  return { flags, positionals };
 }
 
 /** Parse `--flag value` pairs from an args array into a map (last write wins). */

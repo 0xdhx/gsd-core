@@ -280,6 +280,14 @@ build/
 /gsd-core/bin/lib/gate-predicate-evaluator.cjs
 /gsd-core/bin/lib/docs.cjs
 /gsd-core/bin/lib/check-command-router.cjs
+/gsd-core/bin/lib/check-auto-mode.cjs
+/gsd-core/bin/lib/decision-coverage-support.cjs
+/gsd-core/bin/lib/gate-args.cjs
+/gsd-core/bin/lib/gate-config.cjs
+/gsd-core/bin/lib/gate-decision-coverage-plan.cjs
+/gsd-core/bin/lib/gate-decision-coverage-verify.cjs
+/gsd-core/bin/lib/gate-phase-context.cjs
+/gsd-core/bin/lib/gate-verdict.cjs
 /gsd-core/bin/lib/verify-command-grounding.cjs
 /gsd-core/bin/lib/frontmatter.cjs
 /gsd-core/bin/lib/frontmatter-fence.cjs

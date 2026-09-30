@@ -748,6 +748,31 @@ function frontmatterBlock(content: string): { bom: string; block: string; rest: 
   };
 }
 
+/**
+ * One top-level frontmatter key's block as RAW TEXT: the rest of the key's line plus every
+ * following blank or indented line (its nested value), or '' when the closed frontmatter block
+ * has no such key. The block is the one `frontmatterRegion` finds — the same fence every reader
+ * agrees on — and, unlike `rawFrontmatterField`, the text is returned WITHOUT parsing the YAML, so
+ * it survives frontmatter the parser refuses (a `--- x` line inside the block, say). For a caller
+ * that scans a block's text for a citation rather than reading its value — the decision-coverage
+ * gate's `must_haves` / `truths` / `objective` scan (#5139, moved here from the router).
+ * `key` is a fixed identifier the caller supplies, never document content.
+ */
+function frontmatterKeyBlockText(content: string, key: string): string {
+  const found = frontmatterRegion(content);
+  if (!found || !found.terminated) return '';
+  const match = found.region.match(new RegExp(`^${key}\\s*:(.*)$`, 'm'));
+  if (!match) return '';
+  const startIdx = (match.index || 0) + match[0].length;
+  const rest = found.region.slice(startIdx + 1).split(/\r?\n/);
+  const block = [match[1] || ''];
+  for (const line of rest) {
+    if (line === '' || /^\s/.test(line)) block.push(line);
+    else break;
+  }
+  return block.join('\n');
+}
+
 function extractFrontmatter(content: string, sourcePath?: string): Frontmatter {
   // Fence location (BOM strip, byte-0 rule, CR handling) lives in
   // `frontmatterRegion` so this and `frontmatterListEntries` cannot drift
@@ -1693,6 +1718,13 @@ export = {
   // branch on an entry's `status:`/`resolution:` rather than print it. Off the
   // same parse path as `extractFrontmatter`, minus only the display flattening.
   frontmatterListEntries,
+  // #5139: one top-level key's value VERBATIM (before display flattening), off the same guarded
+  // parse path — the decision-coverage gates read `must_haves`/`truths`/`objective` and the
+  // SUMMARY `files_modified` list through it instead of a hand-rolled `^key:` scan / regex.
+  rawFrontmatterField,
+  // #5139: one key's block as unparsed text, for a citation scan that must survive frontmatter
+  // the YAML parser refuses.
+  frontmatterKeyBlockText,
   // #3850: the display rendering itself, so a caller deriving a name from those
   // objects produces the byte-identical string `extractFrontmatter` would have.
   flattenObjectListItem,
