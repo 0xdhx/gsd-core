@@ -67,6 +67,7 @@ import onboardProjectionMod = require('./onboard-projection.cjs');
 const { REQUIRED_CODEBASE_MAP_FILES } = onboardProjectionMod;
 import { realClock } from './clock.cjs';
 import { readWorkflowConfigValue } from './gate-config.cjs';
+import { resolveEvaluationScope } from './gate-evaluation-scope.cjs';
 
 const { planningDir, planningRoot, withPlanningLock } = planningWorkspace;
 const { defaultPhaseCleanCommitTimesMs } = verificationMod;
@@ -2366,9 +2367,11 @@ function runVerifySchemaDrift(
     executionLog += fs.readFileSync(path.join(phaseDir, sf), 'utf-8') + '\n';
   }
 
-  const gitLog = execGit(['log', '--oneline', '--all', '-50'], { cwd }) as unknown as { exitCode: number; stdout: string };
-  if (gitLog.exitCode === 0) {
-    executionLog += '\n' + gitLog.stdout;
+  // #5164: the phase's own commits from the evaluation-scope resolver (ADR-5057 §4) — the former
+  // `git log --all -50` let a commit on ANY branch, from ANY phase, put a schema push in the log.
+  const phaseScope = resolveEvaluationScope(cwd, { kind: 'phase', phase: phaseArg, phaseDir }, { includeFiles: false, includeBody: true });
+  if (phaseScope.commits.length > 0) {
+    executionLog += '\n' + phaseScope.commits.map((c) => `${c.sha.slice(0, 7)} ${c.subject}\n${c.body ?? ''}`).join('\n');
   }
 
   const result = checkSchemaDrift(allFiles, executionLog, { skipCheck: !!skipFlag }) as unknown as Record<string, unknown>;

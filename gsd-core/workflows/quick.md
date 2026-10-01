@@ -576,30 +576,12 @@ If no active code-review step hook exists, skip with message "Code review skippe
 
 **Scope files from executor's commits:**
 ```bash
-# Find the diff base: last commit before quick task started
-# Use git log to find commits referencing the quick task id, then take the parent of the oldest
-QUICK_COMMITS=$(git log --oneline --format="%H" --grep="${quick_id}" 2>/dev/null)
-if [ -n "$QUICK_COMMITS" ]; then
-  DIFF_BASE=$(echo "$QUICK_COMMITS" | tail -1)^
-  # Verify parent exists (guard against first commit in repo)
-  git rev-parse "${DIFF_BASE}" >/dev/null 2>&1 || DIFF_BASE=$(echo "$QUICK_COMMITS" | tail -1)
-else
-  # No commits found for this quick task — skip review
-  DIFF_BASE=""
-fi
-
-if [ -n "$DIFF_BASE" ]; then
-  # #4466: bound the tip at the quick task's own last commit, not HEAD --
-  # QUICK_COMMITS is already the complete, newest-first list of this task's
-  # commits, so its first line is the correct tip. An unbounded `..HEAD`
-  # picks up any later commit landed on the same tree in the window between
-  # this task's commits and this review step (worktree merge-back, a shared
-  # tree, another session) and folds it into this task's own review scope.
-  QUICK_TIP=$(echo "$QUICK_COMMITS" | head -1)
-  CHANGED_FILES=$(git diff --name-only "${DIFF_BASE}..${QUICK_TIP}" -- . ':!.planning' 2>/dev/null | tr '\n' ' ')
-else
-  CHANGED_FILES=""
-fi
+# #5164: the quick task's files come from the evaluation-scope resolver (ADR-5057 §4): the
+# UNION of the commits naming the quick task id, on THIS branch only, planning artifacts and
+# lockfiles excluded. A `base..tip` range (the #4466 bound) still folds in every unrelated
+# commit interleaved inside the task's window (worktree merge-back, a shared tree, another
+# session); the union cannot. No commits for this task => empty scope => skip review.
+CHANGED_FILES=$(gsd_run check evaluation-scope --quick "${quick_id}" --include-files --raw 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).files.join(' '))}catch{}})")
 ```
 
 If `CHANGED_FILES` is empty, skip with "No source files changed — skipping code review."

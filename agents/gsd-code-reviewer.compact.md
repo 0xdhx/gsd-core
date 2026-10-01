@@ -84,12 +84,13 @@ files:
 ```
 Present and non-empty → use directly, skip fallback below.
 
-**Fallback (safety net only, when invoked directly without workflow context — `/gsd:code-review` always passes `files`):** if `files` absent/empty, compute DIFF_BASE from `diff_base` if provided; otherwise **fail closed**: "Cannot determine review scope. Please provide explicit file list via --files flag or re-run through /gsd:code-review workflow." Do NOT invent a heuristic (e.g. HEAD~5) — silent mis-scoping is worse than failing loudly.
+**Fallback (safety net only, when invoked directly without workflow context — `/gsd:code-review` always passes `files`):** if `files` absent/empty, ask the evaluation-scope resolver (#5164) for the phase named by `phase_dir`; otherwise **fail closed**: "Cannot determine review scope. Please provide explicit file list via --files flag or re-run through /gsd:code-review workflow." Do NOT invent a heuristic (e.g. HEAD~5) or a `base..HEAD` range — silent mis-scoping is worse than failing loudly.
 
-If DIFF_BASE set:
+Resolver call (phase number = the leading digits of the `phase_dir` basename; add `--since "$diff_base"` when `diff_base` is provided):
 ```bash
-git diff --name-only ${DIFF_BASE}..HEAD -- . ':!.planning/' ':!ROADMAP.md' ':!STATE.md' ':!*-SUMMARY.md' ':!*-VERIFICATION.md' ':!*-PLAN.md' ':!package-lock.json' ':!yarn.lock' ':!Gemfile.lock' ':!poetry.lock'
+gsd_run check evaluation-scope --phase "<phase number>" --raw
 ```
+Use its `files`. A `status` of `unresolvable`, or empty `files`, is the fail-closed case above; `degraded` is usable but say so in REVIEW.md.
 
 **4. Parse structural findings when present:** `<structural_findings>...</structural_findings>` → parse JSON, cache as `STRUCTURAL_FINDINGS`. Include in `## Structural Findings (fallow)` section of REVIEW.md during `write_review` (verbatim if small; concise summary if large). Optional block — absence means no structural pre-pass.
 

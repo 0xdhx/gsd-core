@@ -188,7 +188,7 @@ Pattern B only (verify-only checkpoints). Skip for A/C.
 
    After ALL segments: aggregate files/deviations/decisions → create SUMMARY.md → self-check:
    - Verify key-files.created exist on disk with `[ -f ]`
-   - Check `git log --oneline --all --grep="{phase}-{plan}"` returns ≥1 commit
+   - Check `gsd_run check evaluation-scope --plan "{phase}-{plan}" --commits-only --raw` returns `commits` with ≥1 entry (commits on THIS branch only — #5164; a commit that lives only on another branch does not satisfy the check)
    - Re-run ALL `<acceptance_criteria>` from every task — if any fail, fix before finalizing SUMMARY
    - Re-run the plan-level `<verification>` commands — log results in SUMMARY
    - Append `## Self-Check: PASSED` or `## Self-Check: FAILED` to SUMMARY
@@ -549,21 +549,12 @@ fi
 If .planning/codebase/ doesn't exist: skip.
 
 ```bash
-# #4459: a phase number is unique within a MILESTONE, not a repository. The
-# former commit-subject grep had no milestone bound, and its `--reverse |
-# head -1` deliberately selected the OLDEST matching subject — on a
-# milestone that reuses this phase number, that drags in the PREVIOUS
-# milestone's same-numbered phase's commits too. The phase's own directory
-# is the unique identity: base = the parent of the first commit that added
-# anything under the phase directory — the same anchor code-review.md's
-# structural-pre-pass step already uses for the identical problem (#3995).
-PHASE_START=$(git log --format="%H" --diff-filter=A -- ".planning/phases/XX-name" 2>/dev/null | tail -1)
-if [ -n "$PHASE_START" ] && git rev-parse "${PHASE_START}^" >/dev/null 2>&1; then
-  DIFF_BASE="${PHASE_START}^"
-else
-  DIFF_BASE="${PHASE_START:-HEAD}"
-fi
-git diff --name-only ${DIFF_BASE}..HEAD 2>/dev/null || true
+# #5164: the files this phase changed come from the evaluation-scope resolver (ADR-5057 §4):
+# the union of the phase's own commits' file sets (planning artifacts and lockfiles excluded),
+# on THIS branch only. A `base..HEAD` range would also fold in every unrelated commit landed
+# in the window (#3926, #4459). The resolver widens to the phase-directory range, and says so
+# in its `status`/`reason`, when the phase has no recorded task commits.
+gsd_run check evaluation-scope --phase-dir ".planning/phases/XX-name" --raw 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).changedFiles.join('\n'))}catch{}})" || true
 ```
 
 Update only structural changes: new src/ dir → STRUCTURE.md | deps → STACK.md | file pattern → CONVENTIONS.md | API client → INTEGRATIONS.md | config → STACK.md | renamed → update paths. Skip code-only/bugfix/content changes.

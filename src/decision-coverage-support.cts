@@ -18,13 +18,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
 import { extractDecisions } from './decisions.cjs';
 import type { Decision } from './decisions.cjs';
 import { locateFrontmatterFence } from './frontmatter-fence.cjs';
 import { stripFencedCode, collectSections, extractXmlTagBodies } from './markdown-sectionizer.cjs';
 import { tryWithinRoot, PathAcceptance } from './security.cjs';
 import { readIfExists } from './gate-phase-context.cjs';
+import { resolveEvaluationScope } from './gate-evaluation-scope.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import frontmatterMod = require('./frontmatter.cjs');
 const { rawFrontmatterField, frontmatterKeyBlockText } = frontmatterMod;
@@ -177,21 +177,20 @@ export function buildVerifyMessage(notHonored: UncoveredItem[]): string {
 
 // ─── Shipped-artifact haystack (verify gate) ──────────────────────────────────
 
-export function recentCommitMessages(projectDir: string): string {
-  try {
-    return execFileSync('git', ['log', '-n', '200', '--pretty=%s%n%b'], {
-      cwd: projectDir,
-      encoding: 'utf-8',
-      // stderr piped (and dropped), never inherited: a gate module writes nothing to stderr
-      // (`fatal: not a git repository` on a non-git project dir must not reach the terminal).
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true,
-      timeout: 15_000,
-    });
-  } catch {
-    return '';
-  }
+/**
+ * The subjects and bodies of the PHASE'S OWN commits (#5164, ADR-5057 §4) — the evaluation-scope
+ * resolver's commit set for `phaseDir`, not the last 200 commits of whatever branch is checked
+ * out. A phase with no recorded task commits widens to the commits in its directory range (the
+ * resolver says so); an unreadable phase or repository yields '' ("could not look"), and a git
+ * failure on a non-git project dir writes nothing to the terminal.
+ */
+export function phaseCommitMessages(projectDir: string, phaseDir: string): string {
+  const scope = resolveEvaluationScope(
+    projectDir,
+    { kind: 'phase', phase: '', phaseDir },
+    { includeBody: true, includeFiles: false },
+  );
+  return scope.commits.map((c) => `${c.subject}\n${c.body ?? ''}`).join('\n');
 }
 
 /** Cap on files read across all SUMMARYs, and on bytes read per file. */

@@ -26,13 +26,10 @@ block indefinitely waiting for a signal; verify via filesystem and git state.
 ```bash
 # For each plan in this wave, check if the executor finished:
 SUMMARY_EXISTS=$(test -f "{phase_dir}/{plan_number}-{plan_padded}-SUMMARY.md" && echo "true" || echo "false")
-# #4003: anchored, zero-pad-tolerant scope (see safe_resume_gate); --since stays.
-SPOT_PHASE_NUMBER="{phase_number}"
-# #4619 / #4748: same decimal/N-segment/letter-suffix handling as safe_resume_gate.
-SPOT_PHASE_INT=${SPOT_PHASE_NUMBER%%[!0-9]*}; SPOT_PHASE_REST=${SPOT_PHASE_NUMBER#"$SPOT_PHASE_INT"}
-SPOT_PHASE_N="$((10#$SPOT_PHASE_INT))${SPOT_PHASE_REST//./\\.}"
-SPOT_PLAN_N=$((10#{plan_padded}))
-COMMITS_FOUND=$(git log --oneline --all -E --grep="^[a-z]+\((0*${SPOT_PHASE_N})-(0*${SPOT_PLAN_N})\):" --since="1 hour ago" | head -1)
+# #5164: the plan's commits come from the evaluation-scope resolver — anchored on the SUBJECT,
+# zero-pad tolerant (#4003, #4619, #4748), reachable from THIS branch only (the former
+# any-branch lookup let a commit on another branch satisfy the probe); the 1-hour window stays.
+COMMITS_FOUND=$(gsd_run check evaluation-scope --plan "{phase_number}-{plan_padded}" --commits-only --committed-since "1 hour ago" --raw 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const c=JSON.parse(s).commits;process.stdout.write(c.length?c[0].sha:'')}catch{}})")
 COMMITS_SINCE_DISPATCH=$(git log "${EXPECTED_BRANCH}" --since="${DISPATCH_TS}" --oneline | head -1)
 ```
 

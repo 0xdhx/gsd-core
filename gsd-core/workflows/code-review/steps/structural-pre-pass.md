@@ -40,17 +40,13 @@ FALLOW_STDERR_TMP=$(mktemp)
 # Tier 3's scope step agree on the tip just because they agree on the base.
 FALLOW_SCOPE_ARGS=()
 if [ \"$FALLOW_SCOPE\" = \"phase\" ]; then
-  # #3995: phase-directory anchor — same derivation as the Tier-3 scope step
-  # (lockstep per #3191). A phase number is unique within a milestone, not a
-  # repository; the former message grep matched previous milestones'
-  # same-numbered phases and tail -1 selected the oldest.
-  FALLOW_PHASE_START=$(git log --format=\"%H\" --diff-filter=A -- \"${PHASE_DIR}\" 2>/dev/null | tail -1)
-  if [ -n \"$FALLOW_PHASE_START\" ]; then
-    if git rev-parse \"${FALLOW_PHASE_START}^\" >/dev/null 2>&1; then
-      FALLOW_BASE=\"${FALLOW_PHASE_START}^\"
-    else
-      FALLOW_BASE=\"${FALLOW_PHASE_START}\"
-    fi
+  # #5164: the base is the evaluation-scope resolver's `rangeBase` — the SAME
+  # phase-directory anchor the Tier-3 scope step reads (#3191/#3995), now from
+  # one owner instead of a second hand-rolled `git log --diff-filter=A`. A phase
+  # number is unique within a milestone, not a repository, so the anchor is the
+  # parent of the first commit that added anything under the phase's directory.
+  FALLOW_BASE=$(gsd_run check evaluation-scope --phase "${PADDED_PHASE}" --raw 2>/dev/null | sed -n 's/^ *"rangeBase": *"\([^"]*\)".*$/\1/p')
+  if [ -n \"$FALLOW_BASE\" ]; then
     FALLOW_SCOPE_ARGS=(--changed-since \"$FALLOW_BASE\")
   fi
 fi
