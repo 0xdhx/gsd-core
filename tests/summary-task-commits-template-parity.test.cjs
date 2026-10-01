@@ -82,9 +82,9 @@ describe('SUMMARY templates carry the task-commit shape the resolver reads', () 
 });
 
 describe('positive controls — the shape guard can go red', () => {
-  test('[control] the shipped placeholders are not hex, so an unfilled template yields no commit (the executor must write real shas)', () => {
-    const text = fs.readFileSync(path.join(TEMPLATE_DIR, 'summary.md'), 'utf8');
-    assert.deepEqual(extractTaskCommitRefs(text), []);
+  test('[control] a placeholder that is not hex (`def456g`) is not read — the executor must write real shas', () => {
+    assert.deepEqual(extractTaskCommitRefs('## Task Commits\n1. **Task 1: x** - `def456g`\n## End\n'), []);
+    assert.deepEqual(extractTaskCommitRefs('## Task Commits\n1. **Task 1: x** - `hij789k`\n## End\n'), []);
   });
 
   test('[control] a hash outside backticks, or a row without the Task label, is not read', () => {

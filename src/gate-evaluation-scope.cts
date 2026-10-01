@@ -175,16 +175,23 @@ function paddedPattern(value: string): string {
 }
 
 /**
- * The anchored subject pattern for a plan id, or null when `planId` is not `<phase>-<plan>`.
- * `feat(03-01):`, `test(3-1):` and `fix(03-01)!:` match plan `03-01`; `feat(03-010):` does not.
+ * The anchored subject pattern for a plan id, or null when `planId` is empty, over-long or carries a
+ * control / whitespace character.
+ *
+ * A `<phase>-<plan>` id (`03-01`) is zero-padding tolerant: `feat(03-01):`, `test(3-1):` and
+ * `fix(03-01)!:` match, `feat(03-010):` does not. Any other id (a plan FILE NAME that does not follow
+ * the numbering) is matched LITERALLY — every ERE metacharacter escaped — so `x.*` or `a[b]` can only
+ * match a commit that names that exact id, and never widens the pattern.
  */
 export function planSubjectPattern(planId: string): string | null {
+  if (planId.length === 0 || planId.length > 200 || /[\s\x00-\x1f\x7f]/.test(planId)) return null;
   const dash = planId.indexOf('-');
-  if (dash <= 0 || dash === planId.length - 1) return null;
-  const phasePart = planId.slice(0, dash);
-  const planPart = planId.slice(dash + 1);
-  if (!/^[0-9A-Za-z.]+$/.test(phasePart) || !/^[0-9A-Za-z.]+$/.test(planPart)) return null;
-  return `^[a-z]+\\(${paddedPattern(phasePart)}-${paddedPattern(planPart)}\\)!?:`;
+  const phasePart = dash > 0 ? planId.slice(0, dash) : '';
+  const planPart = dash > 0 ? planId.slice(dash + 1) : '';
+  if (/^[0-9A-Za-z.]+$/.test(phasePart) && /^[0-9A-Za-z.]+$/.test(planPart)) {
+    return `^[a-z]+\\(${paddedPattern(phasePart)}-${paddedPattern(planPart)}\\)!?:`;
+  }
+  return `^[a-z]+\\(${escapeEre(planId)}\\)!?:`;
 }
 
 // ─── Git plumbing ─────────────────────────────────────────────────────────────

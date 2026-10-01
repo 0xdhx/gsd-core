@@ -361,17 +361,19 @@ REVIEW_FILES=("${FILTERED_FILES[@]}")
 ```bash
 EXISTING_FILES=()
 DELETED_FILES=()
+DELETED_COUNT=0
 for file in "${REVIEW_FILES[@]}"; do
   if [ -f "$file" ]; then
     EXISTING_FILES+=("$file")
   else
+    DELETED_COUNT=$((DELETED_COUNT + 1))
     DELETED_FILES+=("$file")
   fi
 done
 REVIEW_FILES=("${EXISTING_FILES[@]}")
 
-if [ ${#DELETED_FILES[@]} -gt 0 ]; then
-  echo "Filtered ${#DELETED_FILES[@]} deleted files from review scope:"
+if [ $DELETED_COUNT -gt 0 ]; then
+  echo "Filtered $DELETED_COUNT deleted files from review scope:"
   printf '  - %s\n' "${DELETED_FILES[@]}"
 fi
 ```

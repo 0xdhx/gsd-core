@@ -70,8 +70,8 @@ describe('#4003 / #5164 — safe_resume_gate plan-commit lookups ask the resolve
       'execute-phase', 'steps', 'completion-reconciliation.md'), 'utf8');
     assert.ok(!w.includes('--grep="{phase_number}-{plan_padded}"') && !frag.includes('--grep="{phase_number}-{plan_padded}"'),
       'the raw padded placeholder substring grep must not remain');
-    assert.ok(frag.includes('gsd_run check evaluation-scope --plan "{phase_number}-{plan_padded}" --commits-only --committed-since "1 hour ago"'),
-      'the spot-check asks the resolver and keeps its temporal bound');
+    assert.ok(frag.includes('gsd_run check evaluation-scope --plan "{phase_number}-{plan_padded}" --ref "${EXPECTED_BRANCH}" --commits-only --committed-since "1 hour ago"'),
+      'the spot-check asks the resolver, on the expected branch (a finished worktree executor\'s commits are not yet merged), and keeps its temporal bound');
     assert.ok(!frag.includes('--all'), 'the spot-check must not look at commits on other branches');
   });
 

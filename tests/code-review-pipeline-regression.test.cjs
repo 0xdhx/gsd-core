@@ -848,10 +848,20 @@ describe('Bug 4 (#2352) — compute_file_scope tilde-path expansion', () => {
         /REVIEW_FILES_COUNT=1/,
         `expected only the tilde path to survive; got: ${JSON.stringify(result.stdout)}`
       );
+      // The filter NAMES each dropped path ("  - <path>" under the "Filtered N deleted files" header,
+      // #5164); only the surviving REVIEW_FILES lines may not carry it.
+      const survivors = result.stdout
+        .split('\n')
+        .filter((line) => !/^Filtered \d+ deleted files/.test(line) && !/^  - /.test(line));
       assert.doesNotMatch(
-        result.stdout,
+        survivors.join('\n'),
         /this\/relative\/path\/does-not-exist\.md/,
         'the missing ordinary relative path must not survive into REVIEW_FILES'
+      );
+      assert.match(
+        result.stdout,
+        /^  - this\/relative\/path\/does-not-exist\.md$/m,
+        'the dropped path is named, not silently discarded'
       );
     }
   );

@@ -42,7 +42,7 @@ FALLOW_SCOPE_ARGS=()
 if [ \"$FALLOW_SCOPE\" = \"phase\" ]; then
   # #5164: the base is the evaluation-scope resolver's `rangeBase` — the SAME
   # phase-directory anchor the Tier-3 scope step reads (#3191/#3995), now from
-  # one owner instead of a second hand-rolled `git log --diff-filter=A`. A phase
+  # one owner instead of a second hand-rolled copy of that derivation. A phase
   # number is unique within a milestone, not a repository, so the anchor is the
   # parent of the first commit that added anything under the phase's directory.
   FALLOW_BASE=$(gsd_run check evaluation-scope --phase "${PADDED_PHASE}" --raw 2>/dev/null | sed -n 's/^ *"rangeBase": *"\([^"]*\)".*$/\1/p')

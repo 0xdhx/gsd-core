@@ -202,12 +202,13 @@ describe('`check evaluation-scope` through the CLI', () => {
     const repo = makeRepo();
     const a = commit(repo, 'src/a.js', 'feat(03-01): a');
     commit(repo, 'other/n.js', 'fix: noise');
-    summarize(repo, [a]);
+    const b = commit(repo, 'src/b.js', 'feat(03-01): b');
+    summarize(repo, [a, b]);
     const result = runTools(['check', 'evaluation-scope', '--phase', '3', '--raw'], repo.dir);
     assert.equal(result.exitCode, 0, result.stderr);
     const scope = JSON.parse(result.stdout);
     assert.equal(scope.status, 'resolved');
-    assert.deepEqual(scope.files, ['src/a.js']);
+    assert.deepEqual(scope.files, ['src/a.js', 'src/b.js']);
     assert.deepEqual(scope.outsideUnion, ['other/n.js']);
   });
 

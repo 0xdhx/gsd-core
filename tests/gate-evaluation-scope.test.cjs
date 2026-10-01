@@ -292,15 +292,27 @@ describe('resolveEvaluationScope — plan and quick units', () => {
   });
 
   test('[hostile] ERE metacharacters in a plan id cannot widen the pattern', () => {
-    assert.equal(planSubjectPattern('.*-PLAN'), null);
-    assert.equal(planSubjectPattern('03'), null);
+    // An id that is not `<phase>-<plan>` is matched LITERALLY, never as a pattern.
+    const wildcard = new RegExp(planSubjectPattern('x.*'));
+    assert.ok(wildcard.test('test(x.*): red'));
+    assert.ok(!wildcard.test('test(xyz): red'), 'a plan named `x.*` is not satisfied by unrelated commits');
+    const bracket = new RegExp(planSubjectPattern('a[b]'));
+    assert.ok(bracket.test('feat(a[b]): g'));
+    assert.ok(!bracket.test('feat(ab): g'));
     const dotted = new RegExp(planSubjectPattern('3.1-2'));
     assert.ok(dotted.test('feat(3.1-2): x'));
     assert.ok(!dotted.test('feat(3x1-2): x'));
+    // An empty, over-long or whitespace-bearing id is refused outright.
+    assert.equal(planSubjectPattern(''), null);
+    assert.equal(planSubjectPattern('a b'), null);
+    assert.equal(planSubjectPattern('x'.repeat(201)), null);
+    assert.notEqual(planSubjectPattern('x'.repeat(200)), null);
     const repo = makeRepo();
-    const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '.*-1' });
-    assert.equal(scope.status, 'unresolvable');
-    assert.equal(scope.reason, 'invalid-plan-id');
+    commit(repo, 'src/a.js', 'feat(abc-1): unrelated');
+    const literal = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '.*-1' });
+    assert.equal(literal.status, 'resolved');
+    assert.deepEqual(literal.commits, [], '`.*-1` must not match feat(abc-1)');
+    assert.equal(resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '' }).reason, 'invalid-plan-id');
   });
 
   test('[regression] a plan commit that lives only on another branch is not returned', () => {

@@ -431,8 +431,11 @@ describe('D. check ui.safety-gate — CLI subprocess route', () => {
     const dir = makeTmpDir();
     initGitRepo(dir);
 
-    // Create planning dirs
+    // Create planning dirs. The phase carries a committed PLAN (a phase that was planned): the
+    // evaluation-scope resolver (#5164) anchors a phase's scope at the commit that first added
+    // anything under its directory, and git does not track an empty directory.
     fs.mkdirSync(path.join(dir, '.planning', 'phases', '01-phase'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'phases', '01-phase', '01-01-PLAN.md'), '# Plan\n');
 
     // Write ROADMAP.md with a frontend Phase 1 section.
     // getRoadmapPhaseWithFallback requires ## or ### heading (not #) for phase lookup.
