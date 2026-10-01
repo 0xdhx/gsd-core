@@ -86,5 +86,8 @@ export function evaluateUiSafetyGate(input: { projectDir: string; args: readonly
     return gateUsageFailure(GATE_FAILURE_CODE.SDK_MISSING_ARG, 'ui-safety-gate requires a phase argument: check ui-safety-gate <phase>');
   }
   const result = computeUiSafetyGate(input.projectDir, phase);
-  return gateVerdict(result.block ? 'block' : 'pass', result.block, { ...result });
+  // A scope the resolver could not read is "could not look", never a pass (ADR-5057 §4: `unreadable`
+  // never produces a passing verdict); Phase 8 derives the exit code from this outcome.
+  const outcome = result.block ? 'block' : result.scopeStatus === 'unresolvable' ? 'skip' : 'pass';
+  return gateVerdict(outcome, result.block, { ...result });
 }

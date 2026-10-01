@@ -70,6 +70,8 @@ export interface ScopeOptions {
   committedSince?: string;
   /** Git runner. Default: `execGit` from shell-command-projection. */
   execGit?: GitRunner;
+  /** Shas per git argv chunk (default 400, safely under the Windows 32,767-char limit). A test seam. */
+  shaChunk?: number;
 }
 
 export type GitRunner = (args: string[], opts?: { cwd?: string }) => SpawnResultOutput;
@@ -95,7 +97,10 @@ export interface EvaluationScope {
   unit: ScopeUnit;
   status: ScopeStatus;
   source: ScopeSource;
-  /** Present whenever `status` is not `resolved`. */
+  /**
+   * Present whenever `status` is not `resolved`, and for a plan/quick unit that matched no commits
+   * (`no-matching-commits`: git was read and the answer is "none" — not an unread scope).
+   */
   reason: string | null;
   commits: ScopeCommit[];
   /** Every path the scope touched, deleted ones included. */
@@ -186,9 +191,12 @@ export function planSubjectPattern(planId: string): string | null {
 
 class ScopeUnreadable extends Error {
   readonly reason: string;
-  constructor(reason: string) {
+  /** git's exit status when the failure was a plain non-zero exit (not a timeout or a missing git). */
+  readonly exitCode: number | null;
+  constructor(reason: string, exitCode: number | null = null) {
     super(reason);
     this.reason = reason;
+    this.exitCode = exitCode;
   }
 }
 
@@ -199,9 +207,24 @@ function makeGit(projectDir: string, runner: GitRunner): Git {
     const result = runner(args, { cwd });
     if (result.timedOut) throw new ScopeUnreadable('git-timeout');
     if (result.exitCode === 127) throw new ScopeUnreadable('git-unavailable');
-    if (result.exitCode !== 0) throw new ScopeUnreadable(`git-failed:${args[0] ?? ''}`);
+    if (result.exitCode !== 0) throw new ScopeUnreadable(`git-failed:${args[0] ?? ''}`, result.exitCode);
     return result.stdout;
   };
+}
+
+/**
+ * Run a git question whose exit status 1 is a legitimate "no" (`merge-base --is-ancestor`,
+ * `rev-parse --verify --quiet`). Exit 1 returns `null`; every other failure — a timeout, a missing
+ * git, a bad object (exit 128) — still rethrows, so a hung or broken git is `unresolvable`, never a
+ * silent "no".
+ */
+function gitOrNo(git: Git, args: string[], cwd?: string): string | null {
+  try {
+    return git(args, cwd);
+  } catch (error) {
+    if (error instanceof ScopeUnreadable && error.exitCode === 1) return null;
+    throw error;
+  }
 }
 
 function splitNul(output: string): string[] {
@@ -229,12 +252,7 @@ export function isSafeDateArgument(candidate: string): boolean {
 }
 
 function isAncestor(git: Git, sha: string, of: string): boolean {
-  try {
-    git(['merge-base', '--is-ancestor', sha, of]);
-    return true;
-  } catch {
-    return false;
-  }
+  return gitOrNo(git, ['merge-base', '--is-ancestor', sha, of]) !== null;
 }
 
 // ─── The resolver ─────────────────────────────────────────────────────────────
@@ -309,9 +327,9 @@ function parseLog(out: string, withBody: boolean): ScopeCommit[] {
   return commits;
 }
 
-function subjectsFor(git: Git, shas: readonly string[], withBody: boolean): ScopeCommit[] {
+function subjectsFor(git: Git, shas: readonly string[], withBody: boolean, chunkSize: number): ScopeCommit[] {
   const out: ScopeCommit[] = [];
-  for (const group of chunk(shas, SHA_CHUNK)) {
+  for (const group of chunk(shas, chunkSize)) {
     out.push(...parseLog(git(['log', '--no-walk=unsorted', logFormat(withBody), ...group]), withBody));
   }
   return out;
@@ -322,21 +340,36 @@ function subjectsFor(git: Git, shas: readonly string[], withBody: boolean): Scop
  * commit of a walk started at all of them is one no other listed commit descends from. (Commit
  * DATES are not used — commits made within one second tie, and a tie picks an arbitrary tip.)
  */
-function newestOf(git: Git, shas: readonly string[]): string {
-  const tip = git(['rev-list', '--topo-order', '-n', '1', ...shas.slice(0, SHA_CHUNK)]).split('\n').filter(Boolean)[0];
+function newestOf(git: Git, shas: readonly string[], chunkSize: number): string {
+  // More shas than fit one argv chunk are reduced chunk by chunk: the chunks' tips are themselves a
+  // (shorter) list, until one chunk holds them all. Nothing is silently dropped.
+  if (shas.length > chunkSize) {
+    const tips = chunk(shas, chunkSize).map((group) => newestOf(git, group, chunkSize));
+    return newestOf(git, tips, chunkSize);
+  }
+  const tip = git(['rev-list', '--topo-order', '-n', '1', ...shas]).split('\n').filter(Boolean)[0];
   return tip ?? shas[0] ?? 'HEAD';
 }
 
-/** The phase-start anchor: the parent of the commit that first added anything under the phase dir. */
-function phaseRangeBase(git: Git, phaseDir: string): string | null {
-  const first = git(['log', '--format=%H', '--diff-filter=A', '--', '.'], phaseDir)
+/** One clamp for every commit cap, so the CLI limit and the resolver's ceiling cannot diverge. */
+export const MAX_COMMITS_CEILING = 1000;
+function clampMaxCommits(requested: number | undefined): number {
+  return Math.max(1, Math.min(requested ?? DEFAULT_MAX_COMMITS, MAX_COMMITS_CEILING));
+}
+
+/** git's empty tree (SHA-1 repositories): the base a range needs to include a root commit's own files. */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+/**
+ * The phase-start anchor on `ref`: the parent of the commit that first added anything under the
+ * phase dir. A phase directory that arrived with the repository's root commit has no parent, so the
+ * anchor is the empty tree — `<empty>..<ref>` then includes the root commit's own files.
+ */
+function phaseRangeBase(git: Git, phaseDir: string, ref: string): string | null {
+  const first = git(['log', ref, '--format=%H', '--diff-filter=A', '--', '.'], phaseDir)
     .split('\n').filter(Boolean).pop();
   if (!first) return null;
-  try {
-    return git(['rev-parse', '--verify', '--quiet', `${first}^`]);
-  } catch {
-    return first; // the phase directory arrived with the repository's root commit
-  }
+  return gitOrNo(git, ['rev-parse', '--verify', '--quiet', `${first}^`]) ?? EMPTY_TREE;
 }
 
 function resolvePhase(
@@ -367,22 +400,29 @@ function resolvePhase(
   // Resolve each listed id to a full sha reachable from the ref (and, for wave scoping, newer than `since`).
   const shas: string[] = [];
   const unreachable: string[] = [];
+  let sinceDropped = 0;
   for (const id of [...new Set(refs)]) {
+    // Exit 1 = no object answers to the id (rebased away); exit 128 = an ambiguous short id. Both
+    // are named below, per id, and neither poisons the phase. A timeout still rethrows.
     let full = '';
     try {
-      full = git(['rev-parse', '--verify', '--quiet', `${id}^{commit}`]);
-    } catch { /* an id no repository object answers to (rebased away) is named below */ }
+      full = gitOrNo(git, ['rev-parse', '--verify', '--quiet', `${id}^{commit}`]) ?? '';
+    } catch (error) {
+      if (!(error instanceof ScopeUnreadable && error.exitCode === 128)) throw error;
+    }
     if (!full || !isAncestor(git, full, ref)) { unreachable.push(id); continue; }
-    if (options.since !== undefined && isAncestor(git, full, options.since)) continue;
+    if (options.since !== undefined && isAncestor(git, full, options.since)) { sinceDropped += 1; continue; }
     shas.push(full);
   }
   scope.unreachable = unreachable.sort();
-  scope.rangeBase = options.since ?? phaseRangeBase(git, phaseDir);
+  scope.rangeBase = options.since ?? phaseRangeBase(git, phaseDir, ref);
 
   const union = new Set<string>();
   const commits: ScopeCommit[] = [];
   const withFiles = options.includeFiles ?? true;
-  for (const meta of subjectsFor(git, [...new Set(shas)], options.includeBody === true)) {
+  // At least 2: a chunk of one never shrinks the list `newestOf` reduces.
+  const chunkSize = Math.max(2, options.shaChunk ?? SHA_CHUNK);
+  for (const meta of subjectsFor(git, [...new Set(shas)], options.includeBody === true, chunkSize)) {
     const files = commitFiles(git, meta.sha);
     for (const file of files) union.add(file);
     commits.push(withFiles ? { ...meta, files: [...files].sort() } : meta);
@@ -393,7 +433,7 @@ function resolvePhase(
     scope.commits = commits;
     finalizeFiles(scope, repoRoot, union);
     if (scope.rangeBase) {
-      const window = rangeFiles(git, scope.rangeBase, newestOf(git, commits.map((c) => c.sha)));
+      const window = rangeFiles(git, scope.rangeBase, newestOf(git, commits.map((c) => c.sha), chunkSize));
       scope.outsideUnion = uniqueSorted(window.filter((f) => !union.has(f)));
     }
     return;
@@ -403,13 +443,13 @@ function resolvePhase(
   const reason =
     summaryCount === 0 ? 'no-summary'
       : refs.length === 0 ? 'no-task-commit-rows'
-        : shas.length === 0 ? 'no-reachable-task-commits'
+        : shas.length === 0 ? (sinceDropped > 0 ? 'no-task-commits-since' : 'no-reachable-task-commits')
           : 'empty-after-exclusions';
   if (!scope.rangeBase) throw new ScopeUnreadable(`${reason}:no-phase-start-anchor`);
   scope.status = 'degraded';
   scope.reason = reason;
   scope.source = 'phase-range';
-  const max = Math.max(1, Math.min(options.maxCommits ?? DEFAULT_MAX_COMMITS, 1000));
+  const max = clampMaxCommits(options.maxCommits);
   scope.commits = parseLog(
     git(['log', `${scope.rangeBase}..${ref}`, logFormat(options.includeBody === true), '-n', String(max)]),
     options.includeBody === true,
@@ -422,12 +462,19 @@ function resolveBySubject(
   git: Git, ref: string, options: ScopeOptions, repoRoot: string,
 ): void {
   const withBody = options.includeBody === true;
-  const pathspecs = (options.pathspecs ?? []).slice(0, MAX_PATHSPECS);
-  const max = Math.max(1, Math.min(options.maxCommits ?? DEFAULT_MAX_COMMITS, 1000));
+  // Refuse rather than truncate: a silently dropped positive pathspec narrows the match.
+  const pathspecs = options.pathspecs ?? [];
+  if (pathspecs.length > MAX_PATHSPECS) throw new ScopeUnreadable('too-many-pathspecs');
+  const max = clampMaxCommits(options.maxCommits);
   let range = ref;
   if (options.milestoneBound === true) {
     let tag = '';
-    try { tag = git(['describe', '--tags', '--abbrev=0', ref]); } catch { /* no tag → unbounded */ }
+    try {
+      tag = git(['describe', '--tags', '--abbrev=0', ref]);
+    } catch (error) {
+      // Exit 128 = no reachable tag → unbounded; a timeout or a missing git still rethrows.
+      if (!(error instanceof ScopeUnreadable && error.exitCode === 128)) throw error;
+    }
     if (tag) range = `${tag}..${ref}`;
   }
   const grepArgs: string[] = [];
@@ -457,6 +504,7 @@ function resolveBySubject(
   if (since !== undefined) commits = commits.filter((c) => !isAncestor(git, c.sha, since));
   if (options.commitsOnly === true) {
     scope.commits = commits;
+    if (commits.length === 0) scope.reason = 'no-matching-commits';
     return;
   }
   const withFiles = options.includeFiles ?? false;
@@ -469,6 +517,11 @@ function resolveBySubject(
   }
   scope.commits = result;
   finalizeFiles(scope, repoRoot, union);
+  // Found nothing: a truthful "none" (status stays `resolved` — git was read), said out loud so a
+  // caller can tell "no such commits" from "an empty scope that was never computed". Commits whose
+  // every path is excluded (planning-only) are an empty scope too, and say so.
+  if (result.length === 0) scope.reason = 'no-matching-commits';
+  else if (scope.changedFiles.length === 0) scope.reason = 'empty-after-exclusions';
 }
 
 // ─── The `check evaluation-scope` verb ────────────────────────────────────────
@@ -511,7 +564,9 @@ function parseScopeArgs(args: readonly string[]): { unit: ScopeUnit; options: Sc
   if (committedSince !== undefined) options.committedSince = committedSince;
   const maxCommits = one('--max-commits');
   if (maxCommits !== undefined) {
-    if (!/^[1-9][0-9]{0,3}$/.test(maxCommits)) return `--max-commits must be an integer from 1 to 9999, got: ${maxCommits}`;
+    if (!/^[1-9][0-9]{0,3}$/.test(maxCommits) || Number(maxCommits) > MAX_COMMITS_CEILING) {
+      return `--max-commits must be an integer from 1 to ${MAX_COMMITS_CEILING}, got: ${maxCommits}`;
+    }
     options.maxCommits = Number(maxCommits);
   }
   if (flags.has('--milestone-bound')) options.milestoneBound = true;
@@ -536,6 +591,7 @@ export function evaluateEvaluationScope(input: { projectDir: string; args: reado
     unit = { kind: 'phase', phase: '', phaseDir: contained };
   }
   const scope = resolveEvaluationScope(input.projectDir, unit, options);
-  const outcome = scope.status === 'resolved' ? 'pass' : scope.status === 'degraded' ? 'advisory' : 'skip';
+  // `pass` only for a scope with nothing to explain; an empty-but-resolved scope (it carries a reason) is advisory.
+  const outcome = scope.status === 'unresolvable' ? 'skip' : scope.status === 'degraded' || scope.reason !== null ? 'advisory' : 'pass';
   return gateVerdict(outcome, false, { ...scope });
 }

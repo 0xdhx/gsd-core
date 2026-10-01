@@ -6,7 +6,7 @@
  *
  * Every gate or workflow step that decides "which commits and files am I evaluating" asks the ONE
  * resolver (`src/gate-evaluation-scope.cts`, reached as `check evaluation-scope`). This guard fails
- * CI on the next bespoke derivation. It scans the shapes the Phase 7 census enumerated:
+ * CI on the next bespoke derivation. It scans the shapes the Phase 7 census enumerated (S1–S5):
  *
  *   S1  `git log … --all`            any-branch commit lookups (a commit that lives on another branch
  *                                    satisfies the check)
@@ -14,6 +14,8 @@
  *                                    (`DIFF_BASE..HEAD`, `HEAD~1..HEAD`, `${X}..HEAD`)
  *   S3  `git diff … HEAD~N`          a relative anchor that names whatever commit happened to land
  *   S4  `PHASE_START=$(git log … --diff-filter=A …)`  a hand-rolled phase-start anchor
+ *   S5  `git log … --grep` (shell) / any raw `git log` argv in a gate module — a commit-message
+ *       lookup that decides scope; only the resolver may ask git which commits belong to a unit
  *
  * Hosts: every `src/gate-*.cts` module except the resolver itself, `src/decision-coverage-support.cts`,
  * `gsd-core/workflows/**\/*.md` and `agents/*.md`. A site that is legitimately NOT an evaluation
@@ -38,8 +40,8 @@ const ISSUE_REF_RE = /#\d+/;
 
 // Shell shapes (workflows, agents): scanned per logical line, backslash continuations joined.
 const SHELL_RULES = [
-  { rule: 'S1', re: /\bgit\s+log\b[^\n]*--all\b/ },
-  { rule: 'S2', re: /\bgit\s+diff\b[^\n]*(?:(?<!\.)\.\.HEAD\b|\$\{?DIFF_BASE\}?\.\.)/ },
+  { rule: 'S1', re: /\bgit\s+log\b[^\n]*--all(?![-\w])/ },
+  { rule: 'S2', re: /\bgit\s+diff\b[^\n]*(?:(?<!\.)\.\.HEAD\b|\$\{?[A-Z_]*(?:BASE|TIP)\}?(?<!\.)\.\.(?!\.))/ },
   { rule: 'S3', re: /\bgit\s+(?:diff|log)\b[^\n]*\bHEAD~\d+\b/ },
   { rule: 'S4', re: /\b[A-Z_]*PHASE_START=\$\(\s*git\s+log\b[^\n]*--diff-filter=A\b/ },
   { rule: 'S5', re: /\bgit\s+log\b[^\n]*--grep\b/ },
@@ -49,7 +51,7 @@ const SHELL_RULES = [
 // `git log` argv) applies only to the gate modules, where the resolver is the one place that may
 // ask git which commits belong to a unit; `src/verify.cts` is scanned for S1–S3 only.
 const TS_RULES = [
-  { rule: 'S1', re: /\[\s*'log'[^\]]*'--all'/g },
+  { rule: 'S1', re: /\[\s*'log'[^\]]*'--all'/g }, // exact element: `--all-match` is a different flag
   { rule: 'S2', re: /\[\s*'diff'[^\]]*(?<!\.)\.\.HEAD\b/g },
   { rule: 'S3', re: /\[\s*'(?:diff|log)'[^\]]*'HEAD~\d+'/g },
   { rule: 'S5', re: /\[\s*'log'/g, gateModulesOnly: true },

@@ -29,7 +29,7 @@ SUMMARY_EXISTS=$(test -f "{phase_dir}/{plan_number}-{plan_padded}-SUMMARY.md" &&
 # #5164: the plan's commits come from the evaluation-scope resolver — anchored on the SUBJECT,
 # zero-pad tolerant (#4003, #4619, #4748), reachable from THIS branch only (the former
 # any-branch lookup let a commit on another branch satisfy the probe); the 1-hour window stays.
-COMMITS_FOUND=$(gsd_run check evaluation-scope --plan "{phase_number}-{plan_padded}" --commits-only --committed-since "1 hour ago" --raw 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const c=JSON.parse(s).commits;process.stdout.write(c.length?c[0].sha:'')}catch{}})")
+COMMITS_FOUND=$(gsd_run check evaluation-scope --plan "{phase_number}-{plan_padded}" --ref "${EXPECTED_BRANCH}" --commits-only --committed-since "1 hour ago" --raw 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const c=JSON.parse(s).commits;process.stdout.write(c.length?c[0].sha:'')}catch{}})")
 COMMITS_SINCE_DISPATCH=$(git log "${EXPECTED_BRANCH}" --since="${DISPATCH_TS}" --oneline | head -1)
 ```
 

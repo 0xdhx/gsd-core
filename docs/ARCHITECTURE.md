@@ -348,7 +348,7 @@ Behavior differences from the pre-refactor router:
 
 | Field | Meaning |
 |-------|---------|
-| `status` | `resolved` (exactly the unit's own commits), `degraded` (the preferred evidence was absent or empty, so `files` come from wider evidence; `reason` says why) or `unresolvable` (git or the phase could not be read; `files` is empty and means "could not look") |
+| `status` | `resolved` (exactly the unit's own commits), `degraded` (the preferred evidence was absent or empty, so `files` come from wider evidence; `reason` says why) or `unresolvable` (git or the phase could not be read, including a git timeout; `files` is empty and means "could not look"). A plan or quick unit that matches nothing is `resolved` with `reason: no-matching-commits` (or `empty-after-exclusions` when its commits touched only excluded paths): git was read and the answer is "none", and the verb reports it as `advisory`, not `pass` |
 | `source` | `task-commits`, `plan-subjects`, `quick-subjects`, `phase-range` or `none` |
 | `commits` | the unit's commits (`sha`, `subject`, optionally `body` and `files`) |
 | `changedFiles` / `files` / `missingOnDisk` | every path the commits touched; the subset that exists on disk (the reviewable set); the subset that no longer exists, **by name** |
@@ -367,7 +367,7 @@ The design rules:
 Workflows reach it as `gsd_run check evaluation-scope`:
 
 ```bash
-gsd_run check evaluation-scope --phase <phase> [--since <sha>] --raw      # a phase
+gsd_run check evaluation-scope --phase <phase> [--since <sha>] --raw      # a phase (or --phase-dir <dir>; --ref <ref>)
 gsd_run check evaluation-scope --plan <phase>-<plan> --raw                # a plan: --commits-only, --max-commits N,
                                                                           #   --milestone-bound, --committed-since <date>,
                                                                           #   --pathspec <glob> (repeatable)

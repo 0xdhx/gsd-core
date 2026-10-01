@@ -410,5 +410,193 @@ describe('evaluateEvaluationScope — the check verb', () => {
     const bare = makeRepo();
     commit(bare, 'src/z.js', 'feat(03-01): z');
     assert.equal(evaluateEvaluationScope({ projectDir: bare.dir, args: ['--phase', '3'] }).outcome, 'advisory');
+    // An empty-but-resolved plan scope carries a reason and is advisory, never a clean pass.
+    assert.equal(evaluateEvaluationScope({ projectDir: bare.dir, args: ['--plan', '09-09'] }).outcome, 'advisory');
+  });
+
+  test('[boundary] --max-commits accepts 1 and the 1000 ceiling, refuses 0 and 1001', () => {
+    const verdict = (value) => evaluateEvaluationScope({ projectDir: '/x', args: ['--plan', '03-01', '--max-commits', value] });
+    assert.match(verdict('0').failure.message, /--max-commits must be an integer from 1 to 1000/);
+    assert.match(verdict('1001').failure.message, /--max-commits must be an integer from 1 to 1000/);
+    assert.equal(verdict('1').failure, undefined);
+    assert.equal(verdict('1000').failure, undefined);
+  });
+});
+
+// ─── Seams driven through an injected git runner ──────────────────────────────
+
+const { execGit: realExecGit } = require('../gsd-core/bin/lib/shell-command-projection.cjs');
+const TIMED_OUT = { exitCode: 1, stdout: '', stderr: '', signal: 'SIGTERM', error: null, timedOut: true };
+
+/** A git runner that records every argv and delegates to the real git unless `force` answers. */
+function spyGit(force) {
+  const calls = [];
+  const run = (args, opts) => {
+    calls.push(args);
+    const forced = force ? force(args) : undefined;
+    return forced ?? realExecGit(args, opts);
+  };
+  run.calls = calls;
+  return run;
+}
+
+describe('resolveEvaluationScope — limits at limit-1, limit and limit+1', () => {
+  test('[boundary] the sha chunk size never changes the answer (chunk 2/3/4 over 3 task commits; 1 is clamped to 2)', () => {
+    const repo = makeRepo();
+    const a = commit(repo, 'src/a.js', 'feat(03-01): a');
+    commit(repo, 'other/noise.js', 'fix: noise');
+    const b = commit(repo, 'src/b.js', 'feat(03-01): b');
+    const c = commit(repo, 'src/c.js', 'feat(03-01): c');
+    summarize(repo, [a, b, c]);
+    const at = (shaChunk) => {
+      const scope = resolveEvaluationScope(repo.dir, { kind: 'phase', phase: '3' }, { shaChunk });
+      return { files: scope.files, outside: scope.outsideUnion, shas: scope.commits.map((x) => x.sha) };
+    };
+    const expected = { files: ['src/a.js', 'src/b.js', 'src/c.js'], outside: ['other/noise.js'], shas: [a, b, c] };
+    assert.deepEqual(at(2), expected, 'limit-1: the task commits span two chunks');
+    assert.deepEqual(at(3), expected, 'limit: exactly one chunk');
+    assert.deepEqual(at(4), expected, 'limit+1: one chunk with room to spare');
+    assert.deepEqual(at(1), expected, 'a chunk of one is clamped to two — it would never shrink the tip reduction');
+  });
+
+  test('[boundary] the pathspec cap: 19 and 20 pass through; 21 is refused, not truncated', () => {
+    const repo = makeRepo();
+    commit(repo, 'src/a.js', 'feat(03-01): a');
+    const run = (count) => {
+      const git = spyGit();
+      const specs = Array.from({ length: count }, (_, i) => `src/p${i}/`);
+      const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '03-01' }, { pathspecs: specs, commitsOnly: true, execGit: git });
+      const log = git.calls.find((args) => args[0] === 'log');
+      return { scope, sent: log ? log.length - 1 - log.indexOf('--') : null };
+    };
+    assert.equal(run(19).sent, 19);
+    assert.equal(run(20).sent, 20);
+    const over = run(21);
+    assert.equal(over.scope.status, 'unresolvable');
+    assert.equal(over.scope.reason, 'too-many-pathspecs');
+    assert.equal(over.sent, null, 'no git log was issued with a truncated pathspec list');
+  });
+
+  test('[boundary] maxCommits is clamped at the 1000 ceiling by one helper (git is asked for twice that many)', () => {
+    const repo = makeRepo();
+    commit(repo, 'src/a.js', 'feat(03-01): a');
+    const asked = (maxCommits) => {
+      const git = spyGit();
+      resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '03-01' }, { maxCommits, commitsOnly: true, execGit: git });
+      const log = git.calls.find((args) => args[0] === 'log');
+      return Number(log[log.indexOf('-n') + 1]);
+    };
+    assert.deepEqual([asked(999), asked(1000), asked(1001), asked(5000), asked(0)], [1998, 2000, 2000, 2000, 2]);
+  });
+});
+
+describe('resolveEvaluationScope — a hung git is unresolvable on EVERY call path, never "unreachable"', () => {
+  test('[negative] a timeout in the ancestor check', () => {
+    const repo = makeRepo();
+    const a = commit(repo, 'src/a.js', 'feat(03-01): a');
+    summarize(repo, [a]);
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'phase', phase: '3' }, {
+      execGit: spyGit((args) => (args[0] === 'merge-base' ? TIMED_OUT : undefined)),
+    });
+    assert.equal(scope.status, 'unresolvable');
+    assert.equal(scope.reason, 'git-timeout');
+    assert.deepEqual(scope.unreachable, []);
+  });
+
+  test('[negative] a timeout resolving a task commit id', () => {
+    const repo = makeRepo();
+    const a = commit(repo, 'src/a.js', 'feat(03-01): a');
+    summarize(repo, [a]);
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'phase', phase: '3' }, {
+      execGit: spyGit((args) => (args[0] === 'rev-parse' && args.some((arg) => arg.startsWith(a)) ? TIMED_OUT : undefined)),
+    });
+    assert.equal(scope.status, 'unresolvable');
+    assert.equal(scope.reason, 'git-timeout');
+    assert.deepEqual(scope.unreachable, []);
+  });
+
+  test('[negative] a timeout finding the milestone tag', () => {
+    const repo = makeRepo();
+    commit(repo, 'src/a.js', 'feat(03-01): a');
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '03-01' }, {
+      milestoneBound: true,
+      execGit: spyGit((args) => (args[0] === 'describe' ? TIMED_OUT : undefined)),
+    });
+    assert.equal(scope.status, 'unresolvable');
+    assert.equal(scope.reason, 'git-timeout');
+  });
+
+  test('[control] a plain "not an ancestor" is still named unreachable, so the distinction can fail', () => {
+    const repo = makeRepo();
+    repo.git('checkout', '-b', 'side');
+    const side = commit(repo, 'src/side.js', 'feat(03-01): side only');
+    repo.git('checkout', 'main');
+    const a = commit(repo, 'src/a.js', 'feat(03-01): a');
+    summarize(repo, [a, side]);
+    assert.deepEqual(resolveEvaluationScope(repo.dir, { kind: 'phase', phase: '3' }).unreachable, [side]);
+  });
+
+  test('[negative] an ambiguous short id is named unreachable, and does not poison the phase', () => {
+    const repo = makeRepo();
+    const a = commit(repo, 'src/a.js', 'feat(03-01): a');
+    summarize(repo, [a]);
+    const ambiguous = 'abcdef0'; // git answers `rev-parse --verify` with exit 128 for an ambiguous or malformed short id
+    const git = spyGit((args) => (args[0] === 'rev-parse' && args.some((arg) => arg.startsWith(ambiguous))
+      ? { exitCode: 128, stdout: '', stderr: 'fatal: ambiguous argument', signal: null, error: null, timedOut: false }
+      : undefined));
+    write(repo.dir, `${PHASE_DIR}/03-02-SUMMARY.md`, `## Task Commits\n\n1. **Task 1: x** - \`${ambiguous}\`\n\n## Next\n`);
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'phase', phase: '3' }, { execGit: git });
+    assert.equal(scope.status, 'resolved');
+    assert.deepEqual(scope.unreachable, [ambiguous]);
+    assert.deepEqual(scope.files, ['src/a.js']);
+  });
+});
+
+describe('resolveEvaluationScope — what a scope says when it finds little', () => {
+  test('[negative] no matching commits is a resolved "none" with a reason, not an unread scope', () => {
+    const repo = makeRepo();
+    commit(repo, 'src/a.js', 'feat(09-09): another plan');
+    for (const options of [{}, { commitsOnly: true }]) {
+      const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '03-01' }, options);
+      assert.equal(scope.status, 'resolved');
+      assert.equal(scope.reason, 'no-matching-commits');
+      assert.deepEqual(scope.commits, []);
+    }
+    assert.equal(resolveEvaluationScope(repo.dir, { kind: 'quick', id: 'nope-123' }).reason, 'no-matching-commits');
+  });
+
+  test('[negative] commits whose every path is excluded are an empty scope that says so', () => {
+    const repo = makeRepo();
+    commit(repo, `${PHASE_DIR}/03-01-NOTES.md`, 'docs(03-01): notes only');
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'plan', planId: '03-01' });
+    assert.equal(scope.status, 'resolved');
+    assert.equal(scope.reason, 'empty-after-exclusions');
+    assert.equal(scope.commits.length, 1);
+    assert.deepEqual(scope.files, []);
+  });
+
+  test('[negative] `since` removing every task commit is not "unreachable"', () => {
+    const repo = makeRepo();
+    const a = commit(repo, 'src/a.js', 'feat(03-01): a');
+    summarize(repo, [a]);
+    const scope = resolveEvaluationScope(repo.dir, { kind: 'phase', phase: '3' }, { since: a });
+    assert.equal(scope.status, 'degraded');
+    assert.equal(scope.reason, 'no-task-commits-since');
+  });
+
+  test('[boundary] a phase directory that arrived with the root commit still includes the root commit\'s files', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-scope-root-'));
+    dirs.push(dir);
+    const git = (...args) => gitOrThrow(args, { cwd: dir, env: { ...process.env, ...IDENTITY } }).trim();
+    git('init', '--initial-branch=main');
+    git('config', 'user.email', 'test@test.io');
+    git('config', 'user.name', 'Test');
+    write(dir, `${PHASE_DIR}/03-CONTEXT.md`, 'context\n');
+    write(dir, 'src/root.js', 'root\n');
+    git('add', '.');
+    git('commit', '-m', 'feat(03-01): everything in the root commit');
+    const scope = resolveEvaluationScope(dir, { kind: 'phase', phase: '3' });
+    assert.equal(scope.status, 'degraded');
+    assert.deepEqual(scope.files, ['src/root.js']);
   });
 });

@@ -17,7 +17,7 @@ const { execFileSync } = require('node:child_process');
 const { cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-const { computeUiSafetyGate } = require('../gsd-core/bin/lib/gate-ui-safety.cjs');
+const { computeUiSafetyGate, evaluateUiSafetyGate } = require('../gsd-core/bin/lib/gate-ui-safety.cjs');
 const { evaluateTddReviewCheckpoint } = require('../gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs');
 const { evaluateDecisionCoverageVerify } = require('../gsd-core/bin/lib/gate-decision-coverage-verify.cjs');
 
@@ -121,6 +121,15 @@ describe('ui-safety-gate reads the phase\'s evaluation scope, not the last commi
     assert.equal(result.scopeStatus, 'unresolvable');
     assert.equal(result.scopeReason, 'phase-dir-not-found');
     assert.equal(result.block, false);
+  });
+
+  test('[negative] the verdict for an unreadable scope is `skip` — "could not look" is never a `pass`', () => {
+    const repo = makeRepo();
+    const unreadable = evaluateUiSafetyGate({ projectDir: repo.dir, args: ['9'] });
+    assert.equal(unreadable.outcome, 'skip');
+    assert.equal(unreadable.block, false);
+    const read = evaluateUiSafetyGate({ projectDir: repo.dir, args: ['3'] });
+    assert.equal(read.outcome, 'pass', 'a readable (here degraded) scope with no UI-SPEC need keeps the pass outcome');
   });
 });
 

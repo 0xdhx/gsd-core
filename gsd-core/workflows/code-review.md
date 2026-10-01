@@ -275,6 +275,11 @@ if [ -n "$SCOPE_UNREACHABLE" ]; then
   echo "Task commits not reachable from HEAD (another branch, or dropped by a rebase):"
   printf '%s\n' "$SCOPE_UNREACHABLE" | sed 's/^/  - /'
 fi
+SCOPE_MISSING=$(scope_field missingOnDisk)
+if [ -n "$SCOPE_MISSING" ]; then
+  echo "Scoped paths that no longer exist on disk (not reviewed):"
+  printf '%s\n' "$SCOPE_MISSING" | sed 's/^/  - /'
+fi
 
 if [ ${#REVIEW_FILES[@]} -eq 0 ]; then
   # Full fallback (per D-02): SUMMARY scoping yielded nothing.

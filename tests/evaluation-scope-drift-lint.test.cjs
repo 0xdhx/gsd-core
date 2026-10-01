@@ -39,6 +39,12 @@ describe('lint-evaluation-scope-drift — each rule fails on its shape', () => {
     assert.deepEqual(rulesOf(ts("run(['diff', '--name-only', 'abc..HEAD'])")), ['S2']);
   });
 
+  test('[S1/S2 precision] `--all-match` is not `--all`; a `${BASE}..${TIP}` range is still a range', () => {
+    assert.deepEqual(rulesOf(shell('git log --oneline --all-match --grep=x')), ['S5']);
+    assert.deepEqual(rulesOf(shell('git diff --name-only "${SCOPE_BASE}..${QUICK_TIP}"')), ['S2']);
+    assert.deepEqual(rulesOf(shell('git diff --name-only "${BASE}...${TIP}"')), []);
+  });
+
   test('[S3] a relative HEAD~N anchor is flagged', () => {
     assert.deepEqual(rulesOf(shell('git diff --name-only HEAD~1 HEAD')), ['S3']);
     assert.deepEqual(rulesOf(ts("run(['diff', '--name-only', 'HEAD~1', 'HEAD'])")), ['S3']);

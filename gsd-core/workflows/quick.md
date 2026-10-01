@@ -581,7 +581,13 @@ If no active code-review step hook exists, skip with message "Code review skippe
 # lockfiles excluded. A `base..tip` range (the #4466 bound) still folds in every unrelated
 # commit interleaved inside the task's window (worktree merge-back, a shared tree, another
 # session); the union cannot. No commits for this task => empty scope => skip review.
-CHANGED_FILES=$(gsd_run check evaluation-scope --quick "${quick_id}" --include-files --raw 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).files.join(' '))}catch{}})")
+QUICK_SCOPE_JSON=$(gsd_run check evaluation-scope --quick "${quick_id}" --include-files --raw 2>/dev/null)
+CHANGED_FILES=$(printf '%s' "$QUICK_SCOPE_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{process.stdout.write(JSON.parse(s).files.join(' '))}catch{}})")
+if [ -z "$CHANGED_FILES" ]; then
+  # Say WHY the scope is empty (no commits for this task, only excluded paths, or git could not be read).
+  QUICK_SCOPE_WHY=$(printf '%s' "$QUICK_SCOPE_JSON" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const v=JSON.parse(s);process.stdout.write(v.status+(v.reason?': '+v.reason:''))}catch{process.stdout.write('unresolvable: no resolver output')}})")
+  echo "Quick-task review scope is empty (${QUICK_SCOPE_WHY})."
+fi
 ```
 
 If `CHANGED_FILES` is empty, skip with "No source files changed — skipping code review."
