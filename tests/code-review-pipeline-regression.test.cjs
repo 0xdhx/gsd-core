@@ -852,7 +852,7 @@ describe('Bug 4 (#2352) — compute_file_scope tilde-path expansion', () => {
       // #5164); only the surviving REVIEW_FILES lines may not carry it.
       const survivors = result.stdout
         .split('\n')
-        .filter((line) => !/^Filtered \d+ deleted files/.test(line) && !/^  - /.test(line));
+        .filter((line) => !/^Filtered \d+ deleted files/.test(line) && !/^ {2}- /.test(line));
       assert.doesNotMatch(
         survivors.join('\n'),
         /this\/relative\/path\/does-not-exist\.md/,
@@ -860,7 +860,7 @@ describe('Bug 4 (#2352) — compute_file_scope tilde-path expansion', () => {
       );
       assert.match(
         result.stdout,
-        /^  - this\/relative\/path\/does-not-exist\.md$/m,
+        /^ {2}- this\/relative\/path\/does-not-exist\.md$/m,
         'the dropped path is named, not silently discarded'
       );
     }
