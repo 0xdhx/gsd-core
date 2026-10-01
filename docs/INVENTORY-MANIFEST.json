@@ -426,6 +426,7 @@
       "gate-config.cjs",
       "gate-decision-coverage-plan.cjs",
       "gate-decision-coverage-verify.cjs",
+      "gate-evaluation-scope.cjs",
       "gate-gap-analysis-plan-post.cjs",
       "gate-phase-context.cjs",
       "gate-predicate-evaluator.cjs",

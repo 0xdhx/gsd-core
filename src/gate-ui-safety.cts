@@ -5,18 +5,19 @@
  *
  * Post-wave check that verifies UI-changed files conform to the active UI-SPEC for the phase.
  * Uses `checkUiPresence` from `ui-safety-gate.cjs` (frontend detection is not reimplemented) and
- * looks for frontend file changes in `git diff --name-only HEAD~1 HEAD`.
- *
- * Limitation: `HEAD~1..HEAD` covers only the last commit; in a multi-plan wave the wave-start
- * commit would be more accurate but is not yet stored in the wave manifest.
+ * looks for frontend files in the phase's evaluation scope (#5164, ADR-5057 §4): the union of the
+ * phase's own commits' file sets from `gate-evaluation-scope`, not the last commit. A scope the
+ * resolver could not read, or had to widen, is reported (`scopeStatus` / `scopeReason`), never
+ * silently treated as "no UI files".
  *
  * Argv after the verb: `<phase>`.
  */
 
-import { execFileSync } from 'node:child_process';
 import { gateVerdict, gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
 import type { GateResult } from './gate-verdict.cjs';
 import { findUiSpecInDir, lookupRoadmapPhase, resolvePhaseDirOrEmpty } from './gate-phase-context.cjs';
+import { resolveEvaluationScope } from './gate-evaluation-scope.cjs';
+import type { ScopeStatus } from './gate-evaluation-scope.cjs';
 import { checkUiPresence } from './ui-safety-gate.cjs';
 
 const UI_FILE_EXTENSIONS_RE = /\.(tsx|jsx|css|scss|sass|less|vue|svelte|html)$/i;
@@ -29,6 +30,9 @@ export interface UiSafetyGateResult {
   block: boolean;
   message?: string;
   phaseLookupFailed?: boolean;
+  /** Present only when the scope was widened (`degraded`) or unreadable (`unresolvable`). */
+  scopeStatus?: Exclude<ScopeStatus, 'resolved'>;
+  scopeReason?: string;
 }
 
 /**
@@ -36,8 +40,8 @@ export interface UiSafetyGateResult {
  *
  *   (a) ROADMAP phase section via the shared lookup (same as ui-plan-gate) → is this a frontend phase.
  *   (b) checkUiPresence (frontend detection).
- *   (c) `git diff HEAD~1..HEAD` for UI file changes in the current worktree (10 s bound; a git
- *       failure is "no UI files changed").
+ *   (c) UI files among the phase's evaluation scope (`resolveEvaluationScope`, phase unit; every
+ *       git call is bounded by the resolver's seam; an unreadable scope is reported, not "clean").
  *   (d) Phase directory → `*-UI-SPEC.md`.
  *
  * `block = frontend && hasUiFiles && !hasUiSpec`.
@@ -50,23 +54,11 @@ export function computeUiSafetyGate(projectDir: string, phase: string): UiSafety
   const presenceResult = checkUiPresence(phaseSection);
   const frontend = presenceResult.hasUI;
 
-  // (c) any UI files changed in recent git commits?
-  let hasUiFiles = false;
-  try {
-    const changed = execFileSync('git', ['diff', '--name-only', 'HEAD~1', 'HEAD'], {
-      cwd: projectDir,
-      encoding: 'utf-8',
-      // stderr is piped (and dropped), never inherited: a gate module writes nothing to the
-      // process's stderr, and a git failure here already means "no UI files changed".
-      stdio: ['ignore', 'pipe', 'pipe'],
-      maxBuffer: 2 * 1024 * 1024,
-      windowsHide: true,
-      timeout: 10_000,
-    });
-    hasUiFiles = changed.split('\n').some((f) =>
-      f.trim() && (UI_FILE_EXTENSIONS_RE.test(f) || UI_PATH_PATTERNS_RE.test(f)),
-    );
-  } catch { /* git unavailable or no prior commit — treat as no UI files changed */ }
+  // (c) any UI files in the phase's own commits? (deleted paths count: a removed component is a UI change)
+  const scope = resolveEvaluationScope(projectDir, { kind: 'phase', phase });
+  const hasUiFiles = scope.changedFiles.some((f) =>
+    f.trim() && (UI_FILE_EXTENSIONS_RE.test(f) || UI_PATH_PATTERNS_RE.test(f)),
+  );
 
   // (d) phase directory and *-UI-SPEC.md
   const uiSpecPath = findUiSpecInDir(resolvePhaseDirOrEmpty(projectDir, phase));
@@ -81,6 +73,10 @@ export function computeUiSafetyGate(projectDir: string, phase: string): UiSafety
       `Run /gsd:ui-phase ${phase} to generate the design contract before continuing.`;
   }
   if (phaseLookupFailed) result.phaseLookupFailed = true;
+  if (scope.status !== 'resolved') {
+    result.scopeStatus = scope.status;
+    result.scopeReason = scope.reason ?? '';
+  }
   return result;
 }
 
@@ -90,5 +86,8 @@ export function evaluateUiSafetyGate(input: { projectDir: string; args: readonly
     return gateUsageFailure(GATE_FAILURE_CODE.SDK_MISSING_ARG, 'ui-safety-gate requires a phase argument: check ui-safety-gate <phase>');
   }
   const result = computeUiSafetyGate(input.projectDir, phase);
-  return gateVerdict(result.block ? 'block' : 'pass', result.block, { ...result });
+  // A scope the resolver could not read is "could not look", never a pass (ADR-5057 §4: `unreadable`
+  // never produces a passing verdict); Phase 8 derives the exit code from this outcome.
+  const outcome = result.block ? 'block' : result.scopeStatus === 'unresolvable' ? 'skip' : 'pass';
+  return gateVerdict(outcome, result.block, { ...result });
 }

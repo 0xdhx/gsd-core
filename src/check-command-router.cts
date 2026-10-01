@@ -26,6 +26,7 @@ import type { GateResult, GateUsageFailure } from './gate-verdict.cjs';
 import { partitionPredicateArgs, parsePredicateFlags } from './gate-args.cjs';
 import { evaluateDecisionCoveragePlan } from './gate-decision-coverage-plan.cjs';
 import { evaluateDecisionCoverageVerify } from './gate-decision-coverage-verify.cjs';
+import { evaluateEvaluationScope } from './gate-evaluation-scope.cjs';
 import { evaluateUiPlanGate, computeUiPlanGate } from './gate-ui-plan.cjs';
 import { evaluateUiSafetyGate, computeUiSafetyGate } from './gate-ui-safety.cjs';
 import { evaluateTddReviewCheckpoint } from './gate-tdd-review-checkpoint.cjs';
@@ -73,6 +74,10 @@ function cmdDecisionCoveragePlan(projectDir: string, args: string[], raw: boolea
 
 function cmdDecisionCoverageVerify(projectDir: string, args: string[], raw: boolean): void {
   emitGateResult(evaluateDecisionCoverageVerify({ projectDir, args: args.slice(2) }), raw);
+}
+
+function cmdEvaluationScope(projectDir: string, args: string[], raw: boolean): void {
+  emitGateResult(evaluateEvaluationScope({ projectDir, args: args.slice(2) }), raw);
 }
 
 function cmdUiPlanGate(projectDir: string, args: string[], raw: boolean): void {
@@ -135,6 +140,11 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
       return;
     case 'decision-coverage-verify':
       cmdDecisionCoverageVerify(cwd, args, raw);
+      return;
+    case 'evaluation-scope':
+      // ADR-5057 §4 / #5164: the one resolver for which commits and files a gate or
+      // workflow step evaluates (`--phase N`, `--plan P-N` or `--quick ID`).
+      cmdEvaluationScope(cwd, args, raw);
       return;
     case 'ui-plan-gate':
       cmdUiPlanGate(cwd, args, raw);
@@ -207,7 +217,7 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
       routeProhibitionEnforcement(args, raw);
       return;
     default:
-      error('Unknown check subcommand. Available: api-coverage-verify-pre, auto-mode, decision-coverage-plan, decision-coverage-verify, gap-analysis-plan-post, predicate, prohibition-enforcement, tdd-red-evidence, tdd-review-checkpoint, ui-plan-gate, ui-safety-gate, verify-command-paths, verify-failure-directions, verify-schema-drift, verify-codebase-drift, verify-context-drift', ERROR_REASON.SDK_UNKNOWN_COMMAND);
+      error('Unknown check subcommand. Available: api-coverage-verify-pre, auto-mode, decision-coverage-plan, decision-coverage-verify, evaluation-scope, gap-analysis-plan-post, predicate, prohibition-enforcement, tdd-red-evidence, tdd-review-checkpoint, ui-plan-gate, ui-safety-gate, verify-command-paths, verify-failure-directions, verify-schema-drift, verify-codebase-drift, verify-context-drift', ERROR_REASON.SDK_UNKNOWN_COMMAND);
   }
 }
 

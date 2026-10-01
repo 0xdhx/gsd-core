@@ -18,7 +18,7 @@ import {
   loadSummaryContents,
   loadDecisionExtraction,
   readModifiedFilesContent,
-  recentCommitMessages,
+  phaseCommitMessages,
   buildVerifyMessage,
 } from './decision-coverage-support.cjs';
 import type { UncoveredItem } from './decision-coverage-support.cjs';
@@ -79,7 +79,7 @@ export function evaluateDecisionCoverageVerify(input: { projectDir: string; args
     planContents.join('\n\n'),
     summaryParts.join('\n\n'),
     readModifiedFilesContent(projectDir, summaryParts),
-    recentCommitMessages(projectDir),
+    phaseCommitMessages(projectDir, phaseDir),
   ].join('\n\n');
 
   const notHonored: UncoveredItem[] = [];
