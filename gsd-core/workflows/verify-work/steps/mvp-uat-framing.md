@@ -15,7 +15,7 @@ PHASE_GOAL=$(gsd_run query roadmap.get-phase "${phase_number}" ${GSD_WS:+--ws=${
 USER_STORY_VALID=$(gsd_run query user-story.validate --story "$PHASE_GOAL" --pick valid)
 if [ "$USER_STORY_VALID" != "true" ]; then
   echo "Phase ${phase_number} has '**Mode:** mvp' in ROADMAP.md but the **Goal:** is not in user-story format."
-  echo "Run /gsd mvp-phase ${phase_number} to set a user-story goal before verifying."
+  echo "Run /gsd:mvp-phase ${phase_number} to set a user-story goal before verifying."
   exit 1
 fi
 ```

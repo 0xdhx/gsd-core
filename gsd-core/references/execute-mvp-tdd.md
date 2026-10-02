@@ -52,7 +52,7 @@ The executor MUST:
    Required next step:
    1. Write a failing test for the behavior above.
    2. Commit it as: test({phase}-{plan}): {short description}
-   3. Re-run /gsd execute-phase
+   3. Re-run /gsd:execute-phase
    ```
 
 3. Exit the current execution wave cleanly. Do NOT roll back any prior commits in the same wave.
@@ -65,7 +65,7 @@ The existing end-of-phase TDD review (in `workflows/execute-phase.md`'s `tdd_rev
 Under TDD mode, escalate this to **blocking**:
 - If any TDD plan is missing a RED or GREEN commit, the executor MUST refuse to mark the phase complete.
 - The user is shown the same review table, but the verdict line reads:
-  > "Phase blocked: {N} TDD plan(s) violate the RED→GREEN gate sequence under TDD. Resolve and re-run /gsd execute-phase, or override with `/gsd execute-phase {phase} --force-mvp-gate` to ship anyway."
+  > "Phase blocked: {N} TDD plan(s) violate the RED→GREEN gate sequence under TDD. Resolve and re-run /gsd:execute-phase, or override with `/gsd:execute-phase {phase} --force-mvp-gate` to ship anyway."
 
 The `--force-mvp-gate` flag is documented but not introduced by this plan — it is the escape hatch the spec mentions; if the user later builds it, the workflow already references the contract.
 

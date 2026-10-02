@@ -1,5 +1,5 @@
 <purpose>
-Guide the user through MVP-mode planning for a phase. Prompts for an "As a / I want to / So that" user story, runs SPIDR splitting check on the story, writes the result to ROADMAP.md, and delegates to `/gsd plan-phase` (which auto-detects MVP via the roadmap mode field shipped in PRD Phase 1).
+Guide the user through MVP-mode planning for a phase. Prompts for an "As a / I want to / So that" user story, runs SPIDR splitting check on the story, writes the result to ROADMAP.md, and delegates to `/gsd:plan-phase` (which auto-detects MVP via the roadmap mode field shipped in PRD Phase 1).
 </purpose>
 
 <required_reading>
@@ -23,9 +23,9 @@ Extract the phase number from `$ARGUMENTS` (integer or decimal like `2.1`). Opti
 If no argument:
 ```
 ERROR: Phase number required
-Usage: /gsd mvp-phase <phase-number>
-Example: /gsd mvp-phase 1
-Example: /gsd mvp-phase 2.1
+Usage: /gsd:mvp-phase <phase-number>
+Example: /gsd:mvp-phase 1
+Example: /gsd:mvp-phase 2.1
 ```
 Exit.
 
@@ -60,7 +60,7 @@ fi
 
 **If `response_language` is set:** All user-facing output of this workflow — narration between tool calls, status updates, progress notes, findings, questions, prompts, and explanations — MUST be presented in `{response_language}`. Technical terms, code, file paths, and subagent prompts stay in English — only user-facing output is translated.
 
-If `PHASE_FOUND` is `false`: error and exit. Suggest `/gsd add-phase` or `/gsd insert-phase` to create the phase first.
+If `PHASE_FOUND` is `false`: error and exit. Suggest `/gsd:phase "<description>"` or `/gsd:phase --insert <after-phase> "<description>"` to create the phase first.
 
 **Status guard.** If the phase is `in_progress` (has plans but not complete) or `completed`, refuse unless `--force` is in `$ARGUMENTS`:
 
@@ -69,7 +69,7 @@ ERROR: Phase ${PHASE} is currently ${STATUS}.
 Converting an active or completed phase to MVP mode mid-flight will
 invalidate any existing plans and summaries.
 
-To proceed anyway: /gsd mvp-phase ${PHASE} --force
+To proceed anyway: /gsd:mvp-phase ${PHASE} --force
 ```
 
 **Already-MVP guard.** If `PHASE_MODE` is already `mvp`, surface this and ask whether to re-prompt the user story or abort:
@@ -161,7 +161,7 @@ d) Produce a split proposal. Example:
 
 Use `AskUserQuestion` [Accept / Modify / Reject].
 
-- **Accept**: `USER_STORY` becomes the first split's story (`${HAPPY_STORY}` in the example). Surface the remaining splits as a list of `/gsd add-phase` invocations the user can run after this command completes — do NOT auto-create the new phases (preserve user control over numbering).
+- **Accept**: `USER_STORY` becomes the first split's story (`${HAPPY_STORY}` in the example). Surface the remaining splits as a list of `/gsd:phase` invocations the user can run after this command completes — do NOT auto-create the new phases (preserve user control over numbering).
 - **Modify**: re-prompt the splits one more time, then accept or reject.
 - **Reject**: revert `USER_STORY` to the original, proceed without splitting.
 
@@ -200,9 +200,9 @@ Assert:
 
 If either assertion fails, surface the discrepancy to the user and exit. Do not proceed to plan-phase delegation with a half-applied write.
 
-## 7. Delegate to /gsd plan-phase
+## 7. Delegate to /gsd:plan-phase
 
-Invoke `/gsd plan-phase ${PHASE}` (no flags). Phase 1's MVP_MODE resolution chain (CLI flag → roadmap mode → config → false) will detect the new `**Mode:** mvp` line and run plan-phase in vertical-slice mode automatically.
+Invoke `/gsd:plan-phase ${PHASE}` (no flags). Phase 1's MVP_MODE resolution chain (CLI flag → roadmap mode → config → false) will detect the new `**Mode:** mvp` line and run plan-phase in vertical-slice mode automatically.
 
 The Walking Skeleton gate (also from Phase 1) will fire automatically if `${PHASE} == "01"` and there are zero prior phase summaries.
 
@@ -215,11 +215,11 @@ If SPIDR produced a split in step 4, append a final user-facing message:
 > Your original story was split. The first slice is now planned via plan-phase.
 > To create the remaining slice(s) as new phases, run:
 >
-> - `/gsd add-phase` — for the next slice: «${SPLIT_2_STORY}»
-> - `/gsd add-phase` — for the next slice: «${SPLIT_3_STORY}»
+> - `/gsd:phase ${SPLIT_2_STORY}`
+> - `/gsd:phase ${SPLIT_3_STORY}`
 >
 > Each will be added to the end of the current milestone. You can then run
-> `/gsd mvp-phase <new-phase-number>` on each to plan them as MVP slices."
+> `/gsd:mvp-phase <new-phase-number>` on each to plan them as MVP slices."
 
 ## 9. Exit
 

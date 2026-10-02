@@ -100,7 +100,7 @@ CHECK_EXIT=$?
 
 ```
 Phase blocked: {N} TDD plan(s) violate the RED→GREEN gate sequence under TDD.
-Resolve and re-run /gsd execute-phase, or override with /gsd execute-phase {phase} --force-mvp-gate to ship anyway.
+Resolve and re-run /gsd:execute-phase, or override with /gsd:execute-phase {phase} --force-mvp-gate to ship anyway.
 ```
 
 (`--force-mvp-gate` is the documented, not-yet-implemented escape hatch.) Outside TDD mode, TDD-review violations remain advisory (table shown, execution continues).

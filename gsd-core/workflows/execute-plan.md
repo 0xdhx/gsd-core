@@ -581,7 +581,7 @@ SUMMARY_COUNT=$(echo "$PHASE_COUNTS" | jq -r '.summary_count // 0')
 |-----------|-------|--------|
 | summaries < plans | **A: More plans** | Find next PLAN without SUMMARY — skip any plan whose `plan_id` matches a non-terminal async-job manifest (`external_job_waiting`; see `identify_plan`). Yolo: auto-continue. Interactive: show next plan, suggest `/gsd:execute-phase {phase}` + `/gsd:verify-work`. STOP here. |
 | summaries = plans, current < highest phase | **B: Phase done** | Show completion, suggest `/gsd:plan-phase {Z+1}` + `/gsd:verify-work {Z}` + `/gsd:discuss-phase {Z+1}` |
-| summaries = plans, current = highest phase | **C: Milestone done** | Show banner, suggest `/gsd:complete-milestone` + `/gsd:verify-work` + `/gsd-add-phase` |
+| summaries = plans, current = highest phase | **C: Milestone done** | Show banner, suggest `/gsd:complete-milestone` + `/gsd:verify-work` + `/gsd:phase` |
 
 All routes: `/clear` first for fresh context.
 </step>
