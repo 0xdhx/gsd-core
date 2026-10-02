@@ -1673,6 +1673,40 @@ describe('bug #950: quick-task SUMMARY must carry status: complete', () => {
       assert.match(fs.readFileSync(filePath, 'utf-8'), /^status: open$/m, 'verdict-preserving: status: must be unchanged');
     });
 
+    // #4905: 2020-06-15T02:00Z is 2020-06-14 21:00 in America/Chicago, so the
+    // pinned local day, the pinned UTC day and the real day all differ.
+    const PINNED_CHICAGO_EVENING = { GSD_TEST_MODE: '1', GSD_NOW_MS: '1592186400000', TZ: 'America/Chicago' };
+
+    test('#4905: without --at, the marker date is the pinned local day', () => {
+      const debugDir = planningPath('debug');
+      fs.mkdirSync(debugDir, { recursive: true });
+      const filePath = path.join(debugDir, 'investigate.md');
+      fs.writeFileSync(filePath, '---\nstatus: open\n---\n## Current Focus\ndigging\n');
+
+      const result = runGsdTools(
+        ['audit-open', 'acknowledge', '--category', 'debug_sessions', '--slug', 'investigate', '--milestone', 'v1.0', '--json'],
+        tmpDir,
+        PINNED_CHICAGO_EVENING,
+      );
+      assert.ok(result.success, `acknowledge must succeed. stderr: ${result.error}`);
+      assert.match(fs.readFileSync(filePath, 'utf-8'), /^ {2}at: 2020-06-14$/m, 'the marker must carry the pinned local day');
+    });
+
+    test('#4905: an explicit --at still wins over the pinned day', () => {
+      const debugDir = planningPath('debug');
+      fs.mkdirSync(debugDir, { recursive: true });
+      const filePath = path.join(debugDir, 'investigate.md');
+      fs.writeFileSync(filePath, '---\nstatus: open\n---\n## Current Focus\ndigging\n');
+
+      const result = runGsdTools(
+        ['audit-open', 'acknowledge', '--category', 'debug_sessions', '--slug', 'investigate', '--milestone', 'v1.0', '--at', '2026-08-15', '--json'],
+        tmpDir,
+        PINNED_CHICAGO_EVENING,
+      );
+      assert.ok(result.success, `acknowledge must succeed. stderr: ${result.error}`);
+      assert.match(fs.readFileSync(filePath, 'utf-8'), /^ {2}at: 2026-08-15$/m, '--at must be written verbatim');
+    });
+
     test('quick_tasks: acknowledged item drops out of counts; status: field unchanged', () => {
       const taskDir = planningPath('quick', '20260810-fixthing');
       fs.mkdirSync(taskDir, { recursive: true });

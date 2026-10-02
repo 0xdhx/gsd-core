@@ -1516,7 +1516,10 @@ function dispatchOverlayCapabilityCommand({ command, args, cwd, raw, error, load
             error(`quick-tasks-append: STATE.md not found at ${statePath}`, ERROR_REASON.USAGE);
           }
 
-          const date = new Date().toISOString().slice(0, 10);
+          // #4905: an operator-facing date, so the local calendar day (#2136)
+          // through the clock seam, which honors the GSD_NOW_MS pin (#474).
+          const { realClock } = require('./lib/clock.cjs');
+          const date = realClock.localToday();
           const { execGit } = require('./lib/shell-command-projection.cjs');
           const hashResult = execGit(['rev-parse', '--short', 'HEAD'], { cwd });
           const commit = hashResult.exitCode === 0 && hashResult.stdout ? hashResult.stdout : '—';

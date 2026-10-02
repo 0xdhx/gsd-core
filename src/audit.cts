@@ -47,6 +47,7 @@ import { parseNamedArgsOrExit } from './command-arg-projection.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import verificationMod = require('./verification.cjs');
 const { reportStatusOf, VERIFICATION_STATUS, VerificationStatusError } = verificationMod;
+import { realClock } from './clock.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -1687,7 +1688,9 @@ function cmdAuditAcknowledge(cwd: string, args: string[], raw: boolean): void {
   // All declared flags above are value flags, so each resolves to `string |
   // null` at runtime; the cast narrows away the `boolean` arm of
   // ParsedNamedArgs's value type that this call site never produces.
-  const at = (atFlag as string | null) || new Date().toISOString().slice(0, 10);
+  // #4905: without --at, the operator-facing local calendar day (#2136)
+  // through the clock seam, which honors the GSD_NOW_MS pin (#474).
+  const at = (atFlag as string | null) || realClock.localToday();
 
   const planDir = planningDir(cwd);
   const markerBase = { milestone: milestone as string, at };
