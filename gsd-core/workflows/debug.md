@@ -38,7 +38,7 @@ One round-trip carries everything this workflow needs (#3149 — this call repla
 When SUBCMD=list:
 
 ```bash
-ls .planning/debug/*.md 2>/dev/null | grep -v resolved
+ls .planning/debug/*.md 2>/dev/null | grep -v '/knowledge-base\.md$'
 ```
 
 For each file found, parse frontmatter fields (`status`, `trigger`, `updated`) and the `Current Focus` block (`hypothesis`, `next_action`). Display a formatted table:

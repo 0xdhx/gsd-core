@@ -2808,3 +2808,55 @@ describe('#4802: acknowledge refuses targets whose frontmatter fails to parse', 
     assert.strictEqual(fs.readFileSync(filePath, 'utf-8'), before);
   });
 });
+
+// ─── #4869: the debugger's knowledge base is not a debug session ──────────
+
+describe('#4869: audit-open does not report the debug knowledge base as a session', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  let tmpDir;
+
+  beforeEach(() => { tmpDir = createTempProject('gsd-4869-'); });
+  afterEach(() => { cleanup(tmpDir); });
+
+  // The header gsd-debugger's archive_session step writes: a plain document, no frontmatter.
+  const KNOWLEDGE_BASE = [
+    '# GSD Debug Knowledge Base',
+    '',
+    'Resolved debug sessions. Used by `gsd-debugger` to surface known-pattern hypotheses at the start of new investigations.',
+    '',
+    '---',
+    '',
+  ].join('\n');
+
+  function writeDebugFile(name, content) {
+    const debugDir = path.join(tmpDir, '.planning', 'debug');
+    fs.mkdirSync(debugDir, { recursive: true });
+    fs.writeFileSync(path.join(debugDir, name), content, 'utf-8');
+  }
+
+  function openDebugSlugs() {
+    const result = runGsdTools(['audit-open', '--json'], tmpDir);
+    assert.ok(result.success, `audit-open must succeed. stderr: ${result.error}`);
+    const parsed = JSON.parse(result.output);
+    return { count: parsed.counts.debug_sessions, slugs: parsed.items.debug_sessions.map((i) => i.slug) };
+  }
+
+  test('a debug directory holding only the knowledge base reports no open session', () => {
+    writeDebugFile('knowledge-base.md', KNOWLEDGE_BASE);
+    assert.deepStrictEqual(openDebugSlugs(), { count: 0, slugs: [] });
+  });
+
+  test('a real session without frontmatter beside the knowledge base is still reported open', () => {
+    writeDebugFile('knowledge-base.md', KNOWLEDGE_BASE);
+    writeDebugFile('untriaged-crash.md', '# Untriaged crash\n\nNo frontmatter yet.\n');
+    assert.deepStrictEqual(openDebugSlugs(), { count: 1, slugs: ['untriaged-crash'] });
+  });
+
+  test('resolved and complete sessions beside the knowledge base stay excluded', () => {
+    writeDebugFile('knowledge-base.md', KNOWLEDGE_BASE);
+    writeDebugFile('fixed-login.md', '---\nstatus: resolved\n---\n');
+    writeDebugFile('done-export.md', '---\nstatus: complete\n---\n');
+    assert.deepStrictEqual(openDebugSlugs(), { count: 0, slugs: [] });
+  });
+});

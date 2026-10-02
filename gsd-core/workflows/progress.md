@@ -110,7 +110,7 @@ Use this instead of manually reading/parsing ROADMAP.md.
 - Use `current_phase` and `next_phase` from `$ROADMAP`
 - Note `paused_at` if work was paused (from `$STATE`)
 - Count pending todos: use `init todos` or `list-todos`
-- Check for active debug sessions: `(ls .planning/debug/*.md 2>/dev/null || true) | grep -v resolved | wc -l`
+- Check for active debug sessions: `(ls .planning/debug/*.md 2>/dev/null || true) | grep -v '/knowledge-base\.md$' | wc -l`
   </step>
 
 <step name="report">
