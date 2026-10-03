@@ -42,6 +42,7 @@ import noAdhocTimeoutLiteral from './eslint-rules/no-adhoc-timeout-literal.cjs';
 import noRenderedTextLengthAssert from './eslint-rules/no-rendered-text-length-assert.cjs';
 import noUnconfinedPathJoin from './eslint-rules/no-unconfined-path-join.cjs';
 import noVerificationStatusLiteral from './eslint-rules/no-verification-status-literal.cjs';
+import noRuntimeNameLiteral from './eslint-rules/no-runtime-name-literal.cjs';
 
 const unconfinedPathJoinAllowlist = require('./eslint-rules/no-unconfined-path-join.allowlist.json');
 
@@ -78,6 +79,7 @@ const localPlugin = {
     'no-rendered-text-length-assert': noRenderedTextLengthAssert,
     'no-unconfined-path-join': noUnconfinedPathJoin,
     'no-verification-status-literal': noVerificationStatusLiteral,
+    'no-runtime-name-literal': noRuntimeNameLiteral,
   },
 };
 
@@ -521,6 +523,28 @@ export default tseslint.config(
       // literal compared against a verification status elsewhere in src/ is a
       // re-derivation. The rule exempts the owner by path.
       'local/no-verification-status-literal': 'error',
+      // #5169 (ADR-5057 Phase 10): the runtime descriptor owns every
+      // runtime-specific fact; comparing a runtime identifier to a registered
+      // runtime-id literal re-derives one. Exempts the owner by path.
+      'local/no-runtime-name-literal': 'error',
+    },
+  },
+
+  // #5169: the same rule on the two non-.cts surfaces that hold install and
+  // hook logic — the hand-written installer and the shipped hook scripts.
+  {
+    files: ['bin/install.js', 'hooks/**/*.js'],
+    plugins: {
+      local: localPlugin,
+    },
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: {
+        ...globals.node,
+      },
+    },
+    rules: {
+      'local/no-runtime-name-literal': 'error',
     },
   },
 

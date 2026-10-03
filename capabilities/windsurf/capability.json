@@ -86,7 +86,8 @@
       "skipSharedHooksInstall": true,
       "legacyDevinSkillsCleanup": true,
       "installsCommandBodiesForWorkflowDelegation": true,
-      "verificationStyle": "windsurf-workflows"
+      "verificationStyle": "windsurf-workflows",
+      "contentRewriteProfile": "slash-lookahead-nested-own-devin"
     }
   }
 }

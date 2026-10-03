@@ -1251,9 +1251,14 @@ describe('bug #3126: runtime-homes getGlobalConfigDir — defaults', () => {
       }
     });
   }
-  test('unknown runtime falls back to ~/.claude', () => {
+  test('an unknown runtime REFUSES instead of falling back to ~/.claude (#5169)', () => {
     withEnv('CLAUDE_CONFIG_DIR', undefined, () => {
-      assert.strictEqual(getGlobalConfigDir('unknown-xyz'), path.join(os.homedir(), '.claude'));
+      assert.throws(() => getGlobalConfigDir('unknown-xyz'), { name: 'UnknownRuntimeError' });
+    });
+  });
+  test('an absent runtime id keeps the generic ~/.claude default (#5169)', () => {
+    withEnv('CLAUDE_CONFIG_DIR', undefined, () => {
+      assert.strictEqual(getGlobalConfigDir(''), path.join(os.homedir(), '.claude'));
     });
   });
 });

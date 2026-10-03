@@ -112,7 +112,8 @@
         "stop",
         "subagentStart",
         "subagentStop"
-      ]
+      ],
+      "contentRewriteProfile": "slash-lookahead-own-tilde"
     }
   },
   "reviewer": {

@@ -170,7 +170,7 @@ const migration: InstallerMigration = {
     // Defense in depth ahead of the framework's own runtimes filter: a
     // claude/kimi/opencode/etc. hooks/ directory is a live install surface,
     // never a retirement target.
-    if (ctx.runtime !== 'pi') return [];
+    if (ctx.runtime === null || !migration.runtimes.includes(ctx.runtime)) return [];
 
     const hooksRoot = path.join(ctx.configDir, HOOKS_DIR);
 

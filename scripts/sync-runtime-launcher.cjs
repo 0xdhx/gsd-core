@@ -437,8 +437,93 @@ function delegatesToResolverReference(content) {
   return content.includes('references/gsd-run-resolver.md');
 }
 
+// ---------------------------------------------------------------------------
+// `_gsd_homes` — the launcher's runtime-home candidate list, DERIVED from the
+// runtime descriptors (#5169, ADR-5057 §5 "one resolver", #4347).
+//
+// The JS resolver (src/runtime-homes.cts) resolves a runtime's home from its
+// `configHome` descriptor. The shell launcher used to carry a hand-written copy
+// of that list and drifted (it still probed GEMINI_CONFIG_DIR after the runtime
+// was retired, and omitted zcode/pi/kimi). Both now read the same registry:
+// this renderer is the only producer of the `_gsd_homes` text in the snippet,
+// and tests/runtime-launcher-parity.test.cjs fails when the snippet differs
+// from it.
+// ---------------------------------------------------------------------------
+
+const HOMES_START = '_gsd_homes() { ';
+const HOMES_END = '; }; if _gsd_at';
+
+function shellHomeExpr(configHome) {
+  const dotHome = (rel) => `$HOME/${rel}`;
+  const withEnvs = (envs, fallback) => envs.reduceRight((acc, name) => `\${${name}:-${acc}}`, fallback);
+  switch (configHome.kind) {
+    case 'dot-home':
+      return [withEnvs(configHome.env, dotHome(configHome.name))];
+    case 'dot-home-nested': {
+      const probes = configHome.probe && configHome.probe.length > 0 ? configHome.probe : [configHome.name];
+      const first = withEnvs(configHome.env.slice(0, 1), dotHome(`${configHome.parent}/${probes[0]}`));
+      return [first, ...probes.slice(1).map((p) => dotHome(`${configHome.parent}/${p}`))];
+    }
+    case 'xdg': {
+      const xdgVar = configHome.env[2];
+      const base = xdgVar ? `\${${xdgVar}:-$HOME/.config}` : '$HOME/.config';
+      return [withEnvs(configHome.env.slice(0, 1), `${base}/${configHome.name}`)];
+    }
+    case 'generic-agents-root': {
+      const probes = configHome.probe.map((p) => p.replace(/^~/, '$HOME'));
+      return [withEnvs(configHome.env.slice(0, 1), probes[0]), ...probes.slice(1)];
+    }
+    default:
+      return []; // kind "none": no file-projected home, nothing to probe
+  }
+}
+
+/** The `_gsd_homes() { _gsd_at ...; }` text for a registry + legacy-home table. */
+function renderHomesFunction(registry, legacyHomes) {
+  const ids = Object.keys(registry.runtimes).sort((a, b) =>
+    a === 'claude' ? -1 : b === 'claude' ? 1 : a < b ? -1 : a > b ? 1 : 0);
+  const exprs = [];
+  for (const id of ids) {
+    const configHome = registry.runtimes[id].runtime && registry.runtimes[id].runtime.configHome;
+    if (configHome) exprs.push(...shellHomeExpr(configHome));
+  }
+  for (const id of Object.keys(legacyHomes).sort()) {
+    const legacy = legacyHomes[id];
+    exprs.push(`\${${legacy.env}:-$HOME/${legacy.dir.join('/')}}`);
+  }
+  const unique = [...new Set(exprs)];
+  const args = unique.map((e) => `"${e}/gsd-core/bin/\${_GSD_SHIM_NAME}"`).join(' ');
+  return `${HOMES_START}_gsd_at ${args}${HOMES_END.slice(0, '; }'.length)}`;
+}
+
+/** Locate the `_gsd_homes` function text inside the snippet's single line. */
+function extractHomesFunction(snippetText) {
+  const start = snippetText.indexOf(HOMES_START);
+  const end = snippetText.indexOf(HOMES_END, start);
+  if (start === -1 || end === -1) return null;
+  return { start, end: end + '; }'.length, text: snippetText.slice(start, end + '; }'.length) };
+}
+
+function loadDerivedHomes() {
+  const registry = require('../gsd-core/bin/lib/capability-registry.cjs');
+  const { LEGACY_NON_REGISTRY_RUNTIME_HOMES } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
+  return renderHomesFunction(registry, LEGACY_NON_REGISTRY_RUNTIME_HOMES);
+}
+
+/** Rewrite the snippet's `_gsd_homes` from the descriptors. Returns true when it changed. */
+function refreshSnippetHomes() {
+  const raw = fs.readFileSync(SNIPPET_FILE, 'utf8');
+  const found = extractHomesFunction(raw);
+  if (!found) throw new Error('_runtime-launcher.snippet.sh has no _gsd_homes function to refresh');
+  const derived = loadDerivedHomes();
+  if (found.text === derived) return false;
+  fs.writeFileSync(SNIPPET_FILE, raw.slice(0, found.start) + derived + raw.slice(found.end), 'utf8');
+  return true;
+}
+
 // Main
 function main() {
+  if (refreshSnippetHomes()) console.log('refreshed _gsd_homes in _runtime-launcher.snippet.sh from the runtime descriptors');
   const preamble = loadPreamble();
 
   let transformedCount = 0;
@@ -479,4 +564,11 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { transformFile, loadPreamble };
+module.exports = {
+  transformFile,
+  loadPreamble,
+  renderHomesFunction,
+  extractHomesFunction,
+  loadDerivedHomes,
+  refreshSnippetHomes,
+};

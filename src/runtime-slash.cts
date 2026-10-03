@@ -200,6 +200,29 @@ export function resolveRuntime(projectDir: string | null | undefined): string {
 }
 
 /**
+ * Resolve the effective runtime from an ALREADY-LOADED config object — the one
+ * chain every consumer of "which runtime is this install" shares (#5169,
+ * ADR-5057 §5, #4690):
+ *
+ *   env.GSD_RUNTIME  >  config.runtime  >  install marker  >  'claude'
+ *
+ * Canonicalized, so an alias or case variant (`claude-code`, `Claude`) cannot
+ * defeat a downstream comparison. `resolveRuntime` above is the same chain for
+ * callers that hold a project directory rather than a parsed config; the marker
+ * is read through `readInstallRuntimeMarker` in both.
+ */
+export function resolveActiveRuntime(
+  config: Record<string, unknown> | null | undefined,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return resolveRuntimeNameFromCandidates(
+    env['GSD_RUNTIME'],
+    config ? config['runtime'] : undefined,
+    readInstallRuntimeMarker(),
+  ) || 'claude';
+}
+
+/**
  * Convenience: format using the runtime resolved from a project directory.
  * Equivalent to `formatGsdSlash(name, resolveRuntime(projectDir))`.
  */

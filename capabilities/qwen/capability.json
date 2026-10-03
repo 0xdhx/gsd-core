@@ -105,7 +105,8 @@
       "legacyCommandsGsdCleanup": true,
       "legacyCommandsGsdInstallMigration": true,
       "legacyCommandsGsdUninstall": true,
-      "hyphenNameAgentBody": true
+      "hyphenNameAgentBody": true,
+      "contentRewriteProfile": "branded-lookahead-own-derived"
     }
   },
   "reviewer": {

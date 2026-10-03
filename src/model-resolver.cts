@@ -35,9 +35,9 @@ import { MODEL_ALIAS_MAP, RUNTIME_PROFILE_MAP, PROVIDER_PRESETS, VALID_TIERS, CL
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolveRuntimeNameFromCandidates, canonicalizeRuntimeName } from './runtime-name-policy.cjs';
+import { canonicalizeRuntimeName } from './runtime-name-policy.cjs';
 import {
-  readInstallRuntimeMarker,
+  resolveActiveRuntime,
   _setInstallRuntimeMarkerForTests,
   _resetInstallRuntimeMarkerCacheForTests,
 } from './runtime-slash.cjs';
@@ -73,18 +73,11 @@ const RUNTIMES_WITH_NATIVE_ALIASES: ReadonlySet<string> = new Set(['claude']);
 // below (`export =` at the bottom of this file) preserve every existing
 // caller's `require('./model-resolver.cjs')` surface byte-for-behaviour.
 
-// The runtime whose install is actually resolving, canonicalized so an alias or
-// case variant (e.g. "claude-code"/"Claude") cannot defeat the native-alias
-// check below (#2297 review). Precedence mirrors resolveRuntime()
-// (runtime-slash.cts): GSD_RUNTIME env → project config.runtime → per-install
-// .gsd-runtime marker → 'claude'.
-function resolveActiveRuntime(config: Record<string, unknown>): string {
-  return resolveRuntimeNameFromCandidates(
-    process.env['GSD_RUNTIME'],
-    config['runtime'],
-    readInstallRuntimeMarker(),
-  ) || 'claude';
-}
+// The runtime whose install is actually resolving — one chain, owned by
+// runtime-slash.cts's `resolveActiveRuntime` (#5169): GSD_RUNTIME env → project
+// config.runtime → per-install .gsd-runtime marker → 'claude', canonicalized so
+// an alias or case variant (e.g. "claude-code"/"Claude") cannot defeat the
+// native-alias check below (#2297 review).
 
 // Did the PROJECT's own config (root `.planning/config.json` or the active
 // workstream/project override) explicitly set resolve_model_ids to "omit"?
