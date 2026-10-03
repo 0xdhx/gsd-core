@@ -38,7 +38,6 @@ const CLAUDE_AXES = CLAUDE_CAP.runtime.hostIntegration;
 // Requiring the installer (not as main) never runs the CLI; GSD_TEST_MODE is set
 // defensively to match the install-test convention.
 process.env.GSD_TEST_MODE = process.env.GSD_TEST_MODE || '1';
-const installMod = require('../bin/install.js');
 // #5169: the single host-behaviors accessor and its #338 fail-safe floor live in
 // the runtime-name-policy owner module, not in bin/install.js.
 const { hostBehaviorsFor, FALLBACK_HOST_BEHAVIORS } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');

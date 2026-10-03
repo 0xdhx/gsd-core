@@ -22,6 +22,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { cleanup } = require('./helpers.cjs');
+const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const LIB = path.join(ROOT, 'gsd-core', 'bin', 'lib');
@@ -111,7 +113,7 @@ describe('the launcher finds the install the JS resolver resolves, for every run
     return spawnSync('sh', ['-c', script], {
       cwd: home,
       encoding: 'utf8',
-      timeout: 30000,
+      timeout: PROBE_TIMEOUT_MS,
       // A minimal environment: no *_CONFIG_DIR / *_HOME override, so the
       // descriptor defaults (`$HOME/.<dir>`) are what is probed.
       env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH || '/usr/bin:/bin' },
@@ -152,7 +154,7 @@ describe('the launcher finds the install the JS resolver resolves, for every run
           fs.realpathSync(path.join(jsAfter, 'gsd-core', 'bin', 'gsd-tools.cjs')),
         );
       } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        cleanup(home);
       }
     });
   }
@@ -168,7 +170,7 @@ describe('the launcher finds the install the JS resolver resolves, for every run
         assert.equal(result.status, 0, result.stderr);
         assert.equal(fs.realpathSync(result.stdout), fs.realpathSync(path.join(dir, 'gsd-core', 'bin', 'gsd-tools.cjs')));
       } finally {
-        fs.rmSync(home, { recursive: true, force: true });
+        cleanup(home);
       }
     });
   }
@@ -180,7 +182,7 @@ describe('the launcher finds the install the JS resolver resolves, for every run
       assert.notEqual(result.status, 0);
       assert.equal(result.stdout.includes('gsd-tools.cjs') && fs.existsSync(result.stdout), false);
     } finally {
-      fs.rmSync(home, { recursive: true, force: true });
+      cleanup(home);
     }
   });
 
@@ -194,13 +196,13 @@ describe('the launcher finds the install the JS resolver resolves, for every run
       const result = spawnSync('sh', ['-c', script], {
         cwd: home,
         encoding: 'utf8',
-        timeout: 30000,
+        timeout: PROBE_TIMEOUT_MS,
         env: { HOME: home, USERPROFILE: home, PATH: process.env.PATH || '/usr/bin:/bin', CLAUDE_CONFIG_DIR: custom },
       });
       assert.equal(result.status, 0, result.stderr);
       assert.equal(fs.realpathSync(result.stdout), fs.realpathSync(path.join(custom, 'gsd-core', 'bin', 'gsd-tools.cjs')));
     } finally {
-      fs.rmSync(home, { recursive: true, force: true });
+      cleanup(home);
     }
   });
 });
