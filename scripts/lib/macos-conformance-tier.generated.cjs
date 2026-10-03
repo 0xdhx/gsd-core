@@ -88,6 +88,7 @@ module.exports = {
   "tests/git-base-branch.test.cjs",
   "tests/graphify-query.test.cjs",
   "tests/graphify-visualization.test.cjs",
+  "tests/gsd-agent-isolation-guard.test.cjs",
   "tests/gsd-secret-read-guard.test.cjs",
   "tests/gsd-settings-advanced.test.cjs",
   "tests/gsd-statusline.test.cjs",
