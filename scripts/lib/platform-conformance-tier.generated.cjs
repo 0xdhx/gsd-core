@@ -14,6 +14,7 @@ module.exports = {
   "tests/assumption-delta-checkpoint-e2e.test.cjs",
   "tests/assumption-delta.test.cjs",
   "tests/audit-command-cutover.test.cjs",
+  "tests/audit-workstream-layouts.test.cjs",
   "tests/augment-upgrades.test.cjs",
   "tests/blocking-guard-budget-parity.test.cjs",
   "tests/broken-windows.test.cjs",
