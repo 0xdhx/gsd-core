@@ -46,6 +46,7 @@ function control({ id = 'foo', fn = 'evaluateFoo', red = 'block', module: module
     fn === null ? null : `fn: '${fn}'`,
     red === null ? null : `red: '${red}'`,
     modulePath === null ? null : `module: require('${modulePath}')`,
+    "expectRed: { reason: 'x' }",
     'redScenario: {}',
     'greenScenario: {}',
   ].filter((f) => f !== null);
@@ -176,6 +177,26 @@ describe('lint-gate-positive-control — evasions of discovery (each is the same
     assert.deepEqual(ruleSet(result), [RULES.UNCLASSIFIED_EVALUATE]);
   });
 
+  test('defaultExportAllExportAndMemberGatesAreUnclassified: shapes the guard does not resolve are reported, never skipped', () => {
+    const body = "gateVerdict('block', true, {})";
+    const shapes = [
+      `${GATE_IMPORTS}\nexport default function evaluateFoo${sig} { return ${body}; }\n`,
+      `${GATE_IMPORTS}\nexport default ${sig} => ${body};\n`,
+      `${GATE_IMPORTS}\nexport * from './x.cjs';\n`,
+      `${GATE_IMPORTS}\nexport class G { evaluateFoo${sig} { return ${body}; } }\n`,
+      `${GATE_IMPORTS}\nexport const g = { evaluateFoo${sig} { return ${body}; } };\n`,
+    ];
+    for (const text of shapes) {
+      const result = scan([{ file: 'src/gate-foo.cts', text }, gate('bar', 'Bar', BLOCKING_BODY)], [control({ id: 'bar', fn: 'evaluateBar' })]);
+      assert.ok(ruleSet(result).includes(RULES.UNCLASSIFIED_EVALUATE), text);
+    }
+  });
+
+  test('memberCallDoesNotResolveToALocalFunction: `h.decide()` is not a call to the top-level decide', () => {
+    const text = `${GATE_IMPORTS}\nfunction decide() { return gateVerdict('block', true, {}); }\nexport function evaluateFoo${sig} {\n  return h.decide() ?? gateUnreadable(false, {});\n}\n`;
+    assert.equal(scan([{ file: 'src/gate-foo.cts', text }], []).gates[0].red, 'unreadable');
+  });
+
   test('deadHelperDoesNotDeriveBlock: a blocking verdict in code the evaluate never reaches is not its blocking arm', () => {
     const text = `${GATE_IMPORTS}\nfunction unusedHelper() { return gateVerdict('block', true, {}); }\nexport function evaluateFoo${sig} {\n  return gateUnreadable(false, {});\n}\n`;
     assert.equal(scan([{ file: 'src/gate-foo.cts', text }], []).gates[0].red, 'unreadable');
@@ -193,13 +214,13 @@ describe('lint-gate-positive-control — evasions of discovery (each is the same
 });
 
 describe('lint-gate-positive-control — an inert control does not count', () => {
-  const body = "{ gate: 'foo', module: require('../gsd-core/bin/lib/gate-foo.cjs'), fn: 'evaluateFoo', red: 'block', redScenario: {}, greenScenario: {} }";
+  const body = "{ gate: 'foo', module: require('../gsd-core/bin/lib/gate-foo.cjs'), fn: 'evaluateFoo', red: 'block', expectRed: { reason: 'x' }, redScenario: {}, greenScenario: {} }";
   const uncontrolled = (text) => scan([gate('foo', 'Foo', BLOCKING_BODY)], [{ file: 'tests/x.test.cjs', text }]);
 
   test('localNoopGateControlIsFlagged: a local function named gateControl is not the helper', () => {
     const result = uncontrolled(`function gateControl() {}\ngateControl(${body});\n`);
     assert.deepEqual(ruleSet(result), [RULES.MALFORMED_CONTROL, RULES.NO_CONTROL]);
-    assert.match(result.violations.find((v) => v.rule === RULES.MALFORMED_CONTROL).detail, /not bound from require/);
+    assert.match(result.violations.find((v) => v.rule === RULES.MALFORMED_CONTROL).detail, /not bound by exactly one top-level const/);
   });
 
   test('gateControlBoundFromAnotherModuleIsFlagged', () => {
@@ -215,6 +236,37 @@ describe('lint-gate-positive-control — an inert control does not count', () =>
 
   test('topLevelBoundCallCounts (control)', () => {
     assert.deepEqual(uncontrolled(`${HELPER_BINDING}gateControl(${body});\n`).violations, []);
+  });
+
+  test('reassignedBindingIsFlagged: `let`/reassignment of gateControl makes the call inert', () => {
+    const let_ = uncontrolled(`let { gateControl } = require('./helpers/gate-positive-control.cjs');\ngateControl = () => {};\ngateControl(${body});\n`);
+    assert.deepEqual(ruleSet(let_), [RULES.MALFORMED_CONTROL, RULES.NO_CONTROL]);
+    const reassigned = uncontrolled(`${HELPER_BINDING}gateControl = () => {};\ngateControl(${body});\n`);
+    assert.ok(reassigned.violations.some((v) => /is reassigned/.test(v.detail ?? '')));
+  });
+
+  test('redeclaredBindingIsFlagged: a var or function of the same name', () => {
+    assert.ok(uncontrolled(`${HELPER_BINDING}var gateControl = function () {};\ngateControl(${body});\n`).violations.some((v) => /declared more than once/.test(v.detail ?? '')));
+    assert.ok(uncontrolled(`${HELPER_BINDING}function gateControl() {}\ngateControl(${body});\n`).violations.some((v) => /declared more than once/.test(v.detail ?? '')));
+    assert.ok(uncontrolled(`${HELPER_BINDING}const run = (gateControl) => gateControl;\ngateControl(${body});\n`).violations.some((v) => /declared more than once/.test(v.detail ?? '')));
+  });
+
+  test('terminatingFileIsFlagged: process.exit or a top-level throw before the call means it may never run', () => {
+    assert.ok(uncontrolled(`${HELPER_BINDING}process.exit(0);\ngateControl(${body});\n`).violations.some((v) => /terminates the process or throws/.test(v.detail ?? '')));
+    assert.ok(uncontrolled(`${HELPER_BINDING}throw new Error('x');\ngateControl(${body});\n`).violations.some((v) => /terminates the process or throws/.test(v.detail ?? '')));
+  });
+
+  test('helperFromAnotherDirectoryIsFlagged: the helper is resolved, not matched by basename', () => {
+    const result = uncontrolled(`const { gateControl } = require('./evil/gate-positive-control.cjs');\ngateControl(${body});\n`);
+    assert.deepEqual(ruleSet(result), [RULES.MALFORMED_CONTROL, RULES.NO_CONTROL]);
+  });
+
+  test('missingExpectRedIsFlagged: a control that does not name the arm it reaches is not a control', () => {
+    const noExpect = "gateControl({ gate: 'foo', module: require('../gsd-core/bin/lib/gate-foo.cjs'), fn: 'evaluateFoo', red: 'block', redScenario: {}, greenScenario: {} });\n";
+    const result = uncontrolled(`${HELPER_BINDING}${noExpect}`);
+    assert.ok(result.violations.some((v) => /expectRed is not a non-empty object literal/.test(v.detail ?? '')));
+    const empty = noExpect.replace("redScenario", "expectRed: {}, redScenario");
+    assert.ok(uncontrolled(`${HELPER_BINDING}${empty}`).violations.some((v) => /expectRed is not a non-empty/.test(v.detail ?? '')));
   });
 
   test('stubModuleInAnotherDirectoryIsFlagged: only gsd-core/bin/lib/gate-<id>.cjs is the gate', () => {

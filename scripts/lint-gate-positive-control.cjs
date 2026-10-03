@@ -32,7 +32,10 @@
  *                       not the helper's export (an inert call must not count as a control)
  *   orphan-control      a control naming a gate that does not exist
  *   unclassified-evaluate  an exported `evaluate*` in a gate file that does not declare a `GateResult`
- *                       return (or cannot be resolved), so the guard cannot tell whether it is a gate
+ *                       return (or cannot be resolved), or a gate file with an `export default`,
+ *                       an `export * from`, or an `evaluate*` class/object member returning
+ *                       `GateResult`: shapes the guard does not read, so the gate must be rewritten as
+ *                       one of the shapes it does
  *   multiple-evaluates  a gate file exporting more than one `GateResult` `evaluate*` (one gate module,
  *                       one gate: the second would have no control naming it)
  *
@@ -50,7 +53,7 @@ const { runMain } = require('./lib/cli-exit.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const CONTROL_CALL = 'gateControl';
-const HELPER_BASENAME = 'gate-positive-control.cjs';
+const HELPER_PATH = 'tests/helpers/gate-positive-control.cjs';
 const GATE_LIB_DIR = 'gsd-core/bin/lib';
 
 /** Empty by decision (ADR-5057 §4): a gate without a control is fixed, never listed. */
@@ -176,6 +179,24 @@ function exportedEvaluates(ast) {
 }
 
 /**
+ * Shapes through which a gate could export an evaluate the guard does not resolve: a default export, an
+ * `export * from`, and an `evaluate*` method or object member. Each is reported as unclassified (a gate
+ * in such a shape must be rewritten to a shape the guard reads), never skipped.
+ */
+function unresolvedEvaluateShapes(ast) {
+  const found = [];
+  walk(ast, (node) => {
+    if (node.type === 'ExportDefaultDeclaration' || node.type === 'ExportAllDeclaration') found.push(node);
+    // An `evaluate*` member that declares a GateResult return is a gate surface (a lookup table of
+    // evaluators that return something else, or a destructuring, is not).
+    if ((node.type === 'MethodDefinition' || node.type === 'Property' || node.type === 'PropertyDefinition') && !node.computed
+      && node.key.type === 'Identifier' && node.key.name.startsWith('evaluate')
+      && isFunctionExpressionNode(node.value) && returnsGateResult(node.value)) found.push(node);
+  });
+  return found;
+}
+
+/**
  * The failing verdict a gate can reach, read from the exported `evaluate*` and the same-file functions
  * it (transitively) calls — never from dead code elsewhere in the file. `block` when some
  * `gateVerdict(outcome, block, …)` / `gateUnreadable(block, …)` call's block argument is anything but the
@@ -199,7 +220,7 @@ function deriveRed(ast, evaluateNode) {
         if (name === 'gateUnreadable') unreadable = true;
         const blockArg = node.arguments[name === 'gateVerdict' ? 1 : 0];
         if (blockArg !== undefined && !(blockArg.type === 'Literal' && blockArg.value === false)) blocking = true;
-      } else if (name !== null && defs.has(name)) {
+      } else if (node.callee.type === 'Identifier' && defs.has(name)) {
         queue.push(defs.get(name));
       }
     });
@@ -210,21 +231,57 @@ function deriveRed(ast, evaluateNode) {
 
 // ─── control discovery ───────────────────────────────────────────────────────────────────────────
 
-/** Is `gateControl` bound at the top level of the file from the helper (`const { gateControl } = require('…/gate-positive-control.cjs')`)? */
-function gateControlBoundFromHelper(ast) {
+function isProcessTermination(node) {
+  return node.type === 'CallExpression' && node.callee.type === 'MemberExpression' && !node.callee.computed
+    && node.callee.object.type === 'Identifier' && node.callee.object.name === 'process'
+    && node.callee.property.type === 'Identifier' && ['exit', 'abort', 'kill', 'reallyExit'].includes(node.callee.property.name);
+}
+
+/**
+ * Why `gateControl` in this file is not the helper's live function; `[]` when it is. It must be bound by
+ * exactly one top-level `const { gateControl } = require('…/tests/helpers/gate-positive-control.cjs')`
+ * (resolved against the file, not matched by basename), never rebound, assigned or redeclared, and the
+ * file must not terminate the process or throw at the top level (the call would never run).
+ */
+function gateControlBindingProblems(ast, file) {
+  const problems = [];
+  let helperBindings = 0;
   for (const statement of ast.body) {
-    if (statement.type !== 'VariableDeclaration') continue;
+    if (statement.type !== 'VariableDeclaration' || statement.kind !== 'const') continue;
     for (const d of statement.declarations) {
       if (d.id.type !== 'ObjectPattern' || d.init === null || d.init.type !== 'CallExpression') continue;
       if (d.init.callee.type !== 'Identifier' || d.init.callee.name !== 'require') continue;
       const required = stringLiteral(d.init.arguments[0]);
-      if (required === null || path.posix.basename(required.replace(/\\/g, '/')) !== HELPER_BASENAME) continue;
-      const bindsControl = d.id.properties.some((p) => p.type === 'Property' && !p.computed && p.key.type === 'Identifier'
-        && p.key.name === CONTROL_CALL && p.value.type === 'Identifier' && p.value.name === CONTROL_CALL);
-      if (bindsControl) return true;
+      if (required === null || resolvedModule(file, required) !== HELPER_PATH) continue;
+      if (d.id.properties.some((p) => p.type === 'Property' && !p.computed && p.key.type === 'Identifier'
+        && p.key.name === CONTROL_CALL && p.value.type === 'Identifier' && p.value.name === CONTROL_CALL)) helperBindings += 1;
     }
   }
-  return false;
+  if (helperBindings !== 1) problems.push(`${CONTROL_CALL} is not bound by exactly one top-level const from require('…/${HELPER_PATH}')`);
+
+  // Every other way of introducing or changing the name `gateControl`: a plain declarator, a function or
+  // import of that name, a parameter, a second destructuring, and any assignment or update that targets it.
+  const isName = (n) => n !== null && n !== undefined && n.type === 'Identifier' && n.name === CONTROL_CALL;
+  const mentionsName = (n) => { let hit = false; walk(n, (x) => { if (isName(x)) hit = true; }); return hit; };
+  let otherDeclarations = 0;
+  let patternBindings = 0;
+  let reassigned = false;
+  let terminates = false;
+  walk(ast, (node) => {
+    if (node.type === 'VariableDeclarator') {
+      if (isName(node.id)) otherDeclarations += 1;
+      if (node.id.type === 'ObjectPattern' && node.id.properties.some((p) => p.type === 'Property' && isName(p.value))) patternBindings += 1;
+    }
+    if ((node.type === 'FunctionDeclaration' && isName(node.id)) || (node.type === 'ImportSpecifier' && isName(node.local))) otherDeclarations += 1;
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') && node.params.some(mentionsName)) otherDeclarations += 1;
+    if (node.type === 'AssignmentExpression' && mentionsName(node.left)) reassigned = true;
+    if (node.type === 'UpdateExpression' && isName(node.argument)) reassigned = true;
+    if (isProcessTermination(node)) terminates = true;
+  });
+  if (patternBindings > 1 || otherDeclarations > 0) problems.push(`${CONTROL_CALL} is declared more than once in the file`);
+  if (reassigned) problems.push(`${CONTROL_CALL} is reassigned`);
+  if (terminates || ast.body.some((s) => s.type === 'ThrowStatement')) problems.push('the file terminates the process or throws at the top level, so a control may never run');
+  return problems;
 }
 
 /** The literal property values of a `gateControl({...})` argument; a non-literal value reads as undefined. */
@@ -243,6 +300,10 @@ function readControl(call, file) {
     if (value === null) control.malformed.push(`${key} is not a string literal`);
     else control[key] = value;
   }
+  const expectProp = property('expectRed');
+  if (expectProp === undefined || expectProp.value.type !== 'ObjectExpression' || expectProp.value.properties.length === 0) {
+    control.malformed.push('expectRed is not a non-empty object literal naming the arm the red scenario reaches');
+  }
   const moduleProp = property('module');
   const requireCall = moduleProp === undefined ? null : moduleProp.value;
   if (requireCall === null || requireCall.type !== 'CallExpression' || requireCall.callee.type !== 'Identifier'
@@ -257,13 +318,13 @@ function readControl(call, file) {
 /** Every `gateControl(...)` call in one test source; a call that is not a real control is `malformed`. */
 function scanControls(text, file, parser) {
   const ast = parse(parser, text, file);
-  const bound = gateControlBoundFromHelper(ast);
+  const bindingProblems = gateControlBindingProblems(ast, file);
   const topLevel = new Set(ast.body.filter((s) => s.type === 'ExpressionStatement').map((s) => s.expression));
   const controls = [];
   walk(ast, (node) => {
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === CONTROL_CALL) {
       const control = readControl(node, file);
-      if (!bound) control.malformed.push(`${CONTROL_CALL} is not bound from require('…/${HELPER_BASENAME}')`);
+      control.malformed.push(...bindingProblems);
       if (!topLevel.has(node)) control.malformed.push('call is not a top-level statement (it may never run)');
       controls.push(control);
     }
@@ -306,6 +367,9 @@ function scanSources({ gates: gateSources, controls: controlSources }, parser, {
     const evaluates = exportedEvaluates(ast);
     for (const e of evaluates.filter((x) => !x.classified)) {
       violations.push({ file: source.file, line: e.node.loc.start.line, rule: RULES.UNCLASSIFIED_EVALUATE, gate: id });
+    }
+    for (const node of unresolvedEvaluateShapes(ast)) {
+      violations.push({ file: source.file, line: node.loc.start.line, rule: RULES.UNCLASSIFIED_EVALUATE, gate: id });
     }
     const classified = evaluates.filter((x) => x.classified);
     if (classified.length === 0) continue;

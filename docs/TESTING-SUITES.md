@@ -310,7 +310,9 @@ module has a **positive control**: a test that drives the gate, through its real
   greenScenario })` from `tests/helpers/gate-positive-control.cjs`, as a top-level
   statement of a `tests/**/*.test.cjs` file (by convention
   `tests/gate-positive-control.test.cjs`) with `gateControl` bound from that
-  helper; an inert call (a local function of that name, a nested call, a file the
+  helper (a single top-level `const`, resolved against the file, never rebound or
+  redeclared); an inert call (a local function of that name, a nested call, a
+  reassigned binding, a file that exits or throws before the call, a file the
   runner does not execute) does not count. Each scenario runs in a fresh temp
   project (`git: true` for a git repository); `setup(dir)` may return a restore
   function for a monkeypatched `fs` method (never a `chmod`: root bypasses mode
@@ -330,8 +332,9 @@ module has a **positive control**: a test that drives the gate, through its real
   `wrong-fn`, `malformed-control` (a field the lint cannot read as a literal, a
   call that is not a top-level statement, or a `gateControl` not bound from the
   helper), `orphan-control`, `unclassified-evaluate` (an exported `evaluate*`
-  with no `GateResult` return, or one that cannot be resolved, so the lint cannot
-  tell whether it is a gate), `multiple-evaluates` (one gate module, one gate).
+  with no `GateResult` return, one that cannot be resolved, or a gate file using
+  `export default`, `export * from` or an `evaluate*` class/object member, shapes
+  the lint does not read), `multiple-evaluates` (one gate module, one gate).
   The allowlist is empty by decision and a stale entry is itself a problem.
 - **Fail-closed.** Zero discovered gates, a `gate-*.cts` file whose name the lint
   cannot read, or a source the parser cannot read, is a violation: an inert scan
