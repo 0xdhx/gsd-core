@@ -187,6 +187,7 @@ module.exports = {
   "tests/no-unbounded-dirname-walk.rule.test.cjs",
   "tests/no-unbounded-spawn.test.cjs",
   "tests/no-unguarded-nonportable-exec.rule.test.cjs",
+  "tests/node-compile-cache.test.cjs",
   "tests/npm-audit-baseline.test.cjs",
   "tests/npm-integrity-gate.test.cjs",
   "tests/nsegment-phase-grammar.test.cjs",
