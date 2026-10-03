@@ -33,13 +33,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execGit as execGitSeam } from './shell-command-projection.cjs';
 import type { SpawnResultOutput } from './shell-command-projection.cjs';
-import { gateVerdict, gateUsageFailure, isGateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
+import { gateVerdict, gateUnreadable, gateUsageFailure, isGateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
 import type { GateResult } from './gate-verdict.cjs';
-import { resolveContainedPath, resolvePhaseDirOrEmpty } from './gate-phase-context.cjs';
+import { resolveContainedPath, resolvePhaseDir } from './gate-phase-context.cjs';
 import { escapeEre } from './pattern.cjs';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import planScanMod = require('./plan-scan.cjs');
-const { scanPhasePlans } = planScanMod;
+import { readPlanScanEvidence } from './gate-evidence.cjs';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -383,18 +381,22 @@ function resolvePhase(
   projectDir: string, unit: { kind: 'phase'; phase: string; phaseDir?: string }, scope: EvaluationScope,
   git: Git, ref: string, options: ScopeOptions, repoRoot: string,
 ): void {
-  const phaseDir = unit.phaseDir ?? resolvePhaseDirOrEmpty(projectDir, unit.phase);
+  let phaseDir = unit.phaseDir ?? '';
+  if (unit.phaseDir === undefined) {
+    const located = resolvePhaseDir(projectDir, unit.phase);
+    if (located.kind === 'unreadable') throw new ScopeUnreadable(`phase-dir-lookup-failed:${located.reason}`);
+    if (located.kind === 'found') phaseDir = located.value;
+  }
   if (!phaseDir) throw new ScopeUnreadable('phase-dir-not-found');
 
   const refs: string[] = [];
   let summaryCount = 0;
-  let entries: string[];
-  try {
-    // The canonical LIVE summary set (root + nested, superseded excluded) from its single owner.
-    entries = [...scanPhasePlans(phaseDir).summaryFiles].sort();
-  } catch {
-    throw new ScopeUnreadable('phase-dir-unreadable');
-  }
+  // The canonical LIVE summary set (root + nested, superseded excluded) from its single owner. A scan
+  // that did not see every summary (an existing nested plans/ that could not be read) is "could not
+  // look": a short summary set would narrow the phase's commits and report success (#5170).
+  const planScan = readPlanScanEvidence(phaseDir);
+  if (planScan.kind === 'unreadable') throw new ScopeUnreadable('phase-dir-unreadable');
+  const entries = [...planScan.value.summaryFiles].sort();
   for (const name of entries) {
     try {
       refs.push(...extractTaskCommitRefs(fs.readFileSync(path.join(phaseDir, name), 'utf-8')));
@@ -598,7 +600,10 @@ export function evaluateEvaluationScope(input: { projectDir: string; args: reado
     unit = { kind: 'phase', phase: '', phaseDir: contained };
   }
   const scope = resolveEvaluationScope(input.projectDir, unit, options);
+  // An unresolvable scope is "could not look" (a missing git, a timeout): outcome `unreadable`, exit
+  // UNAVAILABLE, never a pass-shaped exit 0 (#5170). The payload is unchanged.
+  if (scope.status === 'unresolvable') return gateUnreadable(false, { ...scope });
   // `pass` only for a scope with nothing to explain; an empty-but-resolved scope (it carries a reason) is advisory.
-  const outcome = scope.status === 'unresolvable' ? 'skip' : scope.status === 'degraded' || scope.reason !== null ? 'advisory' : 'pass';
+  const outcome = scope.status === 'degraded' || scope.reason !== null ? 'advisory' : 'pass';
   return gateVerdict(outcome, false, { ...scope });
 }

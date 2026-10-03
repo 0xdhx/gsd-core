@@ -12,16 +12,15 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 
-const { cleanup, TEST_ENV_BASE } = require('./helpers.cjs');
+const { cleanup } = require('./helpers.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
-const { LOOP_HOOK_POINT_CLI_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+const { runTools } = require('./helpers/gsd-tools-cli.cjs');
 const { computeUiSafetyGate, evaluateUiSafetyGate } = require('../gsd-core/bin/lib/gate-ui-safety.cjs');
+const { evaluateEvaluationScope } = require('../gsd-core/bin/lib/gate-evaluation-scope.cjs');
 const { evaluateTddReviewCheckpoint } = require('../gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs');
 const { evaluateDecisionCoverageVerify } = require('../gsd-core/bin/lib/gate-decision-coverage-verify.cjs');
 
-const TOOLS_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'gsd-tools.cjs');
 const IDENTITY = {
   GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@test.io',
   GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@test.io',
@@ -72,17 +71,6 @@ function summarize(repo, shas) {
   repo.git('commit', '-m', 'docs(03-01): summary');
 }
 
-function runTools(args, cwd) {
-  try {
-    const stdout = execFileSync(process.execPath, [TOOLS_PATH, ...args], {
-      cwd, encoding: 'utf-8', env: { ...process.env, ...TEST_ENV_BASE }, timeout: LOOP_HOOK_POINT_CLI_TIMEOUT_MS,
-    });
-    return { exitCode: 0, stdout: stdout.trim(), stderr: '' };
-  } catch (err) {
-    return { exitCode: err.status ?? 1, stdout: err.stdout?.toString().trim() ?? '', stderr: err.stderr?.toString().trim() ?? err.message };
-  }
-}
-
 describe('ui-safety-gate reads the phase\'s evaluation scope, not the last commit', () => {
   test('[happy] a UI file in a task commit with no UI-SPEC blocks, however old the commit', () => {
     const repo = makeRepo();
@@ -123,10 +111,10 @@ describe('ui-safety-gate reads the phase\'s evaluation scope, not the last commi
     assert.equal(result.block, false);
   });
 
-  test('[negative] the verdict for an unreadable scope is `skip` — "could not look" is never a `pass`', () => {
+  test('[negative] the verdict for an unreadable scope is `unreadable` — "could not look" is never a `pass`', () => {
     const repo = makeRepo();
     const unreadable = evaluateUiSafetyGate({ projectDir: repo.dir, args: ['9'] });
-    assert.equal(unreadable.outcome, 'skip');
+    assert.equal(unreadable.outcome, 'unreadable');
     assert.equal(unreadable.block, false);
     const read = evaluateUiSafetyGate({ projectDir: repo.dir, args: ['3'] });
     assert.equal(read.outcome, 'pass', 'a readable (here degraded) scope with no UI-SPEC need keeps the pass outcome');
@@ -220,6 +208,24 @@ describe('`check evaluation-scope` through the CLI', () => {
     const scope = JSON.parse(result.stdout);
     assert.equal(scope.commits.length, 1);
     assert.deepEqual(scope.files, []);
+  });
+
+  test('[negative] an unresolvable scope exits UNAVAILABLE (69) and still prints the JSON with the reason (#5170)', () => {
+    const repo = makeRepo();
+    const result = runTools(['check', 'evaluation-scope', '--phase', '9', '--raw'], repo.dir);
+    assert.equal(result.exitCode, 69, result.stderr);
+    const scope = JSON.parse(result.stdout);
+    assert.equal(scope.status, 'unresolvable');
+    assert.equal(typeof scope.reason, 'string');
+    assert.deepEqual(scope, JSON.parse(JSON.stringify(evaluateEvaluationScope({ projectDir: repo.dir, args: ['--phase', '9'] }).payload)));
+  });
+
+  test('[independence] a degraded scope is a delivered answer: exit 0', () => {
+    const repo = makeRepo();
+    commit(repo, 'src/a.js', 'feat(03-01): a');
+    const result = runTools(['check', 'evaluation-scope', '--phase', '3', '--raw'], repo.dir);
+    assert.equal(result.exitCode, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).status, 'degraded');
   });
 
   test('[negative] invalid arguments fail with a usage error naming the problem', () => {
