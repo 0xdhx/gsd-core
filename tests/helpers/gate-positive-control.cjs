@@ -57,7 +57,7 @@ function runScenario(evaluate, scenario) {
  * Assert the red/green pair for already-computed verdicts. Pure, so the harness is testable without a
  * gate: throws unless `redVerdict` is the declared failing verdict and `greenVerdict` is not.
  */
-function assertRedGreen(id, red, redVerdict, greenVerdict) {
+function assertRedGreen(id, red, redVerdict, greenVerdict, expectRed) {
   assert.ok(RED_OUTCOMES.includes(red), `${id}: red must be one of ${RED_OUTCOMES.join(', ')}; got ${JSON.stringify(red)}`);
   for (const [label, verdict] of [['red', redVerdict], ['green', greenVerdict]]) {
     assert.ok(!isUsageFailure(verdict), `${id}: the ${label} scenario produced a usage failure, not a verdict: ${JSON.stringify(verdict)}`);
@@ -71,6 +71,29 @@ function assertRedGreen(id, red, redVerdict, greenVerdict) {
     assert.equal(redVerdict.outcome, 'unreadable', `${id}: the red scenario must reach outcome 'unreadable'; got '${redVerdict.outcome}'`);
     assert.notEqual(greenVerdict.outcome, 'unreadable', `${id}: the green scenario reached 'unreadable'; a control that cannot tell the two apart proves nothing`);
   }
+  if (expectRed !== undefined) assertExpectedArm(id, redVerdict, expectRed);
+}
+
+/**
+ * Pin the red verdict to the arm the control is about: `outcome` is compared with the verdict's
+ * outcome, every other key with the same key of its payload. A red scenario that fails for an unrelated
+ * reason (a different arm) therefore does not pass as this gate's control.
+ */
+function assertExpectedArm(id, verdict, expectRed) {
+  for (const [key, expected] of Object.entries(expectRed)) {
+    const actual = key === 'outcome' ? verdict.outcome : verdict.payload?.[key];
+    assert.deepStrictEqual(actual, expected, `${id}: the red verdict's ${key === 'outcome' ? 'outcome' : `payload.${key}`} is ${JSON.stringify(actual)}, expected ${JSON.stringify(expected)}; the red scenario reached a different arm`);
+  }
+}
+
+const SPEC_KEYS = Object.freeze(['gate', 'module', 'fn', 'red', 'expectRed', 'redScenario', 'greenScenario']);
+const SCENARIO_KEYS = Object.freeze(['git', 'setup', 'args']);
+
+/** A misspelled option reads as `undefined` and would silently weaken a control, so it is rejected. */
+function assertKnownKeys(id, what, value, known) {
+  assert.ok(value !== null && typeof value === 'object', `${id}: ${what} must be an object`);
+  const unknown = Object.keys(value).filter((key) => !known.includes(key));
+  assert.deepEqual(unknown, [], `${id}: ${what} has unknown key(s) ${unknown.join(', ')}; known: ${known.join(', ')}`);
 }
 
 /**
@@ -81,16 +104,21 @@ function assertRedGreen(id, red, redVerdict, greenVerdict) {
  *   module: object,                    the required gate module (`require('../gsd-core/bin/lib/gate-<id>.cjs')`)
  *   fn: string,                        the exported `evaluate*` function the control drives
  *   red: 'block' | 'unreadable',
+ *   expectRed: object,                 `outcome` and/or payload keys the red verdict must carry (the intended arm)
  *   redScenario: { git?: boolean, setup?: Function, args: string[] | Function },
  *   greenScenario: { git?: boolean, setup?: Function, args: string[] | Function },
  * }} spec
  */
 function gateControl(spec) {
-  const { gate, module: gateModule, fn, red, redScenario, greenScenario } = spec;
+  assertKnownKeys(spec.gate, 'gateControl', spec, SPEC_KEYS);
+  assertKnownKeys(spec.gate, 'redScenario', spec.redScenario, SCENARIO_KEYS);
+  assertKnownKeys(spec.gate, 'greenScenario', spec.greenScenario, SCENARIO_KEYS);
+  const { gate, module: gateModule, fn, red, expectRed, redScenario, greenScenario } = spec;
+  assert.ok(expectRed !== null && typeof expectRed === 'object' && Object.keys(expectRed).length > 0, `${gate}: expectRed must name the arm the red scenario reaches (outcome and/or payload keys)`);
   test(`positive control: ${gate} reaches its failing verdict (${red}) and a different one`, () => {
     assert.equal(typeof gateModule?.[fn], 'function', `${gate}: the module does not export ${fn}`);
     const evaluate = gateModule[fn];
-    assertRedGreen(gate, red, runScenario(evaluate, redScenario), runScenario(evaluate, greenScenario));
+    assertRedGreen(gate, red, runScenario(evaluate, redScenario), runScenario(evaluate, greenScenario), expectRed);
   });
 }
 
@@ -127,4 +155,4 @@ function failRead(suffix, code = 'EACCES') {
   return function restore() { fs.readFileSync = real; };
 }
 
-module.exports = { gateControl, assertRedGreen, runScenario, put, git, failRead, RED_OUTCOMES };
+module.exports = { gateControl, assertExpectedArm, assertKnownKeys, SPEC_KEYS, SCENARIO_KEYS, assertRedGreen, runScenario, put, git, failRead, RED_OUTCOMES };

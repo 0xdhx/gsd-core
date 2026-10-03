@@ -13,7 +13,9 @@ const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 
-const { assertRedGreen, runScenario, failRead, RED_OUTCOMES } = require('./helpers/gate-positive-control.cjs');
+const {
+  assertRedGreen, assertExpectedArm, assertKnownKeys, SPEC_KEYS, SCENARIO_KEYS, runScenario, failRead, RED_OUTCOMES,
+} = require('./helpers/gate-positive-control.cjs');
 
 const verdict = (outcome, block) => ({ outcome, block, payload: {} });
 
@@ -64,6 +66,44 @@ describe('assertRedGreen — rejects a control that proves nothing', () => {
     for (const red of ['pass', 'skip', 'advisory', '', undefined]) {
       assert.throws(() => assertRedGreen('g', red, verdict('block', true), verdict('pass', false)), /red must be one of/);
     }
+  });
+});
+
+describe('expectRed — the red verdict must reach the intended arm', () => {
+  const red = { outcome: 'block', block: true, payload: { reason: 'could-not-parse', total: 0 } };
+  const green = verdict('pass', false);
+
+  test('a matching outcome and payload keys pass', () => {
+    assert.doesNotThrow(() => assertRedGreen('g', 'block', red, green, { outcome: 'block', reason: 'could-not-parse' }));
+  });
+
+  test('redForAnUnrelatedReasonIsRejected: right block flag, wrong arm', () => {
+    assert.throws(() => assertRedGreen('g', 'block', red, green, { reason: 'unreadable_record' }), /reached a different arm/);
+    assert.throws(() => assertRedGreen('g', 'block', red, green, { outcome: 'unreadable' }), /outcome is "block"/);
+  });
+
+  test('a payload key the verdict does not carry is rejected (undefined is not a match)', () => {
+    assert.throws(() => assertRedGreen('g', 'block', red, green, { missing: undefined, other: 1 }), /payload\.other/);
+  });
+
+  test('assertExpectedArm compares values strictly', () => {
+    assert.throws(() => assertExpectedArm('g', red, { total: '0' }), /reached a different arm/);
+    assert.doesNotThrow(() => assertExpectedArm('g', red, { total: 0 }));
+  });
+});
+
+describe('assertKnownKeys — a misspelled option does not silently weaken a control', () => {
+  test('misspelledSpecKeyIsRejected', () => {
+    assert.throws(() => assertKnownKeys('g', 'gateControl', { gate: 'g', redScenarioo: {} }, SPEC_KEYS), /unknown key\(s\) redScenarioo/);
+  });
+
+  test('misspelledScenarioKeyIsRejected', () => {
+    assert.throws(() => assertKnownKeys('g', 'redScenario', { arg: [] }, SCENARIO_KEYS), /unknown key\(s\) arg/);
+  });
+
+  test('knownKeysAndNonObjectsAreChecked', () => {
+    assert.doesNotThrow(() => assertKnownKeys('g', 'redScenario', { git: true, setup() {}, args: [] }, SCENARIO_KEYS));
+    assert.throws(() => assertKnownKeys('g', 'redScenario', undefined, SCENARIO_KEYS), /must be an object/);
   });
 });
 

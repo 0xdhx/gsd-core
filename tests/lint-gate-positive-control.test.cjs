@@ -14,7 +14,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const fc = require('fast-check');
 
-const { scanSources, census, loadParser, RULES, ALLOWLIST, gateIdOf, deriveRed } = require('../scripts/lint-gate-positive-control.cjs');
+const { scanSources, census, loadParser, RULES, ALLOWLIST, gateIdOf } = require('../scripts/lint-gate-positive-control.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const parser = loadParser(ROOT);
@@ -37,6 +37,8 @@ function gate(id, name, body, returns) {
   return { file: `src/gate-${id}.cts`, text: gateSource(name, body, returns) };
 }
 
+const HELPER_BINDING = "const { gateControl } = require('./helpers/gate-positive-control.cjs');\n";
+
 /** A test source with one `gateControl` call; every field is overridable (a field set to null is omitted). */
 function control({ id = 'foo', fn = 'evaluateFoo', red = 'block', module: modulePath = `../gsd-core/bin/lib/gate-${id}.cjs`, file = 'tests/gate-positive-control.test.cjs' } = {}) {
   const fields = [
@@ -47,7 +49,7 @@ function control({ id = 'foo', fn = 'evaluateFoo', red = 'block', module: module
     'redScenario: {}',
     'greenScenario: {}',
   ].filter((f) => f !== null);
-  return { file, text: `gateControl({ ${fields.join(', ')} });\n` };
+  return { file, text: `${HELPER_BINDING}gateControl({ ${fields.join(', ')} });\n` };
 }
 
 function scan(gates, controls, options) {
@@ -73,7 +75,7 @@ describe('lint-gate-positive-control — clean pairs pass', () => {
   });
 
   test('conditionalBlockArmCounts: a block decided by a variable (not the literal false) is a blocking arm', () => {
-    assert.equal(deriveRed(parser.parse(gateSource('Foo', BLOCKING_BODY), { range: true, loc: true, sourceType: 'module', filePath: 'src/gate-foo.cts' })), 'block');
+    assert.equal(scan([gate('foo', 'Foo', BLOCKING_BODY)], []).gates[0].red, 'block');
   });
 
   test('gateIdOf names gate-<id>.cts and nothing else', () => {
@@ -139,6 +141,85 @@ describe('lint-gate-positive-control — each rule is flagged (positive controls
   test('unclassifiedEvaluateIsFlagged: an exported evaluate* with no GateResult return cannot be classified', () => {
     const result = scan([gate('foo', 'Foo', BLOCKING_BODY, ''), gate('bar', 'Bar', BLOCKING_BODY)], [control({ id: 'bar', fn: 'evaluateBar' })]);
     assert.deepEqual(ruleSet(result), [RULES.UNCLASSIFIED_EVALUATE]);
+  });
+});
+
+describe('lint-gate-positive-control — one evaluate per gate module', () => {
+  test('multipleEvaluatesIsFlagged: a second GateResult evaluate* has no control naming it', () => {
+    const second = `${GATE_IMPORTS}\nexport function evaluateFoo(input: { projectDir: string; args: readonly string[] }): GateResult {\n${BLOCKING_BODY}\n}\nexport function evaluateFooToo(input: { projectDir: string; args: readonly string[] }): GateResult {\n${BLOCKING_BODY}\n}\n`;
+    const result = scan([{ file: 'src/gate-foo.cts', text: second }], [control()]);
+    assert.deepEqual(ruleSet(result), [RULES.MULTIPLE_EVALUATES]);
+    assert.equal(result.violations[0].line > 0, true);
+  });
+});
+
+describe('lint-gate-positive-control — evasions of discovery (each is the same defect written another way)', () => {
+  const sig = '(input: { projectDir: string; args: readonly string[] }): GateResult';
+
+  test('exportedConstArrowGateIsDiscovered: `export const evaluateX = (…): GateResult => …`', () => {
+    const text = `${GATE_IMPORTS}\nexport const evaluateFoo = ${sig} => gateVerdict('block', true, {});\n`;
+    const result = scan([{ file: 'src/gate-foo.cts', text }], []);
+    assert.deepEqual(result.gates.map((g) => [g.id, g.fn, g.red]), [['foo', 'evaluateFoo', 'block']]);
+    assert.deepEqual(ruleSet(result), [RULES.NO_CONTROL]);
+  });
+
+  test('reExportedGateIsDiscovered: `function f(){}; export { f as evaluateX }`', () => {
+    const text = `${GATE_IMPORTS}\nfunction build${sig} { return gateVerdict('block', true, {}); }\nexport { build as evaluateFoo };\n`;
+    const result = scan([{ file: 'src/gate-foo.cts', text }], []);
+    assert.deepEqual(result.gates.map((g) => [g.id, g.fn]), [['foo', 'evaluateFoo']]);
+    assert.deepEqual(ruleSet(result), [RULES.NO_CONTROL]);
+  });
+
+  test('unresolvedReExportIsUnclassified: `export { missing as evaluateX }` cannot be told from a gate', () => {
+    const text = `${GATE_IMPORTS}\nexport { missing as evaluateFoo } from './elsewhere.cjs';\n`;
+    const result = scan([{ file: 'src/gate-foo.cts', text }, gate('bar', 'Bar', BLOCKING_BODY)], [control({ id: 'bar', fn: 'evaluateBar' })]);
+    assert.deepEqual(ruleSet(result), [RULES.UNCLASSIFIED_EVALUATE]);
+  });
+
+  test('deadHelperDoesNotDeriveBlock: a blocking verdict in code the evaluate never reaches is not its blocking arm', () => {
+    const text = `${GATE_IMPORTS}\nfunction unusedHelper() { return gateVerdict('block', true, {}); }\nexport function evaluateFoo${sig} {\n  return gateUnreadable(false, {});\n}\n`;
+    assert.equal(scan([{ file: 'src/gate-foo.cts', text }], []).gates[0].red, 'unreadable');
+  });
+
+  test('reachedHelperDerivesBlock: a blocking verdict built by a same-file helper the evaluate calls counts', () => {
+    const text = `${GATE_IMPORTS}\nfunction decide() { return gateVerdict('block', true, {}); }\nexport function evaluateFoo${sig} {\n  return decide();\n}\n`;
+    assert.equal(scan([{ file: 'src/gate-foo.cts', text }], []).gates[0].red, 'block');
+  });
+
+  test('unreadableGateFileNameIsAProblem: gate-Foo_x.cts cannot be discovered, so it must not pass silently', () => {
+    const result = scan([{ file: 'src/gate-Foo_x.cts', text: gateSource('Foo', BLOCKING_BODY) }, gate('bar', 'Bar', BLOCKING_BODY)], [control({ id: 'bar', fn: 'evaluateBar' })]);
+    assert.ok(result.problems.some((p) => /gate-Foo_x\.cts is a gate file whose name/.test(p)));
+  });
+});
+
+describe('lint-gate-positive-control — an inert control does not count', () => {
+  const body = "{ gate: 'foo', module: require('../gsd-core/bin/lib/gate-foo.cjs'), fn: 'evaluateFoo', red: 'block', redScenario: {}, greenScenario: {} }";
+  const uncontrolled = (text) => scan([gate('foo', 'Foo', BLOCKING_BODY)], [{ file: 'tests/x.test.cjs', text }]);
+
+  test('localNoopGateControlIsFlagged: a local function named gateControl is not the helper', () => {
+    const result = uncontrolled(`function gateControl() {}\ngateControl(${body});\n`);
+    assert.deepEqual(ruleSet(result), [RULES.MALFORMED_CONTROL, RULES.NO_CONTROL]);
+    assert.match(result.violations.find((v) => v.rule === RULES.MALFORMED_CONTROL).detail, /not bound from require/);
+  });
+
+  test('gateControlBoundFromAnotherModuleIsFlagged', () => {
+    const result = uncontrolled(`const { gateControl } = require('./helpers/other.cjs');\ngateControl(${body});\n`);
+    assert.deepEqual(ruleSet(result), [RULES.MALFORMED_CONTROL, RULES.NO_CONTROL]);
+  });
+
+  test('nestedUnreachableCallIsFlagged: a call under `if (false)` may never run', () => {
+    const result = uncontrolled(`${HELPER_BINDING}if (false) {\n  gateControl(${body});\n}\n`);
+    assert.deepEqual(ruleSet(result), [RULES.MALFORMED_CONTROL, RULES.NO_CONTROL]);
+    assert.match(result.violations.find((v) => v.rule === RULES.MALFORMED_CONTROL).detail, /not a top-level statement/);
+  });
+
+  test('topLevelBoundCallCounts (control)', () => {
+    assert.deepEqual(uncontrolled(`${HELPER_BINDING}gateControl(${body});\n`).violations, []);
+  });
+
+  test('stubModuleInAnotherDirectoryIsFlagged: only gsd-core/bin/lib/gate-<id>.cjs is the gate', () => {
+    const result = scan([gate('foo', 'Foo', BLOCKING_BODY)], [control({ module: './stubs/gate-foo.cjs' })]);
+    assert.deepEqual(ruleSet(result), [RULES.WRONG_MODULE]);
   });
 });
 
@@ -216,9 +297,10 @@ describe('lint-gate-positive-control — limit-1, limit, limit+1 (property)', ()
 describe('lint-gate-positive-control — the real tree', () => {
   test('realTreeCensusIsZero: 12 gate modules (ADR-5057 census), every count zero', () => {
     const c = census(ROOT, parser);
-    assert.equal(c.gates, 12, 'every gate module is discovered (a drop here is an inert scan)');
-    assert.equal(c.controls, 12);
-    for (const key of ['noControl', 'duplicateControl', 'wrongRed', 'noFailingVerdict', 'wrongModule', 'wrongFn', 'malformedControl', 'orphanControl', 'unclassifiedEvaluate', 'allowlisted', 'total']) {
+    // Gates are discovered, never listed: no count is pinned here, so adding a gate (with its control) edits nothing.
+    assert.ok(c.gates >= 1, 'gates are discovered (zero is an inert scan)');
+    assert.equal(c.controls, c.gates, 'one control per discovered gate');
+    for (const key of ['noControl', 'duplicateControl', 'wrongRed', 'noFailingVerdict', 'wrongModule', 'wrongFn', 'malformedControl', 'orphanControl', 'unclassifiedEvaluate', 'multipleEvaluates', 'allowlisted', 'total']) {
       assert.equal(c[key], 0, key);
     }
     assert.deepEqual(c.problems, []);

@@ -5,33 +5,43 @@
  * #5204 (epic #5056, ADR-5057 §4 ratchet) — every gate module has a positive control.
  *
  * "A gate module with no test that drives it to its failing verdict is a lint failure." A gate is a
- * module under `src/gate-*.cts` that exports an `evaluate*` function returning `GateResult`. It is
- * DISCOVERED, never listed by name, so a new gate is covered without editing this guard. Each gate
- * needs exactly one `gateControl({ gate, module, fn, red, redScenario, greenScenario })` call
- * (tests/helpers/gate-positive-control.cjs), which at run time drives the gate to its failing verdict
- * and to a different one. This guard parses the sources with `@typescript-eslint/parser` (a real AST,
- * no regex over source) and reports:
+ * module under `src/gate-*.cts` that exports an `evaluate*` function declared to return `GateResult`
+ * (a function declaration, a `const` arrow/function expression, or an `export { … }` re-export). It is
+ * DISCOVERED, never listed by name, so a new gate is covered without editing this guard. (The verb
+ * entries outside gate modules, `phase uat-passed` and `verify artifacts`, are covered by the exit
+ * guard `lint-gate-evidence-drift.cjs`, not by this ratchet.)
  *
- *   no-control          a gate with no `gateControl` call
+ * Each gate needs exactly one `gateControl({ gate, module, fn, red, expectRed, redScenario,
+ * greenScenario })` call (tests/helpers/gate-positive-control.cjs) as a TOP-LEVEL statement of a
+ * `tests/**\/*.test.cjs` file, with `gateControl` bound from that helper. At run time the control drives
+ * the gate to its failing verdict and to a different one. This guard parses the sources with
+ * `@typescript-eslint/parser` (a real AST, no regex over source) and reports:
+ *
+ *   no-control          a gate with no (well-formed) `gateControl` call
  *   duplicate-control   a gate with more than one (which one proves it is ambiguous)
  *   wrong-red           the control's `red` is not the failing verdict the gate can reach. Derived
- *                       from the gate's own source: `block` when some `gateVerdict`/`gateUnreadable`
- *                       call's block argument is not the literal `false`, else `unreadable`. A
- *                       control cannot declare `unreadable` to dodge a blocking arm
+ *                       from the gate's own source, from the exported `evaluate*` and the same-file
+ *                       functions it reaches: `block` when some `gateVerdict`/`gateUnreadable` call's
+ *                       block argument is not the literal `false`, else `unreadable`. A control cannot
+ *                       declare `unreadable` to dodge a blocking arm
  *   no-failing-verdict  a gate that can neither block nor reach `unreadable`: nothing to drive red
- *   wrong-module        the control's `module` is not the `gate-<id>.cjs` it names
+ *   wrong-module        the control's `module` does not resolve to `gsd-core/bin/lib/gate-<id>.cjs`
  *   wrong-fn            the control's `fn` is not the gate's exported `evaluate*`
  *   malformed-control   a `gateControl` call whose `gate`/`fn`/`red`/`module` is not a literal the
- *                       guard can read (an unreadable control must not count as a control)
+ *                       guard can read, that is not a top-level statement, or whose `gateControl` is
+ *                       not the helper's export (an inert call must not count as a control)
  *   orphan-control      a control naming a gate that does not exist
  *   unclassified-evaluate  an exported `evaluate*` in a gate file that does not declare a `GateResult`
- *                       return, so the guard cannot tell whether it is a gate
+ *                       return (or cannot be resolved), so the guard cannot tell whether it is a gate
+ *   multiple-evaluates  a gate file exporting more than one `GateResult` `evaluate*` (one gate module,
+ *                       one gate: the second would have no control naming it)
  *
  * The allowlist (`ALLOWLIST`) is EMPTY and stays that way (ADR-5057 §4: "drained to zero, never
- * renewed"); an entry that matches nothing is itself a problem. Fail-closed: scanning zero gates, or
- * a gate source the parser cannot read, is a violation — an inert scan must not report a clean tree.
- * `census(root)` re-measures the tree and is asserted zero by tests/lint-gate-positive-control.test.cjs,
- * which also holds the positive controls for this guard (an inline gate/control pair per rule).
+ * renewed"); an entry that matches nothing is itself a problem. Fail-closed: scanning zero gates, a
+ * `gate-*.cts` file whose name the guard cannot read, or a source the parser cannot read, is a
+ * violation — an inert scan must not report a clean tree. `census(root)` re-measures the tree and is
+ * asserted zero by tests/lint-gate-positive-control.test.cjs, which also holds the positive controls
+ * for this guard (an inline gate/control pair per rule).
  */
 
 const fs = require('node:fs');
@@ -40,6 +50,8 @@ const { runMain } = require('./lib/cli-exit.cjs');
 
 const REPO_ROOT = path.join(__dirname, '..');
 const CONTROL_CALL = 'gateControl';
+const HELPER_BASENAME = 'gate-positive-control.cjs';
+const GATE_LIB_DIR = 'gsd-core/bin/lib';
 
 /** Empty by decision (ADR-5057 §4): a gate without a control is fixed, never listed. */
 const ALLOWLIST = Object.freeze([]);
@@ -54,6 +66,7 @@ const RULES = Object.freeze({
   MALFORMED_CONTROL: 'malformed-control',
   ORPHAN_CONTROL: 'orphan-control',
   UNCLASSIFIED_EVALUATE: 'unclassified-evaluate',
+  MULTIPLE_EVALUATES: 'multiple-evaluates',
 });
 
 function loadParser(root) {
@@ -94,9 +107,13 @@ function parse(parser, text, file) {
   return parser.parse(text, { range: true, loc: true, sourceType: 'module', filePath: file });
 }
 
+function isFunctionExpressionNode(node) {
+  return node !== null && node !== undefined && (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression');
+}
+
 // ─── gate discovery ──────────────────────────────────────────────────────────────────────────────
 
-/** The `gate-<id>.cts` basename id, or null for a file that is not a gate file. */
+/** The `gate-<id>.cts` basename id, or null for a file that is not a readable gate file name. */
 function gateIdOf(file) {
   const match = /(?:^|\/)gate-([a-z0-9-]+)\.cts$/.exec(file.replace(/\\/g, '/'));
   return match === null ? null : match[1];
@@ -108,43 +125,107 @@ function returnsGateResult(fn) {
   return annotation?.type === 'TSTypeReference' && annotation.typeName?.type === 'Identifier' && annotation.typeName.name === 'GateResult';
 }
 
+/** The file's top-level named functions: `Map<name, functionNode>` (declarations and `const f = () => …`). */
+function topLevelFunctions(ast) {
+  const defs = new Map();
+  const add = (statement) => {
+    if (statement.type === 'FunctionDeclaration' && statement.id !== null) defs.set(statement.id.name, statement);
+    if (statement.type === 'VariableDeclaration') {
+      for (const d of statement.declarations) {
+        if (d.id.type === 'Identifier' && isFunctionExpressionNode(d.init)) defs.set(d.id.name, d.init);
+      }
+    }
+  };
+  for (const statement of ast.body) {
+    add(statement);
+    if (statement.type === 'ExportNamedDeclaration' && statement.declaration !== null) add(statement.declaration);
+  }
+  return defs;
+}
+
 /**
  * The exported `evaluate*` functions of a parsed gate file: `{ name, node, classified }`, where
- * `classified` means it declares a `GateResult` return.
+ * `classified` means a resolved function that declares a `GateResult` return. Seen: `export function`,
+ * `export const f = () => …`, and `export { f }` / `export { f as evaluateX }`.
  */
 function exportedEvaluates(ast) {
+  const defs = topLevelFunctions(ast);
   const found = [];
   for (const statement of ast.body) {
-    if (statement.type !== 'ExportNamedDeclaration' || statement.declaration === null) continue;
+    if (statement.type !== 'ExportNamedDeclaration') continue;
     const declaration = statement.declaration;
-    if (declaration.type === 'FunctionDeclaration' && declaration.id !== null && declaration.id.name.startsWith('evaluate')) {
+    if (declaration !== null && declaration.type === 'FunctionDeclaration' && declaration.id !== null && declaration.id.name.startsWith('evaluate')) {
       found.push({ name: declaration.id.name, node: declaration, classified: returnsGateResult(declaration) });
+    } else if (declaration !== null && declaration.type === 'VariableDeclaration') {
+      for (const d of declaration.declarations) {
+        if (d.id.type === 'Identifier' && d.id.name.startsWith('evaluate')) {
+          const fn = isFunctionExpressionNode(d.init) ? d.init : null;
+          found.push({ name: d.id.name, node: fn ?? d, classified: fn !== null && returnsGateResult(fn) });
+        }
+      }
+    } else if (declaration === null) {
+      for (const specifier of statement.specifiers) {
+        const exported = specifier.exported.name ?? specifier.exported.value;
+        if (typeof exported !== 'string' || !exported.startsWith('evaluate')) continue;
+        const fn = defs.get(specifier.local.name) ?? null;
+        found.push({ name: exported, node: fn ?? specifier, classified: fn !== null && returnsGateResult(fn) });
+      }
     }
   }
   return found;
 }
 
 /**
- * The failing verdict a gate's source can reach. `block` when some `gateVerdict(outcome, block, …)` /
- * `gateUnreadable(block, …)` call's block argument is anything but the literal `false`; `unreadable`
- * when it only reaches the typed unreadable outcome; null when it can reach neither.
+ * The failing verdict a gate can reach, read from the exported `evaluate*` and the same-file functions
+ * it (transitively) calls — never from dead code elsewhere in the file. `block` when some
+ * `gateVerdict(outcome, block, …)` / `gateUnreadable(block, …)` call's block argument is anything but the
+ * literal `false`; `unreadable` when it only reaches the typed unreadable outcome; null for neither.
+ * (An over-approximated `block` cannot bless a gate: the control must then block at run time.)
  */
-function deriveRed(ast) {
+function deriveRed(ast, evaluateNode) {
+  const defs = topLevelFunctions(ast);
+  const reached = new Set();
+  const queue = [evaluateNode];
   let blocking = false;
   let unreadable = false;
-  walk(ast, (node) => {
-    if (node.type !== 'CallExpression') return;
-    const name = calleeName(node);
-    if (name !== 'gateVerdict' && name !== 'gateUnreadable') return;
-    if (name === 'gateUnreadable') unreadable = true;
-    const blockArg = node.arguments[name === 'gateVerdict' ? 1 : 0];
-    if (blockArg !== undefined && !(blockArg.type === 'Literal' && blockArg.value === false)) blocking = true;
-  });
+  while (queue.length > 0) {
+    const fn = queue.pop();
+    if (reached.has(fn)) continue;
+    reached.add(fn);
+    walk(fn, (node) => {
+      if (node.type !== 'CallExpression') return;
+      const name = calleeName(node);
+      if (name === 'gateVerdict' || name === 'gateUnreadable') {
+        if (name === 'gateUnreadable') unreadable = true;
+        const blockArg = node.arguments[name === 'gateVerdict' ? 1 : 0];
+        if (blockArg !== undefined && !(blockArg.type === 'Literal' && blockArg.value === false)) blocking = true;
+      } else if (name !== null && defs.has(name)) {
+        queue.push(defs.get(name));
+      }
+    });
+  }
   if (blocking) return 'block';
   return unreadable ? 'unreadable' : null;
 }
 
 // ─── control discovery ───────────────────────────────────────────────────────────────────────────
+
+/** Is `gateControl` bound at the top level of the file from the helper (`const { gateControl } = require('…/gate-positive-control.cjs')`)? */
+function gateControlBoundFromHelper(ast) {
+  for (const statement of ast.body) {
+    if (statement.type !== 'VariableDeclaration') continue;
+    for (const d of statement.declarations) {
+      if (d.id.type !== 'ObjectPattern' || d.init === null || d.init.type !== 'CallExpression') continue;
+      if (d.init.callee.type !== 'Identifier' || d.init.callee.name !== 'require') continue;
+      const required = stringLiteral(d.init.arguments[0]);
+      if (required === null || path.posix.basename(required.replace(/\\/g, '/')) !== HELPER_BASENAME) continue;
+      const bindsControl = d.id.properties.some((p) => p.type === 'Property' && !p.computed && p.key.type === 'Identifier'
+        && p.key.name === CONTROL_CALL && p.value.type === 'Identifier' && p.value.name === CONTROL_CALL);
+      if (bindsControl) return true;
+    }
+  }
+  return false;
+}
 
 /** The literal property values of a `gateControl({...})` argument; a non-literal value reads as undefined. */
 function readControl(call, file) {
@@ -173,19 +254,29 @@ function readControl(call, file) {
   return control;
 }
 
-/** Every `gateControl(...)` call in one test source. */
+/** Every `gateControl(...)` call in one test source; a call that is not a real control is `malformed`. */
 function scanControls(text, file, parser) {
   const ast = parse(parser, text, file);
+  const bound = gateControlBoundFromHelper(ast);
+  const topLevel = new Set(ast.body.filter((s) => s.type === 'ExpressionStatement').map((s) => s.expression));
   const controls = [];
   walk(ast, (node) => {
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === CONTROL_CALL) {
-      controls.push(readControl(node, file));
+      const control = readControl(node, file);
+      if (!bound) control.malformed.push(`${CONTROL_CALL} is not bound from require('…/${HELPER_BASENAME}')`);
+      if (!topLevel.has(node)) control.malformed.push('call is not a top-level statement (it may never run)');
+      controls.push(control);
     }
   });
   return controls;
 }
 
 // ─── scan ────────────────────────────────────────────────────────────────────────────────────────
+
+/** The path a control's `module` resolves to, relative to the repo root, posix. */
+function resolvedModule(controlFile, modulePath) {
+  return path.posix.normalize(path.posix.join(path.posix.dirname(controlFile.replace(/\\/g, '/')), modulePath.replace(/\\/g, '/')));
+}
 
 /**
  * Scan in-memory sources. `gates`: `[{ file, text }]` for each `src/gate-*.cts`; `controls`:
@@ -199,7 +290,12 @@ function scanSources({ gates: gateSources, controls: controlSources }, parser, {
 
   for (const source of gateSources) {
     const id = gateIdOf(source.file);
-    if (id === null) continue;
+    if (id === null) {
+      if (/(?:^|\/)gate-[^/]*\.cts$/.test(source.file.replace(/\\/g, '/'))) {
+        problems.push(`${source.file} is a gate file whose name is not gate-<a-z0-9-> .cts: it cannot be discovered, which must not report a clean tree`);
+      }
+      continue;
+    }
     let ast;
     try {
       ast = parse(parser, source.text, source.file);
@@ -213,8 +309,12 @@ function scanSources({ gates: gateSources, controls: controlSources }, parser, {
     }
     const classified = evaluates.filter((x) => x.classified);
     if (classified.length === 0) continue;
-    const red = deriveRed(ast);
-    gates.push({ id, file: source.file, fn: classified[0].name, line: classified[0].node.loc.start.line, red });
+    // One gate module, one `evaluate*`: a second would be a gate no control names.
+    for (const extra of classified.slice(1)) {
+      violations.push({ file: source.file, line: extra.node.loc.start.line, rule: RULES.MULTIPLE_EVALUATES, gate: id });
+    }
+    const first = classified[0];
+    gates.push({ id, file: source.file, fn: first.name, line: first.node.loc.start.line, red: deriveRed(ast, first.node) });
   }
 
   const controls = [];
@@ -249,9 +349,10 @@ function scanSources({ gates: gateSources, controls: controlSources }, parser, {
       if (gate.red !== null && control.red !== gate.red) {
         violations.push({ file: control.file, line: control.line, rule: RULES.WRONG_RED, gate: gate.id, detail: `declares ${control.red}, the gate reaches ${gate.red}` });
       }
-      const expectedModule = `gate-${gate.id}.cjs`;
-      if (path.posix.basename(control.modulePath.replace(/\\/g, '/')) !== expectedModule) {
-        violations.push({ file: control.file, line: control.line, rule: RULES.WRONG_MODULE, gate: gate.id, detail: `requires ${control.modulePath}, expected ${expectedModule}` });
+      const expectedModule = `${GATE_LIB_DIR}/gate-${gate.id}.cjs`;
+      const actualModule = resolvedModule(control.file, control.modulePath);
+      if (actualModule !== expectedModule) {
+        violations.push({ file: control.file, line: control.line, rule: RULES.WRONG_MODULE, gate: gate.id, detail: `requires ${actualModule}, expected ${expectedModule}` });
       }
       if (control.fn !== gate.fn) {
         violations.push({ file: control.file, line: control.line, rule: RULES.WRONG_FN, gate: gate.id, detail: `drives ${control.fn}, the gate exports ${gate.fn}` });
@@ -292,7 +393,7 @@ function listGateFiles(root) {
   return fs.readdirSync(dir).filter((name) => /^gate-.*\.cts$/.test(name)).sort().map((name) => `src/${name}`);
 }
 
-/** Every `.cjs` under tests/ (not fixtures or node_modules) whose text mentions `gateControl(`. */
+/** Every `*.test.cjs` under tests/ (not fixtures or node_modules): the files the test runner executes. */
 function listControlFiles(root) {
   const out = [];
   const walkDir = (dir, rel) => {
@@ -300,7 +401,7 @@ function listControlFiles(root) {
       if (entry.name === 'fixtures' || entry.name === 'node_modules') continue;
       const childRel = rel === '' ? entry.name : `${rel}/${entry.name}`;
       if (entry.isDirectory()) walkDir(path.join(dir, entry.name), childRel);
-      else if (entry.name.endsWith('.cjs')) out.push(childRel);
+      else if (entry.name.endsWith('.test.cjs')) out.push(childRel);
     }
   };
   const testsDir = path.join(root, 'tests');
@@ -335,6 +436,7 @@ function census(root = REPO_ROOT, parser = loadParser(root), options = {}) {
     malformedControl: count(RULES.MALFORMED_CONTROL),
     orphanControl: count(RULES.ORPHAN_CONTROL),
     unclassifiedEvaluate: count(RULES.UNCLASSIFIED_EVALUATE),
+    multipleEvaluates: count(RULES.MULTIPLE_EVALUATES),
     allowlisted: allowlisted.length,
     total: violations.length,
     problems,
@@ -350,10 +452,10 @@ function main() {
   process.stderr.write('ERROR gate-positive-control: a gate module has no positive control that drives it to its failing verdict (ADR-5057 §4, #5204)\n');
   for (const v of violations) process.stderr.write(`  - ${v.file}:${v.line} [${v.rule}]${v.gate ? ` ${v.gate}` : ''}${v.detail ? `: ${v.detail}` : ''}\n`);
   for (const p of problems) process.stderr.write(`  - ${p}\n`);
-  process.stderr.write('Add a gateControl({ gate, module, fn, red, redScenario, greenScenario }) for it (tests/helpers/gate-positive-control.cjs, tests/gate-positive-control.test.cjs).\n');
+  process.stderr.write('Add a gateControl({ gate, module, fn, red, expectRed, redScenario, greenScenario }) for it (tests/helpers/gate-positive-control.cjs, tests/gate-positive-control.test.cjs).\n');
   return 1;
 }
 
 if (require.main === module) runMain(main);
 
-module.exports = { scanSources, scanRepo, census, loadParser, RULES, ALLOWLIST, gateIdOf, deriveRed };
+module.exports = { scanSources, scanRepo, census, loadParser, RULES, ALLOWLIST, gateIdOf, deriveRed, exportedEvaluates };

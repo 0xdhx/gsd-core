@@ -300,15 +300,25 @@ module has a **positive control**: a test that drives the gate, through its real
 ### Reference
 
 - **What counts as a gate.** A module `src/gate-<id>.cts` that exports an
-  `evaluate*` function declared to return `GateResult`. Gates are discovered,
-  never listed, so a new gate is covered without editing the lint.
-- **The control.** `gateControl({ gate, module, fn, red, redScenario,
-  greenScenario })` from `tests/helpers/gate-positive-control.cjs`, registered in
-  `tests/gate-positive-control.test.cjs`. Each scenario runs in a fresh temp
+  `evaluate*` function declared to return `GateResult` (a function declaration,
+  a `const` arrow or function expression, or an `export { … }` re-export). Gates
+  are discovered, never listed, so a new gate is covered without editing the
+  lint. The verb entries outside gate modules (`phase uat-passed`, `verify
+  artifacts`) are covered by the exit guard (`lint-gate-evidence-drift`), not by
+  this ratchet.
+- **The control.** `gateControl({ gate, module, fn, red, expectRed, redScenario,
+  greenScenario })` from `tests/helpers/gate-positive-control.cjs`, as a top-level
+  statement of a `tests/**/*.test.cjs` file (by convention
+  `tests/gate-positive-control.test.cjs`) with `gateControl` bound from that
+  helper; an inert call (a local function of that name, a nested call, a file the
+  runner does not execute) does not count. Each scenario runs in a fresh temp
   project (`git: true` for a git repository); `setup(dir)` may return a restore
   function for a monkeypatched `fs` method (never a `chmod`: root bypasses mode
-  bits).
-- **`red` is derived, not chosen.** `block` when some `gateVerdict` or
+  bits). `expectRed` pins the red verdict to the arm the control is about
+  (`outcome` and/or payload keys), so a scenario that fails for an unrelated
+  reason does not count. A misspelled option key is rejected.
+- **`red` is derived, not chosen.** From the exported `evaluate*` and the
+  same-file functions it reaches: `block` when some `gateVerdict` or
   `gateUnreadable` call's block argument is anything but the literal `false`
   (the red verdict carries `block: true`, the green one `block: false`);
   `unreadable` for a gate that can never block (the red verdict is the typed
@@ -316,17 +326,22 @@ module has a **positive control**: a test that drives the gate, through its real
   other value is `wrong-red`, so a control cannot dodge a blocking arm.
 - **Rules.** `no-control`, `duplicate-control`, `wrong-red`,
   `no-failing-verdict` (a gate that can neither block nor reach `unreadable`),
-  `wrong-module`, `wrong-fn`, `malformed-control` (a field the lint cannot read as
-  a literal), `orphan-control`, `unclassified-evaluate` (an exported `evaluate*`
-  with no `GateResult` return, so the lint cannot tell whether it is a gate).
+  `wrong-module` (the `module` must resolve to `gsd-core/bin/lib/gate-<id>.cjs`),
+  `wrong-fn`, `malformed-control` (a field the lint cannot read as a literal, a
+  call that is not a top-level statement, or a `gateControl` not bound from the
+  helper), `orphan-control`, `unclassified-evaluate` (an exported `evaluate*`
+  with no `GateResult` return, or one that cannot be resolved, so the lint cannot
+  tell whether it is a gate), `multiple-evaluates` (one gate module, one gate).
   The allowlist is empty by decision and a stale entry is itself a problem.
-- **Fail-closed.** Zero discovered gates, or a source the parser cannot read, is a
-  violation: an inert scan does not report a clean tree.
+- **Fail-closed.** Zero discovered gates, a `gate-*.cts` file whose name the lint
+  cannot read, or a source the parser cannot read, is a violation: an inert scan
+  does not report a clean tree.
 
 ### How-to: you added a gate and `lint:ci` reports `no-control`
 
 1. Add a `gateControl({...})` call to `tests/gate-positive-control.test.cjs`
    naming your gate, its module and its `evaluate*` function.
+   `expectRed` names the arm the red scenario reaches.
 2. Take `red` from the lint's message (`wrong-red` states what the gate reaches).
 3. Write the red scenario from the input that makes the gate fail, and the green
    scenario from the nearest input that does not. Reuse the cases in your gate's
