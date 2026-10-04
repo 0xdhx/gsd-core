@@ -2183,7 +2183,19 @@ function computeMigrationPlan(cwd: string, options: Record<string, unknown> = {}
  * a silently-skipped edit leaves ROADMAP.md half-migrated, and the mixed-state
  * guard then refuses every retry. `applyMigration` rolls back on the throw.
  */
-function rewriteRoadmapLines(content: string, edits: RoadmapEdit[]): string {
+function rewriteRoadmapLines(content: string, plannedEdits: RoadmapEdit[]): string {
+  // The planner reads raw lines, so it also plans edits for phase-shaped lines
+  // inside a fenced example block. Fenced content is never a heading or a
+  // bullet (the sectionizer's own view), so those edits are dropped here —
+  // not thrown: a fenced example must neither be rewritten nor block the
+  // migration.
+  const fencedLines = new Set<number>();
+  const physicalLines = content.split('\n');
+  for (const block of scanFencedBlocks(physicalLines)) {
+    const last = block.closeLineIdx === -1 ? physicalLines.length - 1 : block.closeLineIdx;
+    for (let i = block.openLineIdx; i <= last; i++) fencedLines.add(i);
+  }
+  const edits = plannedEdits.filter((edit) => !fencedLines.has(edit.lineIndex));
   let result = content;
   for (const edit of edits) {
     const atTarget = (rawLine: string, lineIndex: number): boolean =>
@@ -2355,35 +2367,38 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
     }
 
     // 3. Rewrite cross-refs in STATE.md and PROJECT.md
-    const crossRefsByFile = new Map<string, CrossRefEdit[]>();
-    for (const edit of plan.crossRefEdits) {
-      if (!crossRefsByFile.has(edit.file)) {
-        crossRefsByFile.set(edit.file, []);
+    // Two targets, two writes, one per seam (ADR-5057 §6): PROJECT.md's
+    // content is rewritten by PlanningDoc, STATE.md goes through its own
+    // read-modify-write seam (ADR-3408: lock, frontmatter sync and
+    // preservation; body-only edit).
+    const crossRefsFor = (fileName: string): CrossRefEdit[] => plan.crossRefEdits.filter((edit) => edit.file === fileName);
+
+    const projectEdits = crossRefsFor('PROJECT.md');
+    const projectPath = path.join(pDir, 'PROJECT.md');
+    if (projectEdits.length > 0 && fs.existsSync(projectPath)) {
+      const original = fs.readFileSync(projectPath, 'utf8');
+      const rewritten = substituteCrossRefs(original, 'PROJECT.md', projectEdits);
+      if (rewritten !== original) {
+        snapshotFile(projectPath);
+        fs.writeFileSync(projectPath, rewritten, 'utf8');
+        editedFiles.push('PROJECT.md');
       }
-      crossRefsByFile.get(edit.file)!.push(edit);
     }
 
-    for (const [fileName, edits] of crossRefsByFile) {
-      const filePath = path.join(pDir, fileName);
-      if (!fs.existsSync(filePath)) continue;
-
-      const original = fs.readFileSync(filePath, 'utf8');
-      if (substituteCrossRefs(original, fileName, edits) === original) continue;
-
-      snapshotFile(filePath);
-      if (fileName === 'STATE.md') {
-        // ADR-3408: STATE.md is written only through its own read-modify-write
-        // seam (lock, frontmatter sync and preservation); body-only edit.
+    const stateEdits = crossRefsFor('STATE.md');
+    const stateMdPath = path.join(pDir, 'STATE.md');
+    if (stateEdits.length > 0 && fs.existsSync(stateMdPath)) {
+      const original = fs.readFileSync(stateMdPath, 'utf8');
+      if (substituteCrossRefs(original, 'STATE.md', stateEdits) !== original) {
+        snapshotFile(stateMdPath);
         readModifyWriteStateMd(
-          filePath,
-          (current) => substituteCrossRefs(current, fileName, edits),
+          stateMdPath,
+          (current) => substituteCrossRefs(current, 'STATE.md', stateEdits),
           cwd,
           { resync: false },
         );
-      } else {
-        fs.writeFileSync(filePath, substituteCrossRefs(original, fileName, edits), 'utf8');
+        editedFiles.push('STATE.md');
       }
-      editedFiles.push(fileName);
     }
 
     // 4. Update config.json to the convention named by this plan — but only

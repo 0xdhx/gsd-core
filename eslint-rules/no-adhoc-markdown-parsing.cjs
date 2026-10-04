@@ -586,7 +586,14 @@ const rule = {
       }
     }
 
+    // A name that says it holds a path, directory or identifier (`projectPath`,
+    // `stateDir`, `roadmapSlug`) is not planning CONTENT, whatever noun it
+    // starts with — `projectPath.split(path.sep).join('/')` is the repo's own
+    // separator-normalisation idiom.
+    const NON_CONTENT_NAME_RE = /(?:path|paths|dir|root|file|filename|name|slug|id|label)$/i;
+
     function isPlanningReceiver(identifier, scope) {
+      if (NON_CONTENT_NAME_RE.test(identifier.name)) return false;
       if (PLANNING_RECEIVER_RE.test(identifier.name)) return true;
       const init = resolveVariableInit(identifier.name, scope);
       if (!init || init.type !== 'CallExpression' || !READ_CALLEE_RE.test(calleeName(init))) return false;
