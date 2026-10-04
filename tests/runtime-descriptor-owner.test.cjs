@@ -117,6 +117,16 @@ describe('hostBehaviorsFor — the single host-behaviors accessor', () => {
     assert.deepEqual(hostBehaviorsFor('claude', {}), FALLBACK_HOST_BEHAVIORS.claude);
   });
 
+  test('parity: every key the #338 floor carries equals the live descriptor value (the floor cannot rot away from the descriptor)', () => {
+    assert.deepEqual(Object.keys(FALLBACK_HOST_BEHAVIORS).sort(), ['antigravity', 'claude']);
+    for (const [id, floor] of Object.entries(FALLBACK_HOST_BEHAVIORS)) {
+      const declared = registry.runtimes[id].runtime.hostBehaviors;
+      for (const [key, value] of Object.entries(floor)) {
+        assert.deepEqual(declared[key], value, `${id}.${key} must match the descriptor`);
+      }
+    }
+  });
+
   test('a registered runtime whose descriptor declares no hostBehaviors degrades to the floor, not to a throw', () => {
     const fake = { runtimes: { claude: { runtime: {} }, codex: { runtime: {} } } };
     assert.deepEqual(hostBehaviorsFor('claude', fake), FALLBACK_HOST_BEHAVIORS.claude);
@@ -196,6 +206,16 @@ describe('every descriptor accessor refuses an unknown id', () => {
   test('grok still resolves (known, not registered)', () => {
     assert.doesNotThrow(() => getGlobalConfigDir('grok'));
   });
+
+  test('the two documented cross-agent-default accessors keep their default for an unknown id (ADR-5057 §5 Phase 10 amendment)', () => {
+    assert.equal(policy.getProjectInstructionFile('future-runtime-xyz'), 'AGENTS.md');
+    assert.equal(policy.getRuntimeNewProjectCommand('future-runtime-xyz'), '/gsd-new-project');
+  });
+
+  test('the rewrite engine and the skill converter refuse an unknown runtime instead of rewriting for it', () => {
+    assert.throws(() => conversion._applyRuntimeRewrites('~/.claude/x', 'not-a-runtime', '$HOME/.p/', true, undefined), UNKNOWN);
+    assert.throws(() => conversion.applyAgentPathRewrites('~/.claude/x', 'not-a-runtime', '$HOME/.p/'), UNKNOWN);
+  });
 });
 
 describe('content rewrite profiles — declared by the descriptor, handled by the engine', () => {
@@ -271,6 +291,10 @@ describe('descriptor-declared install behaviors replaced the name tests', () => 
     assert.deepEqual(declares('reclaimsKimiLegacyHooksRoot'), ['kimi-code']);
     assert.deepEqual(declares('rewriteClaudeAtIncludes'), ['codex']);
     assert.deepEqual(declares('agentTomlFiles'), ['codex']);
+  });
+
+  test('native model aliases are declared by claude alone (the model resolver reads the descriptor, not a hand-kept set)', () => {
+    assert.deepEqual(declares('nativeModelAliases'), ['claude']);
   });
 
   test('the static-bake runtimes are exactly the three that declare it, each with baked file extensions', () => {

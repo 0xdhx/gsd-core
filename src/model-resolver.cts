@@ -35,7 +35,7 @@ import { MODEL_ALIAS_MAP, RUNTIME_PROFILE_MAP, PROVIDER_PRESETS, VALID_TIERS, CL
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { canonicalizeRuntimeName } from './runtime-name-policy.cjs';
+import { canonicalizeRuntimeName, hostBehaviorsFor, isKnownRuntimeId } from './runtime-name-policy.cjs';
 import {
   resolveActiveRuntime,
   _setInstallRuntimeMarkerForTests,
@@ -61,10 +61,13 @@ const { planningDir } = planningWorkspaceMod;
 // <install>/gsd-core/bin/lib). Precedence for the gate: project config.runtime →
 // GSD_RUNTIME env (manual/CI override + test seam) → install marker → 'claude'.
 //
-// `claude` is currently the ONLY runtime with nativeModelAliases:true; a
-// registry-parity test guards this set so a future alias-capable runtime fails
-// loudly here instead of silently omitting.
-const RUNTIMES_WITH_NATIVE_ALIASES: ReadonlySet<string> = new Set(['claude']);
+// Whether a runtime resolves tier aliases natively is a runtime-descriptor fact
+// (`hostBehaviors.nativeModelAliases`, #5169) — `claude` is currently the ONLY
+// runtime that declares it — not a hand-kept set in this module. A label that is
+// not a registered runtime (a future runtime named by env/config) has none.
+function hasNativeModelAliases(runtime: string): boolean {
+  return isKnownRuntimeId(runtime) && hostBehaviorsFor(runtime).nativeModelAliases === true;
+}
 
 // #3897 rung 2: the marker reader + its cache and test seams were promoted to
 // the canonical owner, `runtime-slash.cts` (imported above) — this module now
@@ -610,7 +613,7 @@ function resolveModelInternal(cwd: string, agentType: string): string {
   // map, but only outranks the omit gate when that key canonicalizes to a
   // recognised non-Claude runtime.
   const omitApplies = config['resolve_model_ids'] === 'omit'
-    && (projectExplicitlySetsOmit(cwd) || !RUNTIMES_WITH_NATIVE_ALIASES.has(activeRuntime));
+    && (projectExplicitlySetsOmit(cwd) || !hasNativeModelAliases(activeRuntime));
   // CANONICALIZED, not the raw field. Comparing the raw value against the literal
   // 'claude' made every spelling that is not exactly that string count as a
   // non-Claude opt-in and outrank the omit gate: `runtime:"Claude"`,

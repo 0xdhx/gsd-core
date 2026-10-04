@@ -79,6 +79,27 @@ describe('_gsd_homes is rendered from the descriptors', () => {
     assert.equal(text, '_gsd_homes() { _gsd_at ; }');
   });
 
+  test('every descriptor value rendered into shell is a plain identifier or path segment (no shell metacharacters)', () => {
+    // renderHomesFunction does not shell-escape: it is safe because the registry is first-party
+    // and these fields are plain tokens. This pins that precondition so a descriptor edit that
+    // introduced a quote, `$(`, backtick or `;` fails here instead of reaching every workflow.
+    const ENV = /^[A-Z][A-Z0-9_]*$/;
+    const SEGMENT = /^[A-Za-z0-9._~/-]+$/;
+    for (const id of RUNTIMES) {
+      const configHome = registry.runtimes[id].runtime.configHome;
+      if (!configHome || configHome.kind === 'none') continue;
+      for (const name of configHome.env) assert.match(name, ENV, `${id} env ${name}`);
+      for (const field of [configHome.name, configHome.parent, ...(configHome.probe || [])]) {
+        if (field === undefined) continue;
+        assert.match(field, SEGMENT, `${id} path segment ${field}`);
+      }
+    }
+    for (const [id, legacy] of Object.entries(LEGACY_NON_REGISTRY_RUNTIME_HOMES)) {
+      assert.match(legacy.env, ENV, `${id} env`);
+      for (const segment of legacy.dir) assert.match(segment, SEGMENT, `${id} dir ${segment}`);
+    }
+  });
+
   test('the retired gemini runtime is no longer probed (#4347)', () => {
     assert.ok(!snippetText.includes('GEMINI_CONFIG_DIR'));
     for (const id of RUNTIMES) assert.ok(!registry.runtimes[id].runtime.configHome.env.includes('GEMINI_CONFIG_DIR'));
