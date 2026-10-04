@@ -2336,18 +2336,22 @@ function applyMigration(cwd: string, plan: MigrationPlan, options: { dryRun?: bo
           const currentPath = path.join(newPath, rewrite.finalName);
           if (fs.existsSync(currentPath)) {
             const originalPath = path.join(oldPath, rewrite.oldName);
-            if (!fileBackups.has(originalPath)) {
-              fileBackups.set(originalPath, { existed: true, content: rewrite.from });
-            }
             // `rewrite.to` is the frontmatter seam's own output
             // (`spliceFrontmatter`, computed in computeDependsOnRewrites); it is
             // only persisted over the exact content it was computed from, so a
             // plan file edited since the plan was made is refused, never
-            // clobbered with a stale whole-file image.
+            // clobbered with a stale whole-file image. The check runs BEFORE
+            // the backup is recorded: the backup holds `rewrite.from`, which is
+            // only the file's real content once this check has passed — recording
+            // it first would make the rollback restore stale content over the
+            // edited file.
             if (fs.readFileSync(currentPath, 'utf8') !== rewrite.from) {
               throw new Error(
                 `${JSON.stringify(path.join('phases', phaseEntry.newDir, rewrite.finalName))} changed since the migration plan was computed`,
               );
+            }
+            if (!fileBackups.has(originalPath)) {
+              fileBackups.set(originalPath, { existed: true, content: rewrite.from });
             }
             fs.writeFileSync(currentPath, rewrite.to, 'utf8');
             editedFiles.push(path.join('phases', phaseEntry.newDir, rewrite.finalName));
