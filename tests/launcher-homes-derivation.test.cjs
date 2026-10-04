@@ -37,6 +37,25 @@ const SNIPPET = path.join(ROOT, 'gsd-core', 'workflows', '_runtime-launcher.snip
 const snippetText = fs.readFileSync(SNIPPET, 'utf8');
 const RUNTIMES = Object.keys(registry.runtimes);
 
+describe('the sync only rewrites lines that are genuinely the launcher preamble', () => {
+  const canonical = splitLines(snippetText).find((l) => sync.PREAMBLE_LINE_RE.test(l));
+
+  test('the marker matches the snippet preamble line', () => {
+    assert.ok(canonical, 'the snippet carries a line the marker recognizes');
+  });
+
+  test('a stale preamble line is replaced by the canonical one', () => {
+    const stale = '_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT="old"; echo stale';
+    assert.equal(sync.replaceResolverLines(`a\n${stale}\nb`, canonical), `a\n${canonical}\nb`);
+  });
+
+  test('a line that merely starts with the variable name is left untouched', () => {
+    const divergent = '_GSD_SHIM_NAME=other-tool.cjs # intentionally different';
+    const doc = `a\n${divergent}\nb`;
+    assert.equal(sync.replaceResolverLines(doc, canonical), doc);
+  });
+});
+
 describe('_gsd_homes is rendered from the descriptors', () => {
   test('the committed snippet equals the registry rendering (no hand edits, no stale descriptors)', () => {
     const found = sync.extractHomesFunction(snippetText);

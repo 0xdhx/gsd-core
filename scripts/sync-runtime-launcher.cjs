@@ -273,6 +273,15 @@ function insertPreamble(lines, preamble) {
 }
 
 /**
+ * The first two statements EVERY version of the launcher preamble opens with
+ * (`_GSD_SHIM_NAME="gsd-tools.cjs"; _GSD_RUNTIME_ROOT=`). Matching the pair, not
+ * the bare `_GSD_SHIM_NAME=` prefix, means a prose sample or an intentionally
+ * different resolver that happens to start a line with the variable name is never
+ * mistaken for the preamble and never rewritten (#5169 review).
+ */
+const PREAMBLE_LINE_RE = /^_GSD_SHIM_NAME="gsd-tools\.cjs"; _GSD_RUNTIME_ROOT=/;
+
+/**
  * Index of the line that starts a launcher preamble inside `lines`, or -1.
  *
  * Matched by the marker every version of the preamble opens with
@@ -283,7 +292,7 @@ function insertPreamble(lines, preamble) {
  * #3861 guard-only extraction in tests/code-review-pipeline-regression.test.cjs).
  */
 function findPreambleStart(lines) {
-  return lines.findIndex((l) => /^_GSD_SHIM_NAME=/.test(l));
+  return lines.findIndex((l) => PREAMBLE_LINE_RE.test(l));
 }
 
 /**
@@ -538,7 +547,7 @@ function refreshSnippetHomes() {
 //   - commands/**/*.md — slash-command templates whose every bash block carries
 //     its own definition (each block is a separate shell), originally copied from
 //     an older fixed-list resolver that still probed the retired gemini home.
-// Every line that starts a resolver (`_GSD_SHIM_NAME=`) is replaced by the
+// Every line that starts a resolver (PREAMBLE_LINE_RE) is replaced by the
 // canonical preamble line, so these copies are generated, not hand-kept (#5169).
 // ---------------------------------------------------------------------------
 const RESOLVER_REFERENCE = path.join(__dirname, '..', 'gsd-core', 'references', 'gsd-run-resolver.md');
@@ -547,7 +556,7 @@ const COMMANDS_DIR = path.join(__dirname, '..', 'commands');
 function replaceResolverLines(content, preambleLine) {
   return content
     .split('\n')
-    .map((line) => (/^_GSD_SHIM_NAME=/.test(line) && line !== preambleLine ? preambleLine : line))
+    .map((line) => (PREAMBLE_LINE_RE.test(line) && line !== preambleLine ? preambleLine : line))
     .join('\n');
 }
 
@@ -619,4 +628,5 @@ module.exports = {
   loadDerivedHomes,
   refreshSnippetHomes,
   replaceResolverLines,
+  PREAMBLE_LINE_RE,
 };
