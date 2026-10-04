@@ -44,6 +44,9 @@ const ALL_HOOKS = [...JS_HOOKS, ...SH_HOOKS];
 
 // Seconds the pre-#3981 installer wrote for blocking guards; the registration loop raises it.
 const LEGACY_HOOK_BUDGET_S = 5;
+// A user-chosen budget the installer must leave alone, and the monitor's own budget.
+const CUSTOM_BUDGET_S = 90;
+const MONITOR_BUDGET_S = 10;
 
 const ESC = String.fromCharCode(0x1b);
 const ANSI = new RegExp(`${ESC}\\[[0-9;]*m`, 'g');
@@ -92,9 +95,9 @@ function runOne(rt, spec, apply = applySettingsJsonHooks) {
     const localCmd = (f) => (spec.nullJs ? null : `LOCALNODE ${targetDir}/hooks/${f}`);
     const localShellCmd = (f) => (spec.nullSh ? null : `LOCALBASH ${targetDir}/hooks/${f}`);
     const hookOpts = {
-      portableHooks: false,
+      portableHooks: Boolean(spec.portableHooks),
       runtime: rt.id,
-      platform: 'linux',
+      platform: spec.platform || 'linux',
       execPath: '/opt/node/bin/node',
       existsSync: () => true,
       env: {},
@@ -179,6 +182,54 @@ function scenarioSpecs(rt) {
       },
     },
   };
+  // The #3329 reconcile only rewrites on win32 / portable shapes; seed all four
+  // managed `.sh` hooks with legacy bash-runner-prefixed commands so the path
+  // that consumes the loop's built `.sh` commands actually executes.
+  const legacySh = {
+    [pre]: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'bash /x/hooks/gsd-validate-commit.sh' }] }],
+    [post]: [
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'bash /x/hooks/gsd-graphify-update.sh' }] },
+      { matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'bash /x/hooks/gsd-phase-boundary.sh' }] },
+    ],
+    SessionStart: [{ hooks: [{ type: 'command', command: 'bash /x/hooks/gsd-session-state.sh' }] }],
+  };
+  for (const isGlobal of [false, true]) {
+    const scope = isGlobal ? 'global' : 'local';
+    specs[`${scope}/win32-reconcile-legacy-sh`] = { isGlobal, present: ALL_HOOKS, platform: 'win32', seed: { hooks: legacySh } };
+    specs[`${scope}/linux-reconcile-legacy-sh`] = { isGlobal, present: ALL_HOOKS, seed: { hooks: legacySh } };
+    specs[`${scope}/portable-all-present`] = { isGlobal, present: ALL_HOOKS, portableHooks: true };
+    specs[`${scope}/win32-all-present`] = { isGlobal, present: ALL_HOOKS, platform: 'win32' };
+  }
+  // Already-registered entries whose hook file is absent: the repair and
+  // migration paths still run; nothing is warned and nothing is pushed.
+  specs['local/seed-present-but-file-missing'] = {
+    isGlobal: false,
+    present: [],
+    seed: {
+      hooks: {
+        [post]: [{ hooks: [{ type: 'command', command: 'node /x/hooks/gsd-context-monitor.js' }] }],
+        [pre]: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node /x/hooks/gsd-workflow-guard.js' }] }],
+      },
+    },
+  };
+  // Partial migrations: matcher without timeout, timeout without matcher,
+  // an entry with no `hooks` field, and a blocking guard already past the old budget.
+  specs['local/seed-partial-migrations'] = {
+    isGlobal: false,
+    present: ALL_HOOKS,
+    seed: {
+      hooks: {
+        [post]: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'node /x/hooks/gsd-context-monitor.js' }] },
+          { hooks: [{ type: 'command', command: 'node /x/hooks/gsd-context-monitor.js', timeout: MONITOR_BUDGET_S }] },
+          { matcher: 'Read' },
+        ],
+        [pre]: [
+          { matcher: 'Write|Edit', hooks: [{ type: 'command', command: 'node /x/hooks/gsd-prompt-guard.js', timeout: CUSTOM_BUDGET_S }] },
+        ],
+      },
+    },
+  };
   specs['local/seed-user-hooks-only'] = {
     isGlobal: false,
     present: ALL_HOOKS,
@@ -201,7 +252,11 @@ function runAll(apply) {
 module.exports = { runAll, runOne, scenarioSpecs, settingsJsonRuntimes, ALL_HOOKS, JS_HOOKS, SH_HOOKS };
 
 if (require.main === module && process.argv.includes('--write')) {
+  // `--impl <path>` regenerates from another build of runtime-hooks-surface.cjs
+  // (the pre-migration build, e.g. a checkout of the base commit) — the oracle.
+  const implIdx = process.argv.indexOf('--impl');
+  const apply = implIdx === -1 ? undefined : require(path.resolve(process.argv[implIdx + 1])).applySettingsJsonHooks;
   const out = path.join(__dirname, 'golden.json');
-  fs.writeFileSync(out, JSON.stringify(runAll(), null, 1) + '\n');
+  fs.writeFileSync(out, JSON.stringify(runAll(apply), null, 1) + '\n');
   console.log(`wrote ${out}`);
 }

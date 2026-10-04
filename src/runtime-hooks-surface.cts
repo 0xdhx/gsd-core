@@ -2526,7 +2526,16 @@ interface SettingsJsonHookTables {
 
 const BASH_UNAVAILABLE_MESSAGE = 'Bash executable path unavailable (#3393)';
 
-const SETTINGS_JSON_HOOK_ROWS: readonly SettingsJsonHookRow[] = Object.freeze([
+// The tables are exported as a contract; freeze every row (and its nested
+// objects) so no consumer can mutate a matcher or timeout at runtime.
+function deepFreeze<T extends object>(value: T): T {
+  for (const child of Object.values(value)) {
+    if (child !== null && typeof child === 'object') deepFreeze(child as object);
+  }
+  return Object.freeze(value);
+}
+
+const SETTINGS_JSON_HOOK_ROWS: readonly SettingsJsonHookRow[] = deepFreeze([
   // Guard: only register if the hook file was actually installed (#1754, #1817).
   { file: 'gsd-check-update.js', event: 'SessionStart', command: { opts: 'updateCheckCommand' },
     configuredMessage: 'Configured update check hook', skipLabel: 'update check hook' },
@@ -2590,21 +2599,25 @@ const SETTINGS_JSON_HOOK_ROWS: readonly SettingsJsonHookRow[] = Object.freeze([
 // is qwen/codebuddy-only today; the Before/After Agent/Model rows are an inert
 // seam (no runtime declares them) that re-activates if one does (#776, #1928).
 // FileChanged hot-reloads the gsd config on .planning/config.json edits.
-const SETTINGS_JSON_EXTENDED_ROWS: readonly SettingsJsonExtendedRow[] = Object.freeze([
-  { event: 'SubagentStop', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured SubagentStop context monitor hook', runtimeLabelSuffix: true },
-  { event: 'Stop', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured Stop context monitor hook', runtimeLabelSuffix: true },
-  { event: 'PreCompact', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured PreCompact context monitor hook', runtimeLabelSuffix: true },
-  { event: 'SubagentStart', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured SubagentStart context monitor hook', runtimeLabelSuffix: true },
-  { event: 'BeforeAgent', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured BeforeAgent context monitor hook' },
-  { event: 'AfterAgent', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured AfterAgent context monitor hook' },
-  { event: 'BeforeModel', file: 'gsd-context-monitor.js', command: { opts: 'contextMonitorCommand' }, timeout: 10,
-    configuredMessage: 'Configured BeforeModel context monitor hook' },
+function contextMonitorRow(event: string, runtimeLabelSuffix: boolean): SettingsJsonExtendedRow {
+  return {
+    event,
+    file: 'gsd-context-monitor.js',
+    command: { opts: 'contextMonitorCommand' },
+    timeout: 10,
+    configuredMessage: `Configured ${event} context monitor hook`,
+    ...(runtimeLabelSuffix ? { runtimeLabelSuffix } : {}),
+  };
+}
+
+const SETTINGS_JSON_EXTENDED_ROWS: readonly SettingsJsonExtendedRow[] = deepFreeze([
+  contextMonitorRow('SubagentStop', true),
+  contextMonitorRow('Stop', true),
+  contextMonitorRow('PreCompact', true),
+  contextMonitorRow('SubagentStart', true),
+  contextMonitorRow('BeforeAgent', false),
+  contextMonitorRow('AfterAgent', false),
+  contextMonitorRow('BeforeModel', false),
   { event: 'FileChanged', file: 'gsd-config-reload.js', command: { opts: 'configReloadCommand' }, matcher: 'config.json', timeout: 8,
     configuredMessage: 'Configured FileChanged config-reload hook (Claude Code)',
     noCommandMessage: 'Node executable path unavailable' },

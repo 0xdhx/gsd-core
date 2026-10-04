@@ -11,13 +11,15 @@
 
 const { describe, test } = require('node:test');
 const assert = require('node:assert/strict');
-const path = require('node:path');
 
 const surface = require('../gsd-core/bin/lib/runtime-hooks-surface.cjs');
 const scenarios = require('./fixtures/hook-registration/run-scenarios.cjs');
 const golden = require('./fixtures/hook-registration/golden.json');
 
-const { applySettingsJsonHooks, SETTINGS_JSON_HOOK_ROWS, SETTINGS_JSON_EXTENDED_ROWS, applySettingsJsonHookTables } = surface;
+const { SETTINGS_JSON_HOOK_ROWS, SETTINGS_JSON_EXTENDED_ROWS, applySettingsJsonHookTables } = surface;
+
+// A non-blocking budget distinct from every row's, for the timeout mutation.
+const MUTATED_BUDGET_S = 7;
 
 describe('settings-json hook registration parity (golden)', () => {
   const runtimes = scenarios.settingsJsonRuntimes();
@@ -36,18 +38,41 @@ describe('settings-json hook registration parity (golden)', () => {
     }
   }
 
-  test('the golden comparison goes red on a mutated row (positive control)', () => {
-    const rt = runtimes.find((r) => r.id === 'claude');
-    const rows = structuredClone(SETTINGS_JSON_HOOK_ROWS);
-    const target = rows.find((r) => r.file === 'gsd-write-guard.js');
-    assert.ok(target, 'gsd-write-guard.js row exists');
-    target.matcher = 'Write|Edit';
-    const actual = scenarios.runOne(
-      rt,
-      scenarios.scenarioSpecs(rt)['local/all-present'],
-      (settings, opts) => applySettingsJsonHookTables(settings, opts, { rows, extendedRows: SETTINGS_JSON_EXTENDED_ROWS }),
-    );
-    assert.notDeepEqual(actual, golden.claude['local/all-present']);
+  // Every field a row carries is observable in the golden; mutating any one
+  // of them must turn the comparison red, or the pin is not binding it.
+  const MUTATIONS = [
+    ['matcher', (r) => { r.matcher = 'Write|Edit'; }],
+    ['timeout', (r) => { r.timeout = r.timeout === 'blocking' ? MUTATED_BUDGET_S : 'blocking'; }],
+    ['event', (r) => { r.event = r.event === 'pre' ? 'post' : 'pre'; }],
+    ['configuredMessage', (r) => { r.configuredMessage += ' (mutated)'; }],
+    ['skipLabel', (r) => { r.skipLabel += ' (mutated)'; }],
+    ['command source', (r) => { r.command = 'opts' in r.command ? { build: 'js' } : { opts: 'promptGuardCommand' }; }],
+  ];
+  for (const [field, mutate] of MUTATIONS) {
+    test(`the golden comparison goes red when a row's ${field} is mutated (positive control)`, () => {
+      const rt = runtimes.find((r) => r.id === 'claude');
+      const rows = structuredClone(SETTINGS_JSON_HOOK_ROWS);
+      mutate(rows.find((r) => r.file === 'gsd-write-guard.js'));
+      const scenario = field === 'skipLabel' ? 'local/none-present' : 'local/all-present';
+      const actual = scenarios.runOne(
+        rt,
+        scenarios.scenarioSpecs(rt)[scenario],
+        (settings, opts) => applySettingsJsonHookTables(settings, opts, { rows, extendedRows: SETTINGS_JSON_EXTENDED_ROWS }),
+      );
+      assert.notDeepEqual(actual, golden.claude[scenario]);
+    });
+  }
+
+  test('the #3329 reconcile path executes in the golden (a dropped .sh command cannot pass unseen)', () => {
+    const reconciled = Object.values(golden.claude).filter((s) => s.stdout.includes('Reconciled managed .sh hook commands'));
+    assert.ok(reconciled.length > 0);
+  });
+
+  test('the scenarios install every hook file the tables register', () => {
+    const files = new Set(scenarios.ALL_HOOKS);
+    for (const row of [...SETTINGS_JSON_HOOK_ROWS, ...SETTINGS_JSON_EXTENDED_ROWS]) {
+      assert.ok(files.has(row.file), `${row.file} has a row but no scenario installs it`);
+    }
   });
 });
 
@@ -68,12 +93,26 @@ describe('settings-json hook registration table', () => {
     }
   });
 
+  test('every hook with the blocking budget is a BLOCKING_GUARD_NAMES member, and vice versa', () => {
+    const blocking = SETTINGS_JSON_HOOK_ROWS.filter((r) => r.timeout === 'blocking').map((r) => r.file.replace(/\.(?:js|sh)$/, ''));
+    assert.deepEqual([...blocking].sort(), [...surface.BLOCKING_GUARD_NAMES].sort());
+  });
+
+  test('the table and its rows are frozen', () => {
+    assert.ok(Object.isFrozen(SETTINGS_JSON_HOOK_ROWS));
+    assert.ok(Object.isFrozen(SETTINGS_JSON_EXTENDED_ROWS));
+    for (const row of [...SETTINGS_JSON_HOOK_ROWS, ...SETTINGS_JSON_EXTENDED_ROWS]) {
+      assert.ok(Object.isFrozen(row), `${row.file} row is mutable`);
+      assert.ok(Object.isFrozen(row.command), `${row.file} command is mutable`);
+    }
+  });
+
   test('every registered hook comes from a table row', () => {
     const registered = new Set();
     const g = golden.claude['local/all-present'].settings.hooks;
     for (const entries of Object.values(g)) {
       for (const entry of entries) {
-        for (const h of entry.hooks) registered.add(path.basename(h.command.split(' ').pop()));
+        for (const h of entry.hooks) registered.add(/(gsd-[a-z-]+\.(?:js|sh))$/.exec(h.command)[1]);
       }
     }
     const fromTables = new Set([
@@ -96,28 +135,19 @@ describe('settings-json hook registration edge shapes', () => {
     });
   }
 
+  const EXTENDED_EVENTS = SETTINGS_JSON_EXTENDED_ROWS.map((r) => r.event);
   for (const bad of ['oops', 42, { not: 'array' }, true]) {
-    test(`a malformed extended-event key (${JSON.stringify(bad)}) is repaired, not thrown on`, () => {
-      const spec = {
-        isGlobal: false,
-        present: scenarios.ALL_HOOKS,
-        seed: { hooks: { Stop: bad, BeforeAgent: bad } },
-      };
-      const out = scenarios.runOne({ ...rt, extendedHookEvents: ['Stop', 'BeforeAgent'] }, spec);
-      assert.ok(Array.isArray(out.settings.hooks.Stop));
-      assert.equal(out.settings.hooks.Stop.length, 1);
-      assert.ok(Array.isArray(out.settings.hooks.BeforeAgent));
-    });
+    for (const event of EXTENDED_EVENTS) {
+      test(`a malformed ${event} key (${JSON.stringify(bad)}) is repaired, not thrown on`, () => {
+        const spec = {
+          isGlobal: false,
+          present: scenarios.ALL_HOOKS,
+          seed: { hooks: { [event]: bad } },
+        };
+        const out = scenarios.runOne({ ...rt, extendedHookEvents: [event] }, spec);
+        assert.ok(Array.isArray(out.settings.hooks[event]));
+        assert.equal(out.settings.hooks[event].length, 1);
+      });
+    }
   }
-
-  test('the public entry point is the table loop over the default tables', () => {
-    const spec = scenarios.scenarioSpecs(rt)['local/all-present'];
-    const viaPublic = scenarios.runOne(rt, spec, applySettingsJsonHooks);
-    const viaTables = scenarios.runOne(
-      rt,
-      spec,
-      (s, o) => applySettingsJsonHookTables(s, o, { rows: SETTINGS_JSON_HOOK_ROWS, extendedRows: SETTINGS_JSON_EXTENDED_ROWS }),
-    );
-    assert.deepEqual(viaPublic, viaTables);
-  });
 });
