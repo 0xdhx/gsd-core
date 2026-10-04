@@ -497,8 +497,12 @@ function renderHomesFunction(registry, legacyHomes) {
   }
   // One loop over the homes, the `/gsd-core/bin/<shim>` suffix written once: the
   // preamble is inlined into ~240 prompt files, several of which sit at a size cap.
+  // The homes are loaded into the FUNCTION's own positional parameters (`set --`
+  // is scoped to the function) and walked with `for _h; do`, not `for _h in <list>`:
+  // lint-workflow-shellcheck's #4109 structural check flags any `for x in` list that
+  // contains a `$`, without parsing the quoting around it.
   const homes = [...new Set(exprs)].map((e) => `"${e}"`).join(' ');
-  return `${HOMES_START}for _h in ${homes}; do _gsd_at "$_h/gsd-core/bin/\${_GSD_SHIM_NAME}" && return 0; done; return 1; }`;
+  return `${HOMES_START}set -- ${homes}; for _h; do _gsd_at "$_h/gsd-core/bin/\${_GSD_SHIM_NAME}" && return 0; done; return 1; }`;
 }
 
 /** Locate the `_gsd_homes` function text inside the snippet's single line. */

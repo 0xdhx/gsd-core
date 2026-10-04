@@ -55,7 +55,7 @@ describe('_gsd_homes is rendered from the descriptors', () => {
 
   test('claude is probed first; the legacy non-registry home is probed last', () => {
     const text = sync.loadDerivedHomes();
-    const list = text.slice(text.indexOf(' in ') + ' in '.length, text.indexOf('; do '));
+    const list = text.slice(text.indexOf('set -- ') + 'set -- '.length, text.indexOf('; for _h; do '));
     assert.ok(list.startsWith('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "'), 'claude is the first element');
     assert.ok(list.slice(list.lastIndexOf(' "')).includes('GROK_AGENTS_HOME'), 'the legacy home is the last element');
   });
@@ -63,7 +63,9 @@ describe('_gsd_homes is rendered from the descriptors', () => {
   test('the shim suffix is written once, in the loop body, not once per home (the preamble ships in ~240 files)', () => {
     const text = sync.loadDerivedHomes();
     assert.equal(text.split('/gsd-core/bin/').length - 1, 1);
-    assert.ok(text.endsWith('; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }'));
+    assert.ok(text.endsWith('; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }'));
+    // No `for x in <list>` header: the #4109 structural lint flags any such list containing a `$`.
+    assert.ok(!/\bfor\s+\w+\s+in\s/.test(text));
   });
 
   test('every registered runtime with a file-projected home contributes its env override', () => {
@@ -82,7 +84,7 @@ describe('_gsd_homes is rendered from the descriptors', () => {
   test('a runtime with no file-projected home (kind "none") contributes nothing', () => {
     const fake = { runtimes: { ide: { runtime: { configHome: { kind: 'none', name: 'ide', env: [] } } } } };
     const text = sync.renderHomesFunction(fake, {});
-    assert.equal(text, '_gsd_homes() { for _h in ; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }');
+    assert.equal(text, '_gsd_homes() { set -- ; for _h; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }');
   });
 
   test('every descriptor value rendered into shell is a plain identifier or path segment (no shell metacharacters)', () => {
