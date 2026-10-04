@@ -347,7 +347,7 @@ describe('lint-gate-positive-control — limit-1, limit, limit+1 (property)', ()
 });
 
 describe('lint-gate-positive-control — the real tree', () => {
-  test('realTreeCensusIsZero: 12 gate modules (ADR-5057 census), every count zero', () => {
+  test('realTreeCensusIsZero: 16 gate modules (ADR-5057 census, arm C closed), every count zero', () => {
     const c = census(ROOT, parser);
     // Gates are discovered, never listed: no count is pinned here, so adding a gate (with its control) edits nothing.
     assert.ok(c.gates >= 1, 'gates are discovered (zero is an inert scan)');

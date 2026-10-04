@@ -295,6 +295,10 @@ build/
 /gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs
 /gsd-core/bin/lib/gate-ui-plan.cjs
 /gsd-core/bin/lib/gate-ui-safety.cjs
+/gsd-core/bin/lib/gate-schema-drift.cjs
+/gsd-core/bin/lib/gate-codebase-drift.cjs
+/gsd-core/bin/lib/gate-context-drift.cjs
+/gsd-core/bin/lib/gate-prohibition-enforcement.cjs
 /gsd-core/bin/lib/gate-verdict.cjs
 /gsd-core/bin/lib/gate-evidence.cjs
 /gsd-core/bin/lib/gate-exit.cjs

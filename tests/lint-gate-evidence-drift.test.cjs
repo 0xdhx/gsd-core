@@ -364,13 +364,20 @@ describe('lint-gate-evidence-drift — gate verb entries are discovered, not lis
     const { entries } = scanRepo(ROOT, parser);
     const names = (router) => entries.filter((e) => e.router === router).map((e) => e.name);
     for (const name of ['cmdVerifyPlanStructure', 'cmdVerifyPhaseCompleteness', 'cmdVerifyReferences', 'cmdVerifyCommits',
-      'cmdVerifyArtifacts', 'cmdVerifyKeyLinks', 'cmdVerifySchemaDrift', 'cmdVerifyCodebaseDrift', 'cmdVerifyContextDrift']) {
+      'cmdVerifyArtifacts', 'cmdVerifyKeyLinks']) {
       assert.ok(names('verify').includes(name), `${name} is dispatched by the verify router`);
     }
+    // #5219 (ADR-5057 §4 arm C): the three drift verbs are gate modules the check router formats; the
+    // verify router no longer owns a verdict-emitting function for them.
+    for (const name of ['cmdVerifySchemaDrift', 'cmdVerifyCodebaseDrift', 'cmdVerifyContextDrift']) {
+      assert.ok(!names('verify').includes(name), `${name} is no longer a verify-router entry`);
+    }
     assert.deepEqual(names('phase'), ['cmdPhaseUatPassed']);
-    for (const name of ['cmdUiPlanGate', 'cmdTddReviewCheckpoint', 'cmdApiCoverageVerifyPre', 'cmdCheckPredicate', 'routeProhibitionEnforcement']) {
+    for (const name of ['cmdUiPlanGate', 'cmdTddReviewCheckpoint', 'cmdApiCoverageVerifyPre', 'cmdCheckPredicate',
+      'cmdSchemaDriftGate', 'cmdCodebaseDriftGate', 'cmdContextDriftGate', 'cmdProhibitionEnforcement']) {
       assert.ok(names('check').includes(name), `${name} is dispatched by the check router`);
     }
+    assert.ok(!names('check').includes('routeProhibitionEnforcement'), 'the producer no longer emits for itself');
   });
 
   test('a router that yields no entries is a problem, not a clean scan (fail-closed)', () => {

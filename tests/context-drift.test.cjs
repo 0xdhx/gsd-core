@@ -7,8 +7,15 @@ const path = require('node:path');
 const { createTempGitProject, createTempDir, cleanup, runGsdTools } = require('./helpers.cjs');
 const { gitOrThrow } = require('./helpers/git-fixture.cjs');
 
-const VERIFY_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'verify.cjs');
-const { computeContextDrift } = require(VERIFY_PATH);
+// #5219 (ADR-5057 §4 arm C): the context-drift gate is its own module; the check router formats its result.
+const GATE_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'gate-context-drift.cjs');
+const ROUTER_PATH = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'check-command-router.cjs');
+const { computeContextDrift } = require(GATE_PATH);
+
+/** A child-process statement running the router's `check verify-context-drift <phase>` for `cwd`. */
+function routeContextDriftStatement(cwd, phase) {
+  return `require(${JSON.stringify(ROUTER_PATH)}).routeCheckCommand({ args: ['check', 'verify-context-drift', ${JSON.stringify(phase)}], cwd: ${JSON.stringify(cwd)}, raw: false });`;
+}
 
 describe('computeContextDrift', () => {
   test('returns no stale artifacts when there is nothing to compare', () => {
@@ -366,7 +373,7 @@ describe('verify context-drift CLI', () => {
     const { spawnSync } = require('node:child_process');
     const { TEST_ENV_BASE } = require('./helpers.cjs');
     const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
-    const script = `require(${JSON.stringify(VERIFY_PATH)}).cmdVerifyContextDrift(${JSON.stringify(tmp)}, '01-setup', false);`;
+    const script = routeContextDriftStatement(tmp, '01-setup');
     return spawnSync(process.execPath, ['-e', script], {
       cwd: tmp,
       encoding: 'utf-8',
@@ -442,7 +449,7 @@ describe('verify context-drift CLI', () => {
       "const fs = require('node:fs');",
       'const real = fs.statSync;',
       `fs.statSync = function (p, ...rest) { if (String(p) === ${JSON.stringify(phasesDir)}) { throw Object.assign(new Error('EACCES: injected'), { code: 'EACCES' }); } return real.call(fs, p, ...rest); };`,
-      `require(${JSON.stringify(VERIFY_PATH)}).cmdVerifyContextDrift(${JSON.stringify(tmp)}, '01', false);`,
+      routeContextDriftStatement(tmp, '01'),
     ].join('\n');
     const r = spawnSync(process.execPath, ['-e', script], {
       cwd: tmp,

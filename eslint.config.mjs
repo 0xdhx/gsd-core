@@ -155,6 +155,11 @@ export default tseslint.config(
       'gsd-core/bin/lib/gate-tdd-review-checkpoint.cjs',
       'gsd-core/bin/lib/gate-ui-plan.cjs',
       'gsd-core/bin/lib/gate-ui-safety.cjs',
+      // #5219 (epic #5056, ADR-5057 §4 arm C): the four drift / prohibition gates, moved out of verify.cts.
+      'gsd-core/bin/lib/gate-schema-drift.cjs',
+      'gsd-core/bin/lib/gate-codebase-drift.cjs',
+      'gsd-core/bin/lib/gate-context-drift.cjs',
+      'gsd-core/bin/lib/gate-prohibition-enforcement.cjs',
       'gsd-core/bin/lib/gate-verdict.cjs',
       'gsd-core/bin/lib/gate-verify-command-paths.cjs',
       'gsd-core/bin/lib/gate-verify-failure-directions.cjs',

@@ -39,10 +39,10 @@ import { evaluateCheckPredicate, buildPredicateDeps } from './gate-predicate.cjs
 import { evaluateApiCoverageVerifyPre, readPhaseScope } from './gate-api-coverage-verify-pre.cjs';
 import { decisionMentioned, extractPlanDesignatedSections } from './decision-coverage-support.cjs';
 import { readAutoModeState } from './check-auto-mode.cjs';
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import verifyModule = require('./verify.cjs');
-const { cmdVerifySchemaDrift, cmdVerifyCodebaseDrift, cmdVerifyContextDrift } = verifyModule;
-import { routeProhibitionEnforcement } from './prohibition-enforcement.cjs';
+import { evaluateSchemaDriftGate } from './gate-schema-drift.cjs';
+import { evaluateCodebaseDriftGate } from './gate-codebase-drift.cjs';
+import { evaluateContextDriftGate } from './gate-context-drift.cjs';
+import { evaluateProhibitionEnforcementGate } from './gate-prohibition-enforcement.cjs';
 
 type ErrorReason = (typeof ERROR_REASON)[keyof typeof ERROR_REASON];
 
@@ -120,13 +120,32 @@ function cmdApiCoverageVerifyPre(projectDir: string, args: string[], raw: boolea
   emitGateResult(evaluateApiCoverageVerifyPre({ projectDir, args: args.slice(2) }), raw);
 }
 
+/** `GSD_SKIP_SCHEMA_CHECK` is the schema-drift bypass: it arrives as `env`, read here, never by the gate. */
+function cmdSchemaDriftGate(projectDir: string, args: string[], raw: boolean, env: NodeJS.ProcessEnv): void {
+  emitGateResult(evaluateSchemaDriftGate({ projectDir, args: args.slice(2), env }), raw);
+}
+
+function cmdCodebaseDriftGate(projectDir: string, args: string[], raw: boolean): void {
+  emitGateResult(evaluateCodebaseDriftGate({ projectDir, args: args.slice(2) }), raw);
+}
+
+function cmdContextDriftGate(projectDir: string, args: string[], raw: boolean): void {
+  emitGateResult(evaluateContextDriftGate({ projectDir, args: args.slice(2) }), raw);
+}
+
+function cmdProhibitionEnforcement(projectDir: string, args: string[], raw: boolean): void {
+  emitGateResult(evaluateProhibitionEnforcementGate({ projectDir, args: args.slice(2) }), raw);
+}
+
 interface RouteCheckCommandOptions {
   args: string[];
   cwd: string;
   raw: boolean;
+  /** The environment the gates' flags are read from; the process environment when absent. */
+  env?: NodeJS.ProcessEnv;
 }
 
-function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
+function routeCheckCommand({ args, cwd, raw, env = process.env }: RouteCheckCommandOptions): void {
   // Normalize dots to hyphens in the subcommand so both forms are accepted.
   // This makes `check.query = "ui.plan-gate"` (dotted form in capability.json gates)
   // directly runnable as `gsd_run check ui.plan-gate` — the dot is normalized to
@@ -182,27 +201,22 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
     case 'ui-safety-gate':
       cmdUiSafetyGate(cwd, args, raw);
       return;
-    case 'verify-schema-drift': {
-      // Delegates to verify.schema-drift — drift capability gate at execute:wave:post (blocking).
+    case 'verify-schema-drift':
+      // The drift capability's gate at execute:wave:post (blocking; src/gate-schema-drift.cts).
       // Dot-to-hyphen normalization means query "verify.schema-drift" routes here.
-      // Honor GSD_SKIP_SCHEMA_CHECK=true to bypass the gate (preserves the original inline gate behavior).
-      const phaseArg = typeof args[2] === 'string' ? args[2] : '';
-      const skipSchemaCheck = process.env['GSD_SKIP_SCHEMA_CHECK'] === 'true';
-      cmdVerifySchemaDrift(cwd, phaseArg, skipSchemaCheck, raw);
+      // GSD_SKIP_SCHEMA_CHECK=true bypasses the gate: read from `env` here, passed to the gate.
+      cmdSchemaDriftGate(cwd, args, raw, env);
       return;
-    }
     case 'verify-codebase-drift':
-      // Delegates to verify.codebase-drift — drift capability gate at execute:wave:post (non-blocking).
+      // The drift capability's gate at execute:wave:post (non-blocking; src/gate-codebase-drift.cts).
       // Dot-to-hyphen normalization means query "verify.codebase-drift" routes here.
-      cmdVerifyCodebaseDrift(cwd, raw);
+      cmdCodebaseDriftGate(cwd, args, raw);
       return;
-    case 'verify-context-drift': {
-      // Delegates to verify.context-drift — drift capability gate at plan:pre (non-blocking).
+    case 'verify-context-drift':
+      // The drift capability's gate at plan:pre (non-blocking; src/gate-context-drift.cts).
       // Dot-to-hyphen normalization means query "verify.context-drift" routes here.
-      const phaseArg = typeof args[2] === 'string' ? args[2] : '';
-      cmdVerifyContextDrift(cwd, phaseArg, raw);
+      cmdContextDriftGate(cwd, args, raw);
       return;
-    }
     case 'predicate':
       // Generic gate-predicate evaluator (#2008). The workflow gate-dispatch calls
       // this for any gate whose `check` carries a `predicate` (instead of a `query`),
@@ -216,9 +230,10 @@ function routeCheckCommand({ args, cwd, raw }: RouteCheckCommandOptions): void {
     case 'prohibition-enforcement':
       // The deterministic test-tier prohibition PRODUCER/gate (#1259, ADR-550 D5d). Locates the
       // wired mechanical check (node-test or lint-rule), confirms fail-first, runs it, builds
-      // enforcementEvidence, and emits the dispositionForProhibition verdict. Invocable as
+      // enforcementEvidence, and emits the dispositionForProhibition verdict
+      // (src/gate-prohibition-enforcement.cts). Invocable as
       // `gsd_run check prohibition-enforcement <request.json>`.
-      routeProhibitionEnforcement(args, raw);
+      cmdProhibitionEnforcement(cwd, args, raw);
       return;
     default:
       error('Unknown check subcommand. Available: api-coverage-verify-pre, auto-mode, decision-coverage-plan, decision-coverage-verify, evaluation-scope, gap-analysis-plan-post, predicate, prohibition-enforcement, tdd-red-evidence, tdd-review-checkpoint, ui-plan-gate, ui-safety-gate, verify-command-paths, verify-failure-directions, verify-schema-drift, verify-codebase-drift, verify-context-drift', ERROR_REASON.SDK_UNKNOWN_COMMAND);

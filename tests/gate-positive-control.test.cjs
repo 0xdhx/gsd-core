@@ -15,6 +15,7 @@
  * pin byte-for-byte; here they are asserted as a PAIR through one harness.
  */
 
+const fs = require('node:fs');
 const path = require('node:path');
 const { cleanup } = require('./helpers.cjs');
 const { gateControl, put, git, failRead } = require('./helpers/gate-positive-control.cjs');
@@ -293,4 +294,113 @@ gateControl({
   redScenario: { git: true, setup: scaffoldScopedPhase, args: ['--phase', '9'] },
   // A phase with a directory and a scoped commit but no SUMMARY: resolved, advisory.
   greenScenario: { git: true, setup: scaffoldScopedPhase, args: ['--phase', '3'] },
+});
+
+// ─── #5219 (ADR-5057 §4 arm C): the drift and prohibition gates ─────────────────────────────────────
+
+/** A plan whose frontmatter declares `files_modified` (the drift gates' input). */
+function planDeclaring(files) {
+  return `---\nphase: 01\nfiles_modified:\n${files.map((f) => `  - ${f}`).join('\n')}\n---\n\n# Plan\n`;
+}
+
+gateControl({
+  gate: 'schema-drift',
+  module: require('../gsd-core/bin/lib/gate-schema-drift.cjs'),
+  fn: 'evaluateSchemaDriftGate',
+  red: 'block',
+  expectRed: { drift_detected: true, unpushed_orms: ['prisma'] },
+  // A plan that modifies a Prisma schema and no push evidenced anywhere in the phase.
+  redScenario: {
+    git: true,
+    setup: (dir) => put(dir, '.planning/phases/01-schema/01-01-PLAN.md', planDeclaring(['prisma/schema.prisma'])),
+    args: ['1'],
+  },
+  // The same phase whose plan touches no schema file.
+  greenScenario: {
+    git: true,
+    setup: (dir) => put(dir, '.planning/phases/01-schema/01-01-PLAN.md', planDeclaring(['src/a.js'])),
+    args: ['1'],
+  },
+});
+
+/** One mapped-and-stamped repository; `extraDirs` are new top-level directories added after the stamp. */
+function scaffoldMappedCodebase(extraDirs) {
+  return (dir) => {
+    put(dir, '.planning/codebase/STRUCTURE.md', '# Structure\n\n- `src/` application sources\n');
+    put(dir, 'src/main.js', 'main\n');
+    commitAll(dir, 'feat: baseline');
+    const baseline = git(dir, 'rev-parse', 'HEAD').trim();
+    put(dir, '.planning/codebase/STRUCTURE.md', `---\nlast_mapped_commit: ${baseline}\n---\n# Structure\n\n- \`src/\` application sources\n`);
+    commitAll(dir, 'docs: stamp the map');
+    for (const extra of extraDirs) put(dir, `${extra}/index.js`, `${extra}\n`);
+    if (extraDirs.length > 0) commitAll(dir, 'feat: add directories');
+  };
+}
+
+gateControl({
+  gate: 'codebase-drift',
+  module: require('../gsd-core/bin/lib/gate-codebase-drift.cjs'),
+  fn: 'evaluateCodebaseDriftGate',
+  red: 'block',
+  expectRed: { action_required: true, threshold: 3 },
+  // Three directories the map does not describe appeared since its stamped commit: the default threshold.
+  redScenario: { git: true, setup: scaffoldMappedCodebase(['alpha', 'beta', 'gamma']), args: [] },
+  // Nothing changed since the stamp.
+  greenScenario: { git: true, setup: scaffoldMappedCodebase([]), args: [] },
+});
+
+/** A phase whose CONTEXT.md is newer (by mtime, set explicitly) or older than its RESEARCH.md; `action` is the configured policy. */
+function scaffoldContext(researchEpochSeconds) {
+  return (dir) => {
+    put(dir, '.planning/config.json', JSON.stringify({ workflow: { context_drift_action: 'block' } }));
+    put(dir, '.planning/phases/01-x/01-CONTEXT.md', '# context\n');
+    put(dir, '.planning/phases/01-x/01-RESEARCH.md', '# research\n');
+    fs.utimesSync(path.join(dir, '.planning/phases/01-x/01-CONTEXT.md'), 2000, 2000);
+    fs.utimesSync(path.join(dir, '.planning/phases/01-x/01-RESEARCH.md'), researchEpochSeconds, researchEpochSeconds);
+  };
+}
+
+gateControl({
+  gate: 'context-drift',
+  module: require('../gsd-core/bin/lib/gate-context-drift.cjs'),
+  fn: 'evaluateContextDriftGate',
+  red: 'block',
+  expectRed: { stale_artifacts: ['01-RESEARCH.md'], action: 'block' },
+  // The research was last changed BEFORE the context decisions, under the `block` policy.
+  redScenario: { setup: scaffoldContext(1000), args: ['1'] },
+  // The research is newer than the context: in sync.
+  greenScenario: { setup: scaffoldContext(3000), args: ['1'] },
+});
+
+/** Make the producer's disposition function throw (the one throw the producer's own no-throw handling does not catch). */
+function failDisposition() {
+  const probeCore = require('../gsd-core/bin/lib/probe-core.cjs');
+  const real = probeCore.dispositionForProhibition;
+  probeCore.dispositionForProhibition = function patched() {
+    throw new Error('simulated disposition failure');
+  };
+  return function restore() { probeCore.dispositionForProhibition = real; };
+}
+
+const PROHIBITION_REQUEST = JSON.stringify({ prohibition: { verification: 'test', text: 'never log secrets' }, check: null });
+
+gateControl({
+  gate: 'prohibition-enforcement',
+  module: require('../gsd-core/bin/lib/gate-prohibition-enforcement.cjs'),
+  fn: 'evaluateProhibitionEnforcementGate',
+  red: 'unreadable',
+  expectRed: { outcome: 'unreadable', status: 'unverified', flagged: true, located: false },
+  // The producer throws: never a crash and never a silent green.
+  redScenario: {
+    setup: (dir) => {
+      put(dir, 'req.json', PROHIBITION_REQUEST);
+      return failDisposition();
+    },
+    args: (dir) => [path.join(dir, 'req.json')],
+  },
+  // The same request, the producer unpatched: its advisory disposition.
+  greenScenario: {
+    setup: (dir) => put(dir, 'req.json', PROHIBITION_REQUEST),
+    args: (dir) => [path.join(dir, 'req.json')],
+  },
 });
