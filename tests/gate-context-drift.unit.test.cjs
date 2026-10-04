@@ -73,7 +73,7 @@ function researchAt(researchEpoch, action) {
 }
 
 describe('evaluateContextDriftGate: usage', () => {
-  const USAGE = { failure: { code: 'sdk_missing_arg', message: 'Usage: verify context-drift <phase>' } };
+  const USAGE = { failure: { code: 'unknown', message: 'Usage: verify context-drift <phase>' } };
 
   test('no argument is a usage failure carrying the old error() text', () => {
     const result = evaluate(undefined, []);

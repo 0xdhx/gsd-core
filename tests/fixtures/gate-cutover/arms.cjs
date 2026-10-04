@@ -11,6 +11,14 @@
  * Deterministic by construction: fixed file content, no clock, no random. The
  * only run-dependent text is the temp root, which `normalize` rewrites to
  * `<TMP>` in BOTH capture and comparison.
+ *
+ * PROVENANCE (#5219, ADR-5057 §4 arm C). The goldens of groups E12–E15 (the drift gates and
+ * prohibition-enforcement) were captured by executing `origin/next` at
+ * 8bbdded7efd00fa7beffc10d6e39550c165875d6 (the build BEFORE the four verbs moved into gate
+ * modules). To re-verify: check that commit out detached, `npm run build:lib`, copy this file and
+ * fail-read-preload.cjs into its tests/fixtures/gate-cutover/, run each E12–E15 arm and diff stdout,
+ * stderr and exit code against the checked-in goldens. Review-round arms whose behaviour was
+ * DELIBERATELY changed by the move are marked in the golden catalogue test (E13 stamp validation).
  */
 
 const fs = require('node:fs');
@@ -424,7 +432,19 @@ function buildCodebaseDrift({ git = true, stamp = 'none', extraDirs = [], dirDoc
     const commitAt = makeDatedGit(root);
     const baseline = commitAt(FIXED_DATE, 'feat: baseline');
     const tree = gitOrThrow(['rev-parse', `${baseline}^{tree}`], { cwd: root }).trim();
-    const stampValue = { none: null, fake: UNRESOLVABLE_SHA, tree, head: baseline }[stamp];
+    const stampValue = {
+      none: null,
+      fake: UNRESOLVABLE_SHA,
+      tree,
+      head: baseline,
+      // #5219 (f): stamps that are not an object id spelled in full, or are not a hex id at all.
+      ref: 'HEAD',
+      option: '--batch',
+      upper: baseline.toUpperCase(),
+      short7: baseline.slice(0, 7),
+      short6: baseline.slice(0, 6),
+      fake64: 'f'.repeat(64),
+    }[stamp];
     if (stampValue !== null) {
       write(root, '.planning/codebase/STRUCTURE.md', `---\nlast_mapped_commit: ${stampValue}\n---\n${STRUCTURE_BODY}`);
     }
@@ -457,6 +477,12 @@ const FIXTURES = {
   'cb-below': buildCodebaseDrift({ stamp: 'head', extraDirs: ['alpha'] }),
   'cb-block': buildCodebaseDrift({ stamp: 'head', extraDirs: ['alpha', 'beta', 'gamma'] }),
   'cb-doc-unreadable': buildCodebaseDrift({ stamp: 'head', dirDocument: true }),
+  'cb-ref-stamp': buildCodebaseDrift({ stamp: 'ref', extraDirs: ['alpha', 'beta', 'gamma'] }),
+  'cb-option-stamp': buildCodebaseDrift({ stamp: 'option', extraDirs: ['alpha', 'beta', 'gamma'] }),
+  'cb-upper-stamp': buildCodebaseDrift({ stamp: 'upper', extraDirs: ['alpha', 'beta', 'gamma'] }),
+  'cb-short7-stamp': buildCodebaseDrift({ stamp: 'short7', extraDirs: ['alpha', 'beta', 'gamma'] }),
+  'cb-short6-stamp': buildCodebaseDrift({ stamp: 'short6', extraDirs: ['alpha', 'beta', 'gamma'] }),
+  'cb-fake64-stamp': buildCodebaseDrift({ stamp: 'fake64' }),
   prohibition: buildProhibition,
   dc: buildDecisionCoverage,
   'dc-disabled': buildDecisionCoverageDisabled,
@@ -645,6 +671,16 @@ armArgv('E12', 'verify-surface-schema-drift-skip-flag', 'schema-drift', ['verify
 armArgv('E12', 'verify-surface-schema-drift-skip-flag-first', 'schema-drift', ['verify', 'schema-drift', '--skip', '1']);
 armArgv('E12', 'verify-surface-schema-drift-env-ignored', 'schema-drift', ['verify', 'schema-drift', '1'], { env: { GSD_SKIP_SCHEMA_CHECK: 'true' } });
 armArgv('E12', 'verify-surface-schema-drift-no-arg', 'schema-drift', ['verify', 'schema-drift']);
+// Added in the #5219 review round, captured from origin/next before the move was re-checked.
+armArgv('E12', 'verify-surface-schema-drift-skip-flag-no-phase', 'schema-drift', ['verify', 'schema-drift', '--skip']);
+// The usage failures under the two observable error modes (JSON diagnostics; exit contract v2): the
+// reason code the gates pass is part of both.
+const JSON_ERRORS = { GSD_JSON_ERRORS: '1' };
+const CONTRACT_V2 = { GSD_EXIT_CONTRACT: 'v2' };
+arm('E12', 'verify-schema-drift-no-arg-json-errors', 'schema-drift', 'verify-schema-drift', [], { env: JSON_ERRORS });
+arm('E12', 'verify-schema-drift-no-arg-contract-v2', 'schema-drift', 'verify-schema-drift', [], { env: CONTRACT_V2 });
+armArgv('E12', 'verify-surface-schema-drift-no-arg-json-errors', 'schema-drift', ['verify', 'schema-drift'], { env: JSON_ERRORS });
+armArgv('E12', 'verify-surface-schema-drift-no-arg-contract-v2', 'schema-drift', ['verify', 'schema-drift'], { env: CONTRACT_V2 });
 
 // E13 verify-codebase-drift (#5219)
 arm('E13', 'verify-codebase-drift-no-structure-md', 'cb-no-map', 'verify-codebase-drift', []);
@@ -658,6 +694,17 @@ arm('E13', 'verify-codebase-drift-blocks', 'cb-block', 'verify-codebase-drift', 
 arm('E13', 'verify-codebase-drift-document-unreadable', 'cb-doc-unreadable', 'verify-codebase-drift', []);
 arm('E13', 'verify-codebase-drift-dotted-verb', 'cb-block', 'verify.codebase-drift', []);
 armArgv('E13', 'verify-surface-codebase-drift-blocks', 'cb-block', ['verify', 'codebase-drift']);
+// The stamp is validated as a hex object id before git sees it (#5219 review round): arms captured from
+// origin/next, where a ref name or an abbreviation shorter than 7 was handed to `git cat-file`.
+// `changed`: the golden is the origin/next behaviour; the move DELIBERATELY changes it (the stamp is no
+// longer a hex object id), and the cutover test pins both the old golden and the new answer.
+const STAMP_NOT_A_HEX_ID = { changed: { reason: 'unresolvable-mapped-commit', exitCode: 69 } };
+arm('E13', 'verify-codebase-drift-stamp-ref-name', 'cb-ref-stamp', 'verify-codebase-drift', [], STAMP_NOT_A_HEX_ID);
+arm('E13', 'verify-codebase-drift-stamp-option-shaped', 'cb-option-stamp', 'verify-codebase-drift', []);
+arm('E13', 'verify-codebase-drift-stamp-uppercase-hex', 'cb-upper-stamp', 'verify-codebase-drift', []);
+arm('E13', 'verify-codebase-drift-stamp-7-hex-abbreviation', 'cb-short7-stamp', 'verify-codebase-drift', []);
+arm('E13', 'verify-codebase-drift-stamp-6-hex-abbreviation', 'cb-short6-stamp', 'verify-codebase-drift', [], STAMP_NOT_A_HEX_ID);
+arm('E13', 'verify-codebase-drift-stamp-64-hex-unresolvable', 'cb-fake64-stamp', 'verify-codebase-drift', []);
 
 // E14 verify-context-drift (#5219)
 arm('E14', 'verify-context-drift-no-arg', 'ctx-drift', 'verify-context-drift', []);
@@ -671,6 +718,9 @@ arm('E14', 'verify-context-drift-no-upstream-artifacts', 'ctx-drift', 'verify-co
 arm('E14', 'verify-context-drift-dotted-verb', 'ctx-drift', 'verify.context-drift', ['1']);
 armArgv('E14', 'verify-surface-context-drift-stale-warns', 'ctx-drift', ['verify', 'context-drift', '1']);
 armArgv('E14', 'verify-surface-context-drift-no-arg', 'ctx-drift', ['verify', 'context-drift']);
+armArgv('E14', 'verify-surface-context-drift-stale-blocks', 'ctx-drift-block', ['verify', 'context-drift', '1']);
+arm('E14', 'verify-context-drift-no-arg-json-errors', 'ctx-drift', 'verify-context-drift', [], { env: JSON_ERRORS });
+arm('E14', 'verify-context-drift-no-arg-contract-v2', 'ctx-drift', 'verify-context-drift', [], { env: CONTRACT_V2 });
 
 // E15 prohibition-enforcement (#5219)
 arm('E15', 'prohibition-enforcement-no-arg', 'prohibition', 'prohibition-enforcement', []);
@@ -681,6 +731,8 @@ arm('E15', 'prohibition-enforcement-request-file-judgment-mode', 'prohibition', 
 arm('E15', 'prohibition-enforcement-json-flag', 'prohibition', 'prohibition-enforcement', ['--json', JSON.stringify(PROHIBITION_REQUEST)]);
 arm('E15', 'prohibition-enforcement-json-flag-invalid', 'prohibition', 'prohibition-enforcement', ['--json', '{not json']);
 arm('E15', 'prohibition-enforcement-json-flag-without-value', 'prohibition', 'prohibition-enforcement', ['--json']);
+arm('E15', 'prohibition-enforcement-no-arg-json-errors', 'prohibition', 'prohibition-enforcement', [], { env: JSON_ERRORS });
+arm('E15', 'prohibition-enforcement-no-arg-contract-v2', 'prohibition', 'prohibition-enforcement', [], { env: CONTRACT_V2 });
 
 // auto-mode (non-gate)
 arm('auto', 'auto-mode-both', 'auto-both', 'auto-mode', []);

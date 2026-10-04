@@ -40,7 +40,7 @@ function stamped(sha) { return `---\nlast_mapped_commit: ${sha}\n---\n${STRUCTUR
  * A git project mapped at its baseline commit. `stamp`: 'head' names the baseline commit, 'none' writes
  * no stamp, 'fake' names a commit git cannot resolve, 'tree' names a tree object (resolvable, not a commit).
  */
-function mappedProject({ stamp = 'head', extraDirs = [], config } = {}) {
+function mappedProject({ stamp = 'head', raw, extraDirs = [], config } = {}) {
   return (dir) => {
     if (config !== undefined) put(dir, '.planning/config.json', JSON.stringify(config));
     put(dir, STRUCTURE_PATH, STRUCTURE);
@@ -48,7 +48,15 @@ function mappedProject({ stamp = 'head', extraDirs = [], config } = {}) {
     commitAll(dir, 'feat: baseline');
     const baseline = git(dir, 'rev-parse', 'HEAD').trim();
     const tree = git(dir, 'rev-parse', `${baseline}^{tree}`).trim();
-    const value = { head: baseline, fake: '0123456789abcdef0123456789abcdef01234567', tree }[stamp];
+    const named = {
+      head: baseline,
+      fake: '0123456789abcdef0123456789abcdef01234567',
+      tree,
+      abbrev7: baseline.slice(0, 7),
+      upper: baseline.toUpperCase(),
+    }[stamp];
+    // `raw` is a stamp spelled literally (the boundary cases below).
+    const value = raw !== undefined ? raw : named;
     if (value !== undefined) {
       put(dir, STRUCTURE_PATH, stamped(value));
       commitAll(dir, 'docs: stamp the map');
@@ -262,26 +270,113 @@ describe('evaluateCodebaseDriftGate: the threshold boundary (limit-1 / limit / l
   });
 });
 
-describe('evaluateCodebaseDriftGate: the document size boundary (limit-1 / limit / limit+1)', () => {
-  const sized = (bytes) => (dir) => {
-    const body = `${STRUCTURE}${'x'.repeat(bytes - Buffer.byteLength(STRUCTURE))}`;
+describe('evaluateCodebaseDriftGate: the mapped-commit stamp is a hex object id before git sees it', () => {
+  /** Run with `execGit` recording every call; returns the result and the recorded argument lists. */
+  function withGitCalls(setup) {
+    const calls = [];
+    const real = shell.execGit;
+    const result = evaluate({}, (dir) => {
+      setup(dir);
+      shell.execGit = function recording(args, ...rest) {
+        calls.push([...args]);
+        return real.call(shell, args, ...rest);
+      };
+      return () => { shell.execGit = real; };
+    });
+    return { result, calls };
+  }
+  // `rev-parse HEAD` is the gate's own repository probe and legitimately names HEAD; the stamp is what
+  // the baseline probe and the diff would be given.
+  const reachedGit = (calls, stamp) => calls.some((args) => args[0] !== 'rev-parse' && args.includes(stamp));
+
+  // [label, raw stamp, whether it is a hex object id (7..64 hex chars) so that git is asked]
+  const NOT_HEX_IDS = [
+    ['6 hex chars (limit-1, an abbreviation too short)', 'abcdef'],
+    ['65 hex chars (limit+1)', 'a'.repeat(65)],
+    ['a ref name', 'HEAD'],
+    ['an option-shaped value', '--batch'],
+    ['a 40-char id with a non-hex character', `${'a'.repeat(39)}g`],
+  ];
+  for (const [label, raw] of NOT_HEX_IDS) {
+    test(`${label} is routed to unresolvable-mapped-commit and never reaches git`, () => {
+      const { result, calls } = withGitCalls(mappedProject({ stamp: 'head', raw }));
+      assert.equal(result.outcome, 'unreadable');
+      assert.equal(result.block, false);
+      assert.equal(result.payload.reason, 'unresolvable-mapped-commit');
+      assert.equal(result.payload.last_mapped_commit, raw, 'the stamp is reported as read');
+      assert.equal(reachedGit(calls, raw), false, `${JSON.stringify(raw)} must not be an argument of any git call`);
+      assert.equal(calls.some((args) => args[0] === 'cat-file' || args[0] === 'diff'), false, 'no baseline probe or diff runs');
+    });
+  }
+
+  // Hex ids that pass the check ARE handed to git, which then decides (limit, and the sizes between).
+  for (const [label, raw] of [['7 hex chars (limit)', 'abcdef0'], ['40 hex chars', 'a'.repeat(40)], ['64 hex chars (limit)', 'a'.repeat(64)]]) {
+    test(`${label} that names no object is asked of git and is unresolvable there`, () => {
+      const { result, calls } = withGitCalls(mappedProject({ stamp: 'head', raw }));
+      assert.equal(result.outcome, 'unreadable');
+      assert.equal(result.payload.reason, 'unresolvable-mapped-commit');
+      assert.equal(calls.some((args) => args[0] === 'cat-file' && args.includes(raw)), true, 'git was asked');
+    });
+  }
+
+  test('a 7-hex abbreviation of a real commit is a baseline (limit)', () => {
+    const result = evaluate({}, mappedProject({ stamp: 'abbrev7', extraDirs: ['alpha', 'beta', 'gamma'] }));
+    assert.equal(result.outcome, 'block');
+    assert.equal(result.payload.last_mapped_commit.length, 7);
+  });
+
+  test('an uppercase hex id is a baseline (the id check is case-insensitive)', () => {
+    const result = evaluate({}, mappedProject({ stamp: 'upper', extraDirs: ['alpha', 'beta', 'gamma'] }));
+    assert.equal(result.outcome, 'block');
+  });
+
+  test('an absent stamp is still no-mapped-commit, not unresolvable (the check runs on a present stamp only)', () => {
+    assert.equal(evaluate({}, mappedProject({ stamp: 'none' })).payload.reason, 'no-mapped-commit');
+  });
+});
+
+describe('evaluateCodebaseDriftGate: the document size boundary (limit-1 / limit / limit+1), for every document readDocument reads', () => {
+  const sizedBody = (bytes, lead) => {
+    const body = `${lead}${'x'.repeat(bytes - Buffer.byteLength(lead))}`;
     assert.equal(Buffer.byteLength(body), bytes);
-    put(dir, STRUCTURE_PATH, body);
+    return body;
   };
 
   for (const bytes of [MAX_DOCUMENT_BYTES - 1, MAX_DOCUMENT_BYTES]) {
     test(`a ${bytes}-byte STRUCTURE.md is read (the next step is the git probe)`, () => {
-      const result = evaluate({ git: false }, sized(bytes));
+      const result = evaluate({ git: false }, (dir) => put(dir, STRUCTURE_PATH, sizedBody(bytes, STRUCTURE)));
       assert.equal(result.outcome, 'skip');
       assert.equal(result.payload.reason, 'not-a-git-repo');
     });
   }
 
   test(`a ${MAX_DOCUMENT_BYTES + 1}-byte STRUCTURE.md is refused as unreadable`, () => {
-    const result = evaluate({ git: false }, sized(MAX_DOCUMENT_BYTES + 1));
+    const result = evaluate({ git: false }, (dir) => put(dir, STRUCTURE_PATH, sizedBody(MAX_DOCUMENT_BYTES + 1, STRUCTURE)));
     assert.equal(result.outcome, 'unreadable');
     assert.equal(result.payload.reason, `cannot-read-structure-md: larger than ${MAX_DOCUMENT_BYTES} bytes`);
   });
+
+  // The sibling map documents share readDocument: at the limit they are read and part of the map, one byte over
+  // they are named unreadable (and, with no drift, make the answer unreadable).
+  for (const name of ['STACK.md', 'ARCHITECTURE.md', 'CONVENTIONS.md', 'TESTING.md', 'INTEGRATIONS.md', 'CONCERNS.md']) {
+    for (const [bytes, read] of [[MAX_DOCUMENT_BYTES - 1, true], [MAX_DOCUMENT_BYTES, true], [MAX_DOCUMENT_BYTES + 1, false]]) {
+      test(`${name} of ${bytes} bytes (${bytes === MAX_DOCUMENT_BYTES ? 'limit' : bytes < MAX_DOCUMENT_BYTES ? 'limit-1' : 'limit+1'}) is ${read ? 'read' : 'named unreadable'}`, () => {
+        const result = evaluate({}, (dir) => {
+          mappedProject({ stamp: 'head' })(dir);
+          put(dir, `.planning/codebase/${name}`, sizedBody(bytes, '# Doc\n'));
+        });
+        if (read) {
+          assert.equal(result.outcome, 'pass');
+          assert.deepStrictEqual(result.payload.documents_unreadable, []);
+          assert.ok(result.payload.documents_read.includes(name));
+        } else {
+          assert.equal(result.outcome, 'unreadable');
+          assert.deepStrictEqual(result.payload.documents_unreadable, [name]);
+          assert.ok(!result.payload.documents_read.includes(name));
+        }
+      });
+    }
+  }
 });
 
 describe('evaluateCodebaseDriftGate: the non-blocking contract', () => {

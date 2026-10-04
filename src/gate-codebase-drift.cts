@@ -30,6 +30,18 @@ import planningWorkspace = require('./planning-workspace.cjs');
 import worktreeSafetyMod = require('./worktree-safety.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- onboard-projection.cjs is an export= CommonJS module
 import onboardProjectionMod = require('./onboard-projection.cjs');
+// drift.cjs is a pure library that imports no gate or verify module, so it is loaded at the top.
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- drift.cjs is an export= CommonJS module
+import driftModule = require('./drift.cjs');
+const drift = driftModule as unknown as Record<string, unknown>;
+
+/**
+ * A mapped-commit stamp must be a hex object id (abbreviated to at least 7, or a full SHA-1 / SHA-256
+ * id) before git sees it. A ref name (`HEAD`), a shorter abbreviation and an option-shaped value
+ * (`--batch`) are not baselines: each is routed to `unresolvable-mapped-commit`, so no stamp can reach
+ * `git cat-file` / `git diff` as anything but an object id.
+ */
+const HEX_OBJECT_ID_RE = /^[0-9a-f]{7,64}$/i;
 
 const { planningDir, planningRoot } = planningWorkspace;
 // Single owner of git C-quoted-path decoding (see #4081 note at the --name-status parse loop).
@@ -75,10 +87,6 @@ function unreadable(reason: string, extra: Record<string, unknown> = {}): GateRe
 }
 
 function runCodebaseDriftGate(cwd: string): GateResult {
-  // Non-hoisted: load-order matters for circular dep guard
-  // eslint-disable-next-line @typescript-eslint/no-require-imports -- drift.cjs is an export= CommonJS module
-  const drift = require('./drift.cjs') as Record<string, unknown>;
-
   const codebaseDir = path.join(planningDir(cwd), 'codebase');
   const structurePath = path.join(codebaseDir, 'STRUCTURE.md');
 
@@ -109,14 +117,20 @@ function runCodebaseDriftGate(cwd: string): GateResult {
   if (!lastMapped) {
     return skipped('no-mapped-commit', { last_mapped_commit: null });
   }
+  // A stamp that is not a hex object id is not a baseline (a ref name such as `HEAD` would "resolve" to
+  // a commit and diff against the wrong object; an option-shaped value must never reach git): same arm
+  // as a stamp git cannot resolve, and no git call is made with it.
+  if (!HEX_OBJECT_ID_RE.test(lastMapped)) {
+    return unreadable('unresolvable-mapped-commit', { last_mapped_commit: lastMapped });
+  }
   const baseProbe = execGit(['cat-file', '-t', lastMapped], { cwd }) as unknown as { exitCode: number; stdout: string };
   if (baseProbe.exitCode !== 0 || baseProbe.stdout.trim() !== 'commit') {
     // A stamp git cannot resolve: history rewrite, GC, or a shallow clone.
     // Distinct reason from 'no-mapped-commit' -- the map claims a baseline,
     // this repository just cannot see it, which is an operator-actionable
     // difference (re-map vs. unshallow). A resolvable non-commit (a tree or
-    // blob sha, a ref name) is the same class of bad baseline: git would
-    // happily diff against it and report drift against the wrong object.
+    // blob sha) is the same class of bad baseline: git would happily diff
+    // against it and report drift against the wrong object.
     // The repository cannot resolve the baseline the map claims: it could not look (#5170).
     return unreadable('unresolvable-mapped-commit', { last_mapped_commit: lastMapped });
   }

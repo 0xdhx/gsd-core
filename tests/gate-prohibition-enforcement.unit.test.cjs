@@ -95,16 +95,21 @@ describe('evaluateProhibitionEnforcementGate: usage', () => {
     assert.deepStrictEqual(evaluate(['--json']), USAGE);
   });
 
-  for (const [label, body] of [['null', 'null'], ['a number', '7'], ['a string', '"x"'], ['an empty document', '']]) {
-    test(`a request document that is ${label} is a usage failure, never a throw`, () => {
+  // A document with nothing to read a request from is a usage failure, never a throw.
+  for (const [label, body] of [['null', 'null'], ['an empty document', '']]) {
+    test(`a request document that is ${label} is a usage failure`, () => {
+      assert.deepStrictEqual(inline(body), USAGE);
+    });
+  }
+
+  // A scalar parses; its `check` and `prohibition` are simply absent (fail-closed disposition).
+  for (const [label, body] of [['a number', '7'], ['a string', '"x"']]) {
+    test(`a request document that is ${label} parses and is delivered as the fail-closed advisory verdict`, () => {
       const result = inline(body);
-      if (label === 'a number' || label === 'a string') {
-        // A scalar parses; its `check` and `prohibition` are simply absent (fail-closed disposition).
-        assert.equal(isGateUsageFailure(result), false);
-        assert.equal(result.outcome, 'advisory');
-      } else {
-        assert.deepStrictEqual(result, USAGE);
-      }
+      assert.equal(isGateUsageFailure(result), false);
+      assert.equal(result.outcome, 'advisory');
+      assert.equal(result.payload.flagged, true);
+      assert.equal(result.payload.located, false);
     });
   }
 });
@@ -171,11 +176,16 @@ describe('evaluateProhibitionEnforcementGate: the producer\'s disposition is del
     assert.equal(result.payload.tier, 'judgment');
   });
 
-  test('property: any inline argument yields a usage failure or a non-blocking verdict, never a throw', () => {
+  // The `unreadable` arm (a throw) is unreachable from request input: the producer catches its own
+  // prover / runner throws and every request field is JSON data, so no document can make it throw. That
+  // is why the gate's positive control (tests/gate-positive-control.test.cjs) reaches that arm by
+  // patching the disposition function instead. The property pins the other half: no request is ever
+  // `unreadable`, and none is anything but a usage failure or an advisory, non-blocking verdict.
+  test('property: any inline argument is a usage failure or an advisory non-blocking verdict (a request can never reach the throw arm)', () => {
     fc.assert(fc.property(fc.oneof(fc.string(), fc.json()), (arg) => {
       const result = gate.evaluateProhibitionEnforcementGate({ projectDir: process.cwd(), args: ['--json', arg] });
       if (isGateUsageFailure(result)) return JSON.stringify(result) === JSON.stringify(USAGE);
-      return result.block === false && (result.outcome === 'advisory' || result.outcome === 'unreadable');
+      return result.block === false && result.outcome === 'advisory';
     }), { seed: 5219, numRuns: 100 });
   });
 });

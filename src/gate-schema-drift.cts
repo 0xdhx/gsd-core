@@ -19,45 +19,20 @@
  * the router from the process environment; the gate reads no ambient state for it.
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
 import { gateVerdict, gateUnreadable, gateUsageFailure, GATE_FAILURE_CODE } from './gate-verdict.cjs';
 import type { GateResult, GateVerdict } from './gate-verdict.cjs';
 import { readTextEvidence, readPlanScanEvidence, statEvidence } from './gate-evidence.cjs';
 import { resolveEvaluationScope } from './gate-evaluation-scope.cjs';
 import { checkSchemaDrift } from './schema-detect.cjs';
-import { tryWithinRoot } from './security.cjs';
+import { resolvePhaseDirByToken } from './gate-phase-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 import planningWorkspace = require('./planning-workspace.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- plan-document.cjs is an export= CommonJS module
 import planDocumentMod = require('./plan-document.cjs');
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-import phaseIdMod = require('./phase-id.cjs');
 
 const { planningDir } = planningWorkspace;
 const { parsePlanDocument } = planDocumentMod;
-const { normalizePhaseName, matchPhaseDirs } = phaseIdMod;
-
-/**
- * Resolve a phase directory under `phasesDir` from a user-supplied `phaseArg`,
- * via the canonical phase-directory matcher (phase-id.cjs::matchPhaseDirs) rather
- * than a naive substring test — a bare `.includes(phaseArg)` lets a non-existent
- * phase silently match a different phase whose directory name merely contains the
- * requested token (e.g. "1" matching "11-expansion"). Falls back to an exact
- * directory-name match. Returns null if neither resolves. (#1571, #2528)
- *
- * Shared by the schema-drift and context-drift gates.
- */
-export function resolvePhaseDirByToken(phasesDir: string, phaseArg: string): string | null {
-  const normalizedPhase = normalizePhaseName(phaseArg);
-  const dirEntries = fs.readdirSync(phasesDir, { withFileTypes: true });
-  const dirNames = dirEntries.filter((e) => e.isDirectory()).map((e) => e.name);
-  const matched = matchPhaseDirs(dirNames, normalizedPhase).matches[0];
-  if (matched) return path.join(phasesDir, matched);
-  const contained = tryWithinRoot(phaseArg, phasesDir);
-  if (contained !== null && statEvidence(contained).kind === 'found') return contained;
-  return null;
-}
 
 /**
  * The schema-drift verdict for "drift was not evaluated" (#5170): non-blocking payload (the
@@ -193,7 +168,8 @@ export function evaluateSchemaDriftGate(input: {
 }): GateResult {
   const phaseArg = input.args[0] || '';
   if (!phaseArg) {
-    return gateUsageFailure(GATE_FAILURE_CODE.SDK_MISSING_ARG, 'Usage: verify schema-drift <phase> [--skip]');
+    // UNKNOWN: the pre-move `error('Usage…')` named no reason, and the reason is observable (#5219).
+    return gateUsageFailure(GATE_FAILURE_CODE.UNKNOWN, 'Usage: verify schema-drift <phase> [--skip]');
   }
   const skipFlag = input.env?.['GSD_SKIP_SCHEMA_CHECK'] === 'true';
 

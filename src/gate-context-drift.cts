@@ -23,7 +23,7 @@ import { gateVerdict, gateUnreadable, gateUsageFailure, GATE_FAILURE_CODE } from
 import type { GateResult, GateVerdict } from './gate-verdict.cjs';
 import { readDirEvidence, statEvidence } from './gate-evidence.cjs';
 import { readWorkflowConfigValue } from './gate-config.cjs';
-import { resolvePhaseDirByToken } from './gate-schema-drift.cjs';
+import { resolvePhaseDirByToken } from './gate-phase-context.cjs';
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- planning-workspace.cjs is an export= CommonJS module
 import planningWorkspace = require('./planning-workspace.cjs');
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- verification.cjs is an export= CommonJS module
@@ -161,7 +161,8 @@ export function evaluateContextDriftGate(input: {
 }): GateResult {
   const phaseArg = input.args[0] || '';
   if (!phaseArg) {
-    return gateUsageFailure(GATE_FAILURE_CODE.SDK_MISSING_ARG, 'Usage: verify context-drift <phase>');
+    // UNKNOWN: the pre-move `error('Usage…')` named no reason, and the reason is observable (#5219).
+    return gateUsageFailure(GATE_FAILURE_CODE.UNKNOWN, 'Usage: verify context-drift <phase>');
   }
 
   // Non-blocking contract: a throw anywhere (an invalid GSD_WORKSTREAM, an unreadable file)

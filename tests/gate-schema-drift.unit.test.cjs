@@ -23,6 +23,7 @@ const { createTempProject, createTempGitProject, cleanup } = require('./helpers.
 const { put, git, failRead } = require('./helpers/gate-positive-control.cjs');
 
 const gate = require('../gsd-core/bin/lib/gate-schema-drift.cjs');
+const phaseContext = require('../gsd-core/bin/lib/gate-phase-context.cjs');
 const { isGateUsageFailure } = require('../gsd-core/bin/lib/gate-verdict.cjs');
 
 const SCHEMA_PLAN = '---\nphase: 01\nfiles_modified:\n  - prisma/schema.prisma\n---\n\n# Plan\n';
@@ -63,7 +64,7 @@ function evaluate(options, args, env) {
 function withSchemaPlan(dir) { put(dir, `${PHASE}/01-01-PLAN.md`, SCHEMA_PLAN); }
 
 describe('evaluateSchemaDriftGate: usage', () => {
-  const USAGE = { failure: { code: 'sdk_missing_arg', message: 'Usage: verify schema-drift <phase> [--skip]' } };
+  const USAGE = { failure: { code: 'unknown', message: 'Usage: verify schema-drift <phase> [--skip]' } };
 
   test('no argument is a usage failure carrying the old error() text', () => {
     const result = evaluate({}, []);
@@ -148,12 +149,22 @@ describe('evaluateSchemaDriftGate: none versus unreadable', () => {
     assert.equal(result.payload.unreadable_file, '01-01-SUMMARY.md');
   });
 
-  test('the bypass makes an unreadable plan moot (the gate is skipped, not unreadable)', () => {
+  test('the bypass makes an unreadable plan moot: the unreadable arm is not taken, and no plan content is read so nothing is detected (pass, exactly this payload)', () => {
     const result = evaluate({
       setup: (dir) => { withSchemaPlan(dir); return failRead('01-01-PLAN.md'); },
     }, ['1'], { GSD_SKIP_SCHEMA_CHECK: 'true' });
-    assert.notEqual(result.outcome, 'unreadable');
+    assert.equal(result.outcome, 'pass');
     assert.equal(result.block, false);
+    assert.deepStrictEqual(result.payload, {
+      block: false,
+      drift_detected: false,
+      blocking: false,
+      schema_files: [],
+      orms: [],
+      unpushed_orms: [],
+      message: '',
+      skipped: false,
+    });
   });
 });
 
@@ -269,17 +280,17 @@ describe('evaluateSchemaDriftGate: the non-blocking contract', () => {
   });
 });
 
-describe('resolvePhaseDirByToken (shared with the context-drift gate)', () => {
+describe('resolvePhaseDirByToken (gate-phase-context, shared by the schema- and context-drift gates)', () => {
   test('an exact phase number resolves, a different phase whose directory merely contains it does not', () => {
     const dir = createTempProject('gate-schema-resolve-');
     try {
       put(dir, '.planning/phases/11-expansion/keep.txt', 'x\n');
       put(dir, '.planning/phases/01-core/keep.txt', 'x\n');
       const phasesDir = path.join(dir, '.planning', 'phases');
-      assert.equal(gate.resolvePhaseDirByToken(phasesDir, '1'), path.join(phasesDir, '01-core'));
-      assert.equal(gate.resolvePhaseDirByToken(phasesDir, '01'), path.join(phasesDir, '01-core'));
-      assert.equal(gate.resolvePhaseDirByToken(phasesDir, '11'), path.join(phasesDir, '11-expansion'));
-      assert.equal(gate.resolvePhaseDirByToken(phasesDir, '2'), null);
+      assert.equal(phaseContext.resolvePhaseDirByToken(phasesDir, '1'), path.join(phasesDir, '01-core'));
+      assert.equal(phaseContext.resolvePhaseDirByToken(phasesDir, '01'), path.join(phasesDir, '01-core'));
+      assert.equal(phaseContext.resolvePhaseDirByToken(phasesDir, '11'), path.join(phasesDir, '11-expansion'));
+      assert.equal(phaseContext.resolvePhaseDirByToken(phasesDir, '2'), null);
     } finally {
       cleanup(dir);
     }
@@ -291,8 +302,8 @@ describe('resolvePhaseDirByToken (shared with the context-drift gate)', () => {
       put(dir, '.planning/phases/custom-name/keep.txt', 'x\n');
       put(dir, '.planning/outside/keep.txt', 'x\n');
       const phasesDir = path.join(dir, '.planning', 'phases');
-      assert.equal(gate.resolvePhaseDirByToken(phasesDir, 'custom-name'), path.join(phasesDir, 'custom-name'));
-      assert.equal(gate.resolvePhaseDirByToken(phasesDir, '../outside'), null);
+      assert.equal(phaseContext.resolvePhaseDirByToken(phasesDir, 'custom-name'), path.join(phasesDir, 'custom-name'));
+      assert.equal(phaseContext.resolvePhaseDirByToken(phasesDir, '../outside'), null);
     } finally {
       cleanup(dir);
     }

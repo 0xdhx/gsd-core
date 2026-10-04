@@ -349,8 +349,11 @@ describe('lint-gate-positive-control — limit-1, limit, limit+1 (property)', ()
 describe('lint-gate-positive-control — the real tree', () => {
   test('realTreeCensusIsZero: 16 gate modules (ADR-5057 census, arm C closed), every count zero', () => {
     const c = census(ROOT, parser);
-    // Gates are discovered, never listed: no count is pinned here, so adding a gate (with its control) edits nothing.
-    assert.ok(c.gates >= 1, 'gates are discovered (zero is an inert scan)');
+    // Gates are discovered, never listed, so adding a gate (with its control) edits nothing; but the count
+    // may only grow. 16 is the census after ADR-5057 arm C (#5219: schema-, codebase- and context-drift and
+    // prohibition-enforcement became gate modules): a drop means a gate left `src/gate-*.cts` (or stopped
+    // being discovered) and escaped the ratchet.
+    assert.ok(c.gates >= 16, `at least the 16 gate modules of the ADR-5057 census must be discovered; found ${c.gates}`);
     assert.equal(c.controls, c.gates, 'one control per discovered gate');
     for (const key of ['noControl', 'duplicateControl', 'wrongRed', 'noFailingVerdict', 'wrongModule', 'wrongFn', 'malformedControl', 'orphanControl', 'unclassifiedEvaluate', 'multipleEvaluates', 'allowlisted', 'total']) {
       assert.equal(c[key], 0, key);

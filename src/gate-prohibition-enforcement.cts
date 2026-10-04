@@ -23,7 +23,7 @@ import type { GateResult } from './gate-verdict.cjs';
 import { readTextEvidence, evidenceFound, evidenceFromError } from './gate-evidence.cjs';
 import type { Evidence } from './gate-evidence.cjs';
 import { runProhibitionEnforcement } from './prohibition-enforcement.cjs';
-import type { CheckDescriptor } from './prohibition-enforcement.cjs';
+import type { CheckDescriptor, EnforcementResult } from './prohibition-enforcement.cjs';
 
 interface ProhibitionRequest {
   prohibition: unknown;
@@ -87,7 +87,10 @@ export function evaluateProhibitionEnforcementGate(input: {
     const result = runProhibitionEnforcement(req.prohibition, req.check, req.mode ? { mode: req.mode } : {});
     return gateVerdict('advisory', false, { ...result });
   } catch (err) {
-    return gateUnreadable(false, {
+    // The producer's own fail-closed shape (`EnforcementResult`: a `ProhibitionDisposition` plus the
+    // located / kind / evidence provenance): typed, so a change to that shape fails the build here
+    // instead of drifting silently.
+    const failedClosed: EnforcementResult = {
       status: 'unverified',
       flagged: true,
       tier: null,
@@ -96,6 +99,7 @@ export function evaluateProhibitionEnforcementGate(input: {
       kind: null,
       evidence: [],
       ...(req.mode ? { mode: req.mode } : {}),
-    });
+    };
+    return gateUnreadable(false, { ...failedClosed });
   }
 }

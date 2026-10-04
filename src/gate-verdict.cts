@@ -54,11 +54,17 @@ export type GateResult = GateVerdict | GateUsageFailure;
  * The `GateUsageFailure.failure.code` values a gate module produces. A gate module may not import
  * `./io.cjs` (whose `ERROR_REASON` owns these wire strings), so it names them here; the router
  * hands the code straight to `error()`. Values are pinned equal to `ERROR_REASON.USAGE` /
- * `ERROR_REASON.SDK_MISSING_ARG` by the cutover-equivalence goldens.
+ * `ERROR_REASON.SDK_MISSING_ARG` / `ERROR_REASON.UNKNOWN` by the cutover-equivalence goldens and
+ * the parity test in tests/check-router-cutover-equivalence.test.cjs.
+ *
+ * `UNKNOWN` is the reason `error()` records when its caller names none: the drift verbs' usage
+ * failures never named one (#5219), and the JSON diagnostic's `reason` and the exit-contract v2
+ * status (UNKNOWN is FAIL, 1; SDK_MISSING_ARG is USAGE, 64) are observable, so they keep it.
  */
 export const GATE_FAILURE_CODE = Object.freeze({
   USAGE: 'usage',
   SDK_MISSING_ARG: 'sdk_missing_arg',
+  UNKNOWN: 'unknown',
 });
 
 /**
