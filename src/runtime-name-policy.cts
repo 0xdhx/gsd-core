@@ -624,25 +624,8 @@ export function runtimeFlags(runtime: string): Readonly<Record<string, boolean>>
   return Object.freeze(flags);
 }
 
-/**
- * The `/gsd-new-project` invocation syntax per runtime — the post-install
- * "next step" command string. Most runtimes use the default `/gsd-new-project`;
- * a few hosts need a different surface syntax. Collapses the 14-line
- * `if (runtime === 'x') command = ...` chain in bin/install.js's next-step
- * message (ADR-1239 Phase B / #1679 AC2). Pure: no I/O.
- */
-const DEFAULT_NEW_PROJECT_COMMAND = '/gsd-new-project';
-const RUNTIME_NEW_PROJECT_COMMANDS: Readonly<Record<string, string>> = {
-  codex: '$gsd-new-project',
-  cursor: 'gsd-new-project (mention the skill name)',
-  kimi: '/skill:gsd-new-project',
-};
-
-export function getRuntimeNewProjectCommand(runtime: string): string {
-  // Deliberately NOT retirement-guarded: this value does not vary by runtime
-  // in a way that makes a retired id a WRONG answer, so throwing here would
-  // cost callers a crash without correcting anything.
-  if (!runtime) return DEFAULT_NEW_PROJECT_COMMAND;
-  const c = RUNTIME_NEW_PROJECT_COMMANDS[runtime];
-  return typeof c === 'string' && c.length > 0 ? c : DEFAULT_NEW_PROJECT_COMMAND;
-}
+// The `/gsd-new-project` next-step command is no longer a per-runtime table
+// here: it is generated from the runtime's registered trigger surface by
+// `resolveAdvertisedNewProject` (runtime-artifact-layout.cts, #5215, ADR-5057
+// §5 Phase 12), so what the installer advertises cannot differ from what a
+// runtime registered.

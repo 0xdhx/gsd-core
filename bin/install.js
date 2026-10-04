@@ -49,7 +49,7 @@ const { isTestHomeGuardRefusal } = require('../gsd-core/bin/lib/real-home-guard.
 // (getConfigDirFromHome and the runtime-content-rewrite loops below) — #2876
 // retired the re-export; tests now import getDirName directly from
 // gsd-core/bin/lib/runtime-name-policy.cjs.
-const { getDirName, getRuntimeLabel, getGlobalConfigHomeFragment, runtimeFlags, getRuntimeNewProjectCommand, hostBehaviorsFor } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
+const { getDirName, getRuntimeLabel, getGlobalConfigHomeFragment, runtimeFlags, hostBehaviorsFor } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
 const {
   applyWorktreeBaseRef,
   readBaseRefFromSettings,
@@ -771,6 +771,7 @@ const {
 } = require(path.join(_gsdLibDir, 'installer-migration-report.cjs'));
 const {
   resolveRuntimeArtifactLayout,
+  resolveAdvertisedNewProject,
 } = require(path.join(_gsdLibDir, 'runtime-artifact-layout.cjs'));
 const {
   readSurface,
@@ -13647,18 +13648,29 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // generation reads it). This call is idempotent (preserves existing values).
   writeNonClaudeDefaults(runtime);
 
-  // program + command are now single-source lookups (ADR-1239 Phase B / #1679):
-  // program is the runtime display label; command is the per-host /gsd-new-project
-  // invocation syntax.
+  // program is the runtime display label (ADR-1239 Phase B / #1679). The command
+  // is generated from the surface this runtime registered in this install scope
+  // (#5215, ADR-5057 §5 Phase 12) — a runtime that registers no new-project
+  // trigger is told so instead of being sent to a command that does not exist (#4567).
   const program = getRuntimeLabel(runtime);
-  const command = getRuntimeNewProjectCommand(runtime);
+  const advertised = resolveAdvertisedNewProject(runtime, isGlobal ? 'global' : 'local');
+  const command = advertised.kind === 'command' ? advertised.command : null;
+  // Host-specific launch/restart steps below stay; only the new-project clause
+  // changes when the runtime registered no such command.
+  const noNewProject = advertised.kind === 'unregistered'
+    ? `${program} registers no new-project command in this scope${advertised.nativeCommand ? ` (its native extension registers ${cyan}${advertised.nativeCommand}${reset})` : ''}.`
+    : '';
 
   // Claude Code global installs use the skills/ format (CC 2.1.88+).
   // Restart is required for CC to pick up newly-installed skills, and the
   // slash-menu surface depends on CC version — so the instruction needs to
   // cover both invocation paths to avoid #2957-style "no commands appear".
   if (hostBehaviorsFor(runtime).skillsGlobalOnboarding && isGlobal) {
-    console.log(`
+    console.log(command === null ? `
+  ${green}Done!${reset} Restart ${program}. ${noNewProject}
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Restart ${program}, then in any directory either type ${cyan}${command}${reset} or ask Claude to run the ${cyan}gsd-new-project${reset} skill.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -13668,7 +13680,11 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
 
   if (hostBehaviorsFor(runtime).doneBannerStyle === 'kimi-agent-file') {
     const agentPath = configDir ? path.join(configDir, 'agents', 'gsd.yaml') : 'agents/gsd.yaml';
-    console.log(`
+    console.log(command === null ? `
+  ${green}Done!${reset} Start ${program} with ${cyan}kimi --agent-file ${agentPath}${reset}. ${noNewProject}
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Start ${program} with ${cyan}kimi --agent-file ${agentPath}${reset}, then run ${cyan}${command}${reset}.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -13676,7 +13692,11 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
     return;
   }
 
-  console.log(`
+  console.log(command === null ? `
+  ${green}Done!${reset} GSD is installed for ${program}, which registers no new-project command in this scope${advertised.nativeCommand ? ` (its native extension registers ${cyan}${advertised.nativeCommand}${reset})` : ''}.
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Open a blank directory in ${program} and run ${cyan}${command}${reset}.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r

@@ -32,7 +32,7 @@ const assert = require('node:assert/strict');
 const runtimeNamePolicy = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
 const registry = require('../gsd-core/bin/lib/capability-registry.cjs');
 
-const { getRuntimeLabel, getRuntimeNewProjectCommand } = runtimeNamePolicy;
+const { getRuntimeLabel } = runtimeNamePolicy;
 
 const FALLBACK = 'Claude Code';
 const RUNTIME_IDS = Object.keys(registry.runtimes);
@@ -69,35 +69,6 @@ test('getRuntimeLabel: an absent id is the generic path; an unknown or alias id 
     'getRuntimeLabel("claude-code") must refuse (raw-id match only; aliases are not expanded)');
 });
 
-// ---------------------------------------------------------------------------
-// getRuntimeNewProjectCommand (ADR-1239 Phase B / #1679 AC2) — the per-runtime
-// /gsd-new-project invocation syntax for the post-install next-step message.
-// ---------------------------------------------------------------------------
-
-// CURATED override table — runtimes whose /gsd-new-project invocation differs
-// from the default. All other registry runtimes resolve to the default.
-const NEW_PROJECT_OVERRIDES = {
-  codex: '$gsd-new-project',
-  cursor: 'gsd-new-project (mention the skill name)',
-  kimi: '/skill:gsd-new-project',
-};
-const DEFAULT_CMD = '/gsd-new-project';
-
-test('getRuntimeNewProjectCommand: each override runtime resolves to its curated command', () => {
-  for (const [id, expected] of Object.entries(NEW_PROJECT_OVERRIDES)) {
-    assert.strictEqual(getRuntimeNewProjectCommand(id), expected, `override ${id}`);
-  }
-});
-
-test('getRuntimeNewProjectCommand: every registry runtime not in the override table resolves to the default (count-agnostic)', () => {
-  for (const id of RUNTIME_IDS) {
-    if (Object.prototype.hasOwnProperty.call(NEW_PROJECT_OVERRIDES, id)) continue;
-    assert.strictEqual(getRuntimeNewProjectCommand(id), DEFAULT_CMD,
-      `runtime '${id}' must return the default command (add to NEW_PROJECT_OVERRIDES if it needs a non-default form)`);
-  }
-});
-
-test('getRuntimeNewProjectCommand: unknown / empty → default (fail-closed)', () => {
-  assert.strictEqual(getRuntimeNewProjectCommand('unknown'), DEFAULT_CMD);
-  assert.strictEqual(getRuntimeNewProjectCommand(''), DEFAULT_CMD);
-});
+// The per-runtime `/gsd-new-project` next-step command is no longer a label-
+// policy table: it is generated from the registered trigger surface and pinned
+// by tests/advertised-command-parity.test.cjs (#5215, ADR-5057 Phase 12).

@@ -136,6 +136,7 @@ module.exports = {
   "tests/helpers-cleanup.test.cjs",
   "tests/helpers-process-isolation.test.cjs",
   "tests/hermes-skills-migration.test.cjs",
+  "tests/hook-activation-probe.test.cjs",
   "tests/hooks-commonjs-marker.test.cjs",
   "tests/hooks-crash-policy.test.cjs",
   "tests/hooks-opt-in.test.cjs",
