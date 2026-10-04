@@ -23,6 +23,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { cleanup } = require('./helpers.cjs');
+const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
 const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 
 const ROOT = path.join(__dirname, '..');
@@ -54,10 +55,15 @@ describe('_gsd_homes is rendered from the descriptors', () => {
 
   test('claude is probed first; the legacy non-registry home is probed last', () => {
     const text = sync.loadDerivedHomes();
-    const firstArg = text.indexOf('"');
-    assert.ok(text.slice(firstArg).startsWith('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/gsd-core/bin/'));
-    const lastArgStart = text.lastIndexOf(' "');
-    assert.ok(text.slice(lastArgStart).includes('GROK_AGENTS_HOME'));
+    const list = text.slice(text.indexOf(' in ') + ' in '.length, text.indexOf('; do '));
+    assert.ok(list.startsWith('"${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "'), 'claude is the first element');
+    assert.ok(list.slice(list.lastIndexOf(' "')).includes('GROK_AGENTS_HOME'), 'the legacy home is the last element');
+  });
+
+  test('the shim suffix is written once, in the loop body, not once per home (the preamble ships in ~240 files)', () => {
+    const text = sync.loadDerivedHomes();
+    assert.equal(text.split('/gsd-core/bin/').length - 1, 1);
+    assert.ok(text.endsWith('; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }'));
   });
 
   test('every registered runtime with a file-projected home contributes its env override', () => {
@@ -76,7 +82,7 @@ describe('_gsd_homes is rendered from the descriptors', () => {
   test('a runtime with no file-projected home (kind "none") contributes nothing', () => {
     const fake = { runtimes: { ide: { runtime: { configHome: { kind: 'none', name: 'ide', env: [] } } } } };
     const text = sync.renderHomesFunction(fake, {});
-    assert.equal(text, '_gsd_homes() { _gsd_at ; }');
+    assert.equal(text, '_gsd_homes() { for _h in ; do _gsd_at "$_h/gsd-core/bin/${_GSD_SHIM_NAME}" && return 0; done; return 1; }');
   });
 
   test('every descriptor value rendered into shell is a plain identifier or path segment (no shell metacharacters)', () => {
@@ -103,6 +109,26 @@ describe('_gsd_homes is rendered from the descriptors', () => {
   test('the retired gemini runtime is no longer probed (#4347)', () => {
     assert.ok(!snippetText.includes('GEMINI_CONFIG_DIR'));
     for (const id of RUNTIMES) assert.ok(!registry.runtimes[id].runtime.configHome.env.includes('GEMINI_CONFIG_DIR'));
+  });
+
+  test('the resolver reference and every command template carry the canonical preamble line (no older fixed-list copy)', () => {
+    const preambleLine = sync.loadPreamble()[0];
+    const offenders = [];
+    const check = (file) => {
+      for (const line of splitLines(fs.readFileSync(file, 'utf8'))) {
+        if (/^_GSD_SHIM_NAME=/.test(line) && line !== preambleLine) offenders.push(path.relative(ROOT, file));
+      }
+    };
+    check(path.join(ROOT, 'gsd-core', 'references', 'gsd-run-resolver.md'));
+    const walk = (d) => {
+      for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (entry.name.endsWith('.md')) check(full);
+      }
+    };
+    walk(path.join(ROOT, 'commands'));
+    assert.deepEqual(offenders, []);
   });
 
   test('no shipped workflow, agent or command carries the retired env var', () => {

@@ -6,12 +6,15 @@
  *
  * Locks, behaviorally:
  *   - ONE host-behaviors accessor (`hostBehaviorsFor`): every registered
- *     runtime resolves to its descriptor; an absent id is the generic path; a
- *     non-canonical id refuses; the #338 privacy floor survives a registry-load
- *     failure.
- *   - EVERY descriptor accessor refuses an id it does not know — including
- *     prototype keys and near-misses — as a `fast-check` property, and refuses a
- *     retired id with the retirement error (retired is checked first).
+ *     runtime resolves to its descriptor; an absent, unregistered or retired
+ *     label declares no behaviors (the generic path, never Claude's, and never a
+ *     throw — it is read by guard and hook code on user-supplied labels); the
+ *     #338 privacy floor survives a registry-load failure.
+ *   - EVERY accessor whose fallthrough answer is a Claude Code value
+ *     (`getDirName`, `getRuntimeLabel`, `getGlobalConfigHomeFragment`,
+ *     `getGlobalConfigDir`, `getGlobalSkillsBase`) refuses an id it does not know —
+ *     including prototype keys and near-misses — as a `fast-check` property, and
+ *     refuses a retired id with the retirement error (retired is checked first).
  *   - The content-rewrite profile each runtime declares is one the rewrite
  *     engine actually handles (a typo in a descriptor cannot silently disable a
  *     runtime's path rewrites).
@@ -54,7 +57,6 @@ const ACCESSORS = {
   getGlobalConfigHomeFragment,
   getGlobalConfigDir: (id) => getGlobalConfigDir(id),
   getGlobalSkillsBase,
-  hostBehaviorsFor: (id) => hostBehaviorsFor(id),
   assertKnownRuntime,
 };
 
@@ -78,26 +80,41 @@ describe('hostBehaviorsFor — the single host-behaviors accessor', () => {
     }
   });
 
-  test('a non-canonical id refuses: typo, case, whitespace, alias', () => {
-    for (const bad of ['claud', 'Claude', 'CLAUDE', ' claude', 'claude ', 'claude-code', 'codex-cli', 'gemini-typo', 'x']) {
-      assert.throws(() => hostBehaviorsFor(bad), UNKNOWN, JSON.stringify(bad));
+  // hostBehaviorsFor is a PREDICATE source read by guard and hook code on
+  // user-supplied runtime labels (a stale config value, a retired id). For a label
+  // GSD does not know, "no declared behaviors" is the correct, generic answer — it
+  // is never Claude Code's behaviors — and a throw would crash a session instead of
+  // skipping a behavior. The path/label accessors, whose fallthrough IS a Claude
+  // Code value, are the ones that refuse (next describe). ADR-5057 §5 amendment.
+  test('a non-canonical id declares no behaviors: typo, case, whitespace, alias — and never Claude\'s', () => {
+    const claude = hostBehaviorsFor('claude');
+    assert.ok(Object.keys(claude).length > 0);
+    for (const label of ['claud', 'Claude', 'CLAUDE', ' claude', 'claude ', 'claude-code', 'codex-cli', 'gemini-typo', 'x']) {
+      const got = hostBehaviorsFor(label);
+      assert.deepEqual(got, {}, JSON.stringify(label));
+      assert.notStrictEqual(got, claude, `${JSON.stringify(label)} must not alias claude's descriptor`);
     }
   });
 
-  test('an error names the offending id', () => {
-    try {
-      hostBehaviorsFor('nope-runtime');
-      assert.fail('must throw');
-    } catch (err) {
-      assert.equal(err.runtimeId, 'nope-runtime');
-      assert.ok(err instanceof Error);
-    }
+  test('a retired id declares no behaviors and does not throw (a stale config must not crash a hook)', () => {
+    for (const retired of RETIRED_RUNTIME_IDS) assert.deepEqual(hostBehaviorsFor(retired), {});
   });
 
-  test('prototype keys refuse: the lookup is an own-property check, never an index', () => {
+  test('prototype keys declare nothing: the lookup is an own-property check, never an index', () => {
     for (const key of ['__proto__', 'constructor', 'prototype', 'toString', 'hasOwnProperty', 'valueOf']) {
-      assert.throws(() => hostBehaviorsFor(key), UNKNOWN, key);
+      assert.deepEqual(hostBehaviorsFor(key), {}, key);
     }
+  });
+
+  test('property: hostBehaviorsFor never throws for any string, and an unregistered one declares nothing', () => {
+    fc.assert(
+      fc.property(fc.string({ maxLength: 40 }), (label) => {
+        const got = hostBehaviorsFor(label);
+        assert.equal(typeof got, 'object');
+        if (!isKnownRuntimeId(label)) assert.deepEqual(got, {});
+      }),
+      { seed: 5169, numRuns: 300 },
+    );
   });
 
   test('known non-registry ids (grok) resolve to the generic behaviors rather than refusing', () => {
@@ -133,8 +150,8 @@ describe('hostBehaviorsFor — the single host-behaviors accessor', () => {
     assert.deepEqual(hostBehaviorsFor('codex', fake), {});
   });
 
-  test('an injected registry is authoritative: an id it lacks refuses', () => {
-    assert.throws(() => hostBehaviorsFor('claude', { runtimes: { codex: { runtime: {} } } }), UNKNOWN);
+  test('an injected registry is authoritative: an id it lacks declares nothing', () => {
+    assert.deepEqual(hostBehaviorsFor('claude', { runtimes: { codex: { runtime: {} } } }), {});
   });
 });
 
@@ -212,9 +229,8 @@ describe('every descriptor accessor refuses an unknown id', () => {
     assert.equal(policy.getRuntimeNewProjectCommand('future-runtime-xyz'), '/gsd-new-project');
   });
 
-  test('the rewrite engine and the skill converter refuse an unknown runtime instead of rewriting for it', () => {
+  test('the content rewrite engine refuses an unknown runtime instead of rewriting for it', () => {
     assert.throws(() => conversion._applyRuntimeRewrites('~/.claude/x', 'not-a-runtime', '$HOME/.p/', true, undefined), UNKNOWN);
-    assert.throws(() => conversion.applyAgentPathRewrites('~/.claude/x', 'not-a-runtime', '$HOME/.p/'), UNKNOWN);
   });
 });
 

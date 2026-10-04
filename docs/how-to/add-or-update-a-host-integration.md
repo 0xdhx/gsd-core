@@ -129,8 +129,9 @@ yields the same truth value**, so behavior is unchanged and only the brittle cou
 
 3. **Replace each branch with a descriptor read.** `hostBehaviorsFor(runtime)` in
    `src/runtime-name-policy.cts` is the one accessor (reads
-   `capability-registry.runtimes[runtime].runtime.hostBehaviors`; `{}` for an empty id; **throws
-   `UnknownRuntimeError` for an id that is not registered**, #5169). Rewrite
+   `capability-registry.runtimes[runtime].runtime.hostBehaviors`; `{}` for an empty or unregistered
+   id, #5169 — the path and label accessors, by contrast, throw `UnknownRuntimeError` for an id that is
+   not registered). Rewrite
    `if (runtime === 'claude')` → `if (hostBehaviorsFor(runtime).permissionsSchema === 'claude')`, and
    `if (runtime !== 'claude')` → `if (!hostBehaviorsFor(runtime).authorsCanonicalWorkflow)`. Only the host
    declares the key, so every other runtime keeps the generic path. A new key must also join

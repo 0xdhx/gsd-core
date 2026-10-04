@@ -228,7 +228,7 @@ Install and hook code does not compare a runtime id to a literal; it reads one o
 | `rewriteClaudeAtIncludes` | boolean | `codex` | Rewrite `@~/.claude/…` includes in installed files to the Codex root. |
 | `bakesStaticAgentModel`, `bakedAgentFileExtensions` | boolean, string[] | `codex`, `kilo`, `opencode` | The runtime bakes the resolved model into agent files at install time; the stale-bake guard watches the listed extensions. |
 
-An accessor that takes a runtime id **refuses** one that is not registered (`UnknownRuntimeError`) instead of returning Claude Code's values; an empty id is the generic "no runtime" path and keeps its defaults.
+The path and label accessors (`getDirName`, `getRuntimeLabel`, `getGlobalConfigHomeFragment`, `getGlobalConfigDir`, `getGlobalSkillsBase`) **refuse** an id that is not registered (`UnknownRuntimeError`) instead of returning Claude Code's values; an empty id is the generic "no runtime" path and keeps its defaults. `hostBehaviorsFor` itself answers `{}` for an unregistered or retired label — no declared behaviors, the generic path — because guard and hook code read it on user-supplied labels.
 
 **`reviewerCli` has been removed.** It was a boolean that marked a runtime capability as also being a reviewer lane. [ADR-2782](../adr/2782-reviewer-lane-capability-surface.md) replaced it with the [`reviewer` body](#reviewer-body-role-reviewer-or-on-any-role); it survived one release (1.9.0 → 1.10.0) as a derived legacy alias and was deleted in Phase 7 ([#2801](https://github.com/open-gsd/gsd-core/issues/2801)). No shipped capability declares it.
 

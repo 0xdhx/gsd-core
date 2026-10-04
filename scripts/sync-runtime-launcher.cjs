@@ -273,13 +273,17 @@ function insertPreamble(lines, preamble) {
 }
 
 /**
- * Index of the first line of the exact canonical preamble inside `lines`, or -1.
+ * Index of the line that starts a launcher preamble inside `lines`, or -1.
+ *
+ * Matched by the marker every version of the preamble opens with
+ * (`_GSD_SHIM_NAME=`), NOT by equality with the CURRENT text: the sync runs
+ * precisely when the snippet changed, so the copy in the file is by definition an
+ * older version, and an exact match never found it — which hoisted a guard-fronted
+ * preamble to the top of its block on every snippet change (#5169; caught by the
+ * #3861 guard-only extraction in tests/code-review-pipeline-regression.test.cjs).
  */
-function findPreambleStart(lines, preamble) {
-  for (let k = 0; k + preamble.length <= lines.length; k++) {
-    if (preamble.every((l, p) => lines[k + p] === l)) return k;
-  }
-  return -1;
+function findPreambleStart(lines) {
+  return lines.findIndex((l) => /^_GSD_SHIM_NAME=/.test(l));
 }
 
 /**
@@ -295,7 +299,7 @@ function findPreambleStart(lines, preamble) {
  * are stripped on their own and their length is the insertion point.
  */
 function insertPreambleKeepingGuard(original, stripped, preamble) {
-  const k = findPreambleStart(original, preamble);
+  const k = findPreambleStart(original);
   const firstContent = original.findIndex((l) => l.trim() !== '');
   if (k <= firstContent) return insertPreamble(stripped, preamble);
   const at = stripAndReplace(original.slice(0, k), preamble).length;
@@ -491,9 +495,10 @@ function renderHomesFunction(registry, legacyHomes) {
     const legacy = legacyHomes[id];
     exprs.push(`\${${legacy.env}:-$HOME/${legacy.dir.join('/')}}`);
   }
-  const unique = [...new Set(exprs)];
-  const args = unique.map((e) => `"${e}/gsd-core/bin/\${_GSD_SHIM_NAME}"`).join(' ');
-  return `${HOMES_START}_gsd_at ${args}${HOMES_END.slice(0, '; }'.length)}`;
+  // One loop over the homes, the `/gsd-core/bin/<shim>` suffix written once: the
+  // preamble is inlined into ~240 prompt files, several of which sit at a size cap.
+  const homes = [...new Set(exprs)].map((e) => `"${e}"`).join(' ');
+  return `${HOMES_START}for _h in ${homes}; do _gsd_at "$_h/gsd-core/bin/\${_GSD_SHIM_NAME}" && return 0; done; return 1; }`;
 }
 
 /** Locate the `_gsd_homes` function text inside the snippet's single line. */
@@ -521,10 +526,48 @@ function refreshSnippetHomes() {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Files that carry the preamble as ONE line but are not transformed by
+// `transformFile` (it would move a per-block definition into the first block):
+//   - gsd-core/references/gsd-run-resolver.md — the @-included canonical copy,
+//     asserted byte-equal to the snippet;
+//   - commands/**/*.md — slash-command templates whose every bash block carries
+//     its own definition (each block is a separate shell), originally copied from
+//     an older fixed-list resolver that still probed the retired gemini home.
+// Every line that starts a resolver (`_GSD_SHIM_NAME=`) is replaced by the
+// canonical preamble line, so these copies are generated, not hand-kept (#5169).
+// ---------------------------------------------------------------------------
+const RESOLVER_REFERENCE = path.join(__dirname, '..', 'gsd-core', 'references', 'gsd-run-resolver.md');
+const COMMANDS_DIR = path.join(__dirname, '..', 'commands');
+
+function replaceResolverLines(content, preambleLine) {
+  return content
+    .split('\n')
+    .map((line) => (/^_GSD_SHIM_NAME=/.test(line) && line !== preambleLine ? preambleLine : line))
+    .join('\n');
+}
+
+function syncSingleLinePreambleFiles(preamble) {
+  if (preamble.length !== 1) throw new Error('the launcher preamble must be a single line to be inlined per block');
+  const files = [RESOLVER_REFERENCE, ...collectFiles(COMMANDS_DIR)];
+  let changed = 0;
+  for (const f of files) {
+    const content = fs.readFileSync(f, 'utf8');
+    const next = replaceResolverLines(content, preamble[0]);
+    if (next !== content) {
+      fs.writeFileSync(f, next, 'utf8');
+      changed++;
+      console.log(`transformed (preamble line): ${path.relative(path.join(__dirname, '..'), f)}`);
+    }
+  }
+  return changed;
+}
+
 // Main
 function main() {
   if (refreshSnippetHomes()) console.log('refreshed _gsd_homes in _runtime-launcher.snippet.sh from the runtime descriptors');
   const preamble = loadPreamble();
+  syncSingleLinePreambleFiles(preamble);
 
   let transformedCount = 0;
   let unchangedCount = 0;
@@ -571,4 +614,5 @@ module.exports = {
   extractHomesFunction,
   loadDerivedHomes,
   refreshSnippetHomes,
+  replaceResolverLines,
 };

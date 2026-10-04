@@ -129,7 +129,7 @@ const migration: InstallerMigration = {
     // a claude/kimi/etc. skills/ or agents/ directory is a live install
     // surface, never a retirement target, and so is antigravity's LOCAL
     // .agents/skills layout.
-    if (ctx.runtime === null || !migration.runtimes.includes(ctx.runtime)) return [];
+    if (ctx.runtime !== 'antigravity') return [];
     if (ctx.scope !== 'global') return [];
 
     const actions: MigrationAction[] = [];

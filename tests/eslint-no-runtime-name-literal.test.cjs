@@ -84,7 +84,6 @@ describe('no-runtime-name-literal — positive controls (goes red)', () => {
       'src/surface.cts',
       'src/shell-command-projection.cts',
       'src/agent-install-check.cts',
-      'src/installer-migrations/009-pi-retire-reserved-hooks-dir.cts',
       'hooks/gsd-read-guard.js',
       'bin/install.js',
     ]) {
@@ -127,6 +126,12 @@ describe('no-runtime-name-literal — negative space (stays green)', () => {
     const code = "function f(runtime) { return runtime === 'hermes'; }";
     assert.equal(lint(code, 'src/runtime-name-policy.cts', OPTS).length, 0);
     assert.equal(lint(code, 'src/runtime-homes.cts', OPTS).length, 0);
+  });
+
+  test('does not govern installer migrations: a shipped migration body is immutable (#670) and names its runtime by design', () => {
+    const code = "function f(ctx) { return ctx.runtime !== 'pi'; }";
+    assert.equal(lint(code, 'src/installer-migrations/009-pi-retire-reserved-hooks-dir.cts', OPTS).length, 0);
+    assert.equal(lint(code, 'src/installer-migrations/000-first-time-baseline.cts', OPTS).length, 0);
   });
 
   test('does not govern non-install source or tests', () => {

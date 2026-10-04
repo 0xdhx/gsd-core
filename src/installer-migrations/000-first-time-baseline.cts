@@ -10,8 +10,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { hostBehaviorsFor, isKnownRuntimeId } from '../runtime-name-policy.cjs';
-
 const BASELINE_MIGRATION_ID = '2026-05-11-first-time-baseline-scan';
 
 // Runtime install surfaces must stay aligned with:
@@ -121,11 +119,7 @@ function isKnownGeneratedAgentPath(relPath: string, runtime: string | undefined)
   if (parts.length !== 2 || parts[0] !== 'agents') return false;
   const fileName = parts[1];
   const extension = path.posix.extname(fileName);
-  // #5169: `.toml` agent files are a descriptor fact (`hostBehaviors.agentTomlFiles`),
-  // not a runtime-name test. An absent or unregistered runtime has none.
-  const declaresTomlAgents = typeof runtime === 'string' && isKnownRuntimeId(runtime)
-    && hostBehaviorsFor(runtime).agentTomlFiles === true;
-  if (extension !== '.md' && !(declaresTomlAgents && extension === '.toml')) return false;
+  if (extension !== '.md' && !(runtime === 'codex' && extension === '.toml')) return false;
 
   const agentName = fileName.slice(0, -extension.length);
   return listKnownGeneratedAgentNames().has(agentName);

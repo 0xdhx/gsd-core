@@ -35,7 +35,7 @@ import { MODEL_ALIAS_MAP, RUNTIME_PROFILE_MAP, PROVIDER_PRESETS, VALID_TIERS, CL
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { canonicalizeRuntimeName, hostBehaviorsFor, isKnownRuntimeId } from './runtime-name-policy.cjs';
+import { canonicalizeRuntimeName, hostBehaviorsFor } from './runtime-name-policy.cjs';
 import {
   resolveActiveRuntime,
   _setInstallRuntimeMarkerForTests,
@@ -66,7 +66,7 @@ const { planningDir } = planningWorkspaceMod;
 // runtime that declares it — not a hand-kept set in this module. A label that is
 // not a registered runtime (a future runtime named by env/config) has none.
 function hasNativeModelAliases(runtime: string): boolean {
-  return isKnownRuntimeId(runtime) && hostBehaviorsFor(runtime).nativeModelAliases === true;
+  return hostBehaviorsFor(runtime).nativeModelAliases === true;
 }
 
 // #3897 rung 2: the marker reader + its cache and test seams were promoted to

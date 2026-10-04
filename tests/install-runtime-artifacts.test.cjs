@@ -4891,8 +4891,11 @@ describe('getDirName (relocated to runtime-name-policy)', () => {
     });
   }
 
-  test('falls back to .claude for an unknown runtime', () => {
-    assert.strictEqual(runtimeNamePolicy.getDirName('definitely-not-a-runtime'), '.claude');
+  test('refuses an unknown runtime instead of falling back to .claude (#5169)', () => {
+    assert.throws(
+      () => runtimeNamePolicy.getDirName('definitely-not-a-runtime'),
+      { name: 'UnknownRuntimeError' },
+    );
   });
 
   test('falls back to .claude for empty input', () => {

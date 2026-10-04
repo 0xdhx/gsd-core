@@ -22,7 +22,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const capabilityRegistry = require('./capability-registry.cjs');
-const { hostBehaviorsFor, isKnownRuntimeId } = require('./runtime-name-policy.cjs');
+const { hostBehaviorsFor } = require('./runtime-name-policy.cjs');
 const { resolveConfigHomeFromDescriptor } = require('./runtime-homes.cjs');
 const { resolveActiveRuntime } = require('./runtime-slash.cjs');
 
@@ -38,10 +38,6 @@ const STATIC_FRONTMATTER_RUNTIMES = Object.freeze(
     .sort(),
 );
 
-/** The descriptor's host behaviors for a possibly-unregistered runtime label (none for an unknown one). */
-function bakedBehaviors(runtime) {
-  return runtime && isKnownRuntimeId(runtime) ? hostBehaviorsFor(runtime) : {};
-}
 
 const _warnedKeys = new Set();
 
@@ -156,7 +152,7 @@ function findOldestAgentMtime(runtime, { env = process.env, homedir = os.homedir
   for (const entry of entries) {
     if (!entry.isFile()) continue;
     if (!entry.name.startsWith('gsd-')) continue;
-    const bakedExts = bakedBehaviors(runtime).bakedAgentFileExtensions;
+    const bakedExts = hostBehaviorsFor(runtime).bakedAgentFileExtensions;
     const isAgentFile = Array.isArray(bakedExts) && bakedExts.some((ext) => entry.name.endsWith(ext));
     if (!isAgentFile) continue;
     try {

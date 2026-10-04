@@ -241,8 +241,15 @@ export const FALLBACK_HOST_BEHAVIORS: Readonly<Record<string, Readonly<Record<st
  *   none).
  * - known non-registry id (`grok`) → `{}`.
  * - registry failed to load → the #338 floor for the ids it covers, else `{}`.
- * - any other non-empty id → throws {@link UnknownRuntimeError}
- *   (or {@link RetiredRuntimeError} for a retired id).
+ * - any other id (unregistered, retired, a prototype key) → `{}`: no declared
+ *   behaviors, which is the GENERIC path — never Claude Code's behaviors.
+ *
+ * Unlike the path/label accessors (`getDirName`, `getGlobalConfigDir`, …), whose
+ * fallthrough answer is Claude Code's value and therefore a silent wrong answer
+ * (#4632), an absent behavior is the correct answer for a label GSD does not
+ * know — and this accessor is read by guard and hook code on user-supplied
+ * runtime labels (stale config, a retired id), where a throw would crash the
+ * session rather than skip a behavior. ADR-5057 §5 Phase 10 amendment.
  *
  * `registry` is injectable so the load-failure branch is unit-testable.
  */
@@ -251,7 +258,6 @@ export function hostBehaviorsFor(
   registry?: { runtimes?: RegistryRuntimes } | null,
 ): HostBehaviors {
   if (typeof runtime !== 'string' || runtime.length === 0) return {};
-  assertNotRetiredRuntime(runtime);
   const floor = (): HostBehaviors =>
     Object.prototype.hasOwnProperty.call(FALLBACK_HOST_BEHAVIORS, runtime)
       ? FALLBACK_HOST_BEHAVIORS[runtime]
@@ -262,8 +268,7 @@ export function hostBehaviorsFor(
     const declared = runtimes[runtime]?.runtime?.hostBehaviors;
     return declared ? declared : floor();
   }
-  if (LEGACY_NON_REGISTRY_RUNTIME_IDS.has(runtime)) return {};
-  throw new UnknownRuntimeError(runtime);
+  return {};
 }
 
 const FALLBACK_ALIASES: Readonly<Record<string, string[]>> = {

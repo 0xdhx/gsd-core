@@ -108,9 +108,16 @@ function isRuntimeIdentifierExpression(node) {
  * code"). Modules that implement the runtime→home/identity mapping itself —
  * `runtime-name-policy.cts` and `runtime-homes.cts` — are the owners and are
  * exempt: their id-keyed tables ARE the descriptor-accessor seam.
+ *
+ * `src/installer-migrations/**` is deliberately NOT governed: a shipped
+ * migration body is immutable (editing it changes its checksum and surfaces
+ * drift to every user who already applied it — #670, the committed baseline in
+ * tests/installer-migrations.test.cjs), and a migration retiring one runtime's
+ * artifacts names that runtime by design. It is historical record, not live
+ * install logic that should read a descriptor.
  */
 const INSTALL_SURFACE_SRC_RE =
-  /(^|\/)src\/(install-[^/]*|installer-migrations\/.*|runtime-artifact-[^/]*|surface|shell-command-projection|agent-install-check|runtime-hooks-surface|retired-artifact-cleanup)\.cts$/;
+  /(^|\/)src\/(install-[^/]*|runtime-artifact-[^/]*|surface|shell-command-projection|agent-install-check|runtime-hooks-surface|retired-artifact-cleanup)\.cts$/;
 
 function isOwnedFile(filename) {
   const posix = String(filename || '').replace(/\\/g, '/');
