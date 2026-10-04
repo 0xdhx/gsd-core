@@ -1006,6 +1006,14 @@ export default tseslint.config(
             message: 'The command router runs no subprocess and reads no file; a gate module does (#5139).',
           },
         ],
+        // ADR-5057 §4 unrepresentable-by-construction (#5219): the router imports a verb's logic only
+        // from a gate module, so a verb implemented elsewhere (verify.cts, a producer's own router) and
+        // wired in here is a lint failure, not a review catch. The non-gate imports are the output
+        // seam, the exit/verdict seams (`gate-*`) and the two gate-support modules the router reads.
+        patterns: [{
+          group: ['./*', '../*', '!./gate-*.cjs', '!./io.cjs', '!./check-auto-mode.cjs', '!./decision-coverage-support.cjs', '!./shell-command-projection.cjs'],
+          message: 'The command router dispatches to gate modules (src/gate-*.cts) only; implement the verb as a gate module that returns a GateResult (ADR-5057 §4, #5219).',
+        }],
       }],
     },
   },

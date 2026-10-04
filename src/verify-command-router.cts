@@ -65,9 +65,8 @@ function routeVerifyCommand({ verify, args, cwd, raw, error }: RouteVerifyComman
           env: skipFlag ? { GSD_SKIP_SCHEMA_CHECK: 'true' } : {},
         });
       },
-      // verify codebase-drift dispatches direct to CJS — drift is out-of-seam
-      // per ADR/PRD 3524 §3 / L160 (CJS-only by design). Routing through
-      // recursive dispatch would re-enter this router path.
+      // verify codebase-drift and context-drift are the same gate modules `check verify-<name>`
+      // runs (#5219, ADR-5057 §4): this surface hands them to the check router, which formats them.
       'codebase-drift': () => routeCheckCommand({ args: ['check', 'verify-codebase-drift'], cwd, raw }),
       'context-drift': () => routeCheckCommand({ args: ['check', 'verify-context-drift', args[2] ?? ''], cwd, raw }),
     },
