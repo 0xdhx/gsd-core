@@ -168,3 +168,86 @@ describe('roadmap upgrade config activation (#4698 Blocker 1)', () => {
     assert.equal(config.phase_id_convention, null, 'config must be untouched when the plan converted zero phases');
   });
 });
+
+// ADR-5057 §6 (Phase 13, #5217): every planning-artifact write the migration
+// makes goes through its seam — headings/bullets through the sectionizer,
+// PROJECT.md prose through PlanningDoc, STATE.md through its own write seam.
+describe('roadmap upgrade writes through the planning seams (#5217)', () => {
+  const ROADMAP = ['## v1.0: First Milestone', '', '### Phase 1: Foo', '', '### Phase 2: Bar', ''].join('\n');
+
+  function setup(prefix, roadmap) {
+    const dir = createTempDir(prefix);
+    makeGitignoredPlanningRepo(dir);
+    fs.mkdirSync(path.join(dir, '.planning'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.planning', 'ROADMAP.md'), roadmap);
+    return dir;
+  }
+
+  test('PROJECT.md and STATE.md prose references are rewritten; a reference inside a fenced block is not', (t) => {
+    const dir = setup('m13-crossref-', ROADMAP);
+    t.after(() => cleanup(dir));
+    const project = path.join(dir, '.planning', 'PROJECT.md');
+    const state = path.join(dir, '.planning', 'STATE.md');
+    fs.writeFileSync(project, 'Phase 1: Foo shipped.\n```\nPhase 2: Bar in a fence\n```\n');
+    fs.writeFileSync(state, '# Project State\n\n**Current Phase:** Phase 2: Bar\n');
+
+    const plan = computeMigrationPlan(dir);
+    const result = applyMigration(dir, plan, { dryRun: false });
+
+    assert.equal(result.applied, true);
+    assert.ok(result.editedFiles.includes('PROJECT.md'));
+    assert.ok(result.editedFiles.includes('STATE.md'));
+    assert.equal(
+      fs.readFileSync(project, 'utf8'),
+      'Phase 1-01: Foo shipped.\n```\nPhase 2: Bar in a fence\n```\n',
+    );
+    const stateAfter = fs.readFileSync(state, 'utf8');
+    assert.ok(stateAfter.includes('**Current Phase:** Phase 1-02: Bar'), 'STATE.md body reference rewritten');
+    assert.ok(!stateAfter.includes('Phase 2: Bar'), 'no legacy reference left in STATE.md');
+  });
+
+  test('a planned heading edit the seam cannot rewrite throws and rolls everything back', (t) => {
+    // `###Phase 1:` has no space after the hashes, so it is not a CommonMark
+    // heading: the planner's own regex reads it, the sectionizer does not.
+    const dir = setup('m13-refused-', ['## v1.0: First Milestone', '', '###Phase 1: Foo', ''].join('\n'));
+    t.after(() => cleanup(dir));
+    const before = fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf8');
+
+    const plan = computeMigrationPlan(dir);
+    assert.ok(plan.roadmapEdits.length >= 1, 'precondition: the planner plans an edit for the heading');
+
+    assert.throws(() => applyMigration(dir, plan, { dryRun: false }), /Migration failed and rolled back/);
+    assert.equal(fs.readFileSync(path.join(dir, '.planning', 'ROADMAP.md'), 'utf8'), before);
+    assert.equal(fs.existsSync(path.join(dir, '.planning', 'config.json')), false);
+  });
+
+  test('a plan file edited after the plan was computed is refused, never clobbered, and the rename rolls back', (t) => {
+    const dir = setup('m13-stale-plan-', ROADMAP);
+    t.after(() => cleanup(dir));
+    const oldDir = path.join(dir, '.planning', 'phases', '01-foo');
+    fs.mkdirSync(oldDir, { recursive: true });
+    const planFile = path.join(oldDir, '01-01-PLAN.md');
+    fs.writeFileSync(planFile, 'edited after planning\n');
+
+    const plan = {
+      alreadyMigrated: false,
+      phases: [
+        {
+          oldId: '1',
+          newId: '1-01',
+          oldDir: '01-foo',
+          newDir: '1-01-foo',
+          dependsOnRewrites: [
+            { oldName: '01-01-PLAN.md', finalName: '01-01-PLAN.md', from: 'content at plan time\n', to: 'rewritten\n' },
+          ],
+        },
+      ],
+      roadmapEdits: [],
+      crossRefEdits: [],
+    };
+
+    assert.throws(() => applyMigration(dir, plan, { dryRun: false }), /changed since the migration plan was computed/);
+    assert.equal(fs.readFileSync(planFile, 'utf8'), 'edited after planning\n');
+    assert.equal(fs.existsSync(path.join(dir, '.planning', 'phases', '1-01-foo')), false, 'rename rolled back');
+  });
+});
