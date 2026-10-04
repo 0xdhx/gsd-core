@@ -103,7 +103,8 @@
       "projectInstructionFile": "GEMINI.md",
       "noPathRewrite": true,
       "hookPathStyle": "raw",
-      "globalDirResolver": "antigravity"
+      "globalDirResolver": "antigravity",
+      "contentRewriteProfile": "attribution-only"
     }
   },
   "reviewer": {

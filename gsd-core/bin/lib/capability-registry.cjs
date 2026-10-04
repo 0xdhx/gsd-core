@@ -197,7 +197,8 @@ const capabilities = {
         "projectInstructionFile": "GEMINI.md",
         "noPathRewrite": true,
         "hookPathStyle": "raw",
-        "globalDirResolver": "antigravity"
+        "globalDirResolver": "antigravity",
+        "contentRewriteProfile": "attribution-only"
       }
     },
     "reviewer": {
@@ -428,7 +429,8 @@ const capabilities = {
       "extendedHookEvents": [],
       "hostBehaviors": {
         "commandBodyConverter": "convertClaudeToAugmentMarkdown",
-        "mcpCompanion": "settings-json"
+        "mcpCompanion": "settings-json",
+        "contentRewriteProfile": "slash-lookahead-own-derived"
       },
       "hostIntegration": {
         "embeddingMode": "declarative",
@@ -614,7 +616,14 @@ const capabilities = {
         "skillsGlobalOnboarding": true,
         "legacyCommandsGsdInstallMigration": true,
         "legacyCommandsGsdUninstall": "global",
-        "hyphenNameAgentBody": true
+        "hyphenNameAgentBody": true,
+        "skipCompactAgents": true,
+        "omitBashRunnerOnWindows": true,
+        "specRootSkillPass": true,
+        "restoreAtRefTildeInAgents": true,
+        "restoreAtRefTildeInSpecTree": true,
+        "skipRuntimeDefaultsStamp": true,
+        "contentRewriteProfile": "slash-tilde-restore"
       }
     },
     "reviewer": {
@@ -842,7 +851,8 @@ const capabilities = {
         "skipSharedHooksInstall": true,
         "localTargetIsProjectRoot": true,
         "clineRulesSurface": true,
-        "localCommandsViaRules": true
+        "localCommandsViaRules": true,
+        "contentRewriteProfile": "slash-bare-own-tilde"
       }
     }
   },
@@ -1046,7 +1056,8 @@ const capabilities = {
         "effortSurface": "undocumented"
       },
       "hostBehaviors": {
-        "reportCommandsDir": true
+        "reportCommandsDir": true,
+        "contentRewriteProfile": "slash-bare-own-tilde-bare"
       }
     }
   },
@@ -1217,6 +1228,13 @@ const capabilities = {
         "unsupportedFeatures": [
           "context-warnings",
           "phase-lifecycle-display"
+        ],
+        "rewriteClaudeAtIncludes": true,
+        "contentRewriteProfile": "slash-own-tilde",
+        "bakesStaticAgentModel": true,
+        "bakedAgentFileExtensions": [
+          ".toml",
+          ".md"
         ]
       }
     },
@@ -1378,7 +1396,8 @@ const capabilities = {
         "reapplyCommand": "/gsd-update --reapply",
         "agentFileExtension": ".agent.md",
         "skipSharedHooksInstall": true,
-        "noPathRewrite": true
+        "noPathRewrite": true,
+        "contentRewriteProfile": "attribution-only"
       }
     }
   },
@@ -1496,7 +1515,8 @@ const capabilities = {
           "stop",
           "subagentStart",
           "subagentStop"
-        ]
+        ],
+        "contentRewriteProfile": "slash-lookahead-own-tilde"
       }
     },
     "reviewer": {
@@ -1905,7 +1925,11 @@ const capabilities = {
         "reapplyCommand": "gsd-update --reapply (mention the skill name)",
         "legacyCommandsGsdInstallMigration": true,
         "legacyCommandsGsdUninstall": true,
-        "hyphenNameAgentBody": true
+        "hyphenNameAgentBody": true,
+        "legacyFlatSkillsCleanup": true,
+        "bareStemSkillsCleanup": true,
+        "categoryContainerCleanup": true,
+        "contentRewriteProfile": "branded-lookahead-own-derived"
       },
       "hostIntegration": {
         "embeddingMode": "imperative",
@@ -2107,7 +2131,11 @@ const capabilities = {
           "file": "gsd-core.js",
           "source": ".kilo/plugins/gsd-core.js"
         },
-        "skipUpdateBannerCommand": true
+        "skipUpdateBannerCommand": true,
+        "bakesStaticAgentModel": true,
+        "bakedAgentFileExtensions": [
+          ".md"
+        ]
       }
     }
   },
@@ -2211,7 +2239,9 @@ const capabilities = {
         "agentManifestStyle": "kimi-nested",
         "doneBannerStyle": "kimi-agent-file",
         "skipSharedHooksInstall": true,
-        "noPathRewrite": true
+        "noPathRewrite": true,
+        "requiresSubagentPair": true,
+        "contentRewriteProfile": "slash-bare"
       }
     }
   },
@@ -2325,7 +2355,8 @@ const capabilities = {
         "agentManifestStyle": "none",
         "doneBannerStyle": "kimi-code",
         "skipSharedHooksInstall": true,
-        "namedSubagentsSupported": false
+        "namedSubagentsSupported": false,
+        "reclaimsKimiLegacyHooksRoot": true
       }
     },
     "reviewer": {
@@ -2988,7 +3019,12 @@ const capabilities = {
         },
         "skipHomePrefixSubstitution": true,
         "skipSettingsUi": true,
-        "skipUpdateBannerCommand": true
+        "skipUpdateBannerCommand": true,
+        "opencodePathPrefix": true,
+        "bakesStaticAgentModel": true,
+        "bakedAgentFileExtensions": [
+          ".md"
+        ]
       }
     },
     "reviewer": {
@@ -3359,7 +3395,8 @@ const capabilities = {
         "legacyCommandsGsdCleanup": true,
         "legacyCommandsGsdInstallMigration": true,
         "legacyCommandsGsdUninstall": true,
-        "hyphenNameAgentBody": true
+        "hyphenNameAgentBody": true,
+        "contentRewriteProfile": "branded-lookahead-own-derived"
       }
     },
     "reviewer": {
@@ -3813,7 +3850,8 @@ const capabilities = {
       "hostBehaviors": {
         "skipSharedHooksInstall": true,
         "soloStageMetadata": "workflow",
-        "projectInstructionFile": ".trae/rules/rules.md"
+        "projectInstructionFile": ".trae/rules/rules.md",
+        "contentRewriteProfile": "slash-bare-own-derived"
       }
     }
   },
@@ -4063,7 +4101,8 @@ const capabilities = {
         "skipSharedHooksInstall": true,
         "legacyDevinSkillsCleanup": true,
         "installsCommandBodiesForWorkflowDelegation": true,
-        "verificationStyle": "windsurf-workflows"
+        "verificationStyle": "windsurf-workflows",
+        "contentRewriteProfile": "slash-lookahead-nested-own-devin"
       }
     }
   },
@@ -4175,7 +4214,8 @@ const capabilities = {
         "effortSurface": "undocumented"
       },
       "hostBehaviors": {
-        "skipSharedHooksInstall": true
+        "skipSharedHooksInstall": true,
+        "contentRewriteProfile": "slash-tilde-restore"
       }
     }
   }
@@ -5567,7 +5607,8 @@ const runtimes = {
         "projectInstructionFile": "GEMINI.md",
         "noPathRewrite": true,
         "hookPathStyle": "raw",
-        "globalDirResolver": "antigravity"
+        "globalDirResolver": "antigravity",
+        "contentRewriteProfile": "attribution-only"
       }
     },
     "reviewer": {
@@ -5715,7 +5756,8 @@ const runtimes = {
       "extendedHookEvents": [],
       "hostBehaviors": {
         "commandBodyConverter": "convertClaudeToAugmentMarkdown",
-        "mcpCompanion": "settings-json"
+        "mcpCompanion": "settings-json",
+        "contentRewriteProfile": "slash-lookahead-own-derived"
       },
       "hostIntegration": {
         "embeddingMode": "declarative",
@@ -5855,7 +5897,14 @@ const runtimes = {
         "skillsGlobalOnboarding": true,
         "legacyCommandsGsdInstallMigration": true,
         "legacyCommandsGsdUninstall": "global",
-        "hyphenNameAgentBody": true
+        "hyphenNameAgentBody": true,
+        "skipCompactAgents": true,
+        "omitBashRunnerOnWindows": true,
+        "specRootSkillPass": true,
+        "restoreAtRefTildeInAgents": true,
+        "restoreAtRefTildeInSpecTree": true,
+        "skipRuntimeDefaultsStamp": true,
+        "contentRewriteProfile": "slash-tilde-restore"
       }
     },
     "reviewer": {
@@ -6009,7 +6058,8 @@ const runtimes = {
         "skipSharedHooksInstall": true,
         "localTargetIsProjectRoot": true,
         "clineRulesSurface": true,
-        "localCommandsViaRules": true
+        "localCommandsViaRules": true,
+        "contentRewriteProfile": "slash-bare-own-tilde"
       }
     }
   },
@@ -6127,7 +6177,8 @@ const runtimes = {
         "effortSurface": "undocumented"
       },
       "hostBehaviors": {
-        "reportCommandsDir": true
+        "reportCommandsDir": true,
+        "contentRewriteProfile": "slash-bare-own-tilde-bare"
       }
     }
   },
@@ -6246,6 +6297,13 @@ const runtimes = {
         "unsupportedFeatures": [
           "context-warnings",
           "phase-lifecycle-display"
+        ],
+        "rewriteClaudeAtIncludes": true,
+        "contentRewriteProfile": "slash-own-tilde",
+        "bakesStaticAgentModel": true,
+        "bakedAgentFileExtensions": [
+          ".toml",
+          ".md"
         ]
       }
     },
@@ -6407,7 +6465,8 @@ const runtimes = {
         "reapplyCommand": "/gsd-update --reapply",
         "agentFileExtension": ".agent.md",
         "skipSharedHooksInstall": true,
-        "noPathRewrite": true
+        "noPathRewrite": true,
+        "contentRewriteProfile": "attribution-only"
       }
     }
   },
@@ -6525,7 +6584,8 @@ const runtimes = {
           "stop",
           "subagentStart",
           "subagentStop"
-        ]
+        ],
+        "contentRewriteProfile": "slash-lookahead-own-tilde"
       }
     },
     "reviewer": {
@@ -6668,7 +6728,11 @@ const runtimes = {
         "reapplyCommand": "gsd-update --reapply (mention the skill name)",
         "legacyCommandsGsdInstallMigration": true,
         "legacyCommandsGsdUninstall": true,
-        "hyphenNameAgentBody": true
+        "hyphenNameAgentBody": true,
+        "legacyFlatSkillsCleanup": true,
+        "bareStemSkillsCleanup": true,
+        "categoryContainerCleanup": true,
+        "contentRewriteProfile": "branded-lookahead-own-derived"
       },
       "hostIntegration": {
         "embeddingMode": "imperative",
@@ -6818,7 +6882,11 @@ const runtimes = {
           "file": "gsd-core.js",
           "source": ".kilo/plugins/gsd-core.js"
         },
-        "skipUpdateBannerCommand": true
+        "skipUpdateBannerCommand": true,
+        "bakesStaticAgentModel": true,
+        "bakedAgentFileExtensions": [
+          ".md"
+        ]
       }
     }
   },
@@ -6922,7 +6990,9 @@ const runtimes = {
         "agentManifestStyle": "kimi-nested",
         "doneBannerStyle": "kimi-agent-file",
         "skipSharedHooksInstall": true,
-        "noPathRewrite": true
+        "noPathRewrite": true,
+        "requiresSubagentPair": true,
+        "contentRewriteProfile": "slash-bare"
       }
     }
   },
@@ -7036,7 +7106,8 @@ const runtimes = {
         "agentManifestStyle": "none",
         "doneBannerStyle": "kimi-code",
         "skipSharedHooksInstall": true,
-        "namedSubagentsSupported": false
+        "namedSubagentsSupported": false,
+        "reclaimsKimiLegacyHooksRoot": true
       }
     },
     "reviewer": {
@@ -7224,7 +7295,12 @@ const runtimes = {
         },
         "skipHomePrefixSubstitution": true,
         "skipSettingsUi": true,
-        "skipUpdateBannerCommand": true
+        "skipUpdateBannerCommand": true,
+        "opencodePathPrefix": true,
+        "bakesStaticAgentModel": true,
+        "bakedAgentFileExtensions": [
+          ".md"
+        ]
       }
     },
     "reviewer": {
@@ -7464,7 +7540,8 @@ const runtimes = {
         "legacyCommandsGsdCleanup": true,
         "legacyCommandsGsdInstallMigration": true,
         "legacyCommandsGsdUninstall": true,
-        "hyphenNameAgentBody": true
+        "hyphenNameAgentBody": true,
+        "contentRewriteProfile": "branded-lookahead-own-derived"
       }
     },
     "reviewer": {
@@ -7601,7 +7678,8 @@ const runtimes = {
       "hostBehaviors": {
         "skipSharedHooksInstall": true,
         "soloStageMetadata": "workflow",
-        "projectInstructionFile": ".trae/rules/rules.md"
+        "projectInstructionFile": ".trae/rules/rules.md",
+        "contentRewriteProfile": "slash-bare-own-derived"
       }
     }
   },
@@ -7751,7 +7829,8 @@ const runtimes = {
         "skipSharedHooksInstall": true,
         "legacyDevinSkillsCleanup": true,
         "installsCommandBodiesForWorkflowDelegation": true,
-        "verificationStyle": "windsurf-workflows"
+        "verificationStyle": "windsurf-workflows",
+        "contentRewriteProfile": "slash-lookahead-nested-own-devin"
       }
     }
   },
@@ -7863,7 +7942,8 @@ const runtimes = {
         "effortSurface": "undocumented"
       },
       "hostBehaviors": {
-        "skipSharedHooksInstall": true
+        "skipSharedHooksInstall": true,
+        "contentRewriteProfile": "slash-tilde-restore"
       }
     }
   }

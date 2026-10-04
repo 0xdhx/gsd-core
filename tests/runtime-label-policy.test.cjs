@@ -59,11 +59,14 @@ test('getRuntimeLabel drift guard: no registry runtime except claude falls throu
   }
 });
 
-test('getRuntimeLabel fallback: unknown / empty / alias inputs return "Claude Code" (fail-closed, raw-id match only)', () => {
-  assert.strictEqual(getRuntimeLabel('unknown'), FALLBACK);
+test('getRuntimeLabel: an absent id is the generic path; an unknown or alias id REFUSES (#5169, raw-id match only)', () => {
+  // An absent id (`''`) is "no runtime selected" and keeps the documented default.
   assert.strictEqual(getRuntimeLabel(''), FALLBACK);
-  assert.strictEqual(getRuntimeLabel('claude-code'), FALLBACK,
-    'getRuntimeLabel("claude-code") must return the default (raw-id match only; aliases are not expanded)');
+  // A non-empty id that is not a registered runtime used to fall through to
+  // "Claude Code" silently; ADR-5057 §5 makes every descriptor accessor refuse it.
+  assert.throws(() => getRuntimeLabel('unknown'), { name: 'UnknownRuntimeError' });
+  assert.throws(() => getRuntimeLabel('claude-code'), { name: 'UnknownRuntimeError' },
+    'getRuntimeLabel("claude-code") must refuse (raw-id match only; aliases are not expanded)');
 });
 
 // ---------------------------------------------------------------------------

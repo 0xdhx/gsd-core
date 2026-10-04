@@ -86,7 +86,11 @@
       "reapplyCommand": "gsd-update --reapply (mention the skill name)",
       "legacyCommandsGsdInstallMigration": true,
       "legacyCommandsGsdUninstall": true,
-      "hyphenNameAgentBody": true
+      "hyphenNameAgentBody": true,
+      "legacyFlatSkillsCleanup": true,
+      "bareStemSkillsCleanup": true,
+      "categoryContainerCleanup": true,
+      "contentRewriteProfile": "branded-lookahead-own-derived"
     },
     "hostIntegration": {
       "embeddingMode": "imperative",

@@ -106,7 +106,8 @@
       "effortSurface": "undocumented"
     },
     "hostBehaviors": {
-      "skipSharedHooksInstall": true
+      "skipSharedHooksInstall": true,
+      "contentRewriteProfile": "slash-tilde-restore"
     }
   }
 }

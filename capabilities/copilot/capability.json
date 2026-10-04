@@ -94,7 +94,8 @@
       "reapplyCommand": "/gsd-update --reapply",
       "agentFileExtension": ".agent.md",
       "skipSharedHooksInstall": true,
-      "noPathRewrite": true
+      "noPathRewrite": true,
+      "contentRewriteProfile": "attribution-only"
     }
   }
 }

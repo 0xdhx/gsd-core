@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "count": 301,
+  "count": 303,
   "classes": {
     "ARCH": 1,
     "CI": 2,
@@ -19,7 +19,7 @@
     "PROHIB": 10,
     "RELEASE-NOTES": 31,
     "RULESET": 61,
-    "SEAM": 28,
+    "SEAM": 30,
     "SESSION": 9,
     "WAVE": 5,
     "WORKSTREAM": 5,
@@ -1325,6 +1325,16 @@
       "id": "SEAM.phase-status-owner.owns",
       "klass": "SEAM",
       "value": "phaseStatus(phaseDir, deps?) / phaseStatusFromFacts(...) is the single canonical owner of \"what state is phase P in?\" (ADR-5057 §2, epic #5056)"
+    },
+    {
+      "id": "SEAM.runtime-descriptor-owner.enforced-by",
+      "klass": "SEAM",
+      "value": "test:tests/runtime-descriptor-owner.test.cjs"
+    },
+    {
+      "id": "SEAM.runtime-descriptor-owner.owns",
+      "klass": "SEAM",
+      "value": "hostBehaviorsFor / assertKnownRuntime (src/runtime-name-policy.cts) are the single owners of a runtime's host behaviors and of refusing an unknown runtime id; no install or hook code compares a runtime-name literal (ADR-5057 §5, #5169)"
     },
     {
       "id": "SEAM.shellcmdproj-win-binary-resolution.enforced-by",

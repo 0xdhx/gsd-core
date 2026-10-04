@@ -129,7 +129,12 @@
       },
       "skipHomePrefixSubstitution": true,
       "skipSettingsUi": true,
-      "skipUpdateBannerCommand": true
+      "skipUpdateBannerCommand": true,
+      "opencodePathPrefix": true,
+      "bakesStaticAgentModel": true,
+      "bakedAgentFileExtensions": [
+        ".md"
+      ]
     }
   },
   "reviewer": {
