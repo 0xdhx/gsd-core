@@ -45,7 +45,6 @@ const {
   canonicalizeRuntimeName,
   getRuntimeLabel,
   getGlobalConfigHomeFragment,
-  getRuntimeNewProjectCommand,
   runtimeFlags,
   getProjectInstructionFile,
 } = require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'runtime-name-policy.cjs'));
@@ -180,7 +179,11 @@ describe('#1928 gemini removed from every runtime-name-policy surface', () => {
       /retired by #1928/,
       'config-home fragment removed → must now refuse, not fail-closed-default',
     );
-    assert.strictEqual(getRuntimeNewProjectCommand('gemini'), '/gsd-new-project', 'new-project override removed → default (unchanged by #4709)');
+    assert.deepEqual(
+      require(path.join(ROOT, 'gsd-core', 'bin', 'lib', 'runtime-artifact-layout.cjs')).resolveAdvertisedNewProject('gemini', 'global'),
+      { kind: 'command', command: '/gsd-new-project' },
+      'no descriptor → the cross-agent default (unchanged by #4709)',
+    );
   });
 
   test('runtimeFlags has no isGemini and covers exactly the non-claude, CLI-installable registry runtimes (count-agnostic)', () => {

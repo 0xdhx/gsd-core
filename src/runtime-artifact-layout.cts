@@ -1333,5 +1333,57 @@ function resolveTriggerSurface(runtime: string, scopes: InstallScope[], opts: Tr
   return surfaces;
 }
 
+// ---------------------------------------------------------------------------
+// The advertised "next step" command (#5215, ADR-5057 §5 Phase 12).
+//
+// What the installer tells a user to run is a projection of what the runtime
+// registered: the `new-project` trigger the Trigger Surface resolves for the
+// install scope. It is never a per-runtime literal, so a runtime that registers
+// no such trigger (pi's native extension registers only `/gsd`; windsurf's
+// global layout registers nothing) cannot be told to run one (#4567).
+// ---------------------------------------------------------------------------
+
+/** The cross-agent default for an id GSD cannot know (ADR-5057 §5 Phase 10 amendment). */
+const DEFAULT_NEW_PROJECT_COMMAND = '/gsd-new-project';
+
+/**
+ * How a host invokes a registered trigger. Presentation only — whether the
+ * trigger exists is decided by the registered surface, not by this table. A
+ * runtime absent here is invoked as `/<trigger>`.
+ */
+const TRIGGER_INVOCATION: Readonly<Record<string, (trigger: string) => string>> = {
+  codex: (trigger) => `$${trigger}`,
+  cursor: (trigger) => `${trigger} (mention the skill name)`,
+  kimi: (trigger) => `/skill:${trigger}`,
+};
+
+type AdvertisedNewProject = { kind: 'command'; command: string } | { kind: 'unregistered' };
+
+/**
+ * The command the installer advertises for starting a project, generated from
+ * the registered trigger surface of `runtime` in `scope`. `unregistered` means
+ * the runtime registers no `new-project` trigger there. An empty or unknown id
+ * keeps the documented cross-agent default: it names a runtime GSD cannot know,
+ * so no surface exists to project from.
+ */
+function resolveAdvertisedNewProject(runtime: string, scope: InstallScope): AdvertisedNewProject {
+  if (!runtime) return { kind: 'command', command: DEFAULT_NEW_PROJECT_COMMAND };
+  let surfaces: TriggerSurface[];
+  try {
+    surfaces = resolveTriggerSurface(runtime, [scope], { stems: ['new-project'] });
+  } catch (error) {
+    // resolveTriggerSurface answers an id without a descriptor with a TypeError
+    // (the same signal `resolveInstalledSurfaces` skips on); anything else is a bug.
+    if (error instanceof TypeError) return { kind: 'command', command: DEFAULT_NEW_PROJECT_COMMAND };
+    throw error;
+  }
+  const registered = surfaces[0];
+  if (!registered) return { kind: 'unregistered' };
+  const render = Object.prototype.hasOwnProperty.call(TRIGGER_INVOCATION, runtime)
+    ? TRIGGER_INVOCATION[runtime]
+    : (trigger: string): string => `/${trigger}`;
+  return { kind: 'command', command: render(registered.trigger) };
+}
+
 // getInstallExports removed in ADR-1508 / #1511 Phase 2 (last upward .cts→install.js dep).
-export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, isNamespacedByDir, composeCommandFilename };
+export = { resolveRuntimeArtifactLayout, resolveRuntimeArtifactLayoutFromRegistry, findInstallSourceRoot, resolveTriggerSurface, resolveAdvertisedNewProject, isNamespacedByDir, composeCommandFilename };

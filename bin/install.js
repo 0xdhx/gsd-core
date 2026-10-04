@@ -49,7 +49,7 @@ const { isTestHomeGuardRefusal } = require('../gsd-core/bin/lib/real-home-guard.
 // (getConfigDirFromHome and the runtime-content-rewrite loops below) — #2876
 // retired the re-export; tests now import getDirName directly from
 // gsd-core/bin/lib/runtime-name-policy.cjs.
-const { getDirName, getRuntimeLabel, getGlobalConfigHomeFragment, runtimeFlags, getRuntimeNewProjectCommand, hostBehaviorsFor } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
+const { getDirName, getRuntimeLabel, getGlobalConfigHomeFragment, runtimeFlags, hostBehaviorsFor } = require('../gsd-core/bin/lib/runtime-name-policy.cjs');
 const {
   applyWorktreeBaseRef,
   readBaseRefFromSettings,
@@ -771,6 +771,7 @@ const {
 } = require(path.join(_gsdLibDir, 'installer-migration-report.cjs'));
 const {
   resolveRuntimeArtifactLayout,
+  resolveAdvertisedNewProject,
 } = require(path.join(_gsdLibDir, 'runtime-artifact-layout.cjs'));
 const {
   readSurface,
@@ -13647,11 +13648,21 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // generation reads it). This call is idempotent (preserves existing values).
   writeNonClaudeDefaults(runtime);
 
-  // program + command are now single-source lookups (ADR-1239 Phase B / #1679):
-  // program is the runtime display label; command is the per-host /gsd-new-project
-  // invocation syntax.
+  // program is the runtime display label (ADR-1239 Phase B / #1679). The command
+  // is generated from the surface this runtime registered in this install scope
+  // (#5215, ADR-5057 §5 Phase 12) — a runtime that registers no new-project
+  // trigger is told so instead of being sent to a command that does not exist (#4567).
   const program = getRuntimeLabel(runtime);
-  const command = getRuntimeNewProjectCommand(runtime);
+  const advertised = resolveAdvertisedNewProject(runtime, isGlobal ? 'global' : 'local');
+  if (advertised.kind === 'unregistered') {
+    console.log(`
+  ${green}Done!${reset} GSD is installed for ${program}, which registers no new-project command in this scope.
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+`);
+    return;
+  }
+  const command = advertised.command;
 
   // Claude Code global installs use the skills/ format (CC 2.1.88+).
   // Restart is required for CC to pick up newly-installed skills, and the

@@ -225,8 +225,9 @@ describe('every descriptor accessor refuses an unknown id', () => {
   });
 
   test('the two documented cross-agent-default accessors keep their default for an unknown id (ADR-5057 §5 Phase 10 amendment)', () => {
+    const layout = require(path.join(LIB, 'runtime-artifact-layout.cjs'));
     assert.equal(policy.getProjectInstructionFile('future-runtime-xyz'), 'AGENTS.md');
-    assert.equal(policy.getRuntimeNewProjectCommand('future-runtime-xyz'), '/gsd-new-project');
+    assert.deepEqual(layout.resolveAdvertisedNewProject('future-runtime-xyz', 'global'), { kind: 'command', command: '/gsd-new-project' });
   });
 
   test('the content rewrite engine refuses an unknown runtime instead of rewriting for it', () => {
