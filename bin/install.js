@@ -13654,22 +13654,23 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
   // trigger is told so instead of being sent to a command that does not exist (#4567).
   const program = getRuntimeLabel(runtime);
   const advertised = resolveAdvertisedNewProject(runtime, isGlobal ? 'global' : 'local');
-  if (advertised.kind === 'unregistered') {
-    console.log(`
-  ${green}Done!${reset} GSD is installed for ${program}, which registers no new-project command in this scope.
-
-  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
-`);
-    return;
-  }
-  const command = advertised.command;
+  const command = advertised.kind === 'command' ? advertised.command : null;
+  // Host-specific launch/restart steps below stay; only the new-project clause
+  // changes when the runtime registered no such command.
+  const noNewProject = advertised.kind === 'unregistered'
+    ? `${program} registers no new-project command in this scope${advertised.nativeCommand ? ` (its native extension registers ${cyan}${advertised.nativeCommand}${reset})` : ''}.`
+    : '';
 
   // Claude Code global installs use the skills/ format (CC 2.1.88+).
   // Restart is required for CC to pick up newly-installed skills, and the
   // slash-menu surface depends on CC version — so the instruction needs to
   // cover both invocation paths to avoid #2957-style "no commands appear".
   if (hostBehaviorsFor(runtime).skillsGlobalOnboarding && isGlobal) {
-    console.log(`
+    console.log(command === null ? `
+  ${green}Done!${reset} Restart ${program}. ${noNewProject}
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Restart ${program}, then in any directory either type ${cyan}${command}${reset} or ask Claude to run the ${cyan}gsd-new-project${reset} skill.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -13679,7 +13680,11 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
 
   if (hostBehaviorsFor(runtime).doneBannerStyle === 'kimi-agent-file') {
     const agentPath = configDir ? path.join(configDir, 'agents', 'gsd.yaml') : 'agents/gsd.yaml';
-    console.log(`
+    console.log(command === null ? `
+  ${green}Done!${reset} Start ${program} with ${cyan}kimi --agent-file ${agentPath}${reset}. ${noNewProject}
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Start ${program} with ${cyan}kimi --agent-file ${agentPath}${reset}, then run ${cyan}${command}${reset}.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
@@ -13687,7 +13692,11 @@ function finishInstall(settingsPath, settings, statuslineCommand, shouldInstallS
     return;
   }
 
-  console.log(`
+  console.log(command === null ? `
+  ${green}Done!${reset} GSD is installed for ${program}, which registers no new-project command in this scope${advertised.nativeCommand ? ` (its native extension registers ${cyan}${advertised.nativeCommand}${reset})` : ''}.
+
+  ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r
+` : `
   ${green}Done!${reset} Open a blank directory in ${program} and run ${cyan}${command}${reset}.
 
   ${cyan}Join the community:${reset} https://discord.gg/mYgfVNfA2r

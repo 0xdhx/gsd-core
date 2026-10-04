@@ -33,7 +33,7 @@ const { STAGED_HOOK_SCRIPT_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
 const { SETTINGS_JSON_HOOK_ROWS, SETTINGS_JSON_EXTENDED_ROWS } = surface;
 
 const SCOPES = ['global', 'local'];
-const MANAGED_HOOK = /gsd-[a-z-]+\.(?:js|sh)\b/;
+const MANAGED_HOOK = /gsd-[A-Za-z0-9_-]+\.(?:js|cjs|mjs|sh|py)\b/;
 const PAYLOAD = JSON.stringify({ tool_name: 'Write', tool_input: { file_path: 'probe.txt' }, probe: 'gsd-5215' });
 
 // Both stubs append {hook, payload} to $GSD_PROBE_LOG; the sentinel proves the
@@ -90,14 +90,31 @@ function pairsOf(registered) {
   return registered.map((r) => `${tableEvent(r.event)}:${r.file}`).sort();
 }
 
-/** Table rows the runtime registers, limited to hook files the install shipped. */
-function expectedPairs(rt, hooksDir) {
-  const shipped = new Set(fs.readdirSync(hooksDir));
+/** Every table row the runtime registers: its own rows plus the extended rows its descriptor admits. */
+function expectedPairs(rt) {
   const rows = [
     ...SETTINGS_JSON_HOOK_ROWS,
     ...SETTINGS_JSON_EXTENDED_ROWS.filter((r) => rt.extendedHookEvents.includes(r.event)),
   ];
-  return rows.filter((r) => shipped.has(r.file)).map((r) => `${r.event}:${r.file}`).sort();
+  return rows.map((r) => `${r.event}:${r.file}`).sort();
+}
+
+/**
+ * The census: pairs the tables say a runtime registers vs pairs the installer
+ * registered, plus table rows whose script the install did not ship. All three
+ * lists must be empty. Rows are NOT filtered by what shipped — a row that
+ * silently stops registering, or stops shipping, is exactly what must go red.
+ */
+function censusMismatch(rt, hooksDir, registered) {
+  const expected = expectedPairs(rt);
+  const got = pairsOf(registered);
+  const shipped = new Set(fs.readdirSync(hooksDir));
+  const files = [...SETTINGS_JSON_HOOK_ROWS, ...SETTINGS_JSON_EXTENDED_ROWS.filter((r) => rt.extendedHookEvents.includes(r.event))].map((r) => r.file);
+  return {
+    unregistered: expected.filter((p) => !got.includes(p)),
+    unprobed: got.filter((p) => !expected.includes(p)),
+    unshipped: [...new Set(files.filter((f) => !shipped.has(f)))],
+  };
 }
 
 /**
@@ -133,7 +150,7 @@ describe('activation probe: every runtime × registered hook executes', () => {
     for (const scope of SCOPES) {
       test(`${rt.id} ${scope}`, (t) => {
         if (process.platform === 'win32') {
-          t.skip('registered commands target the host shell; the Windows lane runs the same probe through its own projection');
+          t.skip('the probe executes registered commands through /bin/sh; Windows registration shapes are pinned by the Phase 11 win32 golden scenarios, not executed here');
           return;
         }
         const install = runMinimalInstall({ runtime: rt.id, scope });
@@ -143,8 +160,8 @@ describe('activation probe: every runtime × registered hook executes', () => {
           assert.ok(settings, `${rt.id} ${scope}: installer wrote no settings file with hooks`);
 
           const registered = registeredCommands(settings);
-          // Census: the registered pairs are exactly the table-derived pairs.
-          assert.deepEqual(pairsOf(registered), expectedPairs(rt, hooksDir), `${rt.id} ${scope}: registered hooks differ from the Phase 11 table rows`);
+          // Census: the registered pairs are exactly the table-derived pairs, and every row shipped.
+          assert.deepEqual(censusMismatch(rt, hooksDir, registered), { unregistered: [], unprobed: [], unshipped: [] }, `${rt.id} ${scope}: registered hooks differ from the Phase 11 table rows`);
 
           const failed = [];
           for (const r of registered) {
@@ -171,7 +188,11 @@ describe('positive controls: the probe goes red on a registration that does not 
       cleanup(install.root);
     }
   }
-  const pick = (registered, file) => registered.find((r) => r.file === file);
+  const pick = (registered, file) => {
+    const found = registered.find((r) => r.file === file);
+    assert.ok(found, `positive control needs ${file} registered on claude local, but the installer did not register it`);
+    return found;
+  };
 
   test('a healthy registration is reported as ran (control for the controls)', (t) => {
     if (process.platform === 'win32') { t.skip('POSIX host shell'); return; }
@@ -213,18 +234,25 @@ describe('positive controls: the probe goes red on a registration that does not 
   });
 });
 
-describe('probe-set boundaries (limit-1 / limit / limit+1)', () => {
-  test('dropping one registered pair, or adding one unregistered pair, breaks the table equality', (t) => {
+describe('census boundaries (limit-1 / limit / limit+1) against the real installed settings', () => {
+  test('dropping one registered hook, or adding one, turns the census red', (t) => {
     if (process.platform === 'win32') { t.skip('POSIX host shell'); return; }
     const rt = scenarios.settingsJsonRuntimes().find((r) => r.id === 'claude');
     const install = runMinimalInstall({ runtime: 'claude', scope: 'local' });
     try {
       const hooksDir = path.join(install.configDir, 'hooks');
-      const registered = pairsOf(registeredCommands(settingsOf(install.configDir)));
-      const expected = expectedPairs(rt, hooksDir);
-      assert.deepEqual(registered, expected, 'limit: registered == expected');
-      assert.notDeepEqual(registered.slice(1), expected, 'limit-1: one dropped pair is caught');
-      assert.notDeepEqual([...registered, 'pre:gsd-unregistered.js'].sort(), expected, 'limit+1: one extra pair is caught');
+      const registered = registeredCommands(settingsOf(install.configDir));
+      const clean = { unregistered: [], unprobed: [], unshipped: [] };
+      assert.deepEqual(censusMismatch(rt, hooksDir, registered), clean, 'limit: registered == expected');
+
+      const dropped = registered.slice(1);
+      assert.equal(censusMismatch(rt, hooksDir, dropped).unregistered.length, 1, 'limit-1: one dropped registration is caught');
+
+      const extra = [...registered, { event: 'PreToolUse', file: 'gsd-unregistered.js', command: 'x' }];
+      assert.equal(censusMismatch(rt, hooksDir, extra).unprobed.length, 1, 'limit+1: one registration outside the table is caught');
+
+      fs.unlinkSync(path.join(hooksDir, 'gsd-write-guard.js'));
+      assert.deepEqual(censusMismatch(rt, hooksDir, registered).unshipped, ['gsd-write-guard.js'], 'a table row whose script did not ship is caught');
     } finally {
       cleanup(install.root);
     }

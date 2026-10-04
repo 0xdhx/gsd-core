@@ -30,28 +30,35 @@ function registeredTriggers(runtime, scope) {
   return resolveTriggerSurface(runtime, [scope], { stems: ['new-project'] }).map((t) => t.trigger);
 }
 
-// Runtimes an installer run is meaningful for (vscode is registered but never CLI-installed).
-const NON_INSTALLABLE = new Set(['vscode']);
+// What each registered runtime is told to type. Every current runtime registers the
+// trigger `gsd-new-project`; three hosts invoke it with their own syntax. Pinned as
+// literals, not derived from the renderer, so a wrong renderer entry goes red.
+const INVOCATION = {
+  codex: '$gsd-new-project',
+  cursor: 'gsd-new-project (mention the skill name)',
+  kimi: '/skill:gsd-new-project',
+};
+const expectedCommand = (runtime) => INVOCATION[runtime] || DEFAULT_CMD;
 
 describe('advertised command equals the registered surface', () => {
   for (const runtime of RUNTIME_IDS) {
     for (const scope of SCOPES) {
-      test(`${runtime} ${scope}: advertised iff a new-project trigger is registered, and it names that trigger`, () => {
+      test(`${runtime} ${scope}: advertised iff a new-project trigger is registered, and it is the exact rendered command`, () => {
         const triggers = registeredTriggers(runtime, scope);
         const advert = resolveAdvertisedNewProject(runtime, scope);
         if (triggers.length === 0) {
-          assert.deepEqual(advert, { kind: 'unregistered' });
+          assert.equal(advert.kind, 'unregistered');
           return;
         }
-        assert.equal(advert.kind, 'command');
-        assert.ok(
-          advert.command.includes(triggers[0]),
-          `${runtime} ${scope}: advertised ${JSON.stringify(advert.command)} does not name the registered trigger ${triggers[0]}`,
-        );
+        assert.deepEqual(triggers, triggers.map(() => 'gsd-new-project'), `${runtime} ${scope}: registered trigger is not gsd-new-project`);
+        assert.deepEqual(advert, { kind: 'command', command: expectedCommand(runtime) });
       });
     }
   }
 
+  // INTENTIONAL RATCHET: this list is the census of runtime x scope pairs that
+  // register no new-project trigger. A change here is a change in what a user is
+  // told after install — review it, do not just update it.
   test('runtimes that register no new-project trigger in a scope are exactly the ones that advertise nothing there', () => {
     const unregistered = [];
     for (const runtime of RUNTIME_IDS) {
@@ -59,12 +66,21 @@ describe('advertised command equals the registered surface', () => {
         if (resolveAdvertisedNewProject(runtime, scope).kind === 'unregistered') unregistered.push(`${runtime}:${scope}`);
       }
     }
-    // The census this phase drives to zero: every "unregistered" pair is a pair
-    // the old hand table advertised a command for anyway.
     assert.deepEqual(unregistered.sort(), [
       'pi:global', 'pi:local', 'vscode:global', 'vscode:local', 'windsurf:global',
       'cline:local', 'kimi:local', 'kimi-code:local',
     ].sort());
+  });
+
+  test('a native-extension runtime is told the command its extension actually registers', () => {
+    const names = [];
+    const pi = new Proxy({}, { get: (_, key) => (key === 'registerCommand' ? (name) => names.push(name) : () => {}) });
+    require('../pi/gsd.cjs')(pi);
+    assert.deepEqual(names, ['gsd']);
+    for (const scope of SCOPES) {
+      assert.deepEqual(resolveAdvertisedNewProject('pi', scope), { kind: 'unregistered', nativeCommand: '/gsd' });
+    }
+    assert.deepEqual(resolveAdvertisedNewProject('windsurf', 'global'), { kind: 'unregistered', nativeCommand: null });
   });
 });
 
@@ -115,7 +131,6 @@ describe('the installer completion message is generated from the registered surf
   ];
   for (const [runtime, scope, advertises] of cases) {
     test(`${runtime} --${scope} ${advertises ? 'advertises' : 'does not advertise'} a new-project command`, () => {
-      assert.ok(!NON_INSTALLABLE.has(runtime));
       const res = runMinimalInstall({ runtime, scope });
       try {
         const out = res.stdout.replace(ANSI, '');
@@ -126,6 +141,7 @@ describe('the installer completion message is generated from the registered surf
         } else {
           assert.doesNotMatch(done, /gsd-new-project/, `completion message advertises an unregistered command:\n${done}`);
           assert.match(done, /registers no/);
+          if (runtime === 'pi') assert.match(done, /registers \/gsd/);
         }
       } finally {
         cleanup(res.root);

@@ -1357,28 +1357,40 @@ const TRIGGER_INVOCATION: Readonly<Record<string, (trigger: string) => string>> 
   kimi: (trigger) => `/skill:${trigger}`,
 };
 
-type AdvertisedNewProject = { kind: 'command'; command: string } | { kind: 'unregistered' };
+type AdvertisedNewProject =
+  | { kind: 'command'; command: string }
+  | { kind: 'unregistered'; nativeCommand: string | null };
+
+/**
+ * The command a native-extension runtime registers instead of per-workflow
+ * triggers: the extension file's stem as a slash command (pi's `gsd.js`
+ * registers `/gsd`; pinned by tests/advertised-command-parity.test.cjs against
+ * the extension itself). `null` for a runtime with no native plugin.
+ */
+function nativePluginCommand(runtime: string): string | null {
+  const descriptor = getTriggerRegistry().runtimes[runtime]?.runtime as
+    | { hostBehaviors?: { nativePlugin?: { file?: unknown } } }
+    | undefined;
+  const file = descriptor?.hostBehaviors?.nativePlugin?.file;
+  if (typeof file !== 'string' || file.length === 0) return null;
+  const stem = file.replace(/\.[^.]+$/, '');
+  return stem.length > 0 ? `/${stem}` : null;
+}
 
 /**
  * The command the installer advertises for starting a project, generated from
  * the registered trigger surface of `runtime` in `scope`. `unregistered` means
- * the runtime registers no `new-project` trigger there. An empty or unknown id
- * keeps the documented cross-agent default: it names a runtime GSD cannot know,
- * so no surface exists to project from.
+ * the runtime registers no `new-project` trigger there (`nativeCommand` names
+ * what a native-extension runtime registers instead). An empty or unregistered
+ * id keeps the documented cross-agent default: it names a runtime GSD cannot
+ * know, so no surface exists to project from. Membership is decided up front,
+ * so an error inside the surface resolution is a bug and propagates.
  */
 function resolveAdvertisedNewProject(runtime: string, scope: InstallScope): AdvertisedNewProject {
-  if (!runtime) return { kind: 'command', command: DEFAULT_NEW_PROJECT_COMMAND };
-  let surfaces: TriggerSurface[];
-  try {
-    surfaces = resolveTriggerSurface(runtime, [scope], { stems: ['new-project'] });
-  } catch (error) {
-    // resolveTriggerSurface answers an id without a descriptor with a TypeError
-    // (the same signal `resolveInstalledSurfaces` skips on); anything else is a bug.
-    if (error instanceof TypeError) return { kind: 'command', command: DEFAULT_NEW_PROJECT_COMMAND };
-    throw error;
-  }
-  const registered = surfaces[0];
-  if (!registered) return { kind: 'unregistered' };
+  const known = Boolean(runtime) && Object.prototype.hasOwnProperty.call(getTriggerRegistry().runtimes, runtime);
+  if (!known) return { kind: 'command', command: DEFAULT_NEW_PROJECT_COMMAND };
+  const registered = resolveTriggerSurface(runtime, [scope], { stems: ['new-project'] })[0];
+  if (!registered) return { kind: 'unregistered', nativeCommand: nativePluginCommand(runtime) };
   const render = Object.prototype.hasOwnProperty.call(TRIGGER_INVOCATION, runtime)
     ? TRIGGER_INVOCATION[runtime]
     : (trigger: string): string => `/${trigger}`;

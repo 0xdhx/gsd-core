@@ -166,8 +166,8 @@ describe('#1928 gemini removed from every runtime-name-policy surface', () => {
   // #4709 AC#1 inverted this assertion: gemini used to silently fall back to
   // Claude Code's label/config-fragment defaults (the defect this test used to
   // pin); it now REFUSES on those two surfaces with RetiredRuntimeError
-  // instead. getRuntimeNewProjectCommand is NOT one of the functions #4709
-  // changed, so it still falls back — kept un-inverted and asserted as before.
+  // instead. the new-project command (now resolveAdvertisedNewProject, #5215) is NOT one of the
+  // surfaces #4709 changed, so an id with no descriptor still falls back to the default.
   test('gemini refuses on label / config-fragment surfaces; new-project still falls back (unchanged by #4709)', () => {
     assert.throws(
       () => getRuntimeLabel('gemini'),
