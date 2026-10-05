@@ -151,7 +151,7 @@ export function evaluateApiCoverageVerifyPre(input: { projectDir: string; args: 
   // token — its basename — and resolved by findPhaseInternal strictly under
   // .planning/phases/ (or a milestone archive). The raw arg is never used as a
   // path, so `..`, absolute paths, and arbitrary directories cannot reach a
-  // file read. Mirrors cmdVerifySchemaDrift's token-match approach.
+  // file read. Mirrors the schema-drift gate's (gate-schema-drift.cts) token-match approach.
   let token = posixNormalize(phaseArg).split('/').filter(Boolean).pop() || '';
   // A token like ".." or "." carries no phase identity → unresolvable.
   if (token === '.' || token === '..') token = '';

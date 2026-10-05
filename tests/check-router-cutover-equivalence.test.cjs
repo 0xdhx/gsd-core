@@ -83,8 +83,22 @@ function assertArmMatchesGolden(spec) {
   const golden = readGolden(spec.id);
   assert.deepStrictEqual(golden.argv, spec.argv, 'golden argv is the arm argv');
   assert.strictEqual(golden.fixture, spec.fixture, 'golden fixture is the arm fixture');
+  assert.deepStrictEqual(golden.env, spec.env, 'golden environment is the arm environment');
   const actual = runArm(spec, rootFor(spec.fixture));
   assert.strictEqual(actual.outcome, 'exited', 'the gate subprocess exited on its own');
+  if (spec.changed) {
+    // A DELIBERATE change (#5219): the golden is the origin/next answer and stays the provenance record;
+    // the move answers differently, and that answer is pinned here.
+    const before = JSON.parse(golden.stdout);
+    const after = JSON.parse(actual.stdout);
+    assert.notStrictEqual(before.reason, spec.changed.reason, `${spec.id}: the golden records the pre-move answer`);
+    assert.strictEqual(after.reason, spec.changed.reason, `${spec.id}: reason`);
+    assert.strictEqual(after.block, false, `${spec.id}: stays non-blocking`);
+    assert.strictEqual(after.skipped, true, `${spec.id}: not a comparison`);
+    assert.strictEqual(after.last_mapped_commit, before.last_mapped_commit, `${spec.id}: the stamp is reported as read`);
+    assert.strictEqual(actual.exitCode, spec.changed.exitCode, `${spec.id}: exit code`);
+    return;
+  }
   assert.strictEqual(actual.stdout, golden.stdout, `${spec.id}: stdout differs byte-for-byte`);
   assert.strictEqual(actual.stderr, golden.stderr, `${spec.id}: stderr differs`);
   assert.strictEqual(actual.exitCode, golden.exitCode, `${spec.id}: exit code differs`);
@@ -99,6 +113,30 @@ function describeGroup(title, group) {
 }
 
 // ─── catalogue integrity ──────────────────────────────────────────────────────
+
+describe('gate failure codes are ERROR_REASON values (parity)', () => {
+  test('every GATE_FAILURE_CODE equals an ERROR_REASON wire string, so the router passes it to error() as a known reason', () => {
+    const { GATE_FAILURE_CODE } = require('../gsd-core/bin/lib/gate-verdict.cjs');
+    const { ERROR_REASON } = require('../gsd-core/bin/lib/io.cjs');
+    const reasons = new Set(Object.values(ERROR_REASON));
+    for (const [name, code] of Object.entries(GATE_FAILURE_CODE)) {
+      assert.ok(reasons.has(code), `GATE_FAILURE_CODE.${name} (${code}) is not an ERROR_REASON value`);
+    }
+    assert.strictEqual(GATE_FAILURE_CODE.UNKNOWN, ERROR_REASON.UNKNOWN);
+    assert.strictEqual(GATE_FAILURE_CODE.SDK_MISSING_ARG, ERROR_REASON.SDK_MISSING_ARG);
+    assert.strictEqual(GATE_FAILURE_CODE.USAGE, ERROR_REASON.USAGE);
+  });
+
+  test('the drift verbs\' usage failures keep the pre-move reason (unknown): JSON diagnostics and exit-contract v2 are unchanged', () => {
+    for (const id of ['verify-schema-drift-no-arg-json-errors', 'verify-surface-schema-drift-no-arg-json-errors', 'verify-context-drift-no-arg-json-errors']) {
+      assert.strictEqual(JSON.parse(readGolden(id).stderr).reason, 'unknown', id);
+    }
+    for (const id of ['verify-schema-drift-no-arg-contract-v2', 'verify-surface-schema-drift-no-arg-contract-v2', 'verify-context-drift-no-arg-contract-v2']) {
+      assert.strictEqual(readGolden(id).exitCode, 1, `${id}: UNKNOWN is FAIL (1), not USAGE (64)`);
+    }
+    assert.strictEqual(readGolden('prohibition-enforcement-no-arg-contract-v2').exitCode, 64, 'prohibition-enforcement always named SDK_MISSING_ARG');
+  });
+});
 
 describe('golden catalogue', () => {
   test('every arm has exactly one golden and every golden has an arm', () => {
@@ -131,6 +169,13 @@ describeGroup('E8 verify-failure-directions', 'E8');
 describeGroup('E9 gap-analysis-plan-post', 'E9');
 describeGroup('E10 predicate', 'E10');
 describeGroup('E11 api-coverage-verify-pre', 'E11');
+// #5219 (ADR-5057 §4 arm C): the four gates moved out of verify.cts / prohibition-enforcement.cts into
+// gate modules. Goldens were captured by executing the code BEFORE the move (the `verify` surface arms
+// included: `verify schema-drift|codebase-drift|context-drift` reach the same gates).
+describeGroup('E12 verify-schema-drift', 'E12');
+describeGroup('E13 verify-codebase-drift', 'E13');
+describeGroup('E14 verify-context-drift', 'E14');
+describeGroup('E15 prohibition-enforcement', 'E15');
 describeGroup('auto-mode', 'auto');
 describeGroup('dispatcher', 'dispatch');
 
@@ -194,6 +239,38 @@ describe('exit status follows the verdict (#5170, ADR-5057 §4)', () => {
     const detected = runById('api-coverage-verify-pre-detected');
     assert.strictEqual(detected.payload.block, true);
     assert.strictEqual(detected.actual.exitCode, 0, 'a delivered block is exit 0');
+  });
+
+  test('the drift gates: a delivered block is exit 0, "could not look" is UNAVAILABLE, a non-answer skip is exit 0 (#5219)', () => {
+    for (const id of ['verify-schema-drift-blocks', 'verify-codebase-drift-blocks', 'verify-context-drift-stale-blocks']) {
+      const { actual, payload } = runById(id);
+      assert.strictEqual(payload.block, true, `${id}: the verdict blocks`);
+      assert.strictEqual(actual.exitCode, 0, `${id}: a delivered block is not a command failure`);
+    }
+    for (const id of [
+      'verify-schema-drift-phase-not-found',
+      'verify-schema-drift-plan-unreadable',
+      'verify-codebase-drift-unresolvable-mapped-commit',
+      'verify-codebase-drift-non-commit-baseline',
+      'verify-codebase-drift-document-unreadable',
+      'verify-context-drift-phase-not-found',
+    ]) {
+      const { actual, payload } = runById(id);
+      assert.strictEqual(payload.block, false, `${id}: the non-blocking contract holds`);
+      assert.strictEqual(actual.exitCode, UNAVAILABLE, `${id}: "could not look" is never exit 0`);
+    }
+    for (const id of ['verify-schema-drift-no-phases-dir', 'verify-codebase-drift-no-structure-md', 'verify-context-drift-no-context-md']) {
+      const { actual, payload } = runById(id);
+      assert.strictEqual(payload.block, false, `${id}: a skip does not block`);
+      assert.strictEqual(actual.exitCode, 0, `${id}: "nothing to compare" is exit 0`);
+    }
+  });
+
+  test('schema-drift: the env bypass reaches the gate through the check surface only; the verify surface reads --skip (#5219)', () => {
+    assert.strictEqual(runById('verify-schema-drift-env-skip').payload.block, false, 'GSD_SKIP_SCHEMA_CHECK=true bypasses on the check surface');
+    assert.strictEqual(runById('verify-schema-drift-env-not-true').payload.block, true, 'only the exact string "true" bypasses');
+    assert.strictEqual(runById('verify-surface-schema-drift-skip-flag').payload.block, false, '--skip bypasses on the verify surface');
+    assert.strictEqual(runById('verify-surface-schema-drift-env-ignored').payload.block, true, 'the verify surface does not read the env flag');
   });
 });
 

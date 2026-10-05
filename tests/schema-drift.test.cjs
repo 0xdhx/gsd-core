@@ -357,10 +357,11 @@ describe('verify schema-drift CLI command', () => {
   });
 
   test('an invalid GSD_WORKSTREAM is a non-blocking payload, exit 0 (planningDir throws)', () => {
-    // The CLI rejects a bad workstream before any verb runs; call the command directly.
+    // The CLI rejects a bad workstream before any verb runs; call the check router directly (#5219:
+    // the schema-drift gate is a gate module, the router formats its result).
     const { spawnSync } = require('node:child_process');
-    const verifyPath = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'verify.cjs');
-    const script = `require(${JSON.stringify(verifyPath)}).cmdVerifySchemaDrift(${JSON.stringify(tmpDir)}, '01-setup', false, false);`;
+    const routerPath = path.join(__dirname, '..', 'gsd-core', 'bin', 'lib', 'check-command-router.cjs');
+    const script = `require(${JSON.stringify(routerPath)}).routeCheckCommand({ args: ['check', 'verify-schema-drift', '01-setup'], cwd: ${JSON.stringify(tmpDir)}, raw: false, env: {} });`;
     const r = spawnSync(process.execPath, ['-e', script], {
       cwd: tmpDir,
       encoding: 'utf-8',
