@@ -32,7 +32,8 @@ breadcrumb bookkeeping.
 end of the model window — the same scale as the statusline's context bar (#4985).
 That point is the auto-compact window (`CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else the
 `autoCompactWindow` setting `/autocompact` saves, per model under `modelSettings` or
-top-level, else the model window) minus the 33k auto-compact buffer `/context` shows. With auto-compact off, it is the model
+top-level, else the model window) minus the 33k auto-compact buffer `/context` shows,
+lowered further when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` sets an earlier point. With auto-compact off, it is the model
 window.
 
 ### Tuning the fire-points

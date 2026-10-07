@@ -218,19 +218,37 @@ function isAutoCompactDisabled(dir, env = process.env) {
  * `undefined`.
  */
 function readClaudeSetting(dir, env, key, accept) {
-  for (const settings of readClaudeSettingsFiles(dir, env)) {
-    if (accept(settings[key])) return settings[key];
+  // Lazy: stop at the first file that answers, so a lower file is never read.
+  for (const file of claudeSettingsPaths(dir, env)) {
+    const settings = readSettingsFile(file);
+    if (settings && accept(settings[key])) return settings[key];
   }
   return undefined;
 }
 
 /**
- * The parsed Claude Code settings files, highest precedence first:
- *   <dir>/.claude/settings.local.json, <dir>/.claude/settings.json,
- *   (CLAUDE_CONFIG_DIR || ~/.claude)/settings.local.json, settings.json.
- * An absent, unparseable or non-object file is left out.
+ * The parsed Claude Code settings files, highest precedence first. An absent,
+ * unparseable or non-object file is left out.
  */
 function readClaudeSettingsFiles(dir, env) {
+  return claudeSettingsPaths(dir, env).map(readSettingsFile).filter(Boolean);
+}
+
+function readSettingsFile(file) {
+  try {
+    const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : null;
+  } catch (e) {
+    return null; // absent or unparseable — keep looking
+  }
+}
+
+/**
+ * The Claude Code settings file paths, highest precedence first:
+ *   <dir>/.claude/settings.local.json, <dir>/.claude/settings.json,
+ *   (CLAUDE_CONFIG_DIR || ~/.claude)/settings.local.json, settings.json.
+ */
+function claudeSettingsPaths(dir, env) {
   const candidates = [];
   if (dir) {
     candidates.push(path.join(dir, '.claude', 'settings.local.json'));
@@ -246,29 +264,24 @@ function readClaudeSettingsFiles(dir, env) {
     candidates.push(path.join(claudeDir, 'settings.local.json'));
     candidates.push(path.join(claudeDir, 'settings.json'));
   }
-  const files = [];
-  for (const file of candidates) {
-    try {
-      const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (settings && typeof settings === 'object' && !Array.isArray(settings)) files.push(settings);
-    } catch (e) { /* absent or unparseable — keep looking */ }
-  }
-  return files;
+  return candidates;
 }
 
 /**
  * Claude Code's settings key for a model: its canonical name, which also
  * matches the dated, `[1m]`, Bedrock and Vertex spellings of it
  * (`claude-opus-5-5[1m]`, `us.anthropic.claude-opus-5-5-v1:0` and
- * `claude-opus-5-5@20260101` all key as `claude-opus-5-5`). '' for a
- * non-string.
+ * `claude-opus-5-5@20260101` all key as `claude-opus-5-5`). A Bedrock
+ * revision suffix is stripped only after a version or date segment, so a
+ * model whose own name ends in `-v<n>` (`anthropic.claude-v2`) keeps it.
+ * '' for a non-string.
  */
 function canonicalModelKey(id) {
   if (typeof id !== 'string') return '';
   return id.trim().toLowerCase()
     .replace(/\[1m\]$/, '')
     .replace(/^(?:[a-z]+\.)?anthropic\./, '')
-    .replace(/-v\d+(?::\d+)?$/, '')
+    .replace(/(\d)-v\d+(?::\d+)?$/, '$1')
     .replace(/@\d{8}$/, '')
     .replace(/-\d{8}$/, '');
 }
