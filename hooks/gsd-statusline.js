@@ -218,6 +218,19 @@ function isAutoCompactDisabled(dir, env = process.env) {
  * `undefined`.
  */
 function readClaudeSetting(dir, env, key, accept) {
+  for (const settings of readClaudeSettingsFiles(dir, env)) {
+    if (accept(settings[key])) return settings[key];
+  }
+  return undefined;
+}
+
+/**
+ * The parsed Claude Code settings files, highest precedence first:
+ *   <dir>/.claude/settings.local.json, <dir>/.claude/settings.json,
+ *   (CLAUDE_CONFIG_DIR || ~/.claude)/settings.local.json, settings.json.
+ * An absent, unparseable or non-object file is left out.
+ */
+function readClaudeSettingsFiles(dir, env) {
   const candidates = [];
   if (dir) {
     candidates.push(path.join(dir, '.claude', 'settings.local.json'));
@@ -233,13 +246,75 @@ function readClaudeSetting(dir, env, key, accept) {
     candidates.push(path.join(claudeDir, 'settings.local.json'));
     candidates.push(path.join(claudeDir, 'settings.json'));
   }
+  const files = [];
   for (const file of candidates) {
     try {
       const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (settings && typeof settings === 'object' && accept(settings[key])) return settings[key];
+      if (settings && typeof settings === 'object' && !Array.isArray(settings)) files.push(settings);
     } catch (e) { /* absent or unparseable — keep looking */ }
   }
-  return undefined;
+  return files;
+}
+
+/**
+ * Claude Code's settings key for a model: its canonical name, which also
+ * matches the dated, `[1m]`, Bedrock and Vertex spellings of it
+ * (`claude-opus-5-5[1m]`, `us.anthropic.claude-opus-5-5-v1:0` and
+ * `claude-opus-5-5@20260101` all key as `claude-opus-5-5`). '' for a
+ * non-string.
+ */
+function canonicalModelKey(id) {
+  if (typeof id !== 'string') return '';
+  return id.trim().toLowerCase()
+    .replace(/\[1m\]$/, '')
+    .replace(/^(?:[a-z]+\.)?anthropic\./, '')
+    .replace(/-v\d+(?::\d+)?$/, '')
+    .replace(/@\d{8}$/, '')
+    .replace(/-\d{8}$/, '');
+}
+
+function isAutoCompactWindowValue(v) {
+  return v === 'auto' ||
+    (Number.isInteger(v) && v >= AUTO_COMPACT_WINDOW_MIN && v <= AUTO_COMPACT_WINDOW_MAX);
+}
+
+/**
+ * The `autoCompactWindow` setting for this model, merged across the settings
+ * files the way Claude Code merges it (claude 2.1.292): lowest precedence
+ * first, each file's `modelSettings.<model>.autoCompactWindow` entries
+ * layer over the lower files', and a file that sets a top-level
+ * `autoCompactWindow` replaces the default and drops the lower files'
+ * per-model entries. The model's own entry wins over the default.
+ * `/autocompact` saves the per-model entry; older versions saved the
+ * top-level one. `"auto"` (Claude Code's tuned window) and an absent setting
+ * are null, so the caller falls back to the model window. An invalid value
+ * is treated as absent.
+ */
+function readAutoCompactWindowSetting(dir, env, modelId) {
+  let fallback;
+  let byModel = {};
+  for (const settings of readClaudeSettingsFiles(dir, env).reverse()) {
+    const own = {};
+    const perModel = settings.modelSettings;
+    if (perModel && typeof perModel === 'object' && !Array.isArray(perModel)) {
+      for (const [name, entry] of Object.entries(perModel)) {
+        const v = entry && typeof entry === 'object' ? entry.autoCompactWindow : undefined;
+        if (!isAutoCompactWindowValue(v)) continue;
+        const key = canonicalModelKey(name);
+        // A canonically spelled key wins over another spelling of it.
+        if (name === key || !Object.hasOwn(own, key)) own[key] = v;
+      }
+    }
+    if (isAutoCompactWindowValue(settings.autoCompactWindow)) {
+      fallback = settings.autoCompactWindow;
+      byModel = own;
+    } else {
+      byModel = { ...byModel, ...own };
+    }
+  }
+  const key = canonicalModelKey(modelId);
+  const value = key && Object.hasOwn(byModel, key) ? byModel[key] : fallback;
+  return Number.isInteger(value) ? value : null;
 }
 
 /**
@@ -248,9 +323,10 @@ function readClaudeSetting(dir, env, key, accept) {
  *
  *   window     CLAUDE_CODE_AUTO_COMPACT_WINDOW (an unparseable or non-positive
  *              value is ignored; capped at 1M, raised to 100k), else the
- *              settings `autoCompactWindow` that `/autocompact` saves (an
- *              integer in 100k–1M), else the model window. Always capped at
- *              the model window.
+ *              `autoCompactWindow` setting `/autocompact` saves, per model or
+ *              top-level (an integer in 100k–1M; see
+ *              readAutoCompactWindowSetting), else the model window. Always
+ *              capped at the model window.
  *   threshold  window − min(model max output, 20,000) − 13,000, lowered to
  *              floor((window − 20,000) × pct / 100) when
  *              CLAUDE_AUTOCOMPACT_PCT_OVERRIDE (0 < pct ≤ 100) is lower.
@@ -261,8 +337,9 @@ function readClaudeSetting(dir, env, key, accept) {
  * 20,000, so the reserve is taken as 20,000.
  *
  * Not visible to a statusline, so not modelled: the `--autocompact` launch
- * flag, managed-policy settings, and Claude Code's server-side window
- * defaults. Those sessions fall back to the model window.
+ * flag, managed-policy settings, and Claude Code's server-side and per-model
+ * window defaults (what `"auto"` resolves to). Those sessions fall back to
+ * the model window.
  */
 const AUTO_COMPACT_WINDOW_MIN = 100_000;
 const AUTO_COMPACT_WINDOW_MAX = 1_000_000;
@@ -281,12 +358,11 @@ function parseAutoCompactWindowEnv(raw) {
  * The token count at which Claude Code auto-compacts this session, or null
  * when auto-compaction is off (see isAutoCompactDisabled).
  */
-function resolveAutoCompactThreshold(modelWindow, dir, env = process.env) {
+function resolveAutoCompactThreshold(modelWindow, dir, env = process.env, modelId) {
   if (!(modelWindow > 0) || isAutoCompactDisabled(dir, env)) return null;
   let window = parseAutoCompactWindowEnv(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
   if (window === null) {
-    window = readClaudeSetting(dir, env, 'autoCompactWindow', v =>
-      Number.isInteger(v) && v >= AUTO_COMPACT_WINDOW_MIN && v <= AUTO_COMPACT_WINDOW_MAX) ?? modelWindow;
+    window = readAutoCompactWindowSetting(dir, env, modelId) ?? modelWindow;
   }
   const effective = Math.min(window, modelWindow) - AUTO_COMPACT_OUTPUT_RESERVE;
   let threshold = effective - AUTO_COMPACT_SUMMARY_BUFFER;
@@ -311,7 +387,7 @@ function resolveAutoCompactThreshold(modelWindow, dir, env = process.env) {
  * so the meter shows Claude Code's own percentage unscaled. Returns null
  * when there is no usage yet.
  */
-function contextMeter(contextWindow, dir, env = process.env) {
+function contextMeter(contextWindow, dir, env = process.env, modelId) {
   if (!contextWindow || typeof contextWindow !== 'object') return null;
   const size = Number(contextWindow.context_window_size);
   const usage = contextWindow.current_usage;
@@ -326,7 +402,7 @@ function contextMeter(contextWindow, dir, env = process.env) {
       usedTokens = Math.round(((100 - remainingPct) * size) / 100);
     }
     if (usedTokens !== null) {
-      const limitTokens = resolveAutoCompactThreshold(size, dir, env) ?? size;
+      const limitTokens = resolveAutoCompactThreshold(size, dir, env, modelId) ?? size;
       const used = Math.max(0, Math.min(100, Math.round((usedTokens / limitTokens) * 100)));
       return { used, remaining: 100 - used, usedTokens, limitTokens };
     }
@@ -1008,7 +1084,7 @@ function runStatusline() {
     // model window (#2219, #4985). With auto-compact disabled (#4844) 100% is
     // the model window. Project settings are read from workspace.project_dir,
     // Claude Code's launch directory, not the current directory.
-    const meter = contextMeter(data.context_window, data.workspace?.project_dir || dir);
+    const meter = contextMeter(data.context_window, data.workspace?.project_dir || dir, process.env, data.model?.id);
     let ctx = '';
     if (meter) {
       const { used } = meter;
