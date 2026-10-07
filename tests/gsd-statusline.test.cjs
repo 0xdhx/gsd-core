@@ -707,6 +707,7 @@ describe('context meter: 100% is the auto-compact threshold (#2219, #4985)', () 
     const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
     delete env.DISABLE_AUTO_COMPACT;
     delete env.DISABLE_COMPACT;
+    delete env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
     if (acwEnv != null) {
       env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(acwEnv);
     } else {
@@ -997,6 +998,14 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
       assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, id), 617_000, `${id} keys as claude-opus-5-5`);
     }
     assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-sonnet-5'), 967_000, 'another model: no entry');
+    // A Bedrock revision suffix strips only after a version or date segment; a model whose
+    // own name ends in -v<n> keeps it, so two such models never share an entry.
+    write(user, { modelSettings: { 'claude-v1': { autoCompactWindow: 100_000 }, 'claude-v2': { autoCompactWindow: 200_000 },
+      'claude-sonnet-4-5': { autoCompactWindow: 300_000 } } });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'anthropic.claude-v1'), 67_000, 'claude-v1 keys as itself');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'anthropic.claude-v2'), 167_000, 'claude-v2 keys as itself, not claude');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'), 267_000, 'a dated Bedrock id keys as its canonical name');
+    write(user, { modelSettings: { 'claude-opus-5-5': { effortLevel: 'high', autoCompactWindow: 650_000 } } });
     assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 967_000, 'no model id: no entry');
 
     write(user, { autoCompactWindow: 400_000, modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 650_000 } } });
@@ -1015,6 +1024,19 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
 
     write(project, { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 50_000 } } });
     assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 617_000, 'an invalid model entry is absent');
+
+    // An INVALID top-level value is absent, so its file merges rather than resets: the lower
+    // file's per-model entry survives (a valid top-level value would have dropped it).
+    for (const bad of [50_000, '400000', null]) {
+      write(project, { autoCompactWindow: bad });
+      assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 617_000, `top-level ${JSON.stringify(bad)} merges`);
+      assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-sonnet-5'), 367_000, `top-level ${JSON.stringify(bad)} keeps the lower default`);
+    }
+    // "auto" is a VALID top-level value: like any other it resets the default and drops the lower
+    // files' per-model entries, and the default it sets is Claude Code's own window.
+    write(project, { autoCompactWindow: 'auto' });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 967_000, 'top-level "auto" drops the lower model entry');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-sonnet-5'), 967_000, 'top-level "auto" replaces the lower default');
     assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' }, 'claude-opus-5-5'), 767_000, 'env outranks the model entry');
   });
 
@@ -1086,6 +1108,7 @@ describe('context meter boundary: acw at/near totalCtx does not pin used at 100%
     const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
     delete env.DISABLE_AUTO_COMPACT;
     delete env.DISABLE_COMPACT;
+    delete env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE;
     if (acwEnv != null) {
       env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(acwEnv);
     } else {

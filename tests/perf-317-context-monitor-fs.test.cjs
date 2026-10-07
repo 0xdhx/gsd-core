@@ -730,7 +730,12 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
     },
   });
 
-  const env = { ...process.env };
+  // Pin CLAUDE_CONFIG_DIR to an empty scratch dir and clear the compaction env
+  // vars, so the developer's real settings (autoCompactWindow, autoCompactEnabled)
+  // cannot move the threshold these expectations are computed against.
+  const configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-2451-cfg-'));
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir };
+  for (const key of ['DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']) delete env[key];
   if (acwEnv != null) {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(acwEnv);
   } else {
@@ -744,6 +749,7 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
       timeout: CONTEXT_MONITOR_QUICK_PROBE_TIMEOUT_MS,
     });
   } catch { /* non-zero exit is fine; we only need the bridge file */ }
+  finally { cleanup(configDir); }
 
   const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
   const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf-8'));
