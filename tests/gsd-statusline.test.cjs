@@ -983,6 +983,67 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
     assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, DISABLE_AUTO_COMPACT: '1' }), null, 'disabled: no threshold');
   });
 
+  test('resolveAutoCompactThreshold: the per-model window /autocompact saves in modelSettings (claude 2.1.292)', (t) => {
+    const { cfg, proj, env } = scratch(t);
+    const M = 1_000_000;
+    const write = (file, obj) => fs.writeFileSync(file, JSON.stringify(obj));
+    const user = path.join(cfg, 'settings.json');
+    const project = path.join(proj, '.claude', 'settings.json');
+
+    // What `/autocompact 650k` writes on a current Claude Code.
+    write(user, { modelSettings: { 'claude-opus-5-5': { effortLevel: 'high', autoCompactWindow: 650_000 } } });
+    for (const id of ['claude-opus-5-5', 'claude-opus-5-5[1m]', 'claude-opus-5-5-20260101',
+      'us.anthropic.claude-opus-5-5-v1:0', 'claude-opus-5-5@20260101']) {
+      assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, id), 617_000, `${id} keys as claude-opus-5-5`);
+    }
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-sonnet-5'), 967_000, 'another model: no entry');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 967_000, 'no model id: no entry');
+
+    write(user, { autoCompactWindow: 400_000, modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 650_000 } } });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 617_000, 'the model entry wins over the default');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-sonnet-5'), 367_000, 'other models take the default');
+
+    write(project, { modelSettings: { 'claude-sonnet-5': { autoCompactWindow: 300_000 } } });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-sonnet-5'), 267_000, 'a higher file layers its model entries over the lower ones');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 617_000, '…and keeps the lower file\'s entries for other models');
+
+    write(project, { autoCompactWindow: 500_000 });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 467_000, 'a higher top-level window drops the lower files\' model entries');
+
+    write(project, { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 'auto' } } });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 967_000, '"auto" is Claude Code\'s tuned window: the model window here');
+
+    write(project, { modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 50_000 } } });
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env, 'claude-opus-5-5'), 617_000, 'an invalid model entry is absent');
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: '800000' }, 'claude-opus-5-5'), 767_000, 'env outranks the model entry');
+  });
+
+  test('the hook passes the payload\'s model.id through to the per-model window', (t) => {
+    const dirs = scratch(t);
+    fs.writeFileSync(path.join(dirs.cfg, 'settings.json'),
+      JSON.stringify({ modelSettings: { 'claude-opus-5-5': { autoCompactWindow: 650_000 } } }));
+    const sessionId = `test-4985-model-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const env = { ...process.env, CLAUDE_CONFIG_DIR: dirs.cfg };
+    for (const key of ['CLAUDE_CODE_AUTO_COMPACT_WINDOW', 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE', 'DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT']) delete env[key];
+    runHookSeam(hookPath, [], {
+      input: JSON.stringify({
+        model: { id: 'claude-opus-5-5[1m]', display_name: 'Opus' },
+        workspace: { current_dir: dirs.proj, project_dir: dirs.proj },
+        session_id: sessionId,
+        context_window: usageWindow(616_927, 1_000_000),
+      }),
+      env,
+      timeoutMs: STATUSLINE_HOOK_TIMEOUT_MS,
+    });
+    const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
+    const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'));
+    fs.unlinkSync(bridgePath);
+    assert.deepStrictEqual(
+      { used_pct: bridge.used_pct, threshold_tokens: bridge.threshold_tokens },
+      { used_pct: 100, threshold_tokens: 617_000 },
+    );
+  });
+
   test('contextMeter: disabled compaction measures against the model window; no window size falls back unscaled', () => {
     const env = { CLAUDE_CONFIG_DIR: path.join(os.tmpdir(), 'gsd-4985-absent-cfg') };
     assert.deepStrictEqual(
