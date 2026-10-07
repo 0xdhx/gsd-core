@@ -182,7 +182,9 @@ The bridge file is a simple JSON object:
 
 `used_pct` and `remaining_percentage` add to 100 and are percentages of
 `threshold_tokens`: the auto-compact threshold, or the model window when
-auto-compact is off. `used_tokens` is the count `/context` shows. The two token
+auto-compact is off. `used_tokens` is the count `/context` shows, taken from the
+payload's `current_usage`; before the first response, when the payload has no
+`current_usage`, it is estimated from Claude Code's percentage. The two token
 fields are absent when the statusline payload has no `context_window_size`; the
 percentages are then Claude Code's own, against the model window.
 
