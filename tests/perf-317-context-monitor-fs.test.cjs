@@ -694,10 +694,12 @@ describe('#4905: the CRITICAL breadcrumb stamps the local day through the clock 
  * But CC's native /context shows raw used = 100 - remaining = 65%.
  * The 13-point gap is exactly the buffer normalization overhead.
  *
- * Fix: the bridge must write used_pct as the raw value (Math.round(100 -
- * remaining)), not the buffer-normalized value. The statusline progress bar
- * continues to use the normalized value for its own display; only the bridge
- * value that feeds the context monitor needs to be raw/CC-consistent.
+ * #2451 fixed this by keeping the bridge's used_pct raw. #4985 moved the
+ * bridge onto the auto-compact threshold scale, because the monitor gates on
+ * remaining_percentage and can only warn before compaction if that counts
+ * down to the threshold. The /context agreement #2451 protected is now
+ * carried by the bridge's used_tokens / threshold_tokens, which the monitor
+ * quotes in its message.
  */
 
 'use strict';
@@ -789,41 +791,40 @@ function runMonitorHook(remainingPct, usedPct, extraBridge = {}) {
 
 // ─── Bridge file used_pct accuracy ──────────────────────────────────────────
 
-describe('bug #2451: bridge used_pct matches CC native reporting', () => {
-  test('used_pct is raw (100 - remaining), not buffer-normalized', () => {
-    // CC reports remaining_percentage=35 → CC native "used" = 100-35 = 65%
-    // Buffer-normalized would give: (100 - (35-16.5)/(100-16.5)*100) ≈ 78%
-    // The bridge used_pct must be 65 (raw), not 78 (normalized).
+describe('bug #2451, #4985: bridge counts down to compaction and carries the /context tokens', () => {
+  // No window configured on a 1M model: threshold = 1,000,000 − 20,000 − 13,000
+  // = 967,000. These payloads carry no current_usage, so the hook recovers the
+  // used tokens from CC's own percentage: used = (100 − remaining)% of 1M.
+  function expected(remaining) {
+    const usedTokens = (100 - remaining) * 10_000;
+    const usedPct = Math.round((usedTokens / 967_000) * 100);
+    return { used_pct: usedPct, remaining_percentage: 100 - usedPct, used_tokens: usedTokens, threshold_tokens: 967_000 };
+  }
+  function pick(bridge) {
+    const { used_pct, remaining_percentage, used_tokens, threshold_tokens } = bridge;
+    return { used_pct, remaining_percentage, used_tokens, threshold_tokens };
+  }
+
+  test('used_pct is the share of the auto-compact threshold, not of the model window', () => {
+    // CC reports remaining=35 → 650,000 used → 650,000 / 967,000 = 67%.
+    // The pre-#2451 16.5% normalization would give 78; the raw window share is 65.
     const bridge = runStatuslineHook(35);
-    assert.strictEqual(
-      bridge.used_pct,
-      65,
-      `used_pct should be 65 (raw: 100 - 35) but got ${bridge.used_pct}. ` +
-      'Buffer normalization must NOT be applied to the bridge used_pct, ' +
-      'otherwise context monitor messages over-report usage by ~13 points ' +
-      'compared to CC native /context (root cause of #2451).'
-    );
+    assert.deepStrictEqual(pick(bridge), expected(35));
+    assert.strictEqual(bridge.used_pct, 67);
   });
 
-  test('used_pct is raw for high remaining (low usage scenario)', () => {
-    // remaining=80 → raw used = 20
-    const bridge = runStatuslineHook(80);
-    assert.strictEqual(bridge.used_pct, 20,
-      `used_pct should be 20 (raw: 100-80) but got ${bridge.used_pct}`);
+  test('low usage: remaining=80 → 200,000 used → 21%', () => {
+    assert.deepStrictEqual(pick(runStatuslineHook(80)), expected(80));
   });
 
-  test('used_pct is raw for near-critical remaining', () => {
-    // remaining=20 → raw used = 80
-    const bridge = runStatuslineHook(20);
-    assert.strictEqual(bridge.used_pct, 80,
-      `used_pct should be 80 (raw: 100-20) but got ${bridge.used_pct}`);
+  test('near-critical: remaining=20 → 800,000 used → 83%', () => {
+    assert.deepStrictEqual(pick(runStatuslineHook(20)), expected(20));
   });
 
-  test('remaining_percentage in bridge matches raw CC value', () => {
-    // The bridge remaining_percentage should be the exact raw value from CC
+  test('remaining_percentage and used_pct are one scale (they sum to 100)', () => {
     const bridge = runStatuslineHook(42);
-    assert.strictEqual(bridge.remaining_percentage, 42,
-      'bridge remaining_percentage must be the raw CC value (no normalization)');
+    assert.strictEqual(bridge.used_pct + bridge.remaining_percentage, 100);
+    assert.deepStrictEqual(pick(bridge), expected(42));
   });
 });
 
@@ -870,18 +871,13 @@ describe('bug #2451: context monitor warning messages show CC-consistent percent
     );
   });
 
-  test('gap between hook used_pct and raw CC value is at most 1 (rounding)', () => {
-    // With the fix, the only acceptable deviation is ±1 due to Math.round
+  test('the bridge\'s used_tokens is exactly what /context reports as used', () => {
+    // #2451's /context agreement now lives in the token count: CC's remaining=35
+    // on a 1M window is 650,000 used, and the bridge must carry exactly that —
+    // a buffer-normalized or re-rounded figure here is #2451's over-report again.
     const rawRemaining = 35;
     const bridge = runStatuslineHook(rawRemaining);
-    const ccNativeUsed = 100 - rawRemaining; // 65
-    const gap = Math.abs(bridge.used_pct - ccNativeUsed);
-    assert.ok(
-      gap <= 1,
-      `Gap between hook used_pct (${bridge.used_pct}) and CC native used (${ccNativeUsed}) ` +
-      `is ${gap} points — must be ≤1 (rounding). Larger gaps indicate buffer normalization ` +
-      'is still being applied to bridge used_pct (root cause of #2451).'
-    );
+    assert.strictEqual(bridge.used_tokens, (100 - rawRemaining) * 10_000);
   });
 });
   });
