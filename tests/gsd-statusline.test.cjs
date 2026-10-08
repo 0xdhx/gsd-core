@@ -770,50 +770,46 @@ describe('context meter: 100% is the auto-compact threshold (#2219, #4985)', () 
     assert.strictEqual(runHook(50, 1_000_000, null, { autoCompactEnabled: true }).normalizedUsed, 52);
   });
 
-  test('isAutoCompactDisabled: env switches and settings precedence, fail-soft', () => {
+  test('isAutoCompactDisabled: env switches and settings precedence, fail-soft', (t) => {
     const { isAutoCompactDisabled, AUTO_COMPACT_DISABLE_ENV_KEYS, AUTO_COMPACT_ENV_TRUTHY } = require('../hooks/gsd-statusline.js');
     const cfg = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-statusline-cfg-'));
     const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-statusline-proj-'));
-    try {
-      const env = { CLAUDE_CONFIG_DIR: cfg };
-      assert.equal(isAutoCompactDisabled(proj, env), false, 'nothing configured');
-      // The env names and accepted values are Claude Code's own, not invented:
-      // an invented name reads as 'not disabled' forever (PR #4959 review).
-      // Source: the shipped binary (claude 2.1.292). The resolution is
-      // `Boolean(Le(process.env.DISABLE_COMPACT) || a.DISABLE_AUTO_COMPACT)`; the
-      // second operand looks unwrapped but is the env registry's `D.bool()` field,
-      // i.e. `Le(value)` again, so both keys share one truthy set —
-      // `Le = e => ["1","true","yes","on"].includes(String(e).toLowerCase().trim())`
-      // (and 0/false/no/off/'' are therefore "not disabled" for both keys).
-      assert.deepEqual([...AUTO_COMPACT_DISABLE_ENV_KEYS], ['DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT']);
-      assert.deepEqual([...AUTO_COMPACT_ENV_TRUTHY], ['1', 'true', 'yes', 'on']);
-      for (const key of AUTO_COMPACT_DISABLE_ENV_KEYS) {
-        for (const value of ['1', 'true', 'yes', 'on', ' TRUE ', 'On']) {
-          assert.equal(isAutoCompactDisabled(proj, { ...env, [key]: value }), true, `${key}=${JSON.stringify(value)}`);
-        }
-        for (const value of ['0', 'false', '', 'no', 'off']) {
-          assert.equal(isAutoCompactDisabled(proj, { ...env, [key]: value }), false, `${key}=${JSON.stringify(value)}`);
-        }
+    t.after(() => { cleanup(cfg); cleanup(proj); });
+    const env = { CLAUDE_CONFIG_DIR: cfg };
+    assert.equal(isAutoCompactDisabled(proj, env), false, 'nothing configured');
+    // The env names and accepted values are Claude Code's own, not invented:
+    // an invented name reads as 'not disabled' forever (PR #4959 review).
+    // Source: the shipped binary (claude 2.1.292). The resolution is
+    // `Boolean(Le(process.env.DISABLE_COMPACT) || a.DISABLE_AUTO_COMPACT)`; the
+    // second operand looks unwrapped but is the env registry's `D.bool()` field,
+    // i.e. `Le(value)` again, so both keys share one truthy set —
+    // `Le = e => ["1","true","yes","on"].includes(String(e).toLowerCase().trim())`
+    // (and 0/false/no/off/'' are therefore "not disabled" for both keys).
+    assert.deepEqual([...AUTO_COMPACT_DISABLE_ENV_KEYS], ['DISABLE_AUTO_COMPACT', 'DISABLE_COMPACT']);
+    assert.deepEqual([...AUTO_COMPACT_ENV_TRUTHY], ['1', 'true', 'yes', 'on']);
+    for (const key of AUTO_COMPACT_DISABLE_ENV_KEYS) {
+      for (const value of ['1', 'true', 'yes', 'on', ' TRUE ', 'On']) {
+        assert.equal(isAutoCompactDisabled(proj, { ...env, [key]: value }), true, `${key}=${JSON.stringify(value)}`);
       }
-      assert.equal(isAutoCompactDisabled(proj, { ...env, DISABLE_AUTOCOMPACT: '1' }), false,
-        'DISABLE_AUTOCOMPACT is not a Claude Code variable and must not be honoured');
-      // Positive control for the fixture guard itself: without this, a future
-      // fixture could reintroduce an invented field and nothing would notice.
-      assert.throws(() => contextWindow({ total_tokens: 200000 }), /not a documented statusline field/);
-      assert.deepEqual(contextWindow({ context_window_size: 200000 }), { context_window_size: 200000 });
-      fs.writeFileSync(path.join(cfg, 'settings.json'), '{ not json');
-      assert.equal(isAutoCompactDisabled(proj, env), false, 'unparseable settings are ignored');
-      fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify({ autoCompactEnabled: false }));
-      assert.equal(isAutoCompactDisabled(proj, env), true, 'global settings');
-      fs.mkdirSync(path.join(proj, '.claude'));
-      fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ autoCompactEnabled: true }));
-      assert.equal(isAutoCompactDisabled(proj, env), false, 'project settings outrank global');
-      fs.writeFileSync(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ autoCompactEnabled: false }));
-      assert.equal(isAutoCompactDisabled(proj, env), true, 'settings.local.json outranks settings.json');
-    } finally {
-      cleanup(cfg);
-      cleanup(proj);
+      for (const value of ['0', 'false', '', 'no', 'off']) {
+        assert.equal(isAutoCompactDisabled(proj, { ...env, [key]: value }), false, `${key}=${JSON.stringify(value)}`);
+      }
     }
+    assert.equal(isAutoCompactDisabled(proj, { ...env, DISABLE_AUTOCOMPACT: '1' }), false,
+      'DISABLE_AUTOCOMPACT is not a Claude Code variable and must not be honoured');
+    // Positive control for the fixture guard itself: without this, a future
+    // fixture could reintroduce an invented field and nothing would notice.
+    assert.throws(() => contextWindow({ total_tokens: 200000 }), /not a documented statusline field/);
+    assert.deepEqual(contextWindow({ context_window_size: 200000 }), { context_window_size: 200000 });
+    fs.writeFileSync(path.join(cfg, 'settings.json'), '{ not json');
+    assert.equal(isAutoCompactDisabled(proj, env), false, 'unparseable settings are ignored');
+    fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify({ autoCompactEnabled: false }));
+    assert.equal(isAutoCompactDisabled(proj, env), true, 'global settings');
+    fs.mkdirSync(path.join(proj, '.claude'));
+    fs.writeFileSync(path.join(proj, '.claude', 'settings.json'), JSON.stringify({ autoCompactEnabled: true }));
+    assert.equal(isAutoCompactDisabled(proj, env), false, 'project settings outrank global');
+    fs.writeFileSync(path.join(proj, '.claude', 'settings.local.json'), JSON.stringify({ autoCompactEnabled: false }));
+    assert.equal(isAutoCompactDisabled(proj, env), true, 'settings.local.json outranks settings.json');
   });
 
   test('bridge is on the bar\'s scale and carries the /context token counts (#2451, #4985)', () => {

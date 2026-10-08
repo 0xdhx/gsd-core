@@ -749,7 +749,7 @@ function runStatuslineHook(remainingPct, totalTokens = 1_000_000, acwEnv = null)
       timeout: CONTEXT_MONITOR_QUICK_PROBE_TIMEOUT_MS,
     });
   } catch { /* non-zero exit is fine; we only need the bridge file */ }
-  finally { cleanup(configDir); }
+  cleanup(configDir);
 
   const bridgePath = path.join(os.tmpdir(), `claude-ctx-${sessionId}.json`);
   const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf-8'));
