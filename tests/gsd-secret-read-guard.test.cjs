@@ -814,7 +814,7 @@ describe('regressions: #5267 — a `case` pattern paren does not close a substit
   const allows = [
     // The triage control, and the inline-value idiom this must keep working.
     'x=$(echo case); echo hi',
-    'os="$(case "$OSTYPE" in linux*) echo linux;; darwin*) echo mac;; *) echo other;; esac)"; echo "$os"',
+    'os="$(case "$OSTYPE" in linux*) echo linux;; freebsd*) echo bsd;; *) echo other;; esac)"; echo "$os"',
     'echo "$(case x in x) echo ok;; esac)"; echo done',
     // The arm is scanned, not refused: a template name and an existence check pass.
     'echo "$(case x in x) cat .env.example;; esac)"',
