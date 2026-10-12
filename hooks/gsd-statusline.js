@@ -234,12 +234,35 @@ function readClaudeSettingsFiles(dir, env) {
   return claudeSettingsPaths(dir, env).map(readSettingsFile).filter(Boolean);
 }
 
+/**
+ * A settings file larger than this is treated as absent. Claude Code's own
+ * settings files are a few kilobytes; the cap keeps a hostile project's
+ * `.claude/settings.json` from bloating a read that runs on every render.
+ */
+const SETTINGS_FILE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The parsed settings object in `file`, or null. Only a regular file of at
+ * most SETTINGS_FILE_MAX_BYTES is read: the project's `.claude/` is
+ * repository content, and a FIFO there would block the statusline forever.
+ * The file is opened non-blocking and checked through its own descriptor,
+ * so the check and the read see the same file. A symlink is followed — a
+ * settings file linked in from a dotfiles repo is ordinary.
+ */
 function readSettingsFile(file) {
+  let fd;
   try {
-    const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
+    const st = fs.fstatSync(fd);
+    if (!st.isFile() || st.size > SETTINGS_FILE_MAX_BYTES) return null;
+    const settings = JSON.parse(fs.readFileSync(fd, 'utf8'));
     return settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : null;
   } catch (e) {
-    return null; // absent or unparseable — keep looking
+    return null; // absent, unreadable or unparseable — keep looking
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch (e) { /* already closed */ }
+    }
   }
 }
 
@@ -1352,7 +1375,7 @@ module.exports = {
   formatStateFreshness, resolveStatuslineOptions,
   renderBracketPhaseDisplay, renderBracketMilestoneDisplay,
   isAutoCompactDisabled, AUTO_COMPACT_DISABLE_ENV_KEYS, AUTO_COMPACT_ENV_TRUTHY,
-  resolveAutoCompactThreshold, contextMeter,
+  resolveAutoCompactThreshold, contextMeter, SETTINGS_FILE_MAX_BYTES,
 };
 
 /**

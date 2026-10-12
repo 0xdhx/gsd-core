@@ -831,7 +831,7 @@ describe('context meter: 100% is the auto-compact threshold (#2219, #4985)', () 
 
 describe('context meter resolves the auto-compact window the way Claude Code does (#4985)', () => {
   const { runHook: runHookSeam } = require('./helpers/process-seam.cjs');
-  const { resolveAutoCompactThreshold, contextMeter } = require('../hooks/gsd-statusline.js');
+  const { resolveAutoCompactThreshold, contextMeter, SETTINGS_FILE_MAX_BYTES } = require('../hooks/gsd-statusline.js');
   const hookPath = path.join(__dirname, '..', 'hooks', 'gsd-statusline.js');
   const monitorPath = path.join(__dirname, '..', 'hooks', 'gsd-context-monitor.js');
 
@@ -944,6 +944,57 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
     const bridge = JSON.parse(fs.readFileSync(bridgePath, 'utf8'));
     fs.unlinkSync(bridgePath);
     assert.strictEqual(bridge.threshold_tokens, 367_000);
+  });
+
+  test('a FIFO at the project\'s .claude/settings.local.json does not block the render', { skip: process.platform === 'win32' }, (t) => {
+    // The project's .claude/ is repository content. Read blocking, a FIFO there hung the hook
+    // until it was killed, and no bridge was written.
+    const dirs = scratch(t);
+    fs.writeFileSync(path.join(dirs.cfg, 'settings.json'), JSON.stringify({ autoCompactWindow: 650_000 }));
+    const fifo = path.join(dirs.proj, '.claude', 'settings.local.json');
+    const r = runHookSeam(fifo, [], { interpreter: 'mkfifo', timeoutMs: STATUSLINE_HOOK_TIMEOUT_MS });
+    assert.strictEqual(r.exitCode, 0, `mkfifo ${fifo}: ${r.stderr}`);
+    const { bridge, bridgePath } = render(dirs, 100_000, 1_000_000);
+    fs.unlinkSync(bridgePath);
+    assert.strictEqual(bridge.threshold_tokens, 617_000, 'the FIFO is absent; the user setting decides');
+  });
+
+  test('a settings file that is not a regular file, or is over the size cap, is absent; a symlinked one is read', (t) => {
+    const { cfg, proj, env } = scratch(t);
+    const M = 1_000_000;
+    const project = path.join(proj, '.claude', 'settings.json');
+    fs.writeFileSync(path.join(cfg, 'settings.json'), JSON.stringify({ autoCompactWindow: 650_000 }));
+
+    fs.mkdirSync(project);
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 617_000, 'a directory is absent');
+    fs.rmdirSync(project);
+
+    // A JSON document of exactly `bytes` bytes setting a 500k window.
+    const sized = (bytes) => {
+      const head = '{"autoCompactWindow":500000,"pad":"';
+      return head + 'x'.repeat(bytes - head.length - 2) + '"}';
+    };
+    for (const [bytes, expected, label] of [
+      [SETTINGS_FILE_MAX_BYTES - 1, 467_000, 'one byte under the cap is read'],
+      [SETTINGS_FILE_MAX_BYTES, 467_000, 'exactly the cap is read'],
+      [SETTINGS_FILE_MAX_BYTES + 1, 617_000, 'one byte over the cap is absent'],
+    ]) {
+      const body = sized(bytes);
+      assert.strictEqual(Buffer.byteLength(body), bytes);
+      fs.writeFileSync(project, body);
+      assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), expected, label);
+    }
+    fs.unlinkSync(project);
+
+    const target = path.join(cfg, 'linked-settings.json');
+    fs.writeFileSync(target, JSON.stringify({ autoCompactWindow: 500_000 }));
+    try {
+      fs.symlinkSync(target, project);
+    } catch (e) {
+      t.skip(`symlinks unavailable here: ${e.code}`);
+      return;
+    }
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 467_000, 'a symlinked settings file is followed');
   });
 
   test('resolveAutoCompactThreshold: precedence, validation, caps, and the pct override', (t) => {
