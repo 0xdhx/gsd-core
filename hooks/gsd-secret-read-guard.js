@@ -930,32 +930,66 @@ function pastContinuation(str, i, ctx) {
   return ctx.orphans.length ? afterNewline(str, i + 1, ctx) : i + 2;
 }
 
-// readHeredocTag for the readers above: the same tag, with the line
-// continuations bash removes from an unquoted word removed from it, so
-// `<<EO\` newline `F` waits for `EOF`. Inside quotes they stay.
+// readHeredocTag for the readers above: the delimiter bash waits for, which
+// is the tag word with its quotes removed, as the tokenizer reads it. Quoted
+// and unquoted parts join into one word (`<<'E'OF` and `<<X"EOF"` wait for
+// `EOF` and `XEOF`), a backslash quotes the character after it, and inside
+// "…" it is removed only before `"`, `\`, `$` or a backtick. The line
+// continuations bash removes are removed from the unquoted and the
+// double-quoted parts, so `<<EO\` newline `F` and `<<"EO\` newline `F"` wait
+// for `EOF`. Inside '…' they stay. Any quoting makes the heredoc quoted.
+// While an orphan heredoc waits, its body starts at a continuation's newline
+// and the word goes on after it: `<<B\` newline, an orphan body, then `C`
+// waits for `BC`.
 function readHeredocTagContinued(str, i, ctx) {
+  const past = (j) => {
+    for (;;) {
+      j = pastContinuations(str, j, ctx);
+      if (str[j] !== '\\' || str[j + 1] !== '\n') return j;
+      j = pastContinuation(str, j, ctx);
+    }
+  };
   let stripTabs = false;
-  i = pastContinuations(str, i, ctx);
-  if (str[i] === '-') { stripTabs = true; i = pastContinuations(str, i + 1, ctx); }
-  while (str[i] === ' ' || str[i] === '\t') i = pastContinuations(str, i + 1, ctx);
-  if (str[i] === "'" || str[i] === '"') return { ...readHeredocTag(str, i), stripTabs };
+  i = past(i);
+  if (str[i] === '-') { stripTabs = true; i = past(i + 1); }
+  while (str[i] === ' ' || str[i] === '\t') i = past(i + 1);
   const ends = (c) => /[\s;&|<>()]/.test(c);
   let quoted = false;
   let tag = '';
-  // A backslash quotes the character after it, which is then never the
-  // start of a line continuation.
-  if (str[i] === '\\') {
-    quoted = true;
-    i++;
-    if (i < str.length && !ends(str[i])) tag += str[i++];
-  }
   for (;;) {
-    i = pastContinuations(str, i, ctx);
+    i = past(i);
     if (i >= str.length || ends(str[i])) break;
-    if (str[i] === '\\' && i + 1 < str.length && !ends(str[i + 1])) { tag += str[i] + str[i + 1]; i += 2; continue; }
+    const ch = str[i];
+    if (ch === '\\') {
+      quoted = true;
+      if (i + 1 < str.length) tag += str[i + 1];
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      quoted = true;
+      const j = str.indexOf("'", i + 1);
+      tag += str.slice(i + 1, j === -1 ? str.length : j);
+      i = j === -1 ? str.length : j + 1;
+      continue;
+    }
+    if (ch === '"') {
+      quoted = true;
+      i++;
+      while (i < str.length && str[i] !== '"') {
+        if (str[i] === '\\' && i + 1 < str.length && '"\\$`\n'.includes(str[i + 1])) {
+          if (str[i + 1] !== '\n') tag += str[i + 1];
+          i += 2;
+          continue;
+        }
+        tag += str[i++];
+      }
+      i++;
+      continue;
+    }
     tag += str[i++];
   }
-  return { tag, quoted, stripTabs, end: i };
+  return { tag, quoted, stripTabs, end: Math.min(i, str.length) };
 }
 
 // consumeHeredocBodies for the readers above, which need only where the
