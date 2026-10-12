@@ -1330,13 +1330,16 @@ describe('auto-compact window and context meter: properties (#4985)', () => {
           current_usage: { input_tokens: n, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
         }), null, env);
         const m = meter(tokens);
+        // The percentage itself: the rounded share of the limit, pinned at 100 past it.
+        const pct = (tokens / m.limitTokens) * 100;
         return Number.isInteger(m.used) && m.used >= 0 && m.used <= 100 && m.used + m.remaining === 100 &&
+          (pct >= 100 ? m.used === 100 : Math.abs(m.used - pct) <= 0.5) &&
           m.usedTokens === tokens && m.limitTokens === (resolveAutoCompactThreshold(size, null, env) ?? size) &&
           meter(tokens + more).used >= m.used;
       }));
   });
 
-  test('the settings merge: the window is one a file set, or the model window; the highest file\'s own model entry wins', (t) => {
+  test('the settings merge matches a reference model of Claude Code\'s merge, for every generated set of four files', (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4985-prop-merge-'));
     t.after(() => cleanup(root));
     const cfg = path.join(root, 'cfg');
@@ -1349,37 +1352,53 @@ describe('auto-compact window and context meter: properties (#4985)', () => {
       path.join(cfg, 'settings.local.json'), path.join(cfg, 'settings.json'),
     ];
     const M2 = 2_000_000; // above every valid window, so the threshold reads the window back exactly
+    // The model each generated spelling belongs to — stated here, not derived from canonicalModelKey,
+    // so a key bug cannot hide a merge bug.
+    const MODEL_OF = { 'claude-opus-5-5': 'claude-opus-5-5', 'CLAUDE-OPUS-5-5-20260101': 'claude-opus-5-5', 'claude-sonnet-5': 'claude-sonnet-5' };
+    const isWindow = (v) => v === 'auto' || (Number.isInteger(v) && v >= MIN && v <= MAX);
     const value = fc.oneof(fc.integer({ min: MIN, max: MAX }), fc.constantFrom('auto', 50_000, 1_500_000, '400000', null));
     const entry = fc.option(fc.record({ autoCompactWindow: value }), { nil: undefined });
     const settings = fc.option(fc.record({
       top: fc.option(value, { nil: undefined }),
       models: fc.record({ 'claude-opus-5-5': entry, 'CLAUDE-OPUS-5-5-20260101': entry, 'claude-sonnet-5': entry }),
     }), { nil: undefined });
+
+    // The documented merge (readAutoCompactWindowSetting): lowest precedence first; each file's
+    // valid model entries layer over the lower files', the canonical spelling winning within a
+    // file; a valid top-level value becomes the default and drops the lower files' model entries.
+    // The model's own entry wins over the default; "auto" or nothing is the model window.
+    function referenceWindow(four, model) {
+      let fallback;
+      let byModel = {};
+      for (const f of [...four].reverse()) {
+        if (f === undefined) continue;
+        const own = {};
+        for (const [name, e] of Object.entries(f.models)) {
+          if (e === undefined || !isWindow(e.autoCompactWindow)) continue;
+          if (name === MODEL_OF[name] || !(MODEL_OF[name] in own)) own[MODEL_OF[name]] = e.autoCompactWindow;
+        }
+        if (isWindow(f.top)) {
+          fallback = f.top;
+          byModel = own;
+        } else {
+          byModel = { ...byModel, ...own };
+        }
+      }
+      const v = model in byModel ? byModel[model] : fallback;
+      return Number.isInteger(v) ? v : M2;
+    }
+
     fc.assert(fc.property(fc.tuple(settings, settings, settings, settings), fc.constantFrom('claude-opus-5-5', 'claude-sonnet-5'), (four, model) => {
-      const written = [];
-      four.forEach((s, i) => {
+      four.forEach((f, i) => {
         try { fs.unlinkSync(files[i]); } catch { /* absent */ }
-        if (s === undefined) return;
+        if (f === undefined) return;
         const doc = { modelSettings: {} };
-        if (s.top !== undefined) doc.autoCompactWindow = s.top;
-        for (const [name, e] of Object.entries(s.models)) if (e !== undefined) doc.modelSettings[name] = e;
+        if (f.top !== undefined) doc.autoCompactWindow = f.top;
+        for (const [name, e] of Object.entries(f.models)) if (e !== undefined) doc.modelSettings[name] = e;
         fs.writeFileSync(files[i], JSON.stringify(doc));
-        written.push(doc);
       });
       const window = resolveAutoCompactThreshold(M2, proj, { CLAUDE_CONFIG_DIR: cfg }, model) + RESERVE;
-      const set = written.flatMap(d => [d.autoCompactWindow, ...Object.values(d.modelSettings).map(e => e.autoCompactWindow)])
-        .filter(v => Number.isInteger(v) && isAutoCompactWindowValue(v));
-      const valid = (v) => v !== undefined && isAutoCompactWindowValue(v);
-      // The highest file's entry for this model under any spelling of it, the exact spelling first.
-      const spellings = Object.entries(four[0]?.models ?? {})
-        .filter(([name, e]) => e !== undefined && valid(e.autoCompactWindow) && canonicalModelKey(name) === model);
-      const own = (spellings.find(([name]) => name === model) ?? spellings[0])?.[1].autoCompactWindow;
-      const topLevel = four[0]?.top;
-      // The highest file decides when it speaks: its own model entry first, else its top-level
-      // value, which drops every lower file's model entries ("auto" is the model window here).
-      const decided = valid(own) ? own : valid(topLevel) ? topLevel : undefined;
-      return (window === M2 || set.includes(window)) &&
-        (decided === undefined || window === (decided === 'auto' ? M2 : decided));
+      return window === referenceWindow(four, model);
     }));
   });
 });
