@@ -1021,6 +1021,19 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
     assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 467_000, 'unchanged: read');
   });
 
+  test('a hostile model key in project settings does not stall the render', (t) => {
+    // 131,072 repeated [1m] suffixes in a 524 KB file, under the size cap. Normalised to a fixpoint
+    // one suffix per pass, this key took 16.9 s and the hook was killed before writing its bridge.
+    const dirs = scratch(t);
+    fs.writeFileSync(path.join(dirs.cfg, 'settings.json'), JSON.stringify({ autoCompactWindow: 650_000 }));
+    const hostile = 'claude-opus-5-5' + '[1m]'.repeat(131_072);
+    fs.writeFileSync(path.join(dirs.proj, '.claude', 'settings.json'),
+      JSON.stringify({ modelSettings: { [hostile]: { autoCompactWindow: 400_000 } } }));
+    const { bridge, bridgePath } = render(dirs, 100_000, 1_000_000);
+    fs.unlinkSync(bridgePath);
+    assert.strictEqual(bridge.threshold_tokens, 617_000, 'the over-long key is no model\'s; the user setting decides');
+  });
+
   test('resolveAutoCompactThreshold: precedence, validation, caps, and the pct override', (t) => {
     const { cfg, proj, env } = scratch(t);
     const M = 1_000_000;
@@ -1248,6 +1261,13 @@ describe('auto-compact window and context meter: properties (#4985)', () => {
   test('canonicalModelKey is idempotent: a key is its own key', () => {
     fc.assert(fc.property(keyish, (s) => canonicalModelKey(canonicalModelKey(s)) === canonicalModelKey(s)));
     fc.assert(fc.property(fc.anything().filter(v => typeof v !== 'string'), (v) => canonicalModelKey(v) === ''));
+  });
+
+  test('canonicalModelKey: a key of up to 256 characters is kept; a longer one is no model\'s', () => {
+    assert.strictEqual(canonicalModelKey('a'.repeat(255)), 'a'.repeat(255));
+    assert.strictEqual(canonicalModelKey('a'.repeat(256)), 'a'.repeat(256));
+    assert.strictEqual(canonicalModelKey('a'.repeat(257)), '');
+    assert.strictEqual(canonicalModelKey('claude-opus-5-5' + '[1m]'.repeat(60)), 'claude-opus-5-5', 'repeated suffixes, under the cap');
   });
 
   test('canonicalModelKey is spelling-invariant: dated, [1m], Bedrock and Vertex ids key as the model', () => {

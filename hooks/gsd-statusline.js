@@ -304,16 +304,22 @@ function claudeSettingsPaths(dir, env) {
  * revision suffix is stripped only after a version or date segment, so a
  * model whose own name ends in `-v<n>` (`anthropic.claude-v2`) keeps it.
  * The rules repeat until nothing changes, so a key is its own key: one pass
- * left `x[1m][1m]` as `x[1m]`. Each rule only removes characters, so this
- * ends. '' for a non-string.
+ * left `x[1m][1m]` as `x[1m]`. Lowercasing runs once, before the loop (it
+ * can lengthen a string: `İ` becomes two characters); inside the loop every
+ * rule only removes characters, so it ends. A key longer than
+ * MODEL_KEY_MAX_LENGTH is no model's — '' — which also bounds the loop's
+ * work on a hostile settings file. '' for a non-string.
  */
+const MODEL_KEY_MAX_LENGTH = 256;
+
 function canonicalModelKey(id) {
   if (typeof id !== 'string') return '';
-  let key = id;
+  let key = id.toLowerCase();
+  if (key.length > MODEL_KEY_MAX_LENGTH) return '';
   for (let prev; prev !== key;) {
     prev = key;
-    key = key.trim().toLowerCase()
-      .replace(/\[1m\]$/, '')
+    key = key.trim()
+      .replace(/(?:\[1m\])+$/, '')
       .replace(/^(?:[a-z]+\.)?anthropic\./, '')
       .replace(/(\d)-v\d+(?::\d+)?$/, '$1')
       .replace(/@\d{8}$/, '')
