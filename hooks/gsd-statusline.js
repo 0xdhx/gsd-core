@@ -246,8 +246,9 @@ const SETTINGS_FILE_MAX_BYTES = 1024 * 1024;
  * most SETTINGS_FILE_MAX_BYTES is read: the project's `.claude/` is
  * repository content, and a FIFO there would block the statusline forever.
  * The file is opened non-blocking and checked through its own descriptor,
- * so the check and the read see the same file. A symlink is followed — a
- * settings file linked in from a dotfiles repo is ordinary.
+ * so the check and the read see the same file, and at most the checked size
+ * is read: a file that grew or shrank after the check is absent. A symlink
+ * is followed — a settings file linked in from a dotfiles repo is ordinary.
  */
 function readSettingsFile(file) {
   let fd;
@@ -255,7 +256,12 @@ function readSettingsFile(file) {
     fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
     const st = fs.fstatSync(fd);
     if (!st.isFile() || st.size > SETTINGS_FILE_MAX_BYTES) return null;
-    const settings = JSON.parse(fs.readFileSync(fd, 'utf8'));
+    // One byte past the checked size, so growth after the check shows as a longer read.
+    const buf = Buffer.alloc(st.size + 1);
+    let n = 0;
+    for (let r; n < buf.length && (r = fs.readSync(fd, buf, n, buf.length - n, n)) > 0;) n += r;
+    if (n !== st.size) return null;
+    const settings = JSON.parse(buf.toString('utf8', 0, n));
     return settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : null;
   } catch (e) {
     return null; // absent, unreadable or unparseable — keep looking

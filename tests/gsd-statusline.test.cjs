@@ -997,6 +997,30 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
     assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 467_000, 'a symlinked settings file is followed');
   });
 
+  test('a settings file that grows or shrinks between the size check and the read is absent', (t) => {
+    // Stands in for a writer racing the render: fstat reports one size, the file holds another.
+    // Read to EOF instead, a 2-byte file grown past the cap was parsed whole.
+    // The project file is the only settings file, so the mocked size is only ever its own.
+    const { proj, env } = scratch(t);
+    const M = 1_000_000;
+    const project = path.join(proj, '.claude', 'settings.json');
+    const head = '{"autoCompactWindow":500000,"pad":"';
+    fs.writeFileSync(project, head + 'x'.repeat(SETTINGS_FILE_MAX_BYTES - head.length) + '"}');
+    const realFstat = fs.fstatSync;
+    let reported;
+    t.mock.method(fs, 'fstatSync', (fd) => {
+      const st = realFstat(fd);
+      return { isFile: () => st.isFile(), size: reported(st.size) };
+    });
+    reported = () => 2;
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 967_000, 'grew past the cap after a 2-byte check');
+    fs.writeFileSync(project, JSON.stringify({ autoCompactWindow: 500_000 }));
+    reported = (size) => size + 10;
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 967_000, 'shrank after the check');
+    reported = (size) => size;
+    assert.strictEqual(resolveAutoCompactThreshold(M, proj, env), 467_000, 'unchanged: read');
+  });
+
   test('resolveAutoCompactThreshold: precedence, validation, caps, and the pct override', (t) => {
     const { cfg, proj, env } = scratch(t);
     const M = 1_000_000;
