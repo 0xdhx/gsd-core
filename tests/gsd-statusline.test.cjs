@@ -1031,6 +1031,53 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
     assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, DISABLE_AUTO_COMPACT: '1' }), null, 'disabled: no threshold');
   });
 
+  test('resolveAutoCompactThreshold: the 100k–1M window bounds, the pct override, and threshold > 0, each at limit−1 / limit / limit+1', (t) => {
+    const { cfg, proj, env } = scratch(t);
+    // A 2M model window, so a window the setting or env rejects (fallback 2,000,000 − 33,000)
+    // differs from one it accepts at 1M (967,000).
+    const M2 = 2_000_000;
+    const FALLBACK = M2 - 33_000;
+    const user = path.join(cfg, 'settings.json');
+    for (const [value, expected] of [
+      [99_999, FALLBACK], [100_000, 67_000], [100_001, 67_001],
+      [999_999, 966_999], [1_000_000, 967_000], [1_000_001, FALLBACK],
+    ]) {
+      fs.writeFileSync(user, JSON.stringify({ autoCompactWindow: value }));
+      assert.strictEqual(resolveAutoCompactThreshold(M2, proj, env), expected, `setting ${value}`);
+      fs.writeFileSync(user, JSON.stringify({ modelSettings: { 'claude-opus-5-5': { autoCompactWindow: value } } }));
+      assert.strictEqual(resolveAutoCompactThreshold(M2, proj, env, 'claude-opus-5-5'), expected, `per-model setting ${value}`);
+    }
+    fs.unlinkSync(user);
+
+    // The env value is clamped into 100k–1M rather than rejected; only a non-positive one is ignored.
+    for (const [raw, expected] of [
+      ['0', FALLBACK], ['1', 67_000],
+      ['99999', 67_000], ['100000', 67_000], ['100001', 67_001],
+      ['999999', 966_999], ['1000000', 967_000], ['1000001', 967_000],
+    ]) {
+      assert.strictEqual(resolveAutoCompactThreshold(M2, proj, { ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: raw }), expected, `env ${raw}`);
+    }
+
+    // pct: 0 < pct ≤ 100, on a 1M window (effective 980,000, threshold 967,000). At pct = 100 the
+    // override is floor(980,000) — always above the threshold it is min'd with — so 100 and 101 both
+    // read 967,000: the upper edge is not observable, and the lower one is.
+    const M = 1_000_000;
+    const noWindow = { CLAUDE_CONFIG_DIR: path.join(cfg, 'absent') };
+    for (const [pct, expected] of [
+      ['-1', 967_000], ['0', 967_000], ['1', 9_800], ['100', 967_000], ['101', 967_000],
+    ]) {
+      assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: pct }), expected, `pct ${pct}`);
+    }
+
+    // threshold > 0. A pct that floors the threshold to 0 is no threshold, and so is a model window
+    // no larger than the 33,000 Claude Code holds back.
+    assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '0.0001' }), null, 'pct floors to 0');
+    assert.strictEqual(resolveAutoCompactThreshold(M, null, { ...noWindow, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '0.000103' }), 1, 'pct floors to 1');
+    for (const [modelWindow, expected] of [[32_999, null], [33_000, null], [33_001, 1]]) {
+      assert.strictEqual(resolveAutoCompactThreshold(modelWindow, null, noWindow), expected, `model window ${modelWindow}`);
+    }
+  });
+
   test('resolveAutoCompactThreshold: the per-model window /autocompact saves in modelSettings (claude 2.1.292)', (t) => {
     const { cfg, proj, env } = scratch(t);
     const M = 1_000_000;
