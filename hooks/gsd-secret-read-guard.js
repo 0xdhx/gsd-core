@@ -1321,8 +1321,8 @@ function precedingOp(s, bySeg, sepAfter) {
   return { op, prevSeg: p };
 }
 
-// Returns the offending token text, an unreadable-quote record
-// (`{ code, text }`, see tokenize), or null. A command holding dollar-quoting
+// Returns the block as `{ code, text }` — a secret read (secretRead), or a
+// `$'…'` word with no value to check (tokenize's `unreadable`) — or null. A command holding dollar-quoting
 // is scanned under every reading (see the dollar-quoting section): bash's and
 // zsh's ANSI-C readings first, then the plain one, which is the scan as it was
 // before #5255. A command holding none gets the plain scan alone, so for it
@@ -1346,6 +1346,11 @@ function findSecretRead(command, depth) {
     if (hit !== null) return hit;
   }
   return scanCommand(command, depth, false);
+}
+
+// A Bash block for a read of the secret file `text` names.
+function secretRead(text) {
+  return { code: 'secret-read', text };
 }
 
 // One reading of `command`: `ansiC` is false for the plain reading, or the
@@ -1396,7 +1401,7 @@ function scanCommand(command, depth, ansiC) {
           k++;
           if (t.text.endsWith('<<<')) hereStrings.push(target.text); // stdin data for a shell
           // Input redirects are reads regardless of the command's exemption.
-          else if (t.read && namesSecret(target.text)) return target.text;
+          else if (t.read && namesSecret(target.text)) return secretRead(target.text);
         }
         continue;
       }
@@ -1427,7 +1432,7 @@ function scanCommand(command, depth, ansiC) {
             const hit = findSecretRead(src, depth + 1);
             if (hit) return hit;
           }
-        } else if (namesSecret(normalizeOperand(w.text))) return w.text;
+        } else if (namesSecret(normalizeOperand(w.text))) return secretRead(w.text);
       }
       continue;
     }
@@ -1451,7 +1456,7 @@ function scanCommand(command, depth, ansiC) {
     const nameOnly = nameOnlyOperandIndices(base, operands);
     for (let k = 0; k < operands.length; k++) {
       if (nameOnly.has(k)) continue;
-      if (namesSecret(normalizeOperand(operands[k].text))) return operands[k].text;
+      if (namesSecret(normalizeOperand(operands[k].text))) return secretRead(operands[k].text);
     }
   }
   // No secret read found; a `$'…'` word with no value to check still denies.
@@ -1630,7 +1635,7 @@ function scanXargsPipe(operands, s, bySeg, sepAfter, depth, ansiC) {
   const prevCmd = resolveCommand((bySeg.get(prevSeg) || []).filter((t) => t.kind === 'word'));
   if (!prevCmd) return null;
   for (const w of prevCmd.operands) {
-    if (namesSecret(normalizeOperand(w.text))) return w.text;
+    if (namesSecret(normalizeOperand(w.text))) return secretRead(w.text);
   }
   return null;
 }
@@ -1819,8 +1824,7 @@ function main() {
       if (command === '') allow(undefined);
       if (command.length > MAX_COMMAND_LENGTH) emitBlock('command-too-large', tool, '');
       const hit = findSecretRead(command, 0);
-      if (hit !== null && typeof hit === 'object') emitBlock(hit.code, tool, hit.text);
-      if (hit !== null) emitBlock('secret-read', tool, hit);
+      if (hit !== null) emitBlock(hit.code, tool, hit.text);
       const spawn = findDebuggerCliSpawn(command, 0);
       if (spawn !== null) emitBlock('debugger-cli-spawn', tool, spawn);
       allow(undefined);
