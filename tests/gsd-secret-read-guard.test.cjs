@@ -897,18 +897,92 @@ describe('regressions: #5267 — a `case` pattern paren does not close a substit
   const continuedNoTwin = new Set(['in `<<<`', 'in `<<-`', 'in a heredoc terminator line']);
   // Each read below is visible only where the span closes where bash closes
   // it: after a here-string split from `<<`, a heredoc tag split by a
-  // continuation, and an orphan body that starts at a continuation's newline.
-  // No twins: a quoted string after these spans cannot fail for reasons
-  // outside the span reader, so it would test nothing.
+  // continuation, an orphan body that starts at a continuation's newline,
+  // and a heredoc tag that goes on after an orphan body starting at a
+  // continuation inside it (`<<B\`, the body of A, then `C`: bash waits for
+  // `BC`). No twins: a quoted string after these spans cannot fail for
+  // reasons outside the span reader, so it would test nothing.
   const continuedReads = [
     'echo "$(cat <<\\\n<x\n)"; cat .env',
     'echo "$(cat <<EO\\\nF\nx)\nEOF\n)"; cat .env',
     'echo "$(echo $(cat <<EOF) a \\\nx)\nEOF\ncat .env)"',
+    'echo "$(echo $(cat <<A) x; cat <<B\\\nA\nC\nbody\nBC\n)"; cat .env',
   ];
   for (const cmd of continuedReads) {
     test(`a line continuation is read where bash reads it: blocks ${JSON.stringify(cmd)}`, () => {
       assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
     });
+  }
+
+  // bash ends a heredoc at its tag word with the quotes removed: quoted and
+  // unquoted parts join into one word, a backslash quotes the character
+  // after it (inside "…" only before `"`, `\`, `$` or a backtick), and a
+  // line continuation is removed from the unquoted and double-quoted parts.
+  // The span reader kept the quotes, or ended the word at its first quoted
+  // part, so it waited for a line that never came and took the rest of the
+  // input for the body. Each tag is followed by the line bash 5.2, zsh 5.9
+  // and busybox ash end the heredoc at, and then by the read.
+  const tagWords = [
+    ['"E\\\nOF"', 'EOF'],
+    ['X"E\\\nOF"', 'XEOF'],
+    ['E"\\\n"OF', 'EOF'],
+    ['"E"OF', 'EOF'],
+    ["'E'OF", 'EOF'],
+    ["E''OF", 'EOF'],
+    ['E"O"F', 'EOF'],
+    ['X"EOF"', 'XEOF'],
+    ['E\\OF', 'EOF'],
+    ['"E\\"OF"', 'E"OF'],
+    ['"E\\\\OF"', 'E\\OF'],
+  ];
+  for (const [tag, line] of tagWords) {
+    for (const cmd of [
+      `echo "$(cat <<${tag}\nbody\n${line}\n)"; cat .env`,
+      `cat <(cat <<${tag}\nbody\n${line}\n) .env`,
+    ]) {
+      test(`a heredoc tag is read with its quotes removed: blocks ${JSON.stringify(cmd)}`, () => {
+        assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+      });
+    }
+  }
+  // The other side: a body line that a wrong reading of the tag would end
+  // the heredoc at, then a `)` that would close the span there. bash reads
+  // both as body and runs the case arm after the real end, so the read is in
+  // the span only where the heredoc ends where bash ends it. A stray line
+  // spelling the tag as the paren-counting reading reads it is left out:
+  // that reading stops there, a false positive the guard had before #5267
+  // and keeps.
+  const tagStrays = [
+    ['"E\\xOF"', 'ExOF', 'E\\xOF'],
+    ['"E\\"OF"', 'E\\"OF', 'E"OF'],
+    ["E''OF", 'E', 'EOF'],
+    ["'E\\OF'", 'EOF', 'E\\OF'],
+    ['"E\\\nOF"', 'E', 'EOF'],
+    ['"E\\\nOF"', 'E\\', 'EOF'],
+    ['E"\\\n"OF', 'E', 'EOF'],
+  ];
+  for (const [tag, stray, line] of tagStrays) {
+    for (const cmd of [
+      `echo "$(cat <<${tag}\n${stray}\n)\n${line}\ncase x in x) cat .env;; esac)"`,
+      `cat <(cat <<${tag}\n${stray}\n)\n${line}\ncase x in x) cat .env;; esac)`,
+    ]) {
+      test(`a heredoc tag is read with its quotes removed, and the body ends where bash ends it: blocks ${JSON.stringify(cmd)}`, () => {
+        assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+      });
+    }
+  }
+  // Quoting anywhere in the tag makes the heredoc quoted, and a quoted body
+  // keeps a backslash that ends a line, so the line after it still ends the
+  // body.
+  for (const [tag, line] of [['E"O"F', 'EOF'], ['E\\OF', 'EOF'], ["X'EOF'", 'XEOF']]) {
+    for (const cmd of [
+      `echo "$(cat <<${tag}\nbody\\\n${line}\n)"; cat .env`,
+      `cat <(cat <<${tag}\nbody\\\n${line}\n) .env`,
+    ]) {
+      test(`a heredoc tag quoted in part makes a quoted heredoc: blocks ${JSON.stringify(cmd)}`, () => {
+        assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+      });
+    }
   }
   for (const [where, cmd] of continued) {
     test(`a line continuation ${where} keeps the operator whole: blocks ${JSON.stringify(cmd)}`, () => {
