@@ -1176,7 +1176,22 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
 
 describe('auto-compact window and context meter: properties (#4985)', () => {
   const fc = require('./helpers/fast-check-setup.cjs');
-  const { canonicalModelKey } = require('../hooks/gsd-statusline.js');
+  const {
+    parseAutoCompactWindowEnv, canonicalModelKey, isAutoCompactWindowValue,
+    resolveAutoCompactThreshold, contextMeter,
+  } = require('../hooks/gsd-statusline.js');
+  const MIN = 100_000;
+  const MAX = 1_000_000;
+  const RESERVE = 33_000;
+
+  // A config dir that does not exist, so no settings file is read: the env is the only input.
+  function noFiles(t) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4985-prop-'));
+    t.after(() => cleanup(root));
+    return { CLAUDE_CONFIG_DIR: path.join(root, 'absent') };
+  }
+  // null is "no threshold", which the meter treats as the model window; 0 orders it below any threshold.
+  const thr = (...args) => resolveAutoCompactThreshold(...args) ?? 0;
 
   // Strings built from the pieces canonicalModelKey strips, so a run reaches its rules
   // rather than only ever generating strings none of them match.
@@ -1184,9 +1199,144 @@ describe('auto-compact window and context meter: properties (#4985)', () => {
     '@20250101', '-20250101', '-', '5', 'claude', 'opus', ' ', '\t', 'x');
   const keyish = fc.oneof(fc.string(), fc.array(keyPiece, { maxLength: 12 }).map(a => a.join('')));
 
+  test('parseAutoCompactWindowEnv never throws, and returns null or an integer window in 100k–1M', () => {
+    fc.assert(fc.property(fc.oneof(fc.string(), fc.anything()), (raw) => {
+      const n = parseAutoCompactWindowEnv(raw);
+      return n === null || (Number.isInteger(n) && n >= MIN && n <= MAX && isAutoCompactWindowValue(n));
+    }));
+  });
+
+  test('parseAutoCompactWindowEnv reads back any 100k–1M integer, plain or digit-grouped', () => {
+    fc.assert(fc.property(fc.integer({ min: MIN, max: MAX }), fc.constantFrom('', ',', '_'), (n, sep) => {
+      const grouped = String(n).replace(/\B(?=(\d{3})+(?!\d))/g, sep);
+      return parseAutoCompactWindowEnv(grouped) === n && parseAutoCompactWindowEnv(` ${grouped} `) === n;
+    }));
+  });
+
+  test('parseAutoCompactWindowEnv is monotone in a positive value, clamping it into 100k–1M', () => {
+    fc.assert(fc.property(fc.integer({ min: 1, max: 10_000_000 }), fc.integer({ min: 1, max: 10_000_000 }), (a, b) => {
+      const [lo, hi] = a <= b ? [a, b] : [b, a];
+      const pl = parseAutoCompactWindowEnv(String(lo));
+      return pl <= parseAutoCompactWindowEnv(String(hi)) && pl === Math.max(MIN, Math.min(MAX, lo));
+    }));
+  });
+
   test('canonicalModelKey is idempotent: a key is its own key', () => {
     fc.assert(fc.property(keyish, (s) => canonicalModelKey(canonicalModelKey(s)) === canonicalModelKey(s)));
     fc.assert(fc.property(fc.anything().filter(v => typeof v !== 'string'), (v) => canonicalModelKey(v) === ''));
+  });
+
+  test('canonicalModelKey is spelling-invariant: dated, [1m], Bedrock and Vertex ids key as the model', () => {
+    const base = fc.tuple(
+      fc.constantFrom('opus', 'sonnet', 'haiku', 'fable'),
+      fc.array(fc.integer({ min: 0, max: 9 }), { minLength: 1, maxLength: 3 }),
+    ).map(([family, version]) => `claude-${family}-${version.join('-')}`);
+    const date = fc.integer({ min: 20240101, max: 20991231 }).map(String);
+    fc.assert(fc.property(base, date, fc.constantFrom('', 'us.', 'eu.', 'apac.'), fc.integer({ min: 1, max: 9 }), fc.boolean(),
+      (model, d, region, rev, upper) => {
+        const spell = (s) => (upper ? s.toUpperCase() : s);
+        return [
+          model, `${model}[1m]`, `${model}-${d}`, `${model}@${d}`,
+          `${region}anthropic.${model}-v${rev}:0`, `${region}anthropic.${model}-${d}-v${rev}:0`,
+        ].every(id => canonicalModelKey(spell(id)) === model);
+      }));
+  });
+
+  test('the threshold is a positive integer at most min(window, model window) − 33,000, or none', (t) => {
+    const env = noFiles(t);
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 3_000_000 }),
+      fc.option(fc.integer({ min: 1, max: 5_000_000 }), { nil: undefined }),
+      fc.option(fc.double({ min: 0, max: 150, noNaN: true }), { nil: undefined }),
+      (modelWindow, window, pct) => {
+        const e = { ...env };
+        if (window !== undefined) e.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(window);
+        if (pct !== undefined) e.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(pct);
+        const got = resolveAutoCompactThreshold(modelWindow, null, e);
+        const w = window === undefined ? modelWindow : Math.max(MIN, Math.min(MAX, window));
+        const ceiling = Math.min(w, modelWindow) - RESERVE;
+        return got === null ? ceiling <= 0 || pct !== undefined : Number.isInteger(got) && got >= 1 && got <= ceiling;
+      }));
+  });
+
+  test('the threshold never falls as the window or the model window grows, and the pct override only ever lowers it', (t) => {
+    const env = noFiles(t);
+    const pair = fc.tuple(fc.integer({ min: 1, max: 3_000_000 }), fc.integer({ min: 1, max: 3_000_000 }))
+      .map(([a, b]) => (a <= b ? [a, b] : [b, a]));
+    fc.assert(fc.property(pair, fc.integer({ min: 1, max: 3_000_000 }), ([lo, hi], other) => {
+      const withWindow = (w) => ({ ...env, CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(w) });
+      return thr(other, null, withWindow(lo)) <= thr(other, null, withWindow(hi)) &&
+        thr(lo, null, withWindow(other)) <= thr(hi, null, withWindow(other)) &&
+        thr(lo, null, env) <= thr(hi, null, env);
+    }));
+    // Weighted toward 95–100: only above ~98.7% does floor(effective × pct) pass the threshold it is
+    // min'd with, so that is the band where an override that raised the threshold would show.
+    const pctArb = fc.oneof(fc.double({ min: -10, max: 200, noNaN: true }), fc.double({ min: 95, max: 100, noNaN: true }));
+    fc.assert(fc.property(fc.integer({ min: 1, max: 3_000_000 }), pctArb, (modelWindow, pct) =>
+      thr(modelWindow, null, { ...env, CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(pct) }) <= thr(modelWindow, null, env)));
+  });
+
+  test('contextMeter: used + remaining = 100, both integers in 0–100, against the threshold or the model window', (t) => {
+    const env = noFiles(t);
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 3_000_000 }), fc.integer({ min: 0, max: 5_000_000 }), fc.integer({ min: 0, max: 5_000_000 }),
+      (size, tokens, more) => {
+        const meter = (n) => contextMeter(contextWindow({
+          context_window_size: size,
+          current_usage: { input_tokens: n, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        }), null, env);
+        const m = meter(tokens);
+        return Number.isInteger(m.used) && m.used >= 0 && m.used <= 100 && m.used + m.remaining === 100 &&
+          m.usedTokens === tokens && m.limitTokens === (resolveAutoCompactThreshold(size, null, env) ?? size) &&
+          meter(tokens + more).used >= m.used;
+      }));
+  });
+
+  test('the settings merge: the window is one a file set, or the model window; the highest file\'s own model entry wins', (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gsd-4985-prop-merge-'));
+    t.after(() => cleanup(root));
+    const cfg = path.join(root, 'cfg');
+    const proj = path.join(root, 'proj');
+    fs.mkdirSync(cfg);
+    fs.mkdirSync(path.join(proj, '.claude'), { recursive: true });
+    // Highest precedence first, as Claude Code reads them.
+    const files = [
+      path.join(proj, '.claude', 'settings.local.json'), path.join(proj, '.claude', 'settings.json'),
+      path.join(cfg, 'settings.local.json'), path.join(cfg, 'settings.json'),
+    ];
+    const M2 = 2_000_000; // above every valid window, so the threshold reads the window back exactly
+    const value = fc.oneof(fc.integer({ min: MIN, max: MAX }), fc.constantFrom('auto', 50_000, 1_500_000, '400000', null));
+    const entry = fc.option(fc.record({ autoCompactWindow: value }), { nil: undefined });
+    const settings = fc.option(fc.record({
+      top: fc.option(value, { nil: undefined }),
+      models: fc.record({ 'claude-opus-5-5': entry, 'CLAUDE-OPUS-5-5-20260101': entry, 'claude-sonnet-5': entry }),
+    }), { nil: undefined });
+    fc.assert(fc.property(fc.tuple(settings, settings, settings, settings), fc.constantFrom('claude-opus-5-5', 'claude-sonnet-5'), (four, model) => {
+      const written = [];
+      four.forEach((s, i) => {
+        try { fs.unlinkSync(files[i]); } catch { /* absent */ }
+        if (s === undefined) return;
+        const doc = { modelSettings: {} };
+        if (s.top !== undefined) doc.autoCompactWindow = s.top;
+        for (const [name, e] of Object.entries(s.models)) if (e !== undefined) doc.modelSettings[name] = e;
+        fs.writeFileSync(files[i], JSON.stringify(doc));
+        written.push(doc);
+      });
+      const window = resolveAutoCompactThreshold(M2, proj, { CLAUDE_CONFIG_DIR: cfg }, model) + RESERVE;
+      const set = written.flatMap(d => [d.autoCompactWindow, ...Object.values(d.modelSettings).map(e => e.autoCompactWindow)])
+        .filter(v => Number.isInteger(v) && isAutoCompactWindowValue(v));
+      const valid = (v) => v !== undefined && isAutoCompactWindowValue(v);
+      // The highest file's entry for this model under any spelling of it, the exact spelling first.
+      const spellings = Object.entries(four[0]?.models ?? {})
+        .filter(([name, e]) => e !== undefined && valid(e.autoCompactWindow) && canonicalModelKey(name) === model);
+      const own = (spellings.find(([name]) => name === model) ?? spellings[0])?.[1].autoCompactWindow;
+      const topLevel = four[0]?.top;
+      // The highest file decides when it speaks: its own model entry first, else its top-level
+      // value, which drops every lower file's model entries ("auto" is the model window here).
+      const decided = valid(own) ? own : valid(topLevel) ? topLevel : undefined;
+      return (window === M2 || set.includes(window)) &&
+        (decided === undefined || window === (decided === 'auto' ? M2 : decided));
+    }));
   });
 });
 

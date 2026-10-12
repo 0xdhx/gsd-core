@@ -1383,7 +1383,7 @@ module.exports = {
   renderBracketPhaseDisplay, renderBracketMilestoneDisplay,
   isAutoCompactDisabled, AUTO_COMPACT_DISABLE_ENV_KEYS, AUTO_COMPACT_ENV_TRUTHY,
   resolveAutoCompactThreshold, contextMeter, SETTINGS_FILE_MAX_BYTES,
-  canonicalModelKey,
+  parseAutoCompactWindowEnv, canonicalModelKey, isAutoCompactWindowValue,
 };
 
 /**
