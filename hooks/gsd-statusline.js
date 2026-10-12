@@ -297,16 +297,23 @@ function claudeSettingsPaths(dir, env) {
  * `claude-opus-5-5@20260101` all key as `claude-opus-5-5`). A Bedrock
  * revision suffix is stripped only after a version or date segment, so a
  * model whose own name ends in `-v<n>` (`anthropic.claude-v2`) keeps it.
- * '' for a non-string.
+ * The rules repeat until nothing changes, so a key is its own key: one pass
+ * left `x[1m][1m]` as `x[1m]`. Each rule only removes characters, so this
+ * ends. '' for a non-string.
  */
 function canonicalModelKey(id) {
   if (typeof id !== 'string') return '';
-  return id.trim().toLowerCase()
-    .replace(/\[1m\]$/, '')
-    .replace(/^(?:[a-z]+\.)?anthropic\./, '')
-    .replace(/(\d)-v\d+(?::\d+)?$/, '$1')
-    .replace(/@\d{8}$/, '')
-    .replace(/-\d{8}$/, '');
+  let key = id;
+  for (let prev; prev !== key;) {
+    prev = key;
+    key = key.trim().toLowerCase()
+      .replace(/\[1m\]$/, '')
+      .replace(/^(?:[a-z]+\.)?anthropic\./, '')
+      .replace(/(\d)-v\d+(?::\d+)?$/, '$1')
+      .replace(/@\d{8}$/, '')
+      .replace(/-\d{8}$/, '');
+  }
+  return key;
 }
 
 function isAutoCompactWindowValue(v) {
@@ -1376,6 +1383,7 @@ module.exports = {
   renderBracketPhaseDisplay, renderBracketMilestoneDisplay,
   isAutoCompactDisabled, AUTO_COMPACT_DISABLE_ENV_KEYS, AUTO_COMPACT_ENV_TRUTHY,
   resolveAutoCompactThreshold, contextMeter, SETTINGS_FILE_MAX_BYTES,
+  canonicalModelKey,
 };
 
 /**

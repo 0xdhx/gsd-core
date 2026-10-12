@@ -1174,6 +1174,22 @@ describe('context meter resolves the auto-compact window the way Claude Code doe
   });
 });
 
+describe('auto-compact window and context meter: properties (#4985)', () => {
+  const fc = require('./helpers/fast-check-setup.cjs');
+  const { canonicalModelKey } = require('../hooks/gsd-statusline.js');
+
+  // Strings built from the pieces canonicalModelKey strips, so a run reaches its rules
+  // rather than only ever generating strings none of them match.
+  const keyPiece = fc.constantFrom('[1m]', '[1M]', 'anthropic.', 'us.', 'Anthropic.', '-v1', '-v2', ':0',
+    '@20250101', '-20250101', '-', '5', 'claude', 'opus', ' ', '\t', 'x');
+  const keyish = fc.oneof(fc.string(), fc.array(keyPiece, { maxLength: 12 }).map(a => a.join('')));
+
+  test('canonicalModelKey is idempotent: a key is its own key', () => {
+    fc.assert(fc.property(keyish, (s) => canonicalModelKey(canonicalModelKey(s)) === canonicalModelKey(s)));
+    fc.assert(fc.property(fc.anything().filter(v => typeof v !== 'string'), (v) => canonicalModelKey(v) === ''));
+  });
+});
+
 // ─── auto-compact buffer boundary tests (#1194) ─────────────────────────────
 
 describe('context meter boundary: acw at/near totalCtx does not pin used at 100% (#1194)', () => {
