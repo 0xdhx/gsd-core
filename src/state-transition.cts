@@ -543,10 +543,28 @@ export function rebuildStateTransaction(init: StateTransactionInit): StateTransa
 export type StateAssertionRequirement = 'required' | 'best-effort';
 export type StateMutationScope = 'narrow' | 'broad';
 
+/**
+ * What an assertion's `field` names (ADR-4629 §8.2, epic #4629 child C2).
+ * `'field'` (the default when absent — C1's shape) is the vocabulary
+ * `reconcileReportedFields` (src/state.cts) already resolves: a body `Label:`
+ * line, a frontmatter key, or a dotted frontmatter leaf. `'section'` names a
+ * whole body section by its heading text (e.g. `Blockers/Concerns`), because
+ * §8.2 verifies body/section writes and a section is not a `Label:` line.
+ */
+export type StateAssertionTarget = 'field' | 'section';
+
 /** One declared post-state assertion: a frontmatter field or a body section. */
 export type StateFieldAssertion = {
   readonly field: string;
   readonly requirement: StateAssertionRequirement;
+  /** Absent = `'field'` (C1's shape). */
+  readonly target?: StateAssertionTarget;
+  /**
+   * The intended post-write value (trimmed compare against the re-read file).
+   * Absent = the assertion is met only when the write measurably CHANGED the
+   * target — the same measured-delta test `updated[]` uses.
+   */
+  readonly value?: string;
 };
 
 export type StateWriteIntentInit = {
@@ -585,8 +603,48 @@ export function createStateWriteIntent(
     err.code = 'STATE_WRITE_INTENT_TRANSACTION_REQUIRED';
     throw err;
   }
+  // C2 (ADR-4629 §8.2): an unknown `requirement` is a construction error. §8.2
+  // judges only `'required'` assertions, so a mistyped value (`'Required'`)
+  // would otherwise be silently skipped: a fail-open verifier.
+  for (const a of init.assertions ?? []) {
+    if (a.requirement !== 'required' && a.requirement !== 'best-effort') {
+      const err = new Error(
+        `createStateWriteIntent: assertion ${JSON.stringify(a.field)} has unknown requirement ` +
+        `${JSON.stringify(a.requirement)}; expected 'required' or 'best-effort' (ADR-4629 §8.1).`,
+      ) as Error & { code: string };
+      err.code = 'STATE_WRITE_INTENT_REQUIREMENT_INVALID';
+      throw err;
+    }
+  }
+  if (init.scope !== undefined && init.scope !== 'narrow' && init.scope !== 'broad') {
+    const err = new Error(
+      `createStateWriteIntent: unknown scope ${JSON.stringify(init.scope)}; expected 'narrow' or 'broad' ` +
+      '(ADR-4629 §8.1).',
+    ) as Error & { code: string };
+    err.code = 'STATE_WRITE_INTENT_SCOPE_INVALID';
+    throw err;
+  }
+  // C2 (ADR-4629 §8.2): an unknown `target` is a construction error, never a
+  // silent fall-back to field semantics (a JS caller passing `'sections'`).
+  for (const a of init.assertions ?? []) {
+    if (a.target !== undefined && a.target !== 'field' && a.target !== 'section') {
+      const err = new Error(
+        `createStateWriteIntent: assertion ${JSON.stringify(a.field)} has unknown target ` +
+        `${JSON.stringify(a.target)}; expected 'field' or 'section' (ADR-4629 §8.2).`,
+      ) as Error & { code: string };
+      err.code = 'STATE_WRITE_INTENT_TARGET_INVALID';
+      throw err;
+    }
+  }
+  // C2 (ADR-4629 §8.2): `target` / `value` are copied only when the caller set
+  // them, so a C1-shaped assertion stays exactly `{ field, requirement }`.
   const assertions: ReadonlyArray<StateFieldAssertion> = Object.freeze(
-    (init.assertions ?? []).map((a) => Object.freeze({ field: a.field, requirement: a.requirement })),
+    (init.assertions ?? []).map((a) => Object.freeze({
+      field: a.field,
+      requirement: a.requirement,
+      ...(a.target !== undefined ? { target: a.target } : {}),
+      ...(a.value !== undefined ? { value: a.value } : {}),
+    })),
   );
   return Object.freeze({
     ...transaction,
@@ -1146,6 +1204,12 @@ export type StateTransitionIntent =
       isLastPhase: boolean;
       planCount: number;
       summaryCount: number;
+      /**
+       * #4824: the selected next phase's on-disk state, from the Phase Status
+       * ladder. Absent/null keeps the historical `Ready to plan` wording (the
+       * next phase has no directory yet, or the caller did not classify it).
+       */
+      nextPhaseDisk?: NextPhaseDisk | null;
     }
   | { kind: 'plannedPhase'; phaseNumber: string | number; phaseName: string | null; planCount: number | null }
   | { kind: 'milestoneSwitch'; version: string; name: string }
@@ -2032,6 +2096,38 @@ function advancePlanCore(content: string, deps: StateTransitionDeps): StateTrans
 // completePhase — intent implementation (Phase 3)
 // ----------------------------------------------------------------------------
 
+/** #4824: the next phase's disk facts, as classified by the Phase Status ladder. */
+type NextPhaseDisk = {
+  status: import('./phase-status.cjs').PhaseStatus;
+  planCount: number;
+  summaryCount: number;
+};
+
+/**
+ * #4824: Status / Current Plan / Stopped-at wording for the phase a
+ * completion hands off to. The historical `Ready to plan` is only true for a
+ * phase with no plans; a phase that already has PLANs routes to execution,
+ * and one whose plans all have SUMMARYs awaits verification — never back to
+ * `/gsd-plan-phase`. Which phase is selected stays #4078's rule.
+ */
+function nextPhaseWording(disk: NextPhaseDisk | null): { status: string; currentPlan: string; stoppedAt: string } {
+  switch (disk?.status) {
+    case 'PLANNED':
+      return { status: 'Ready to execute', currentPlan: 'Not started', stoppedAt: 'ready to execute' };
+    case 'IN_PROGRESS':
+      return { status: 'Ready to execute', currentPlan: String(disk.summaryCount + 1), stoppedAt: 'ready to execute' };
+    case 'EXECUTED':
+    case 'NEEDS_REVIEW':
+      return {
+        status: 'Phase complete — ready for verification',
+        currentPlan: String(disk.planCount),
+        stoppedAt: 'ready to verify',
+      };
+    default:
+      return { status: 'Ready to plan', currentPlan: 'Not started', stoppedAt: 'ready to plan' };
+  }
+}
+
 /**
  * Apply a `completePhase` transition to STATE.md content.
  *
@@ -2039,7 +2135,9 @@ function advancePlanCore(content: string, deps: StateTransitionDeps): StateTrans
  * (phase.cts) onto the substrate. Owns the field-classification-governed body
  * mutations: Current Phase (preserving the `of total` shape and phase name),
  * Current Phase Name, Status (`All phases complete` on the last phase, else
- * `Ready to plan` per ADR-2207), Current Plan (`Not started`), Last Activity + Description,
+ * `Ready to plan` per ADR-2207 — or, #4824, the next phase's disk-derived
+ * wording when it is already planned or executed), Current Plan (`Not started`
+ * unless the next phase is in flight), Last Activity + Description,
  * and the Completed/Total Phases + Progress percent block (re-derived from the
  * roadmap via the injected `roadmapProvider`).
  *
@@ -2063,11 +2161,13 @@ function completePhaseCore(
     isLastPhase: boolean;
     planCount: number;
     summaryCount: number;
+    nextPhaseDisk?: NextPhaseDisk | null;
   },
   deps: StateTransitionDeps,
 ): StateTransitionResult {
   const updated: string[] = [];
   const today = deps.clock.localToday();
+  const nextWording = nextPhaseWording(intent.isLastPhase ? null : intent.nextPhaseDisk ?? null);
 
   // Consult the field-classification table for the frontmatter keys this
   // transition touches (same guard beginPhaseCore applies). A missing row is a
@@ -2138,7 +2238,7 @@ function completePhaseCore(
   // Status — `All phases complete` on the final phase (ADR-2207), otherwise
   // `Ready to plan`. Milestone termination (`<version> milestone complete`) is
   // owned solely by the milestone-close verb (milestoneCompleteCore).
-  const statusValue = intent.isLastPhase ? 'All phases complete' : 'Ready to plan';
+  const statusValue = intent.isLastPhase ? 'All phases complete' : nextWording.status;
   const statusAfter = stateReplaceFieldWithFallback(body, 'Status', null, statusValue);
   if (statusAfter !== body) {
     body = statusAfter;
@@ -2159,11 +2259,11 @@ function completePhaseCore(
     planAfter = withSection(
       body,
       (h) => (h.level === 2 || h.level === 3) && h.text.trim().toLowerCase() === 'current position',
-      (sectionBody) => stateReplaceFieldWithFallback(sectionBody, 'Current Plan', 'Plan', 'Not started'),
+      (sectionBody) => stateReplaceFieldWithFallback(sectionBody, 'Current Plan', 'Plan', nextWording.currentPlan),
       { levelBounded: true },
     );
   } else {
-    planAfter = stateReplaceFieldWithFallback(body, 'Current Plan', 'Plan', 'Not started');
+    planAfter = stateReplaceFieldWithFallback(body, 'Current Plan', 'Plan', nextWording.currentPlan);
   }
   if (planAfter !== body) {
     body = planAfter;
@@ -2209,7 +2309,7 @@ function completePhaseCore(
   // milestone termination wording stays owned by milestoneCompleteCore.
   const stoppedAtLine = intent.isLastPhase
     ? `Phase ${intent.phaseNum} complete — all phases complete`
-    : `Phase ${intent.phaseNum} complete${intent.nextPhaseNum ? `, ready to plan Phase ${intent.nextPhaseNum}` : ''}`;
+    : `Phase ${intent.phaseNum} complete${intent.nextPhaseNum ? `, ${nextWording.stoppedAt} Phase ${intent.nextPhaseNum}` : ''}`;
   const stoppedAfter = stateReplaceFieldInSession(body, 'Stopped At', 'Stopped at', stoppedAtLine);
   if (stoppedAfter !== body) {
     body = stoppedAfter;
