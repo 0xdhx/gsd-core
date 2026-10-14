@@ -104,7 +104,7 @@ Parse JSON for: `executor_model`, `verifier_model`, `commit_docs`, `parallelizat
 
 @~/.claude/gsd-core/references/execute-phase-response-language.md
 
-Reset the per-run wave-failure tally (#4915). Fenced `bash` blocks are separate shells, so the cumulative count the post-merge gate records and step 5.8 reads travels through a handoff file, and a previous run's tally must not leak into this one:
+Reset the wave-failure tally (#4915). Fenced `bash` blocks are separate shells, so the post-merge gate's cumulative count reaches step 5.8 through a handoff file; a previous run's tally must not leak in:
 
 ```bash
 # gsd-handoff:begin wave-failure-reset
@@ -980,7 +980,7 @@ increases monotonically across waves. `{status}` is `complete` (success),
 
 5.8. **Handle test gate failures (when `WAVE_FAILURE_COUNT > 0`):**
 
-   Read the cumulative count recorded by the post-merge gate (#4915) — a shell variable set in step 5.6 is gone by now:
+   Read the count the post-merge gate recorded (#4915); a shell variable set in step 5.6 is gone by now:
 
    ```bash
    # gsd-handoff:begin wave-failure-read
