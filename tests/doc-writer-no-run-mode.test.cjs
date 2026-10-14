@@ -26,7 +26,7 @@ function section(text, tag) {
   return m[1];
 }
 
-const NO_RUN_MODE = /no standalone run mode/i;
+const NO_RUN_MODE = /no\s+standalone\s+run\s+mode/i; // prose wraps at 100 columns
 const FALLBACK_ORDER = /build[\s\S]{0,80}test|test[\s\S]{0,80}build/i;
 
 for (const [variant, text] of Object.entries(VARIANTS)) {
