@@ -1535,6 +1535,31 @@ describe('gsd-secret-read-guard: gsd-debugger CLI spawn (#5214)', () => {
     });
   }
 
+  // This check finds spans with the same span finder as the secret-read scan
+  // (#5267), so it reads each span both ways too: as bash 5 closes it and as
+  // paren counting does. Before, it used whichever reading the secret-read
+  // scan had left behind, so the first two below were allowed bare and blocked
+  // behind `timeout … bash -c`, which only this check looks inside.
+  const DEBUGGER_SPAN_BLOCKS = [
+    ['in a `case` arm inside "$( )"', 'echo "$(case x in x) claude --agent gsd-debugger -p y;; esac)"'],
+    ['after a `)` in a comment inside "$( )"', 'echo "$(echo hi # )\nclaude --agent gsd-debugger -p y)"'],
+    ['in a `case` arm, behind timeout and bash -c',
+      "timeout 5 bash -c 'echo \"$(case x in x) claude --agent gsd-debugger -p y;; esac)\"'"],
+    // bash 3.2 ends the span at the pattern and runs the spawn; bash 5 rejects the line.
+    ['after a span paren counting closes at a `case` pattern', 'echo "$(case x in y)"; claude --agent gsd-debugger -p z'],
+  ];
+
+  for (const [label, command] of DEBUGGER_SPAN_BLOCKS) {
+    test(`blocks under either reading of a span: ${label}`, () => {
+      assertBlocked(runHook(bash(command)), label, { code: 'debugger-cli-spawn', tool: 'Bash' });
+    });
+  }
+
+  test('allows: the agent name as an echo argument in a `case` arm', () => {
+    const command = 'echo "$(case x in x) echo gsd-debugger;; esac)"';
+    assertAllowed(runHook(bash(command)), command);
+  });
+
   test('the Kimi Shell vocabulary is covered too', () => {
     assertBlocked(
       runHook({ hook_event_name: 'PreToolUse', tool_name: 'Shell', tool_input: { command: 'claude --agent gsd-debugger -p hi' } }),
