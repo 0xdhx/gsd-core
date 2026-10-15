@@ -1484,18 +1484,24 @@ function precedingOp(s, bySeg, sepAfter) {
   return { op, prevSeg: p };
 }
 
-// findSecretRead under each reading of where a span closes (see closeByCount):
-// a read found in a command position under either reading is reported. The
-// second scan is the one this hook made before #5267, so nothing it denied is
-// allowed now. A command with no span reads the same both ways and is scanned
-// once.
-function findSecretReadEitherClose(command) {
+// `scan` under each reading of where a span closes (see closeByCount): a hit
+// under either reading is reported. The second scan is the one this hook made
+// before #5267, so nothing it denied is allowed now. A command with no span
+// reads the same both ways and is scanned once. Every check that reads spans
+// comes through here: one that ran on whatever reading the last scan left
+// would read a span one way in a bare command and the other way behind a
+// wrapper that scan does not look inside.
+function scanEitherClose(scan, command) {
   closeByCount = false;
   spanSeen = false;
-  const hit = findSecretRead(command, 0);
+  const hit = scan(command, 0);
   if (hit !== null || !spanSeen) return hit;
   closeByCount = true;
-  return findSecretRead(command, 0);
+  return scan(command, 0);
+}
+
+function findSecretReadEitherClose(command) {
+  return scanEitherClose(findSecretRead, command);
 }
 
 // Returns the offending token text, or null.
@@ -1955,7 +1961,7 @@ process.stdin.on('end', () => {
     if (command.length > MAX_COMMAND_LENGTH) emitBlock('command-too-large', tool, '');
     const hit = findSecretReadEitherClose(command);
     if (hit !== null) emitBlock('secret-read', tool, hit);
-    const spawn = findDebuggerCliSpawn(command, 0);
+    const spawn = scanEitherClose(findDebuggerCliSpawn, command);
     if (spawn !== null) emitBlock('debugger-cli-spawn', tool, spawn);
     allow(undefined);
   } catch {
