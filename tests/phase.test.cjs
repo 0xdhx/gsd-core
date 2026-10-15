@@ -12607,6 +12607,8 @@ function build2316GhostReqFixture() {
     fs.writeFileSync(path.join(dir, `${n}-01-SUMMARY.md`), '# Summary\nDone.\n');
   }
 
+  // #4972: these fixtures assert the ABSENCE of unrelated warnings; the verify:post audits (on by default) would add theirs.
+  fs.writeFileSync(path.join(planDir, 'config.json'), JSON.stringify({ workflow: { security_enforcement: false, nyquist_validation: false } }));
   return { tmpDir, planDir };
 }
 
@@ -12989,6 +12991,8 @@ function build2334GhostSurfaceFixture({ reqBody, roadmapRequirementsLine, tracea
     fs.writeFileSync(path.join(dir, `${n}-01-SUMMARY.md`), '# Summary\nDone.\n');
   }
 
+  // #4972: these fixtures assert the ABSENCE of unrelated warnings; the verify:post audits (on by default) would add theirs.
+  fs.writeFileSync(path.join(planDir, 'config.json'), JSON.stringify({ workflow: { security_enforcement: false, nyquist_validation: false } }));
   return tmpDir;
 }
 
