@@ -12,12 +12,18 @@
  *   - a placeholder follow-up must differ from the insert's placeholder (case
  *     and bracket style ignored), and the paragraph after the chain must name
  *     it and say it comes from the insert.
- * A chain is the insert plus the command lines that follow it — on the same
- * line (`→`-joined) or on following lines, across blank lines — until the
- * first line that does not start with a command.
+ * A chain is the insert plus the commands that follow it: on the same line
+ * (`→`-joined, up to the next insert on that line), then on the lines after
+ * it that start with a command. Blank lines are skipped only before the first
+ * follow-up; once a follow-up is seen, a blank line ends the chain, so an
+ * unrelated command further down is not absorbed.
  *
- * Not checked: whether the explanation is TRUE. A sentence that names the
- * placeholder and the insert passes even if it misdescribes them.
+ * Not checked:
+ *   - whether the explanation is TRUE (a sentence that names the placeholder
+ *     and the insert passes even if it misdescribes them);
+ *   - follow-ups written inside a sentence ("Then run `/gsd:plan-phase <N>`")
+ *     or inside a separate indented fence. Reaching those lexically would also
+ *     absorb unrelated prose.
  */
 'use strict';
 
@@ -31,8 +37,9 @@ const REPO_ROOT = path.join(__dirname, '..');
 const SCAN_ROOTS = ['gsd-core', 'commands', 'agents', 'skills'].map((d) => path.join(REPO_ROOT, d));
 const AUDIT_MILESTONE = path.join(REPO_ROOT, 'gsd-core', 'workflows', 'audit-milestone.md');
 
-const INSERT_RE = /[/$]gsd[:-]phase\s+--insert\s+([^\s`"]+)/;
-const FOLLOW_UP_RE = /[/$]gsd[:-](discuss|plan|execute)-phase\s+([^\s`"]+)/g;
+// An argument may sit in its own backticks or quotes: `/gsd:plan-phase "<N>"`.
+const INSERT_RE = /[/$]gsd[:-]phase\s+--insert\s+[`"']?([^\s`"']+)/g;
+const FOLLOW_UP_RE = /[/$]gsd[:-](discuss|plan|execute)-phase\s+[`"']?([^\s`"']+)/g;
 const COMMAND_LINE_RE = /^\s*(?:[-*]\s+)?`?[/$]gsd[:-]/;
 const PHASE_NUMBER_RE = new RegExp(`^${PHASE_NUMBER_TOKEN_SOURCE}$`);
 
@@ -63,22 +70,31 @@ function findInsertChains(text) {
   const lines = text.split(/\r?\n/);
   const chains = [];
   for (let i = 0; i < lines.length; i++) {
-    const insert = lines[i].match(INSERT_RE);
-    if (!insert) continue;
-    const followUps = followUpsIn(lines[i].slice(insert.index + insert[0].length), i + 1);
-    let last = i;
-    for (let j = i + 1; j < lines.length; j++) {
-      if (lines[j].trim() === '') continue;
-      if (!COMMAND_LINE_RE.test(lines[j]) || INSERT_RE.test(lines[j])) break;
-      followUps.push(...followUpsIn(lines[j], j + 1));
-      last = j;
+    const inserts = [...lines[i].matchAll(INSERT_RE)];
+    for (let k = 0; k < inserts.length; k++) {
+      const insert = inserts[k];
+      const end = k + 1 < inserts.length ? inserts[k + 1].index : lines[i].length;
+      const followUps = followUpsIn(lines[i].slice(insert.index + insert[0].length, end), i + 1);
+      let last = i;
+      // Only the line's last insert owns the command lines below it.
+      if (k === inserts.length - 1) {
+        for (let j = i + 1; j < lines.length; j++) {
+          if (lines[j].trim() === '') {
+            if (followUps.length > 0) break;
+            continue;
+          }
+          if (!COMMAND_LINE_RE.test(lines[j]) || new RegExp(INSERT_RE.source).test(lines[j])) break;
+          followUps.push(...followUpsIn(lines[j], j + 1));
+          last = j;
+        }
+      }
+      if (followUps.length === 0) continue;
+      let j = last + 1;
+      while (j < lines.length && lines[j].trim() === '') j++;
+      const after = [];
+      for (; j < lines.length && lines[j].trim() !== ''; j++) after.push(lines[j]);
+      chains.push({ line: i + 1, insertArg: insert[1], followUps, nextParagraph: after.join(' ') });
     }
-    if (followUps.length === 0) continue;
-    let j = last + 1;
-    while (j < lines.length && lines[j].trim() === '') j++;
-    const after = [];
-    for (; j < lines.length && lines[j].trim() !== ''; j++) after.push(lines[j]);
-    chains.push({ line: i + 1, insertArg: insert[1], followUps, nextParagraph: after.join(' ') });
   }
   return chains;
 }
@@ -91,10 +107,16 @@ function isPhaseNumber(arg) {
   return PHASE_NUMBER_RE.test(arg);
 }
 
-/** `child` is `parent` plus one more `.N` segment, compared numerically (5 → 05.1 is fine). */
+/**
+ * `child` is `parent` plus exactly one `.N` segment with N ≥ 1, the prefix
+ * compared numerically (5 → 05.1 is fine; 5 → 5.0 and 5.1 → 5.1.0.1 are not).
+ */
 function isDecimalChild(parent, child) {
   const cut = child.lastIndexOf('.');
-  return cut > 0 && comparePhaseNum(child.slice(0, cut), parent) === 0;
+  if (cut <= 0) return false;
+  if (child.split('.').length !== parent.split('.').length + 1) return false;
+  if (!(Number(child.slice(cut + 1)) >= 1)) return false;
+  return comparePhaseNum(child.slice(0, cut), parent) === 0;
 }
 
 function chainProblems(chain) {
@@ -162,6 +184,29 @@ describe('phase-insert chains address the inserted phase, not the after-phase (#
     const good = '`/gsd:phase --insert 5 "x"` → `/gsd:plan-phase 5.1` → `/gsd:execute-phase 5.1`';
     const bad = '`/gsd:phase --insert 5 "x"` → `/gsd:plan-phase 5` → `/gsd:execute-phase 5.1`';
     assert.equal(findInsertChains(good).length, 1);
+    assert.deepEqual(problemsIn(good), []);
+    assert.equal(problemsIn(bad).length, 1);
+  });
+
+  test('a follow-up argument in backticks or quotes is still read', () => {
+    const quoted = ['/gsd:phase --insert <N> "x"', '/gsd:plan-phase `<N>`', '/gsd:execute-phase "<N>"'].join('\n');
+    assert.equal(problemsIn(quoted).length, 2);
+  });
+
+  test('a zero or extra segment is not a decimal child', () => {
+    const zero = ['/gsd:phase --insert 5 "x"', '/gsd:plan-phase 5.0', '/gsd:execute-phase 5.1.1'].join('\n');
+    assert.equal(problemsIn(zero).length, 2);
+  });
+
+  test('an unrelated command after a finished chain is not absorbed', () => {
+    const later = ['/gsd:phase --insert 5 "x"', '/gsd:plan-phase 5.1', '/gsd:execute-phase 5.1', '', '/gsd:plan-phase 6'].join('\n');
+    assert.deepEqual(problemsIn(later), []);
+  });
+
+  test('two inserts on one line are two chains, each checked against its own insert', () => {
+    const good = '`/gsd:phase --insert 5 "x"` → `/gsd:plan-phase 5.1` → `/gsd:phase --insert 6 "y"` → `/gsd:plan-phase 6.1`';
+    const bad = '`/gsd:phase --insert 5 "x"` → `/gsd:plan-phase 5.1` → `/gsd:phase --insert 6 "y"` → `/gsd:plan-phase 6`';
+    assert.equal(findInsertChains(good).length, 2);
     assert.deepEqual(problemsIn(good), []);
     assert.equal(problemsIn(bad).length, 1);
   });
