@@ -7446,7 +7446,7 @@ function installAndRead(runtime) {
   const res = spawnSync(
     process.execPath,
     [INSTALL, `--${runtime}`, '--global', '--config-dir', dir],
-    { encoding: 'utf8', timeout: INSTALL_TIMEOUT_MS, env: { ...process.env, HOME: dir, USERPROFILE: dir } },
+    { encoding: 'utf8', timeout: INSTALL_TIMEOUT_MS, env: { ...process.env, HOME: dir, USERPROFILE: dir, GSD_HOME: dir } },
   );
   assert.strictEqual(res.status, 0, `install --${runtime} failed: ${res.stderr || res.stdout}`);
   const wf = path.join(dir, 'gsd-core', 'workflows', 'execute-phase.md');
@@ -7630,7 +7630,7 @@ test('real install: cursor negotiates --worktree through its own emitted gate an
       // GSD_RUNTIME outranks the config tier in resolveRuntime, so an ambient
       // one in the developer's shell would satisfy this test without the
       // install's own config ever being read. Blank it explicitly.
-      const hermeticEnv = { ...process.env, HOME: dir, USERPROFILE: dir };
+      const hermeticEnv = { ...process.env, HOME: dir, USERPROFILE: dir, GSD_HOME: dir };
       delete hermeticEnv.GSD_RUNTIME;
 
       // Seam again — `runHook` documents `interpreter: 'bash'` for a shell
@@ -8046,6 +8046,7 @@ describe('#607 --dry-run flag: spawned installer exits 0 and mutates nothing', (
           ...process.env,
           HOME: tmpHome,
           USERPROFILE: tmpHome,
+          GSD_HOME: tmpHome,
           // Redirect Claude config dir into isolated tmp home
           CLAUDE_CONFIG_DIR: path.join(tmpHome, '.claude'),
           // Suppress slow stale-SDK npm check
@@ -8124,6 +8125,7 @@ describe('#607 --dry-run flag: spawned installer exits 0 and mutates nothing', (
           ...process.env,
           HOME: tmpHome,
           USERPROFILE: tmpHome,
+          GSD_HOME: tmpHome,
           CLAUDE_CONFIG_DIR: path.join(tmpHome, '.claude'),
           GSD_SKIP_STALE_SDK_CHECK: '1',
           GSD_TEST_MODE: undefined,

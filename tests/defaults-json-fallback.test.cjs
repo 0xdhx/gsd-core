@@ -313,7 +313,7 @@ describe('loadConfig ~/.gsd/defaults.json fallback (#1683)', () => {
 
   /** Run bin/install.js for Codex against a throwaway config dir, with the given home / GSD_HOME. */
   function runInstaller(args, { userHome, gsdHome, configDir }) {
-    const env = { ...process.env, HOME: userHome, USERPROFILE: userHome };
+    const env = { ...process.env, HOME: userHome, USERPROFILE: userHome, GSD_HOME: userHome };
     delete env.GSD_TEST_MODE;
     if (gsdHome === undefined) delete env.GSD_HOME; else env.GSD_HOME = gsdHome;
     return runNode(

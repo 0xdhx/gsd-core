@@ -942,6 +942,7 @@ function runNpm(args, options = {}) {
   const isolatedEnv = {
     ...process.env,
     HOME: _npmIsolatedHome,
+    GSD_HOME: _npmIsolatedHome, // #5017: the defaults store root follows HOME
     npm_config_cache: path.join(_npmIsolatedHome, '.npm'),
     npm_config_userconfig: path.join(_npmIsolatedHome, '.npmrc'),
     npm_config_loglevel: 'error',
