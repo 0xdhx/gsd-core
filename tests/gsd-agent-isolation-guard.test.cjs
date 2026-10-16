@@ -511,6 +511,21 @@ describe('gsd-agent-isolation-guard.js: #3045 BLOCKER 2 — default-install fail
     assert.equal(JSON.parse(r.stdout).decision, 'block');
   });
 
+  test('#5017: the defaults.json runtime fallback reads $GSD_HOME/.gsd/defaults.json when GSD_HOME is set', (t) => {
+    const home = mkProject('gsd-aig-5017-home-');
+    const gsdHome = mkProject('gsd-aig-5017-gsdhome-');
+    t.after(() => { cleanup(home); cleanup(gsdHome); });
+    fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+    fs.writeFileSync(path.join(gsdHome, '.gsd', 'defaults.json'), JSON.stringify({ runtime: 'claude' }));
+
+    // Only the GSD_HOME store names a runtime; the home directory has none.
+    const r = runHook(agentPayload(), unconfiguredHarnessProject, { HOME: home, GSD_HOME: gsdHome });
+    assert.equal(r.status, 2, `stdout: ${r.stdout} stderr: ${r.stderr} — GSD_HOME defaults runtime must be enforced`);
+    // A blank GSD_HOME falls back to the home directory, which has no store -> inert.
+    const blank = runHook(agentPayload(), unconfiguredHarnessProject, { HOME: home, GSD_HOME: '' });
+    assert.equal(blank.status, 0, `stdout: ${blank.stdout} stderr: ${blank.stderr} — blank GSD_HOME must fall back to HOME`);
+  });
+
   test('part B (negative control): a project WITH its own config.json runtime key still wins over defaults.json', (t) => {
     const home = mkProject('gsd-aig-b2-home2-');
     t.after(() => cleanup(home));

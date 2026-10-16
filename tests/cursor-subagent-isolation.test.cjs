@@ -822,6 +822,25 @@ describe('gsd-cursor-subagent-start.js: #3045 MAJOR "Cursor residual false-deny"
       cleanup(home);
     }
   });
+
+  test('#5017: the runtime fallback reads $GSD_HOME/.gsd/defaults.json when GSD_HOME is set, ahead of the home directory', () => {
+    const home = createTempDir('gsd-cs-5017-home-');
+    const gsdHome = createTempDir('gsd-cs-5017-gsdhome-');
+    try {
+      fs.mkdirSync(path.join(gsdHome, '.gsd'), { recursive: true });
+      fs.writeFileSync(path.join(gsdHome, '.gsd', 'defaults.json'), JSON.stringify({ runtime: 'cursor' }));
+      // The home directory has NO store: only the GSD_HOME one carries the runtime signal.
+      const r = runHook(subagentPayload([unconfiguredProject]), { HOME: home, GSD_HOME: gsdHome });
+      assert.equal(r.status, 0, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.equal(JSON.parse(r.stdout).permission, 'deny', `GSD_HOME defaults runtime must be enforced, got: ${r.stdout}`);
+      // A blank GSD_HOME falls back to the home directory (which has no store here) -> inert.
+      const blank = runHook(subagentPayload([unconfiguredProject]), { HOME: home, GSD_HOME: '' });
+      assert.equal(JSON.parse(blank.stdout).permission, undefined, `blank GSD_HOME must fall back to HOME, got: ${blank.stdout}`);
+    } finally {
+      cleanup(home);
+      cleanup(gsdHome);
+    }
+  });
 });
 
 describe('gsd-cursor-subagent-start.js: #3045 SECURITY F2 — sentinel bound to phase/plan, mismatch is "no applicable sentinel"', () => {
