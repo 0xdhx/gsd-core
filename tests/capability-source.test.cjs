@@ -228,7 +228,7 @@ describe('local adapter — happy path', () => {
     process.env.USERPROFILE = home;
     process.env.GSD_HOME = '';
     const result = await resolveCapabilitySource(capDir, { hostVersion: '1.5.0' });
-    assert.strictEqual(result.stagedDir, path.join(fs.realpathSync(home), '.gsd', 'capabilities', 'test-cap-local'));
+    assert.strictEqual(result.stagedDir, path.join(home, '.gsd', 'capabilities', 'test-cap-local'));
   });
 
   test('staging creates the capability under <gsdHome>/.gsd/capabilities/<id>/', async () => {
