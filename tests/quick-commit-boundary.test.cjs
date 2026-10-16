@@ -311,24 +311,40 @@ describe('bug #2523: quick-task final commit includes deferred-items.md', () => 
   const quickMd = fs.readFileSync(path.join(WORKFLOWS_DIR, 'quick.md'), 'utf-8');
 
   describe('#5085: quick executor SUMMARY path under worktree isolation', () => {
-    test('Step 4 derives a repo-relative QUICK_DIR_REL from the absolute task dir', () => {
-      const line = splitLines(quickMd).find((l) => /^QUICK_DIR_REL=/.test(l));
-      assert.ok(line, 'Step 4 must define QUICK_DIR_REL');
-      assert.match(line, /git rev-parse --show-toplevel/);
+    // The shell block that derives QUICK_DIR_REL: from its first `_QTOP=` line to the `fi` that ends it.
+    function derivationBlock() {
+      const lines = splitLines(quickMd);
+      const start = lines.findIndex((l) => /^_QTOP=/.test(l));
+      assert.notStrictEqual(start, -1, 'Step 4 must define the QUICK_DIR_REL derivation');
+      const end = lines.findIndex((l, n) => n > start && l === 'fi');
+      return lines.slice(start, end + 1).join('\n');
+    }
+
+    test('Step 4 derives a repo-relative QUICK_DIR_REL by asking git, not by string-stripping a path', () => {
+      const block = derivationBlock();
+      assert.match(block, /git -C "\$QUICK_DIR" rev-parse --show-prefix/);
+      assert.match(block, /^QUICK_DIR_REL=/m);
     });
 
-    test('the derivation yields .planning-relative paths, and leaves a path outside the checkout alone', (t) => {
-      const line = splitLines(quickMd).find((l) => /^QUICK_DIR_REL=/.test(l));
+    test('the derivation yields .planning-relative paths however the path is spelled, and leaves a path outside the checkout alone', (t) => {
+      const block = derivationBlock();
       const dir = createTempGitProject('gsd-5085-');
       t.after(() => cleanup(dir));
-      const inside = path.join(fs.realpathSync(dir), '.planning', 'quick', '261016-abc-x');
-      const run = (quickDir) => runHook('-c', [`QUICK_DIR="$1"\n${line}\nprintf '%s' "$QUICK_DIR_REL"`, 'sh', quickDir], {
-        interpreter: 'bash', cwd: dir, timeoutMs: PROBE_TIMEOUT_MS,
+      const root = fs.realpathSync(dir);
+      const taskDir = path.join(root, '.planning', 'quick', '261016-abc-x');
+      fs.mkdirSync(taskDir, { recursive: true });
+      const run = (quickDir) => runHook('-c', [`QUICK_DIR="$1"\n${block}\nprintf '%s' "$QUICK_DIR_REL"`, 'sh', quickDir], {
+        interpreter: 'bash', cwd: root, timeoutMs: PROBE_TIMEOUT_MS,
       });
-      const rel = run(inside);
-      assert.strictEqual(rel.stdout, '.planning/quick/261016-abc-x', JSON.stringify(rel));
-      const outside = run('/elsewhere/.planning/quick/x');
-      assert.strictEqual(outside.stdout, '/elsewhere/.planning/quick/x', 'not under the checkout -> unchanged');
+      assert.strictEqual(run(taskDir).stdout, '.planning/quick/261016-abc-x', 'plain spelling');
+      if (process.platform !== 'win32') {
+        // A symlinked spelling of the same directory (macOS /var -> /private/var): a string prefix strip misses it.
+        const link = path.join(path.dirname(root), `${path.basename(root)}-link`);
+        fs.symlinkSync(root, link);
+        t.after(() => fs.rmSync(link, { force: true }));
+        assert.strictEqual(run(path.join(link, '.planning', 'quick', '261016-abc-x')).stdout, '.planning/quick/261016-abc-x', 'symlinked spelling');
+      }
+      assert.strictEqual(run('/elsewhere/.planning/quick/x').stdout, '/elsewhere/.planning/quick/x', 'not under the checkout -> unchanged');
     });
 
     test('the executor SUMMARY target is the relative path when isolated, the absolute one otherwise', () => {
