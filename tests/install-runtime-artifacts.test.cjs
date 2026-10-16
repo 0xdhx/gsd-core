@@ -5812,7 +5812,7 @@ describe('Bug #2973: dev-preferences default writer path is skills/gsd-dev-prefe
         // it -- and the writer under test resolves them env-FIRST. Sandboxing
         // HOME alone let an ambient CLAUDE_CONFIG_DIR win, and the SKILL.md
         // landed in the developer's live config dir instead of tmpHome.
-        env: Object.assign({}, process.env, TEST_ENV_BASE, { HOME: tmpHome, USERPROFILE: tmpHome }),
+        env: Object.assign({}, process.env, TEST_ENV_BASE, { HOME: tmpHome, USERPROFILE: tmpHome, GSD_HOME: tmpHome }),
         encoding: 'utf-8',
         // See WRITER_SUBPROCESS_TIMEOUT_MS's own doc comment (top of file)
         // for the full rationale.
@@ -7354,7 +7354,7 @@ describe('#2218 cross-scope shadowing', () => {
     // order matters for this fixture (a separate test covers order-independence).
     globalInstallResult = runNode([INSTALL_SCRIPT, '--claude', '--global'], {
       cwd: root,
-      env: installerEnv({ HOME: root, USERPROFILE: root }),
+      env: installerEnv({ HOME: root, USERPROFILE: root, GSD_HOME: root }),
       timeoutMs: INSTALL_TIMEOUT_MS,
     });
     assert.strictEqual(globalInstallResult.exitCode, 0,
@@ -7368,7 +7368,7 @@ describe('#2218 cross-scope shadowing', () => {
     // installer directly instead, with cwd pinned at the project dir.
     localInstallResult = runNode([INSTALL_SCRIPT, '--claude', '--local'], {
       cwd: projectDir,
-      env: installerEnv({ HOME: root, USERPROFILE: root }),
+      env: installerEnv({ HOME: root, USERPROFILE: root, GSD_HOME: root }),
       timeoutMs: INSTALL_TIMEOUT_MS,
     });
     assert.strictEqual(localInstallResult.exitCode, 0,
@@ -7486,7 +7486,7 @@ describe('#2873 C1-C6 — install-time shadow report (spawned installer wiring)'
   function spawnInstall(args, cwd, root, nodeFlags = []) {
     return runNode([...nodeFlags, INSTALL_SCRIPT, ...args], {
       cwd,
-      env: installerEnv({ HOME: root, USERPROFILE: root }),
+      env: installerEnv({ HOME: root, USERPROFILE: root, GSD_HOME: root }),
       timeoutMs: INSTALL_TIMEOUT_MS,
     });
   }
@@ -8361,6 +8361,7 @@ describe('install() global codex — @~/.claude include rewrite (#4667)', () => 
         ...__isolatedNpmEnv4667(),
         HOME: tmpCodexHome,
         USERPROFILE: tmpCodexHome,
+        GSD_HOME: tmpCodexHome,
         GSD_TEST_MODE: '',
         NO_UPDATE_NOTIFIER: '1',
         npm_config_update_notifier: 'false',
