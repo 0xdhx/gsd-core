@@ -292,3 +292,53 @@ describe('bug #2523: quick-task final commit includes deferred-items.md', () => 
 });
   });
 }
+
+// ─── #5085: an isolated executor is handed a worktree-relative SUMMARY path ───
+//
+// `init.quick` reports `quick_dir` as an ABSOLUTE path in the primary checkout.
+// Under `isolation="worktree"` the executor was told to write its SUMMARY there,
+// which `gsd-worktree-path-guard` blocks (it is outside the worktree root), and
+// the guard does not cover Bash, so the denied write got copied around the
+// block. The isolated executor now writes a worktree-relative path (the guard
+// ignores relative paths); `worktree.cleanup-wave` already rescues an
+// uncommitted `*SUMMARY.md` from the worktree into the same relative path in
+// the primary checkout, so the orchestrator's later `${QUICK_DIR}` check holds.
+{
+  const { runHook } = require('./helpers/process-seam.cjs');
+  const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
+  const { createTempGitProject, cleanup } = require('./helpers.cjs');
+  const quickMd = fs.readFileSync(path.join(WORKFLOWS_DIR, 'quick.md'), 'utf-8');
+
+  describe('#5085: quick executor SUMMARY path under worktree isolation', () => {
+    test('Step 4 derives a repo-relative QUICK_DIR_REL from the absolute task dir', () => {
+      const line = quickMd.split('\n').find((l) => /^QUICK_DIR_REL=/.test(l));
+      assert.ok(line, 'Step 4 must define QUICK_DIR_REL');
+      assert.match(line, /git rev-parse --show-toplevel/);
+    });
+
+    test('the derivation yields .planning-relative paths, and leaves a path outside the checkout alone', (t) => {
+      const line = quickMd.split('\n').find((l) => /^QUICK_DIR_REL=/.test(l));
+      const dir = createTempGitProject('gsd-5085-');
+      t.after(() => cleanup(dir));
+      const inside = path.join(fs.realpathSync(dir), '.planning', 'quick', '261016-abc-x');
+      const run = (quickDir) => runHook('-c', [`QUICK_DIR="$1"\n${line}\nprintf '%s' "$QUICK_DIR_REL"`, 'sh', quickDir], {
+        interpreter: 'bash', cwd: dir, timeoutMs: PROBE_TIMEOUT_MS,
+      });
+      const rel = run(inside);
+      assert.strictEqual(rel.stdout, '.planning/quick/261016-abc-x', JSON.stringify(rel));
+      const outside = run('/elsewhere/.planning/quick/x');
+      assert.strictEqual(outside.stdout, '/elsewhere/.planning/quick/x', 'not under the checkout -> unchanged');
+    });
+
+    test('the executor SUMMARY target is the relative path when isolated, the absolute one otherwise', () => {
+      const m = quickMd.match(/- Create summary at: (.+?)\/\$\{quick_id\}-SUMMARY\.md/);
+      assert.ok(m, 'executor constraints must name the SUMMARY target');
+      assert.match(m[1], /ISOLATION === "harness-worktree" \? QUICK_DIR_REL : QUICK_DIR/);
+    });
+
+    test('a denied write is reported and stops the run — never copied around with Bash', () => {
+      assert.match(quickMd, /denied by gsd-worktree-path-guard[\s\S]{0,300}stop and report/i);
+      assert.match(quickMd, /not (?:to )?(?:route|work) around[\s\S]{0,120}(?:cp|mv)/i);
+    });
+  });
+}
