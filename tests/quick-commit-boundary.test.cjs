@@ -311,12 +311,13 @@ describe('bug #2523: quick-task final commit includes deferred-items.md', () => 
   const quickMd = fs.readFileSync(path.join(WORKFLOWS_DIR, 'quick.md'), 'utf-8');
 
   describe('#5085: quick executor SUMMARY path under worktree isolation', () => {
-    // The shell block that derives QUICK_DIR_REL: from its first `_QTOP=` line to the `fi` that ends it.
+    // The shell block that derives QUICK_DIR_REL: from its first `_QTOP=` line to its one-line fallback.
     function derivationBlock() {
       const lines = splitLines(quickMd);
       const start = lines.findIndex((l) => /^_QTOP=/.test(l));
       assert.notStrictEqual(start, -1, 'Step 4 must define the QUICK_DIR_REL derivation');
-      const end = lines.findIndex((l, n) => n > start && l === 'fi');
+      const end = lines.findIndex((l, n) => n > start && /^if \[ -z "\$QUICK_DIR_REL" \]/.test(l));
+      assert.notStrictEqual(end, -1, 'the derivation must end with its fallback line');
       return lines.slice(start, end + 1).join('\n');
     }
 
@@ -341,7 +342,7 @@ describe('bug #2523: quick-task final commit includes deferred-items.md', () => 
         // A symlinked spelling of the same directory (macOS /var -> /private/var): a string prefix strip misses it.
         const link = path.join(path.dirname(root), `${path.basename(root)}-link`);
         fs.symlinkSync(root, link);
-        t.after(() => fs.rmSync(link, { force: true }));
+        t.after(() => cleanup(link));
         assert.strictEqual(run(path.join(link, '.planning', 'quick', '261016-abc-x')).stdout, '.planning/quick/261016-abc-x', 'symlinked spelling');
       }
       assert.strictEqual(run('/elsewhere/.planning/quick/x').stdout, '/elsewhere/.planning/quick/x', 'not under the checkout -> unchanged');

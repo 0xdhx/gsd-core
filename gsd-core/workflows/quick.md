@@ -261,7 +261,11 @@ Create the directory for this quick task:
 QUICK_DIR="${task_dir}"
 mkdir -p "$QUICK_DIR"
 # Worktree-relative form for an isolated executor (#5085): the guard blocks absolute paths outside its worktree.
-QUICK_DIR_REL="${QUICK_DIR#"$(git rev-parse --show-toplevel)"/}"
+_QTOP=$(git rev-parse --show-toplevel 2>/dev/null)
+_QTOP_DIR=$(git -C "$QUICK_DIR" rev-parse --show-toplevel 2>/dev/null)
+QUICK_DIR_REL=$(git -C "$QUICK_DIR" rev-parse --show-prefix 2>/dev/null)
+QUICK_DIR_REL="${QUICK_DIR_REL%/}"
+if [ -z "$QUICK_DIR_REL" ] || [ "$_QTOP" != "$_QTOP_DIR" ]; then QUICK_DIR_REL="$QUICK_DIR"; fi
 ```
 
 Report to user:
