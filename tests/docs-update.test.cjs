@@ -536,8 +536,10 @@ describe('#5050: docs-update --verify-only and the doc-verifier result files', (
     assert.match(body.slice(skip, firstQuestion), /verify_only_report/, 'the skip must target verify_only_report');
   });
 
-  test('no step before verify_only_report can ask on the --verify-only path', () => {
-    for (const name of ['classify_project', 'build_doc_queue', 'resolve_modes']) {
+  test('no step reachable on the --verify-only path before verify_only_report can ask', () => {
+    // build_doc_queue jumps over resolve_modes and preservation_check, so classify_project and
+    // build_doc_queue are the only steps this path runs before the report.
+    for (const name of ['classify_project', 'build_doc_queue']) {
       const body = stepBody(SPINE, name);
       const skip = body.indexOf('--verify-only');
       const q = body.indexOf('AskUserQuestion');
@@ -556,7 +558,7 @@ describe('#5050: docs-update --verify-only and the doc-verifier result files', (
   test('every verify_assignment the workflow sends carries an absolute result_path under project_root', () => {
     const blocks = [...SPINE.matchAll(/<verify_assignment>([\s\S]*?)<\/verify_assignment>/g),
       ...ELAB.matchAll(/<verify_assignment>([\s\S]*?)<\/verify_assignment>/g)];
-    assert.ok(blocks.length >= 3, 'expected the verify_docs (x2) and verify_only_report assignments');
+    assert.ok(blocks.length >= 2, 'expected the verify_docs and verify_only_report assignments');
     for (const [, body] of blocks) {
       assert.match(body, /result_path: \{project_root\}\/\.planning\/tmp\/verify-\{doc_key\}\.json/, `assignment lacks result_path:\n${body}`);
     }
