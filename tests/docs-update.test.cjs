@@ -560,7 +560,9 @@ describe('#5050: docs-update --verify-only and the doc-verifier result files', (
       ...ELAB.matchAll(/<verify_assignment>([\s\S]*?)<\/verify_assignment>/g)];
     assert.ok(blocks.length >= 2, 'expected the verify_docs and verify_only_report assignments');
     for (const [, body] of blocks) {
-      assert.match(body, /result_path: \{project_root\}\/\.planning\/tmp\/verify-\{doc_key\}\.json/, `assignment lacks result_path:\n${body}`);
+      // The spine spells the path out; the detail file points at the spine's contract instead,
+      // because the compact-content partition guard forbids a detail line that repeats a spine line.
+      assert.match(body, /result_path: (\{project_root\}\/\.planning\/tmp\/verify-\{doc_key\}\.json|\{this doc's result_path, computed per verify_docs § Result file contract\})/, `assignment lacks result_path:\n${body}`);
     }
   });
 

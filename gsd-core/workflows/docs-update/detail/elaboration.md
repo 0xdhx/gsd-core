@@ -140,7 +140,7 @@ Invoke the gsd-doc-verifier agent in read-only mode for each file in `existing_d
       <verify_assignment>
       doc_path: {doc.path}
       project_root: {the project_root field carried in the init JSON}
-      result_path: {project_root}/.planning/tmp/verify-{doc_key}.json
+      result_path: {this doc's result_path, computed per verify_docs § Result file contract}
       </verify_assignment>
       ```
    b. Read the result JSON from its `result_path`.
