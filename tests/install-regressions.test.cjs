@@ -16,6 +16,14 @@
  */
 
 const { test, describe, beforeEach, afterEach } = require('node:test');
+
+// #5017: tests in this file pin GSD_HOME next to HOME (the defaults store root follows GSD_HOME);
+// put the runner's value back after each test so a pinned home never leaks into the next one.
+const __ORIG_GSD_HOME = process.env.GSD_HOME;
+require('node:test').afterEach(() => {
+  if (__ORIG_GSD_HOME === undefined) delete process.env.GSD_HOME;
+  else process.env.GSD_HOME = __ORIG_GSD_HOME;
+});
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -2161,6 +2169,7 @@ describe('#1874 F18: ~/.gsd/defaults.json read-modify-write is locked and atomic
     delete process.env.GSD_TEST_MODE;
     process.env.HOME = root;
     process.env.USERPROFILE = root;
+    process.env.GSD_HOME = root; // #5017: the defaults store root follows HOME
     try {
       return fn();
     } finally {

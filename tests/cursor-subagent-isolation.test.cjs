@@ -59,6 +59,10 @@ function runHook(payload, extraEnv = {}) {
   // `USERPROFILE` too so that redirection actually takes effect on Windows
   // instead of silently leaking the real CI runner's profile directory.
   if ('HOME' in extraEnv) env.USERPROFILE = extraEnv.HOME;
+  // #5017: the defaults store root is GSD_HOME when set, and the test runner exports a sandbox
+  // GSD_HOME to every test — so redirecting only HOME no longer redirects the store. A test that
+  // redirects HOME redirects the store with it, unless it names GSD_HOME itself.
+  if ('HOME' in extraEnv && !('GSD_HOME' in extraEnv)) env.GSD_HOME = extraEnv.HOME;
   return toLegacyResult(runNode([HOOK_PATH], {
     input: typeof payload === 'string' ? payload : JSON.stringify(payload),
     cwd: require('node:os').tmpdir(),
@@ -973,12 +977,14 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
 
   let savedHome;
   let savedUserProfile;
+  let savedGsdHome;
   let savedGsdRuntime;
   let project; // scaffold-shaped config ({}), per #2840's no-runtime-key template
 
   before(() => {
     savedHome = process.env.HOME;
     savedUserProfile = process.env.USERPROFILE;
+    savedGsdHome = process.env.GSD_HOME;
     savedGsdRuntime = process.env.GSD_RUNTIME;
     project = createTempDir('gsd-cs-3566-');
     fs.mkdirSync(path.join(project, '.planning'), { recursive: true });
@@ -991,6 +997,8 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
     else process.env.HOME = savedHome;
     if (savedUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = savedUserProfile;
+    if (savedGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = savedGsdHome;
     if (savedGsdRuntime === undefined) delete process.env.GSD_RUNTIME;
     else process.env.GSD_RUNTIME = savedGsdRuntime;
     cursorHookModule._setInstallRuntimeMarkerForTests(null);
@@ -1004,6 +1012,7 @@ describe('gsd-cursor-subagent-start.js: #3566 — per-install .gsd-runtime marke
     fs.writeFileSync(path.join(home, '.gsd', 'defaults.json'), JSON.stringify({ runtime: defaultsRuntime }));
     process.env.HOME = home;
     process.env.USERPROFILE = home;
+    process.env.GSD_HOME = home; // #5017: the store root
     t.after(() => cleanup(home));
   }
 
