@@ -984,7 +984,10 @@ describe('#5049: --prompt-file reaches every prompt channel', () => {
           fs.writeFileSync(trimmed, 'trimmed prompt');
           fs.writeFileSync(
             path.join(binDir, bin),
-            `#!/usr/bin/env bash\nprintf '%s\\n' "$@" >> "${seen}"\n` +
+            // `kimi` and `agy` are capability-probed through `--help`; answer the probe and keep it
+            // out of the recorded argv so only the real invocation is asserted on.
+            `#!/usr/bin/env bash\nif [ "$1" = "--help" ]; then echo "--output-format --add-dir"; exit 0; fi\n` +
+            `printf '%s\\n' "$@" >> "${seen}"\n` +
             'echo "a review body long enough to clear the empty-output guard."\n',
             { mode: 0o755 },
           );
