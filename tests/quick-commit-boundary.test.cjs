@@ -307,17 +307,18 @@ describe('bug #2523: quick-task final commit includes deferred-items.md', () => 
   const { runHook } = require('./helpers/process-seam.cjs');
   const { PROBE_TIMEOUT_MS } = require('./helpers/timeouts.cjs');
   const { createTempGitProject, cleanup } = require('./helpers.cjs');
+  const { splitLines } = require('../gsd-core/bin/lib/text-lines.cjs');
   const quickMd = fs.readFileSync(path.join(WORKFLOWS_DIR, 'quick.md'), 'utf-8');
 
   describe('#5085: quick executor SUMMARY path under worktree isolation', () => {
     test('Step 4 derives a repo-relative QUICK_DIR_REL from the absolute task dir', () => {
-      const line = quickMd.split('\n').find((l) => /^QUICK_DIR_REL=/.test(l));
+      const line = splitLines(quickMd).find((l) => /^QUICK_DIR_REL=/.test(l));
       assert.ok(line, 'Step 4 must define QUICK_DIR_REL');
       assert.match(line, /git rev-parse --show-toplevel/);
     });
 
     test('the derivation yields .planning-relative paths, and leaves a path outside the checkout alone', (t) => {
-      const line = quickMd.split('\n').find((l) => /^QUICK_DIR_REL=/.test(l));
+      const line = splitLines(quickMd).find((l) => /^QUICK_DIR_REL=/.test(l));
       const dir = createTempGitProject('gsd-5085-');
       t.after(() => cleanup(dir));
       const inside = path.join(fs.realpathSync(dir), '.planning', 'quick', '261016-abc-x');
