@@ -81,6 +81,7 @@ module.exports = {
   "tests/cursor-hooks.test.cjs",
   "tests/cursor-subagent-isolation.test.cjs",
   "tests/debug-session-management.test.cjs",
+  "tests/defaults-json-fallback.test.cjs",
   "tests/dispatch-identity.test.cjs",
   "tests/dispatcher.test.cjs",
   "tests/drift-detection.test.cjs",
