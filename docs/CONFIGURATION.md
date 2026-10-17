@@ -166,7 +166,7 @@ project one is reported, since that is the file you are most likely able to fix.
 ## Agent tool grants
 
 `agent_tools` is an opt-in, install-time addition to the tools already declared by shipped
-agents. Put defaults shared by your projects in `~/.gsd/defaults.json` and project-specific
+agents. Put defaults shared by your projects in `$GSD_HOME/.gsd/defaults.json` (`~/.gsd/defaults.json` when `GSD_HOME` is unset) and project-specific
 choices in the nearest `.planning/config.json`:
 
 ```json
@@ -944,7 +944,7 @@ Skills reach a consumer agent through **two cooperating seams** (dual injection 
 
 1. **Orchestrator-side (primary on Claude Code).** At spawn time, workflows call `gsd-tools query agent-skills <type>` (or legacy `node gsd-tools.cjs agent-skills <type>`) in their bash init and interpolate the resulting `<agent_skills>` block into the `Task()`/`Agent()` prompt. This is established across ~25 workflows.
 
-2. **Agent-side self-load (durable fallback).** Each of the 22 consumer agents also self-loads in its own mandatory init step — it runs `gsd_run query agent-skills <its-type>` and `Read`s every listed `SKILL.md` per [`gsd-core/references/agent-skills-bootstrap.md`](../gsd-core/references/agent-skills-bootstrap.md). This is the path that works on every runtime, including **Cursor**, where `Skill()`-delegated workflow bash init does not reliably execute and `/gsd-autonomous` delegates via flat `Skill()` calls.
+2. **Agent-side self-load (durable fallback).** Each of the 22 consumer agents also self-loads in its own mandatory init step — it runs `gsd_run query agent-skills <its-type> --skills-only` (the type is written into the agent file's body; `--skills-only` skips the persona fallback that non-Claude runtimes get from the plain query, so the agent never re-reads its own persona) and `Read`s every listed `SKILL.md` per [`gsd-core/references/agent-skills-bootstrap.md`](../gsd-core/references/agent-skills-bootstrap.md). This is the path that works on every runtime, including **Cursor**, where `Skill()`-delegated workflow bash init does not reliably execute and `/gsd-autonomous` delegates via flat `Skill()` calls.
 
 **Dedup guard.** If an agent's prompt already contains an `<agent_skills>` block (orchestrator already injected one), the agent skips self-load — so on runtimes where both seams run (Claude Code), the prompt never carries two copies. `query agent-skills` is read-only and idempotent: it exits 0 with an empty block when nothing is configured for the type, so self-load is zero-overhead for unconfigured agents.
 
@@ -1587,8 +1587,7 @@ On the Claude runtime, fully-qualified Claude model IDs are honored as explicit 
 
 `model_overrides` can be set in either `.planning/config.json` (per-project)
 or `$GSD_HOME/.gsd/defaults.json` (global). The install-time embedding for
-Codex and OpenCode described below still reads `~/.gsd/defaults.json`
-([#5017](https://github.com/open-gsd/gsd-core/issues/5017)). Per-project entries win on conflict and
+Codex and OpenCode described below reads the same store ([#5017](https://github.com/open-gsd/gsd-core/issues/5017)). Per-project entries win on conflict and
 non-conflicting global entries are preserved, so you can tune a single
 agent's model in one repo without re-setting global defaults. This applies
 uniformly across Claude Code, Codex, OpenCode, Kilo, and the other
@@ -2330,6 +2329,8 @@ Save settings as global defaults for future projects:
 
 **Location:** `$GSD_HOME/.gsd/defaults.json` (`GSD_HOME` defaults to your home directory, so `~/.gsd/defaults.json` when unset)
 
+Every reader and writer of this store resolves its root the same way: `GSD_HOME` when it is set and non-blank, otherwise your home directory. That covers the config loader, the install-time model / tools / effort resolvers, the installer's non-Claude defaults writer, the isolation hooks' runtime fallback, capability staging, and the `/gsd-settings` and `/gsd-new-project` workflows (#5017).
+
 When `/gsd-new-project` creates a new `config.json`, it reads global defaults and merges them as the starting configuration. Per-project settings always override globals.
 
 ### What a global file can and cannot set at runtime
@@ -2345,7 +2346,7 @@ Two different rules apply, and the difference is deliberate ([#3532](https://git
   detects this, instead of failing silently. To apply a global model setting to a project,
   put it in that project's `.planning/config.json`.
 - **`effort` is the exception**: the install-time effort channel always merges
-  `~/.gsd/defaults.json` with the project config (that is how `effort sync` works), so a
+  the global defaults store with the project config (that is how `effort sync` works), so a
   global `effort` block keeps working in projects and does not trigger the warning.
 - **The whole `git.*` namespace is project-scoped and never resolves from the global file**,
   in either directory shape — not `git.base_branch`, not `git.protected_branches`, not
