@@ -789,13 +789,13 @@ function scanCommandParenClose(str, i, ctx) {
     // A delimiter. Two `(` belong to the word before them and do not end it.
     if (ch === '(' && word !== null && !(top && top.st === 'pat')) {
       // `!(` where a command can start is `!` and a subshell with extglob
-      // off, and an extended-glob word with it on. The two can close at
-      // different parens and neither can be preferred without reading the
-      // other mode wrong, so this one group is closed by the counter this
-      // file had before, exactly as it was.
+      // off, bash's default outside an interactive shell, and an
+      // extended-glob word with it on. This reading takes the first: `!` is
+      // the pipeline's negation and the `(` is read again as a subshell. The
+      // second reading, a glob group closed by paren counting, is the one
+      // countParenClose makes, and scanEitherClose scans every span both ways.
       if (word.raw === '!' && !word.quoted && !cond && reservedOk('!')) {
-        word.quoted = true;
-        i = countParenClose(str, i + 1) + 1;
+        endWord();
         continue;
       }
       // An extended-glob group: `?(` `*(` `+(` `@(` `!(` inside a word.
