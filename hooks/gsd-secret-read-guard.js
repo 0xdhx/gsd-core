@@ -415,7 +415,7 @@ function classifyGrepGlob(glob) {
 // new empty one, which is what lets a read-ahead be undone by truncating.
 function afterNewline(str, i, ctx) {
   if (ctx.orphans.length === 0) return i + 1;
-  const end = heredocBodiesEnd(str, i + 1, ctx.orphans);
+  const end = consumeHeredocBodies(str, i + 1, ctx.orphans).end;
   ctx.orphans = [];
   return end;
 }
@@ -429,8 +429,6 @@ function skipQuoted(str, i, ctx) {
   if (ch === "'" || ch === '`') {
     i++;
     while (i < str.length && str[i] !== ch) {
-      // A backslash escapes inside backticks, never inside '…'.
-      if (ch === '`' && str[i] === '\\') { i += 2; continue; }
       i = str[i] === '\n' ? afterNewline(str, i, ctx) : i + 1;
     }
     return i + 1;
@@ -439,10 +437,7 @@ function skipQuoted(str, i, ctx) {
     i++;
     while (i < str.length && str[i] !== '"') {
       if (str[i] === '\\') { i += 2; continue; }
-      if (str[i] === '$' && str[pastContinuations(str, i + 1, ctx)] === '(') {
-        i = findParenClose(str, pastContinuations(str, i + 1, ctx) + 1, ctx) + 1;
-        continue;
-      }
+      if (str[i] === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2, ctx) + 1; continue; }
       if (str[i] === '`') { i = skipQuoted(str, i, ctx); continue; }
       i = str[i] === '\n' ? afterNewline(str, i, ctx) : i + 1;
     }
@@ -458,9 +453,8 @@ function findBraceClose(str, i, ctx) {
   while (i < str.length) {
     const q = skipQuoted(str, i, ctx);
     if (q !== -1) { i = q; continue; }
-    const next = pastContinuations(str, i + 1, ctx);
-    if (str[i] === '$' && str[next] === '(') { i = findParenClose(str, next + 1, ctx) + 1; continue; }
-    if (str[i] === '$' && str[next] === '{') { i = findBraceClose(str, next + 1, ctx) + 1; continue; }
+    if (str[i] === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2, ctx) + 1; continue; }
+    if (str[i] === '$' && str[i + 1] === '{') { i = findBraceClose(str, i + 2, ctx) + 1; continue; }
     if (str[i] === '}') return i;
     i = str[i] === '\n' ? afterNewline(str, i, ctx) : i + 1;
   }
@@ -478,14 +472,12 @@ function findPlainParenClose(str, i, words, ctx, pending) {
   let depth = 1;
   let wordStart = true;
   while (i < str.length) {
-    if (str[i] === '\\' && str[i + 1] === '\n') { i = pastContinuation(str, i, ctx); continue; }
     const q = skipQuoted(str, i, ctx);
     if (q !== -1) { i = q; wordStart = false; continue; }
     const ch = str[i];
-    const next = pastContinuations(str, i + 1, ctx);
-    if (ch === '$' && str[next] === '(') { i = findParenClose(str, next + 1, ctx) + 1; wordStart = false; continue; }
-    if (ch === '$' && str[next] === '{') { i = findBraceClose(str, next + 1, ctx) + 1; wordStart = false; continue; }
-    if (words && (ch === '<' || ch === '>') && str[next] === '(') { i = findParenClose(str, next + 1, ctx) + 1; wordStart = false; continue; }
+    if (ch === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2, ctx) + 1; wordStart = false; continue; }
+    if (ch === '$' && str[i + 1] === '{') { i = findBraceClose(str, i + 2, ctx) + 1; wordStart = false; continue; }
+    if (words && (ch === '<' || ch === '>') && str[i + 1] === '(') { i = findParenClose(str, i + 2, ctx) + 1; wordStart = false; continue; }
     if (words && ch === '#' && wordStart) {
       const j = str.indexOf('\n', i);
       i = j === -1 ? str.length : j;
@@ -494,7 +486,7 @@ function findPlainParenClose(str, i, words, ctx, pending) {
     if (ch === '\n') {
       i = afterNewline(str, i, ctx);
       if (pending && pending.length) {
-        i = heredocBodiesEnd(str, i, pending);
+        i = consumeHeredocBodies(str, i, pending).end;
         pending.length = 0;
       }
       wordStart = true;
@@ -581,7 +573,7 @@ function findParenClose(str, i, ctx) {
 function readParenClose(str, i, ctx) {
   // `$((` / `<((`: bash finds this close by counting parens alone, whether the
   // text turns out to be arithmetic or a subshell.
-  if (str[pastContinuations(str, i, ctx)] === '(') return findPlainParenClose(str, i, false, ctx);
+  if (str[i] === '(') return findPlainParenClose(str, i, false, ctx);
   return scanCommandParenClose(str, i, ctx);
 }
 
@@ -730,12 +722,9 @@ function scanCommandParenClose(str, i, ctx) {
 
   while (i < str.length) {
     const ch = str[i];
-    if (ch === '\\' && str[i + 1] === '\n') { i = pastContinuation(str, i, ctx); continue; }
     const q = skipQuoted(str, i, ctx);
     if (q !== -1) { wordPart(true); i = q; continue; }
-    // The next character bash reads: a line continuation between two
-    // characters of an operator does not split it.
-    const next = pastContinuations(str, i + 1, ctx);
+    const next = i + 1;
     if (ch === '$' && str[next] === '(') { wordPart(true); i = findParenClose(str, next + 1, ctx) + 1; continue; }
     if (ch === '$' && str[next] === '{') { wordPart(true); i = findBraceClose(str, next + 1, ctx) + 1; continue; }
     // A process substitution is a part of the word it touches (`x<(a)` is one
@@ -834,8 +823,7 @@ function scanCommandParenClose(str, i, ctx) {
       f.start = true;
       f.pd = 0;
       token(';;');
-      const third = pastContinuations(str, next + 1, ctx);
-      i = str[next] === ';' && str[third] === '&' ? third + 1 : next + 1;
+      i = str[next] === ';' && str[next + 1] === '&' ? next + 2 : next + 1;
       continue;
     }
 
@@ -843,17 +831,15 @@ function scanCommandParenClose(str, i, ctx) {
       token('\n');
       i = afterNewline(str, i, ctx); // orphan bodies come first in the input
       if (heredocTags.length) {
-        i = heredocBodiesEnd(str, i, heredocTags);
+        i = consumeHeredocBodies(str, i, heredocTags).end;
         heredocTags.length = 0;
       }
       continue;
     }
     if (ch === '<' || ch === '>') {
       token('redir');
-      if (ch === '<' && str[next] === '<') {
-        const third = pastContinuations(str, next + 1, ctx);
-        if (str[third] === '<') { i = third + 1; continue; } // a here-string, not a heredoc
-        const tag = readHeredocTagContinued(str, third, ctx);
+      if (ch === '<' && str[next] === '<' && str[next + 1] !== '<') {
+        const tag = readHeredocTag(str, next + 1);
         heredocTags.push(tag);
         token('word');
         i = tag.end;
@@ -864,8 +850,7 @@ function scanCommandParenClose(str, i, ctx) {
     }
     if (ch === '&' && str[next] === '>') {
       token('redir');
-      const third = pastContinuations(str, next + 1, ctx);
-      i = str[third] === '>' ? third + 1 : next + 1;
+      i = str[next + 1] === '>' ? next + 2 : next + 1;
       continue;
     }
     if (ch === ';') { token(';'); i++; continue; }
@@ -885,11 +870,7 @@ function scanCommandParenClose(str, i, ctx) {
       if (last === 'word') {
         // `name()` / `name ( )`: the parens of a function definition.
         let j = i + 1;
-        for (;;) {
-          if (str[j] === ' ' || str[j] === '\t') j++;
-          else if (str[j] === '\\' && str[j + 1] === '\n') j += 2;
-          else break;
-        }
+        while (str[j] === ' ' || str[j] === '\t') j++;
         if (str[j] === ')') { token('fn()'); i = j + 1; continue; }
       }
       if (str[next] === '(' && (last === 'for' || reservedOk('((')) && probeBudget > 0) {
@@ -906,11 +887,10 @@ function scanCommandParenClose(str, i, ctx) {
         const e = findPlainParenClose(str, next + 1, false, probe);
         probeBudget = budget - (e - i);
         if (e >= str.length) return close(str.length);
-        const after = pastContinuations(str, e + 1, ctx);
-        if (str[after] === ')') {
+        if (str[e + 1] === ')') {
           ctx.orphans = probe.orphans;
           token('arith');
-          i = after + 1;
+          i = e + 2;
           continue;
         }
         orphans.length = waiting;
@@ -928,110 +908,6 @@ function scanCommandParenClose(str, i, ctx) {
     i++;
   }
   return close(str.length);
-}
-
-// Index of the first character at or after `i` that is not a line
-// continuation. bash removes a backslash-newline before it reads a token, so
-// an operator split by one is still that operator: `;\` newline `;` is `;;`.
-// Not while an orphan heredoc waits (see afterNewline): bash starts its body
-// at the next newline in the text, a continuation's included, so the reader
-// stops there and pastContinuation reads the body.
-function pastContinuations(str, i, ctx) {
-  while (str[i] === '\\' && str[i + 1] === '\n' && !(ctx && ctx.orphans.length)) i += 2;
-  return i;
-}
-
-// Index past the line continuation at `i`, and past any orphan heredoc bodies
-// that start at its newline.
-function pastContinuation(str, i, ctx) {
-  return ctx.orphans.length ? afterNewline(str, i + 1, ctx) : i + 2;
-}
-
-// readHeredocTag for the readers above: the delimiter bash waits for, which
-// is the tag word with its quotes removed, as the tokenizer reads it. Quoted
-// and unquoted parts join into one word (`<<'E'OF` and `<<X"EOF"` wait for
-// `EOF` and `XEOF`), a backslash quotes the character after it, and inside
-// "…" it is removed only before `"`, `\`, `$` or a backtick. The line
-// continuations bash removes are removed from the unquoted and the
-// double-quoted parts, so `<<EO\` newline `F` and `<<"EO\` newline `F"` wait
-// for `EOF`. Inside '…' they stay. Any quoting makes the heredoc quoted.
-// While an orphan heredoc waits, its body starts at a continuation's newline
-// and the word goes on after it: `<<B\` newline, an orphan body, then `C`
-// waits for `BC`.
-function readHeredocTagContinued(str, i, ctx) {
-  const past = (j) => {
-    for (;;) {
-      j = pastContinuations(str, j, ctx);
-      if (str[j] !== '\\' || str[j + 1] !== '\n') return j;
-      j = pastContinuation(str, j, ctx);
-    }
-  };
-  let stripTabs = false;
-  i = past(i);
-  if (str[i] === '-') { stripTabs = true; i = past(i + 1); }
-  while (str[i] === ' ' || str[i] === '\t') i = past(i + 1);
-  const ends = (c) => /[\s;&|<>()]/.test(c);
-  let quoted = false;
-  let tag = '';
-  for (;;) {
-    i = past(i);
-    if (i >= str.length || ends(str[i])) break;
-    const ch = str[i];
-    if (ch === '\\') {
-      quoted = true;
-      if (i + 1 < str.length) tag += str[i + 1];
-      i += 2;
-      continue;
-    }
-    if (ch === "'") {
-      quoted = true;
-      const j = str.indexOf("'", i + 1);
-      tag += str.slice(i + 1, j === -1 ? str.length : j);
-      i = j === -1 ? str.length : j + 1;
-      continue;
-    }
-    if (ch === '"') {
-      quoted = true;
-      i++;
-      while (i < str.length && str[i] !== '"') {
-        if (str[i] === '\\' && i + 1 < str.length && '"\\$`\n'.includes(str[i + 1])) {
-          if (str[i + 1] !== '\n') tag += str[i + 1];
-          i += 2;
-          continue;
-        }
-        tag += str[i++];
-      }
-      i++;
-      continue;
-    }
-    tag += str[i++];
-  }
-  return { tag, quoted, stripTabs, end: Math.min(i, str.length) };
-}
-
-// consumeHeredocBodies for the readers above, which need only where the
-// bodies end. An unquoted body is read with its line continuations removed,
-// as bash reads it, so a terminator line split by one still ends the body and
-// a line that ends in one joins the next.
-function heredocBodiesEnd(str, i, tags) {
-  for (const t of tags) {
-    let terminated = false;
-    while (i < str.length) {
-      let line = '';
-      for (;;) {
-        const nl = str.indexOf('\n', i);
-        const part = str.slice(i, nl === -1 ? str.length : nl);
-        i = nl === -1 ? str.length : nl + 1;
-        if (!t.quoted && nl !== -1 && /(^|[^\\])(\\\\)*\\$/.test(part)) { line += part.slice(0, -1); continue; }
-        line += part;
-        break;
-      }
-      const probe = t.stripTabs ? line.replace(/^\t+/, '') : line;
-      if (probe === t.tag) { terminated = true; break; }
-    }
-    if (!terminated) break;
-  }
-  return i;
 }
 
 // Reads the tag word after `<<` / `<<-` starting at `i`.
