@@ -531,6 +531,8 @@ const PLAIN_RESERVED = new Set(['!', 'if', 'then', 'else', 'elif', 'fi', 'while'
 // scan then reads again. This caps the total, and no read-ahead starts inside
 // another, so neither a run of `((` nor a nest of them can make one command
 // quadratic; where it does not read ahead, `((` is read as two subshells.
+// scanEitherClose refills it before each scan, so no scan reads `((` with
+// what an earlier one left: one hook run makes several.
 let probeBudget = MAX_COMMAND_LENGTH;
 
 // Which bash runs the command decides where a span closes, and the hook
@@ -1422,9 +1424,11 @@ function precedingOp(s, bySeg, sepAfter) {
 function scanEitherClose(scan, command) {
   closeByCount = false;
   spanSeen = false;
+  probeBudget = MAX_COMMAND_LENGTH;
   const hit = scan(command, 0);
   if (hit !== null || !spanSeen) return hit;
   closeByCount = true;
+  probeBudget = MAX_COMMAND_LENGTH;
   return scan(command, 0);
 }
 
