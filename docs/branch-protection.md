@@ -90,6 +90,52 @@ from the PR's merge ref, so a fork author could emit a passing job with this
 name. Evaluate only on `pull_request_target` (re-triggered on review events from
 a base-branch workflow) before requiring it.
 
+## Self-test report (advisory check, #5612)
+
+`.github/workflows/self-test-report.yml` reports a status context named
+`Self-test report`. It applies to **fix PRs** (head ref `fix/…` or a `fix` title)
+from anyone **not** listed in [`.github/MAINTAINERS`](../.github/MAINTAINERS);
+other PRs, maintainer-authored PRs and bots pass outright.
+
+Such a PR needs a `## Self-test report` section holding a fenced `json` block
+(the fix PR template carries one to fill in):
+
+| Field | Meaning |
+|---|---|
+| `schema` | `1` |
+| `head_sha` | `git rev-parse HEAD` of your final commit; must equal the PR's current head, so update it after your last push |
+| `tool` | `gsd-test`, `npm-test` or `manual` |
+| `failing_first` | `{test, fails_on_base: true, passes_on_head: true}`, or `{not_applicable_reason}` with a real explanation |
+| `commands` | the commands you ran |
+| `full_suite` | `{command, result: "passed", passed, failed: 0}` |
+| `environment` | `{os, node}` |
+| `output_excerpt` | the end of the passing run, at most 2000 characters |
+
+**Reading rules.** The first `json` block under the heading is the report. A
+block inside an HTML comment is ignored (it would be invisible in the rendered
+PR). A fence may carry trailing info (`json title="x"`). A value still written
+as `<…>` is the template, not an answer, and fails. `full_suite.result:
+"passed"` needs at least one passing test. `failing_first.not_applicable_reason`
+is accepted for any real sentence, so it is a declaration, not something the
+check can verify.
+
+**What this is and is not.** It checks the report's shape and that it names the
+current head. It does **not** and cannot prove the run happened: a local run
+cannot be attested, and CI on the merge-group commit remains authoritative. The
+report is a head start for the reviewer and a nudge on effort, nothing more. The
+template as shipped does not validate, so leaving it untouched fails the check.
+
+"Fix PR" is itself author-declared (a `fix/` branch or a `fix` title, and the
+title can be edited), so an outsider can sidestep the check by not calling the
+PR a fix. If this is ever required, derive "fix" from something the author does
+not control, such as the linked issue or a label.
+
+The workflow reads the maintainer list from the base sha, reads the body, title
+and head live from the API (into files, so size is never an issue), passes the
+other PR values through `env:`, and has a read-only token. The check is **advisory**: it is not a
+required context on any ruleset. CI re-running the named failing-first test, and
+generating the report from a `gsd-test` verdict, are possible later steps.
+
 ## 4-PR Rollout Plan
 
 | PR | Branch | Action |
