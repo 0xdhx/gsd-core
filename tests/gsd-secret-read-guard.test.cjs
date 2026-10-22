@@ -1557,6 +1557,23 @@ describe('regressions: #5255 — dollar-quoting ($\'…\' and $"…")', () => {
     });
   });
 
+  describe('pinned: the shapes the header lists under "Documented gaps" stay allowed (#5255 review round 9, Minor 3)', () => {
+    // Each is allowed on `next` too. A change that closes one updates the
+    // header's list with it. Plain strings, not R``: `${` would interpolate.
+    const shapes = [
+      "cat ${x:-$'.env'}", "cat ${x-$'.e\\x6ev'}",
+      "cat ${x:+a}$'.env'", 'cat .env${}',
+      '<<${;cat .env', "<<$'E'${; cat .env #", '<<}; cat .env #',
+      '$(E<<\n)\ncat .env',
+      'x$(($"));cat .env', '$((")); cat .env #',
+    ];
+    for (const cmd of shapes) {
+      test(`allowed: ${JSON.stringify(cmd)}`, () => {
+        assertAllowed(runHook(bash(cmd)), cmd);
+      });
+    }
+  });
+
   describe('boundaries (#5255 review round 6, Minor 5)', () => {
     const LIMIT = 1024 * 1024;
     // A command of exactly `len` characters: `prefix`, a run of `$`, `suffix`.
