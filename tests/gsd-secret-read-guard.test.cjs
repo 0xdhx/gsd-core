@@ -1135,6 +1135,110 @@ describe('regressions: #5267 — a `case` pattern paren does not close a substit
   });
 });
 
+describe('regressions: #5515 — a heredoc left waiting by a closed substitution', () => {
+  // A heredoc opened in a `$( )` or `<( )` that closes before its line ends
+  // is still waiting for its body, and bash 5 reads that body from the lines
+  // after the next newline, wherever the newline falls: at top level, in a
+  // quoted string, a `${ }`, a backtick span, a later substitution or a line
+  // continuation. Those bodies come first, ahead of any top-level heredoc on
+  // the line. The guard used to read them as commands, so a lone quote in one
+  // hid the read after it. Every row was run under bash 5.2.21 with the read
+  // replaced by a file write: each blocked row writes the file, each allowed
+  // row does not.
+  const blocks = [
+    // The issue's five forms.
+    ['the body holds a lone quote', "echo $(cat <<EOF) x\nit's\nEOF\ncat .env"],
+    ['the body holds a lone double quote', 'echo $(cat <<EOF) x\nbody "\nEOF\ncat .env'],
+    ['the heredoc is in a process substitution', "cat <(cat <<EOF) x\nit's\nEOF\ncat .env"],
+    ['the substitution is double-quoted', "echo \"$(cat <<EOF)\" x\nit's\nEOF\ncat .env"],
+    ['a top-level tag is continued across the body', 'echo $(cat <<A) x; cat <<B\\\nA\nC\nbody\nBC\ncat .env'],
+    // More than one waiting heredoc, and a top-level one after them.
+    ['two substitutions leave one each', "echo $(cat <<A) $(cat <<B) x\nit's\nA\nb\"\nB\ncat .env"],
+    ['one substitution leaves two', "echo $(cat <<A; cat <<B) x\nit's\nA\nb\"\nB\ncat .env"],
+    ['a top-level shell heredoc follows them', "echo $(cat <<A) x; bash <<T\nit's\nA\ncat .env\nT"],
+    ['a top-level shell heredoc sits between them', "echo $(cat <<A); bash <<T; echo $(cat <<B)\nit's\nA\nb\"\nB\ncat .env\nT"],
+    // The heredoc was opened two spans deep, or beside the span's own.
+    ['the heredoc is in a nested substitution', "echo $(echo $(cat <<A)) x\nit's\nA\ncat .env"],
+    ['the span leaves its own heredoc and a nested one', "echo \"[$(cat <<B; echo \"<$(cat <<A)>\")]\" x\nit's\nA\nb\"\nB\ncat .env"],
+    // The tag forms.
+    ['the tag is quoted', "echo $(cat <<'A') x\nit's\nA\ncat .env"],
+    ['the tag strips tabs', "echo $(cat <<-A) x\n\tit's\n\tA\ncat .env"],
+    // The newline is inside something that crosses it.
+    ['the newline is in a double-quoted string', 'echo $(cat <<A) "x\nb"\nA\n"; cat .env'],
+    ['the newline is in a single-quoted string', "echo $(cat <<A) 'x\nit's\nA\n'; cat .env"],
+    ['the newline is in a later substitution', "echo $(cat <<A) $(echo\nit's\nA\ncat .env)"],
+    ['the newline is in a later process substitution', "cat $(cat <<A) <(echo\nit's\nA\ncat .env)"],
+    ['the newline is in a later double-quoted substitution', "echo $(cat <<A) \"$(echo\nit's\nA\ncat .env)\""],
+    ['the newline ends a line continuation', "echo $(cat <<A) x \\\nit's\nA\n; cat .env"],
+    ['the newline ends a line continuation in a later substitution', "echo $(cat <<A) $(echo x \\\n)'\nA\n; cat .env)"],
+    ['the newline ends a line continuation in a later double-quoted string', "echo $(cat <<A) $(echo \"x\\\n\")'\nA\n\"; cat .env)"],
+  ];
+  for (const [where, cmd] of blocks) {
+    test(`${where}: blocks ${JSON.stringify(cmd)}`, () => {
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+    });
+    const quiet = cmd.replaceAll('cat .env', 'echo ok');
+    test(`${where}: allows ${JSON.stringify(quiet)}`, () => {
+      assertAllowed(runHook(bash(quiet)), quiet);
+    });
+  }
+
+  // A body goes to the command that opened its heredoc: a shell's is a
+  // script, and an unquoted one's substitutions run.
+  const bodies = [
+    ['a shell', 'echo $(bash <<EOF) x\ncat .env\nEOF'],
+    ['a shell in a double-quoted substitution', 'echo "$(bash <<EOF)" x\ncat .env\nEOF'],
+    ['a shell in a process substitution', 'cat <(sh <<EOF) x\ncat .env\nEOF'],
+    ['a shell two spans deep', 'echo $(echo $(bash <<EOF)) x\ncat .env\nEOF'],
+    ['a shell, after another waiting body', 'echo $(cat <<A) $(bash <<B) x\ndata\nA\ncat .env\nB'],
+    ['a shell, after a later substitution crosses the newline', 'echo $(cat <<A) $(bash <<B\nx\nA\ncat .env\nB\n)'],
+    ['a substitution in an unquoted body', 'echo $(cat <<EOF) x\n$(cat .env)\nEOF'],
+  ];
+  for (const [what, cmd] of bodies) {
+    test(`the body of ${what} is read with it: blocks ${JSON.stringify(cmd)}`, () => {
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+    });
+  }
+
+  test('the waiting bodies come before a top-level heredoc opened earlier on the line: allows', () => {
+    // bash reads `T`'s body only after `A`'s, which ends at `A`, so `cat .env`
+    // is the data `cat <<T` prints.
+    const cmd = "cat <<T; echo $(cat <<A) x\ntbody\nT\nit's\nA\ncat .env";
+    assertAllowed(runHook(bash(cmd)), cmd);
+  });
+
+  // A waiting body is also read on its own as commands, as those lines were
+  // before. The rows below put the rest of the command past the paren-counting
+  // reading first: in `P`, that reading takes the `'` in the comment as a
+  // quote, so everything after it sits in a span nested deeper than the scan
+  // recurses, and only the first reading sees it. Each read runs under bash.
+  const P = ": $(: $(: $(: $(: # '\n))))\n";
+  const readAsCommands = [
+    ['a substitution at command position runs its output', `${P}$(cat <<B)\ncat .env`],
+    ['the `<<` in `$[ ]` opens no heredoc, so the body never ends', `${P}echo $(echo $[1<<2]) x\ncat .env`],
+    ['a tag with a quoted part, four spans deep', `${P}echo $(: $(: $(: $(cat <<A"B")))) x\nits\nAB\ncat .env`],
+    ['a tag holding a substitution', `${P}echo $(cat <<$(x)) y\nits\n$(x)\ncat .env`],
+  ];
+  for (const [what, cmd] of readAsCommands) {
+    test(`a waiting body is read as commands too, ${what}: blocks ${JSON.stringify(cmd)}`, () => {
+      assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+    });
+  }
+
+  test('the cost: a read that is only a waiting body\'s data is blocked, as before #5515', () => {
+    // bash prints this line and runs nothing; it was denied before too.
+    const cmd = 'echo $(cat <<EOF) x\ncat .env\nEOF';
+    assertBlocked(runHook(bash(cmd)), cmd, { tool: 'Bash', path: '.env' });
+  });
+
+  test('29,999 waiting heredocs, then their bodies: blocks the read after them', () => {
+    // An odd count, so the quotes in the bodies do not pair up when read as
+    // commands: without the bodies passed over, the last one hides the read.
+    const cmd = '$(cat <<A)'.repeat(29999) + '\n' + "it's\nA\n".repeat(29999) + 'cat .env';
+    assertBlocked(runHook(bash(cmd)), '29999 waiting heredocs', { tool: 'Bash', path: '.env' });
+  });
+});
+
 describe('gsd-secret-read-guard: scope and crash policy', () => {
   test('ignores other tools even when they name a secret file', () => {
     assertAllowed(runHook({ tool_name: 'Write', tool_input: { file_path: '.env', content: 'X=1' } }), 'Write');

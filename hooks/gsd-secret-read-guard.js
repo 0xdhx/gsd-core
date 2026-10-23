@@ -425,7 +425,8 @@ function afterNewline(str, i, ctx) {
 // or a backtick span — or -1 when `str[i]` starts none.
 function skipQuoted(str, i, ctx) {
   const ch = str[i];
-  if (ch === '\\') return i + 2;
+  // A line continuation's newline is one bash reads waiting bodies after.
+  if (ch === '\\') return str[i + 1] === '\n' ? afterNewline(str, i + 1, ctx) : i + 2;
   if (ch === "'" || ch === '`') {
     i++;
     while (i < str.length && str[i] !== ch) {
@@ -438,7 +439,7 @@ function skipQuoted(str, i, ctx) {
     i++;
     while (i < str.length && str[i] !== '"') {
       readerSteps++;
-      if (str[i] === '\\') { i += 2; continue; }
+      if (str[i] === '\\') { i = str[i + 1] === '\n' ? afterNewline(str, i + 1, ctx) : i + 2; continue; }
       if (str[i] === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2, ctx) + 1; continue; }
       if (str[i] === '`') { i = skipQuoted(str, i, ctx); continue; }
       i = str[i] === '\n' ? afterNewline(str, i, ctx) : i + 1;
@@ -576,13 +577,14 @@ let spanSeen = false;
 // when it sits in a quoted string, a heredoc body, a comment, a `${ }`, or
 // ends a `case` pattern — `$(case x in x) cat .env;; esac)` runs to its last
 // `)` (#5267). `ctx` is passed only by the readers above and below, for a
-// span nested in the one they are reading.
-function findParenClose(str, i, ctx) {
+// span nested in the one they are reading. `root` is tokenize's: it holds the
+// heredocs still waiting when the span starts, and the ones it leaves (#5515).
+function findParenClose(str, i, ctx, root) {
   if (ctx) return readParenClose(str, i, ctx);
   spanSeen = true;
   if (closeByCount) return countParenClose(str, i);
   try {
-    return readParenClose(str, i, { orphans: [], depth: 0 });
+    return readParenClose(str, i, root || { orphans: [], depth: 0 });
   } catch (err) {
     // The readers recurse once per nested span, so a command that nests
     // thousands deep would exhaust the stack; past MAX_READER_DEPTH they stop
@@ -1047,17 +1049,112 @@ function tokenize(str) {
     tokens.push({ kind: 'op', text, quoted: 'none', seg, read, dup });
   };
 
+  // A span that closes with heredocs still waiting (orphans, see afterNewline)
+  // leaves their bodies to the next newline, wherever it falls: here, in a
+  // quoted string, a `${ }`, a backtick span or a later span (#5515). `cut`
+  // holds them from when the span closes until a read reaches that newline
+  // (`nl`), which passes over the lines to `end`; `tags` are the heredocs
+  // whose bodies they are. Each body is given back to the span that opened it,
+  // so the recursion reads it as that command's input (`$(bash <<EOF)`'s body
+  // is a script). Each is also read on its own as commands, at this depth
+  // (`inline`), as the lines were read before #5515: a span's output can be
+  // run (`$(cat <<EOF)` as a command), and a heredoc this file misreads (a
+  // tag it reads wrong, the `<<` in `$[1<<2]`) leaves a body that never ends.
+  let cut = null;
+  const inline = [];
+  // str.indexOf('\n', from), remembered: a run of spans with no newline after
+  // them asks for the same one each time.
+  let nlFrom = str.length + 1;
+  let nlAt = -1;
+  const nextNewline = (from) => {
+    if (from < nlFrom || (nlAt !== -1 && nlAt < from)) {
+      nlFrom = from;
+      nlAt = str.indexOf('\n', from);
+    }
+    return nlAt;
+  };
+  const pastCut = (i) => {
+    if (!cut || i !== cut.nl + 1) return i;
+    const end = cut.end;
+    cut = null;
+    return end;
+  };
+  // The text from `from` up to the next `ch`, and that index (str.length when
+  // there is none), less the cut lines when it runs past their newline.
+  const upTo = (ch, from) => {
+    let j = str.indexOf(ch, from);
+    let text = '';
+    if (cut && cut.nl >= from && (j === -1 || j > cut.nl)) {
+      text = str.slice(from, cut.nl + 1);
+      from = pastCut(cut.nl + 1);
+      j = str.indexOf(ch, from);
+    }
+    const end = j === -1 ? str.length : j;
+    return { text: text + str.slice(from, end), end };
+  };
+  // Reads the span opened just before `i`: where it closes, its text, and the
+  // text the recursion reads for it, which carries its orphans' bodies. A
+  // span that reads past the cut's newline passes over the cut lines there
+  // (afterNewline, given the cut's heredocs as waiting), and they are left out
+  // of its text. The reader is handed `cut.tags` itself, not a copy: a span
+  // that closes before the newline only appends to it, so the cut keeps every
+  // tag in order and no run of spans copies the list once each.
+  const span = (i) => {
+    if (expectTag) {
+      // A span in a heredoc tag (#5513): bash does not read its heredocs as
+      // waiting the way it does a command's, so it is read as before #5515.
+      const e = findParenClose(str, i);
+      return { e, inner: str.slice(i, e), script: str.slice(i, e) };
+    }
+    const waiting = cut ? cut.tags : [];
+    const had = waiting.length;
+    const root = { orphans: waiting, depth: 0 };
+    const e = findParenClose(str, i, null, root);
+    if (closeByCount) {
+      // Paren counting reads no heredoc it leaves waiting (countParenClose).
+      cut = null;
+      return { e, inner: str.slice(i, e), script: str.slice(i, e) };
+    }
+    let inner = str.slice(i, e);
+    let orphans = root.orphans.slice(had);
+    if (cut && e > cut.nl) {
+      // Read past the newline. afterNewline replaced the list if the reader
+      // passed over the cut lines there; if it did not, they stay in the text.
+      if (root.orphans !== waiting) {
+        inner = str.slice(i, cut.nl + 1) + str.slice(cut.end, e);
+        orphans = root.orphans;
+      }
+      cut = null;
+    }
+    if (orphans.length === 0) return { e, inner, script: inner };
+    if (!cut) {
+      const nl = nextNewline(e + 1);
+      if (nl === -1) return { e, inner, script: inner }; // bash reads no body
+      cut = { nl, end: nl + 1, tags: root.orphans };
+    }
+    const r = consumeHeredocBodies(str, cut.end, orphans);
+    cut.end = r.end;
+    let script = inner + '\n';
+    r.bodies.forEach((b, k) => {
+      script += b.body + orphans[k].tag + '\n';
+      inline.push(b.body);
+    });
+    return { e, inner, script };
+  };
+
   let i = 0;
   while (i < str.length) {
     const ch = str[i];
+    // A read that went past the newline without passing over the cut lines
+    // leaves them read as commands, as before #5515.
+    if (cut && i > cut.nl) cut = null;
 
     if (ch === "'") {
       hasWord = true;
       if (quoted === 'none') quoted = 'single';
-      const j = str.indexOf("'", i + 1);
-      const end = j === -1 ? str.length : j;
-      buf += str.slice(i + 1, end);
-      i = end + 1;
+      const r = upTo("'", i + 1);
+      buf += r.text;
+      i = r.end + 1;
       continue;
     }
 
@@ -1069,31 +1166,30 @@ function tokenize(str) {
         const c = str[i];
         if (c === '\\' && i + 1 < str.length && '"\\$`\n'.includes(str[i + 1])) {
           if (str[i + 1] !== '\n') buf += str[i + 1];
-          i += 2;
+          i = pastCut(i + 2);
           continue;
         }
         if (c === '$' && str[i + 1] === '(') {
-          const e = findParenClose(str, i + 2);
-          nested.push(str.slice(i + 2, e));
-          i = e + 1;
+          const s = span(i + 2);
+          nested.push(s.script);
+          i = s.e + 1;
           continue;
         }
         if (c === '`') {
-          const j = str.indexOf('`', i + 1);
-          const e = j === -1 ? str.length : j;
-          nested.push(str.slice(i + 1, e));
-          i = e + 1;
+          const r = upTo('`', i + 1);
+          nested.push(r.text);
+          i = r.end + 1;
           continue;
         }
         buf += c;
-        i++;
+        i = pastCut(i + 1);
       }
       i++;
       continue;
     }
 
     if (ch === '\\') {
-      if (str[i + 1] === '\n') { i += 2; continue; } // line continuation
+      if (str[i + 1] === '\n') { i = pastCut(i + 2); continue; } // line continuation
       hasWord = true;
       if (i + 1 < str.length) buf += str[i + 1];
       i += 2;
@@ -1102,46 +1198,44 @@ function tokenize(str) {
 
     if (ch === '$' && str[i + 1] === '(') {
       hasWord = true;
-      const e = findParenClose(str, i + 2);
-      nested.push(str.slice(i + 2, e));
-      i = e + 1;
+      const s = span(i + 2);
+      nested.push(s.script);
+      i = s.e + 1;
       continue;
     }
 
     if (ch === '$' && str[i + 1] === '{') {
       hasWord = true;
-      const j = str.indexOf('}', i);
-      const e = j === -1 ? str.length - 1 : j;
-      buf += str.slice(i, e + 1);
-      i = e + 1;
+      const r = upTo('}', i);
+      buf += r.text + str.slice(r.end, r.end + 1);
+      i = r.end + 1;
       continue;
     }
 
     if (ch === '`') {
       hasWord = true;
-      const j = str.indexOf('`', i + 1);
-      const e = j === -1 ? str.length : j;
-      nested.push(str.slice(i + 1, e));
-      i = e + 1;
+      const r = upTo('`', i + 1);
+      nested.push(r.text);
+      i = r.end + 1;
       continue;
     }
 
     if ((ch === '<' || ch === '>') && str[i + 1] === '(') {
       flush();
-      const e = findParenClose(str, i + 2);
-      const inner = str.slice(i + 2, e);
-      nested.push(inner);
+      const s = span(i + 2);
+      nested.push(s.script);
       // Emit a word carrying the inner script so a shell / `source` operand
       // (`sh <(echo 'cat .env')`) can reconstruct it; the bare nested recursion
       // above only sees `echo …`, whose operands are not read.
-      tokens.push({ kind: 'word', text: str.slice(i, e + 1), quoted: 'none', seg, procsub: inner });
-      i = e + 1;
+      const text = ch + '(' + s.inner + str.slice(s.e, s.e + 1);
+      tokens.push({ kind: 'word', text, quoted: 'none', seg, procsub: s.script });
+      i = s.e + 1;
       continue;
     }
 
     if (ch === '\n') {
       sep('\n');
-      i++;
+      i = pastCut(i + 1); // orphan bodies come first in the input
       if (heredocs.length) {
         const r = consumeHeredocBodies(str, i, heredocs);
         for (const b of r.bodies) {
@@ -1245,7 +1339,7 @@ function tokenize(str) {
     i++;
   }
   flush();
-  return { tokens, nested };
+  return { tokens, nested, inline };
 }
 
 // ---------------------------------------------------------------------------
@@ -1469,13 +1563,18 @@ function findSecretReadEitherClose(command) {
 
 // Returns the offending token text, or null.
 function findSecretRead(command, depth) {
-  const { tokens, nested } = tokenize(command);
+  const { tokens, nested, inline } = tokenize(command);
 
   for (const sub of nested) {
     if (depth < MAX_NESTING_DEPTH) {
       const hit = findSecretRead(sub, depth + 1);
       if (hit) return hit;
     }
+  }
+  // Waiting bodies cut out of this command, read as its commands were (#5515).
+  for (const body of inline) {
+    const hit = findSecretRead(body, depth);
+    if (hit) return hit;
   }
 
   // Group by seg, not separator order: heredoc tokens carry their `<<`
@@ -1610,13 +1709,18 @@ function unwrapTimeout(cmd) {
 
 // Returns the `--agent` value text of a debugger launch, or null.
 function findDebuggerCliSpawn(command, depth) {
-  const { tokens, nested } = tokenize(command);
+  const { tokens, nested, inline } = tokenize(command);
 
   for (const sub of nested) {
     if (depth < MAX_NESTING_DEPTH) {
       const hit = findDebuggerCliSpawn(sub, depth + 1);
       if (hit) return hit;
     }
+  }
+  // Waiting bodies cut out of this command, read as its commands were (#5515).
+  for (const body of inline) {
+    const hit = findDebuggerCliSpawn(body, depth);
+    if (hit) return hit;
   }
 
   const bySeg = new Map();
