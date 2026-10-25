@@ -43,6 +43,7 @@ import noRenderedTextLengthAssert from './eslint-rules/no-rendered-text-length-a
 import noUnconfinedPathJoin from './eslint-rules/no-unconfined-path-join.cjs';
 import noVerificationStatusLiteral from './eslint-rules/no-verification-status-literal.cjs';
 import noRuntimeNameLiteral from './eslint-rules/no-runtime-name-literal.cjs';
+import requireReadOnlyGitEnv from './eslint-rules/require-read-only-git-env.cjs';
 
 const unconfinedPathJoinAllowlist = require('./eslint-rules/no-unconfined-path-join.allowlist.json');
 
@@ -80,6 +81,7 @@ const localPlugin = {
     'no-unconfined-path-join': noUnconfinedPathJoin,
     'no-verification-status-literal': noVerificationStatusLiteral,
     'no-runtime-name-literal': noRuntimeNameLiteral,
+    'require-read-only-git-env': requireReadOnlyGitEnv,
   },
 };
 
@@ -417,6 +419,8 @@ export default tseslint.config(
       'gsd-core/bin/lib/model-adapter.cjs',
       'gsd-core/bin/lib/hook-bus.cjs',
       'gsd-core/bin/lib/state-io.cjs',
+      // #5048: tsc-generated runtime artifact — lint the src/read-only-git-env.cts source.
+      'gsd-core/bin/lib/read-only-git-env.cjs',
       'gsd-core/bin/lib/external-descriptor-trust.cjs',
       'gsd-core/bin/lib/mcp-server.cjs',
       // #3072: tsc-generated runtime artifact — lint the src/mcp-catalog.cts source.
@@ -544,6 +548,11 @@ export default tseslint.config(
       // runtime-specific fact; comparing a runtime identifier to a registered
       // runtime-id literal re-derives one. Exempts the owner by path.
       'local/no-runtime-name-literal': 'error',
+      // #5048: a direct git spawn takes its env from readOnlyGitEnv() so a
+      // read-only call never contends for the optional index lock. A git
+      // command that never opens the index suppresses with
+      // `// allow-index-refresh: <reason>`.
+      'local/require-read-only-git-env': 'error',
     },
   },
 
@@ -562,6 +571,9 @@ export default tseslint.config(
     },
     rules: {
       'local/no-runtime-name-literal': 'error',
+      // #5048: see the src/**/*.cts block above. The rule scopes itself to
+      // hooks/**/*.js by path, so bin/install.js is untouched.
+      'local/require-read-only-git-env': 'error',
     },
   },
 
