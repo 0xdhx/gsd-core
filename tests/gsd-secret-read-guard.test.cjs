@@ -1211,3 +1211,60 @@ describe('gsd-secret-read-guard: nested shell behind a wrapper with flags (#5627
     );
   });
 });
+
+// #5518: bash 5.3's function substitution `${ cmd; }` / `${| cmd; }` runs its
+// body as commands, where earlier bash reads the same text as a parameter
+// expansion that fails only when expanded. Oracle: each block row runs the
+// read under bash 5.3.20 (the official bash:5.3 image), except the pre-5.3 row,
+// which runs it under bash 5.2.21 and 3.2.57; no allow row runs it anywhere.
+describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => {
+  // MAX_FUNSUB_DEPTH in the hook.
+  const MAX_FUNSUB_DEPTH = 32;
+  const closedChainThenRead = (n) => '${ '.repeat(n) + ':' + '; }'.repeat(n) + '; echo ${ cat .env; }';
+
+  const BLOCKS = [
+    ['unquoted', 'echo ${ cat .env; }'],
+    ['inside double quotes', 'echo "${ cat .env; }"'],
+    ['value substitution', 'echo ${| cat .env; REPLY=x; }'],
+    ['inside a $( )', 'echo "$(echo ${ cat .env; })"'],
+    ['opened by a tab', 'echo ${\tcat .env; }'],
+    ['opened by a newline', 'x=${\ncat .env\n}; echo "$x"'],
+    ['a quote inside a double-quoted one keeps its own quoting', `echo "\${ printf '%s' "'"; cat .env; }"`],
+    ['in an unquoted heredoc body', 'cat <<E\n${ cat .env; }\nE'],
+    ['nested', 'echo ${ echo ${ cat .env; }; }'],
+    // A `}` after `;` closes the first one, so the second sits at depth 3, which is scanned.
+    ['closed by the `}` after `;`, not one past it', 'echo $(echo $(echo ${ :; }; echo ${ cat .env; }))'],
+    // bash 5.2 / 3.2: `${…}` up to the first `}` is one bad word; `&` runs the read anyway.
+    ['read as a pre-5.3 parameter expansion too', "echo ${\n<<'E'\n} & cat .env\n"],
+    [`a read after ${MAX_FUNSUB_DEPTH - 1} nested ones`, closedChainThenRead(MAX_FUNSUB_DEPTH - 1)],
+    [`a read after ${MAX_FUNSUB_DEPTH} nested ones`, closedChainThenRead(MAX_FUNSUB_DEPTH)],
+    [`a read after ${MAX_FUNSUB_DEPTH + 1} nested ones`, closedChainThenRead(MAX_FUNSUB_DEPTH + 1)],
+    // Past the depth cap the scan reads them as text rather than recursing into a stack overflow.
+    ['a read after 20000 nested ones', closedChainThenRead(20000)],
+    ['a read before 20000 unclosed ones', 'cat .env; ' + '${ '.repeat(20000)],
+    ['a read before 20000 unclosed ones in double quotes', 'cat .env; ' + '${ "'.repeat(20000)],
+  ];
+  for (const [label, command] of BLOCKS) {
+    test(`blocks: ${label}`, () => {
+      assertBlocked(runHook(bash(command)), label, { tool: 'Bash', path: '.env' });
+    });
+  }
+
+  test('blocks: a debugger spawn inside one', () => {
+    assertBlocked(runHook(bash('echo ${ claude --agent gsd-debugger -p x; }')), 'debugger', { code: 'debugger-cli-spawn', tool: 'Bash' });
+  });
+
+  const ALLOWS = [
+    ['a parameter expansion', 'echo ${HOME}'],
+    ['an operator word with a blank', 'echo ${x:-a b}'],
+    ['a length in double quotes', 'echo "${#x}"'],
+    ['a quoted `}` in the body', "echo ${ printf '%s' '}'; }"],
+    ['a quoted heredoc body', "cat <<'E'\n${ cat .env; }\nE"],
+    ['a commit message from a heredoc in one', "git commit -m \"${ cat <<'EOF'\nfix: stop reading .env twice\nEOF\n}\""],
+  ];
+  for (const [label, command] of ALLOWS) {
+    test(`allows: ${label}`, () => {
+      assertAllowed(runHook(bash(command)), label);
+    });
+  }
+});

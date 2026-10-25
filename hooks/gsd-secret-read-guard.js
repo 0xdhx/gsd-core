@@ -48,7 +48,9 @@
 // Bash analysis is a two-pass token scan, not a shell:
 //   pass 1 tokenizes with quote state, comments, redirect operators (with fd
 //   digits and `>&N` dups), separators (recording the operator text), `$( )` /
-//   backtick / `<( )` / `>( )` spans (recursed as nested commands, depth ≤ 3),
+//   backtick / `<( )` / `>( )` / bash 5.3 `${ …; }` and `${| …; }` spans
+//   (recursed as nested commands, depth ≤ 3; a command holding a `${ …` is
+//   scanned a second time reading it as a pre-5.3 parameter expansion),
 //   and heredocs (one token per body, carrying its `<<` segment). A heredoc
 //   body is only ever run as a script when its segment's command is a shell
 //   interpreter (below); a DATA heredoc — `cat <<EOF … EOF`, the agent-
@@ -530,13 +532,192 @@ function consumeHeredocBodies(str, i, tags) {
   return { bodies, end: i };
 }
 
-// `$( )` and backtick spans inside an unquoted heredoc body.
+// bash 5.3 function substitution: `${` followed by a blank, a newline or `|`
+// runs a command list in the current shell — `${ cmd; }` (its value is the
+// output) and `${| cmd; }` (its value is $REPLY) — so its body is a nested
+// command, like a `$( )` body (#5518). A parameter expansion (`${VAR}`,
+// `${#x}`, `${x:-a b}`) starts with a name or a special character instead and
+// stays text. Earlier bash reads the same `${ …` as a parameter expansion
+// ending at the first `}`, which fails only when expanded, so the commands
+// around it still run; scanBothBashReadings scans under that reading too.
+let readFunsubs = true;
+const FUNSUB_OPEN_RE = /\$\{[ \t\n|]/;
+function isFunsubOpen(str, i) {
+  if (!readFunsubs || str[i] !== '$' || str[i + 1] !== '{') return false;
+  const c = str[i + 2];
+  return c === ' ' || c === '\t' || c === '\n' || c === '|';
+}
+
+// The command text of the function substitution opened at `i` and closed at
+// `e`; the `|` of `${|` is not part of it.
+function funsubBody(str, i, e) {
+  return str.slice(str[i + 2] === '|' ? i + 3 : i + 2, e);
+}
+
+// `{` and `}` are reserved words only where a command starts, which includes
+// the word after one of these (`then { …; }`, `fi }`).
+const COMMAND_POSITION_WORDS = new Set(['!', 'do', 'done', 'elif', 'else', 'esac', 'fi', 'if', 'then', 'time', 'until', 'while']);
+
+// Function substitutions the close finders follow inside one another before
+// they read a deeper `${ ` as text, the way the guard read every `${ ` before
+// #5518. It bounds the recursion: the guard fails open on a stack overflow,
+// and a long `${ ${ …` or `${ "${ "${ …` chain would otherwise reach one.
+const MAX_FUNSUB_DEPTH = 32;
+let funsubDepth = 0;
+
+// Index just past the `"` closing a double-quoted string whose text starts at
+// `i`. A `$( )`, backtick or function substitution inside keeps its own
+// quoting, so each is skipped whole.
+function skipDoubleQuoted(str, i) {
+  while (i < str.length && str[i] !== '"') {
+    if (str[i] === '\\') { i += 2; continue; }
+    if (str[i] === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2) + 1; continue; }
+    if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, i + 2) + 1; continue; }
+    if (str[i] === '`') {
+      const j = str.indexOf('`', i + 1);
+      i = j === -1 ? str.length : j + 1;
+      continue;
+    }
+    i++;
+  }
+  return i + 1;
+}
+
+// Index of the `}` closing a `${…}` parameter expansion whose text starts at
+// `i`, or str.length. Quote-aware, and a nested expansion, `$( )`, backtick or
+// function substitution in the word is skipped whole, so `${x:-a; }` holds
+// `a; ` rather than ending a function substitution around it.
+function findParamClose(str, i) {
+  let depth = 1;
+  while (i < str.length) {
+    const ch = str[i];
+    if (ch === '\\') { i += 2; continue; }
+    if (ch === "'") {
+      const j = str.indexOf("'", i + 1);
+      i = j === -1 ? str.length : j + 1;
+      continue;
+    }
+    if (ch === '"') { i = skipDoubleQuoted(str, i + 1); continue; }
+    if (ch === '`') {
+      const j = str.indexOf('`', i + 1);
+      i = j === -1 ? str.length : j + 1;
+      continue;
+    }
+    if (ch === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2) + 1; continue; }
+    if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, i + 2) + 1; continue; }
+    if (ch === '$' && str[i + 1] === '{') { depth++; i += 2; continue; }
+    if (ch === '}' && --depth === 0) return i;
+    i++;
+  }
+  return str.length;
+}
+
+// Index of the `}` closing a function substitution whose body starts at `i`,
+// or str.length when unterminated. bash reads that `}` as a reserved word, so
+// it closes only where a command starts: `${ echo }; }` prints `}`, and
+// `${ echo a; }x` closes before the `x`. Quote-, comment- and heredoc-aware;
+// a `{ …; }` group, a parameter expansion or a nested substitution in the body
+// is skipped whole.
+function findFunsubClose(str, i) {
+  funsubDepth++;
+  try {
+    let groups = 0;
+    let atCommand = true; // the next word starts a command
+    let inWord = false;
+    let wordAtCommand = false;
+    let word = ''; // the current word's plain text; a quote or expansion in it marks it with \0
+    let heredocTags = [];
+    const endWord = () => {
+      if (inWord) atCommand = wordAtCommand && COMMAND_POSITION_WORDS.has(word);
+      inWord = false;
+    };
+    while (i < str.length) {
+      const ch = str[i];
+      if (ch === ' ' || ch === '\t') { endWord(); i++; continue; }
+      if (ch === '\n') {
+        endWord();
+        atCommand = true;
+        i++;
+        if (heredocTags.length) {
+          i = consumeHeredocBodies(str, i, heredocTags).end;
+          heredocTags = [];
+        }
+        continue;
+      }
+      if (!inWord) {
+        if (ch === '#') {
+          const j = str.indexOf('\n', i);
+          i = j === -1 ? str.length : j;
+          continue;
+        }
+        if (ch === '}' && atCommand) {
+          if (groups === 0) return i;
+          groups--;
+          i++;
+          continue;
+        }
+        if (ch === '{' && atCommand && /[ \t\n]/.test(str[i + 1] || '')) { groups++; i++; continue; }
+      }
+      if (ch === '<' && str[i + 1] === '<' && str[i + 2] !== '<') {
+        endWord();
+        const tag = readHeredocTag(str, i + 2);
+        heredocTags.push(tag);
+        i = tag.end;
+        continue;
+      }
+      if ((ch === '<' || ch === '>') && str[i + 1] === '(') {
+        endWord();
+        i = findParenClose(str, i + 2) + 1;
+        continue;
+      }
+      if (ch === ';' || ch === '&' || ch === '|' || ch === '(' || ch === ')') {
+        endWord();
+        atCommand = true;
+        i++;
+        continue;
+      }
+      if (ch === '<' || ch === '>') { endWord(); i++; continue; }
+      if (!inWord) { inWord = true; wordAtCommand = atCommand; word = ''; }
+      if (ch === '\\') { word += '\0'; i += 2; continue; }
+      if (ch === "'") {
+        word += '\0';
+        const j = str.indexOf("'", i + 1);
+        i = j === -1 ? str.length : j + 1;
+        continue;
+      }
+      if (ch === '"') { word += '\0'; i = skipDoubleQuoted(str, i + 1); continue; }
+      if (ch === '`') {
+        word += '\0';
+        const j = str.indexOf('`', i + 1);
+        i = j === -1 ? str.length : j + 1;
+        continue;
+      }
+      if (ch === '$' && str[i + 1] === '(') { word += '\0'; i = findParenClose(str, i + 2) + 1; continue; }
+      if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { word += '\0'; i = findFunsubClose(str, i + 2) + 1; continue; }
+      if (ch === '$' && str[i + 1] === '{') { word += '\0'; i = findParamClose(str, i + 2) + 1; continue; }
+      word += ch;
+      i++;
+    }
+    return str.length;
+  } finally {
+    funsubDepth--;
+  }
+}
+
+// `$( )`, function-substitution and backtick spans inside an unquoted heredoc
+// body.
 function collectSubstitutions(body, nested) {
   let i = 0;
   while (i < body.length) {
     if (body[i] === '$' && body[i + 1] === '(') {
       const e = findParenClose(body, i + 2);
       nested.push(body.slice(i + 2, e));
+      i = e + 1;
+      continue;
+    }
+    if (isFunsubOpen(body, i)) {
+      const e = findFunsubClose(body, i + 2);
+      nested.push(funsubBody(body, i, e));
       i = e + 1;
       continue;
     }
@@ -620,6 +801,12 @@ function tokenize(str) {
           i = e + 1;
           continue;
         }
+        if (isFunsubOpen(str, i)) {
+          const e = findFunsubClose(str, i + 2);
+          nested.push(funsubBody(str, i, e));
+          i = e + 1;
+          continue;
+        }
         if (c === '`') {
           const j = str.indexOf('`', i + 1);
           const e = j === -1 ? str.length : j;
@@ -646,6 +833,14 @@ function tokenize(str) {
       hasWord = true;
       const e = findParenClose(str, i + 2);
       nested.push(str.slice(i + 2, e));
+      i = e + 1;
+      continue;
+    }
+
+    if (isFunsubOpen(str, i)) {
+      hasWord = true;
+      const e = findFunsubClose(str, i + 2);
+      nested.push(funsubBody(str, i, e));
       i = e + 1;
       continue;
     }
@@ -1138,6 +1333,33 @@ function findSecretRead(command, depth) {
   return null;
 }
 
+// The hook cannot know which bash runs the command, and bash 5.3 reads a
+// `${ …` opener as a function substitution where every earlier bash reads a
+// parameter expansion (isFunsubOpen). A command holding one is scanned under
+// both readings, and either one's hit is returned; the second reading is the
+// scan as it was before #5518, so nothing it blocked is allowed. That holds
+// when the first reading throws, too (a stack overflow on a deep chain): the
+// second still runs, and the error is rethrown only when it finds nothing.
+function scanBothBashReadings(scan, command) {
+  readFunsubs = true;
+  if (!FUNSUB_OPEN_RE.test(command)) return scan(command, 0);
+  let firstError = null;
+  try {
+    const hit = scan(command, 0);
+    if (hit !== null) return hit;
+  } catch (e) {
+    firstError = e;
+  }
+  readFunsubs = false;
+  try {
+    const hit = scan(command, 0);
+    if (hit !== null || firstError === null) return hit;
+  } finally {
+    readFunsubs = true;
+  }
+  throw firstError;
+}
+
 // ---------------------------------------------------------------------------
 // gsd-debugger CLI spawn scan (#5214)
 // ---------------------------------------------------------------------------
@@ -1469,9 +1691,9 @@ process.stdin.on('end', () => {
     const command = typeof data.tool_input.command === 'string' ? data.tool_input.command : '';
     if (command === '') allow(undefined);
     if (command.length > MAX_COMMAND_LENGTH) emitBlock('command-too-large', tool, '');
-    const hit = findSecretRead(command, 0);
+    const hit = scanBothBashReadings(findSecretRead, command);
     if (hit !== null) emitBlock('secret-read', tool, hit);
-    const spawn = findDebuggerCliSpawn(command, 0);
+    const spawn = scanBothBashReadings(findDebuggerCliSpawn, command);
     if (spawn !== null) emitBlock('debugger-cli-spawn', tool, spawn);
     allow(undefined);
   } catch {
