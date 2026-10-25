@@ -433,6 +433,20 @@ function classifyGrepGlob(glob) {
 // Bash command scan — pass 1: tokenizer
 // ---------------------------------------------------------------------------
 
+// Which reading of a heredoc the scan is making (#5513). The guard scans a command that
+// opens a heredoc under every reading below and denies if any of them finds a secret read
+// (see findSecretReadUnderOtherReadings), so a change of reading can add a denial but
+// never remove one.
+//  - heredocBodiesSkippedInSpans: bash 5 skips the bodies of heredocs opened inside a
+//    `$( )` span when it looks for the closing `)`; bash 3.2.57 (still `/bin/bash` on
+//    macOS) does not, so a `)` on a body line closes the substitution and the rest of
+//    that line runs as the OUTER command.
+//  - heredocTagsAsWords: an unquoted tag is a bash word (a CR and a substitution belong
+//    to it). false is the earlier reading, where the tag stopped at any whitespace and at
+//    `(`: kept as a reading so nothing the guard denied before is allowed now.
+let heredocBodiesSkippedInSpans = true;
+let heredocTagsAsWords = true;
+
 // Index of the `)` closing a `$(` / `<(` / `>(` opened just before `i`, or
 // str.length when unterminated. Quote- and heredoc-aware so a `)` inside a
 // quoted string or a heredoc body never closes the span early.
@@ -467,7 +481,7 @@ function findParenClose(str, i) {
       i = j === -1 ? str.length : j + 1;
       continue;
     }
-    if (ch === '<' && str[i + 1] === '<' && str[i + 2] !== '<') {
+    if (heredocBodiesSkippedInSpans && ch === '<' && str[i + 1] === '<' && str[i + 2] !== '<') {
       const tag = readHeredocTag(str, i + 2);
       heredocTags.push(tag);
       i = tag.end;
@@ -503,7 +517,34 @@ function readHeredocTag(str, i) {
     i = j === -1 ? str.length : j + 1;
   } else {
     if (str[i] === '\\') { quoted = true; i++; }
-    while (i < str.length && !/[\s;&|<>()]/.test(str[i])) tag += str[i++];
+    // #5513: an unquoted tag is a bash WORD. It ends only at a metacharacter (space, tab,
+    // newline, `;&|<>()`): a carriage return is not one, so `EOF` + CR is the tag and the
+    // CRLF terminator line matches it; and a substitution inside the word belongs to it,
+    // taken literally (`E$(x)F` waits for the line `E$(x)F`).
+    while (i < str.length && !(heredocTagsAsWords ? /[ \t\n;&|<>()]/ : /[\s;&|<>()]/).test(str[i])) {
+      if (!heredocTagsAsWords) { tag += str[i++]; continue; }
+      if (str[i] === '$' && str[i + 1] === '(') {
+        const e = findParenClose(str, i + 2);
+        tag += str.slice(i, e + 1);
+        i = e + 1;
+        continue;
+      }
+      if (str[i] === '$' && str[i + 1] === '{') {
+        const j = str.indexOf('}', i);
+        const e = j === -1 ? str.length - 1 : j;
+        tag += str.slice(i, e + 1);
+        i = e + 1;
+        continue;
+      }
+      if (str[i] === '`') {
+        const j = str.indexOf('`', i + 1);
+        const e = j === -1 ? str.length - 1 : j;
+        tag += str.slice(i, e + 1);
+        i = e + 1;
+        continue;
+      }
+      tag += str[i++];
+    }
   }
   return { tag, quoted, stripTabs, end: i };
 }
@@ -613,18 +654,19 @@ function funsubBody(str, i, e) {
 
 // The tag after `<<` / `<<-` at `i` as bash reads it: quote removal as in
 // tokenize's word buffer (a `\` in double quotes escapes only `"`, `\`, `$`,
-// a backtick or a newline), a line continuation dropped, a `$( )` kept as
-// text, and any quote makes the body quoted. The close finder hands its tags
-// on (funsubTags), so a tag that does not match the terminator would carry
-// the lines after it into the substitution; readHeredocTag keeps the quotes
-// of `E'x'` and stays as findParenClose's.
+// a backtick or a newline), a line continuation dropped, and, as
+// readHeredocTag reads a tag as a word (#5513), a carriage return, `$( )`,
+// `${…}` or backtick part kept as text; any quote makes the body quoted. The
+// close finder hands its tags on (funsubTags), so a tag that does not match
+// the terminator would carry the lines after it into the substitution;
+// readHeredocTag keeps the quotes of `E'x'` and stays as findParenClose's.
 function readFunsubHeredocTag(str, i) {
   let stripTabs = false;
   if (str[i] === '-') { stripTabs = true; i++; }
   while (str[i] === ' ' || str[i] === '\t') i++;
   let tag = '';
   let quoted = false;
-  while (i < str.length && !/[\s;&|<>()]/.test(str[i])) {
+  while (i < str.length && !/[ \t\n;&|<>()]/.test(str[i])) {
     const ch = str[i];
     if (ch === "'") {
       const j = str.indexOf("'", i + 1);
@@ -658,6 +700,13 @@ function readFunsubHeredocTag(str, i) {
     }
     if (ch === '$' && str[i + 1] === '(') {
       const e = findParenClose(str, i + 2);
+      tag += str.slice(i, e + 1);
+      i = e + 1;
+      continue;
+    }
+    if ((ch === '$' && str[i + 1] === '{') || ch === '`') {
+      const j = ch === '`' ? str.indexOf('`', i + 1) : str.indexOf('}', i);
+      const e = j === -1 ? str.length - 1 : j;
       tag += str.slice(i, e + 1);
       i = e + 1;
       continue;
@@ -1163,6 +1212,7 @@ function tokenize(str) {
       hasWord = true;
       const e = findParenClose(str, i + 2);
       nested.push(str.slice(i + 2, e));
+      if (expectTag && heredocTagsAsWords) buf += str.slice(i, e + 1); // #5513: the tag is taken literally
       i = e + 1;
       continue;
     }
@@ -1187,6 +1237,7 @@ function tokenize(str) {
       const j = str.indexOf('`', i + 1);
       const e = j === -1 ? str.length : j;
       nested.push(str.slice(i + 1, e));
+      if (expectTag && heredocTagsAsWords) buf += str.slice(i, e + 1); // #5513: the tag is taken literally
       i = e + 1;
       continue;
     }
@@ -1220,6 +1271,14 @@ function tokenize(str) {
         funsubHeredocs = [];
         i = r.end;
       }
+      continue;
+    }
+
+    // #5513: a CR is not a bash metacharacter, so inside a heredoc tag it is part of the word
+    // (a CRLF command's terminator line is `EOF` + CR).
+    if (ch === '\r' && expectTag && hasWord && heredocTagsAsWords) {
+      buf += ch;
+      i++;
       continue;
     }
 
@@ -1319,17 +1378,33 @@ function tokenize(str) {
 // Bash command scan — pass 2: per-segment evaluation
 // ---------------------------------------------------------------------------
 
-// `@file` (curl -d), `--flag=value`, `-Xvalue` → the operand that names the file.
-function normalizeOperand(text) {
+// Option characters of a bundled short cluster (`-2nif`).
+const CLUSTER_FLAG_CHAR_RE = /[A-Za-z0-9]/;
+
+// True when an operand word names a secret file. `@file` (curl -d) and
+// `--flag=value` are stripped to the value. In a single-dash word
+// (`/^-[^-]./`, so `-2if.env` counts too) the value of a bundled cluster
+// starts right after its run of option characters (#5046): `-if.env` holds
+// `.env`, `-nf=.env` holds `.env` after the `=`. That value is checked as
+// well as the historical two-character strip, so the verdict is never looser
+// than base and costs a fixed number of `namesSecret` calls (at most three,
+// whatever the word's length). The option run also swallows a value's leading
+// letters and digits, so `-fapp.env` is denied although `cat app.env` is not:
+// a fail-safe false positive, pinned in tests.
+function operandNamesSecret(text) {
   let v = text;
   if (v.startsWith('@')) v = v.slice(1);
   if (v.startsWith('--')) {
     const eq = v.indexOf('=');
     if (eq !== -1) v = v.slice(eq + 1);
-  } else if (/^-[A-Za-z]./.test(v)) {
-    v = v.slice(2);
+    return namesSecret(v);
   }
-  return v;
+  if (!/^-[^-]./.test(v)) return namesSecret(v);
+  if (namesSecret(v.slice(2))) return true;
+  let end = 1;
+  while (end < v.length && CLUSTER_FLAG_CHAR_RE.test(v[end])) end++;
+  if (end > 2 && namesSecret(v.slice(end))) return true;
+  return v[end] === '=' && namesSecret(v.slice(end + 1));
 }
 
 const ASSIGNMENT_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
@@ -1549,6 +1624,26 @@ function precedingOp(s, bySeg, sepAfter) {
   return { op, prevSeg: p };
 }
 
+// #5513: the same scan under the other readings of a heredoc: bash 3.2.57's `$( )` span
+// (bodies not skipped) and the earlier tag reading (tag ends at any whitespace). Only a
+// command that opens a heredoc can read differently, so the extra passes are skipped for
+// every other command.
+function findSecretReadUnderOtherReadings(command) {
+  if (!command.includes('<<')) return null;
+  for (const [bodiesSkipped, tagsAsWords] of [[false, true], [true, false]]) {
+    heredocBodiesSkippedInSpans = bodiesSkipped;
+    heredocTagsAsWords = tagsAsWords;
+    try {
+      const hit = findSecretRead(command, 0);
+      if (hit) return hit;
+    } finally {
+      heredocBodiesSkippedInSpans = true;
+      heredocTagsAsWords = true;
+    }
+  }
+  return null;
+}
+
 // Returns the offending token text, or null.
 function findSecretRead(command, depth) {
   const { tokens, nested } = tokenize(command);
@@ -1627,7 +1722,7 @@ function findSecretRead(command, depth) {
             const hit = findSecretRead(src, depth + 1);
             if (hit) return hit;
           }
-        } else if (namesSecret(normalizeOperand(w.text))) return w.text;
+        } else if (operandNamesSecret(w.text)) return w.text;
       }
       continue;
     }
@@ -1657,7 +1752,7 @@ function findSecretRead(command, depth) {
     const nameOnly = nameOnlyOperandIndices(base, operands);
     for (let k = 0; k < operands.length; k++) {
       if (nameOnly.has(k)) continue;
-      if (namesSecret(normalizeOperand(operands[k].text))) return operands[k].text;
+      if (operandNamesSecret(operands[k].text)) return operands[k].text;
     }
   }
   return null;
@@ -1675,19 +1770,22 @@ function findSecretRead(command, depth) {
 // the second still runs, and the error is rethrown only when it finds nothing.
 // The handler calls the first scan itself, after beginBashReadings, so it
 // starts at the stack depth it did before #5518 and overflows where it did.
+// `otherReadings` (findSecretReadUnderOtherReadings, #5513) runs under the
+// second reading: its heredoc readings are bash 3.2's and the guard's earlier
+// one, and neither reads a function substitution. A first scan that throws
+// before meeting an opener is rethrown at once, as its error ends the scan on
+// `next` before the other readings run.
 function beginBashReadings() {
   readFunsubs = true;
   funsubSeen = false;
   funsubTags = [];
 }
-function secondBashReading(scan, command, firstError) {
-  if (!funsubSeen) {
-    if (firstError !== null) throw firstError;
-    return null;
-  }
+function secondBashReading(scan, command, firstError, otherReadings) {
+  if (!funsubSeen && firstError !== null) throw firstError;
   readFunsubs = false;
   try {
-    const hit = scan(command, 0);
+    let hit = funsubSeen ? scan(command, 0) : null;
+    if (hit === null && otherReadings !== null) hit = otherReadings(command);
     if (hit !== null || firstError === null) return hit;
   } finally {
     readFunsubs = true;
@@ -1851,7 +1949,7 @@ function scanXargsPipe(operands, s, bySeg, sepAfter, depth) {
   const prevCmd = resolveCommand((bySeg.get(prevSeg) || []).filter((t) => t.kind === 'word'));
   if (!prevCmd) return null;
   for (const w of prevCmd.operands) {
-    if (namesSecret(normalizeOperand(w.text))) return w.text;
+    if (operandNamesSecret(w.text)) return w.text;
   }
   return null;
 }
@@ -2030,13 +2128,13 @@ process.stdin.on('end', () => {
     let hit = null;
     beginBashReadings();
     try { hit = findSecretRead(command, 0); } catch (e) { firstError = e; }
-    if (hit === null) hit = secondBashReading(findSecretRead, command, firstError);
+    if (hit === null) hit = secondBashReading(findSecretRead, command, firstError, findSecretReadUnderOtherReadings);
     if (hit !== null) emitBlock('secret-read', tool, hit);
     firstError = null;
     let spawn = null;
     beginBashReadings();
     try { spawn = findDebuggerCliSpawn(command, 0); } catch (e) { firstError = e; }
-    if (spawn === null) spawn = secondBashReading(findDebuggerCliSpawn, command, firstError);
+    if (spawn === null) spawn = secondBashReading(findDebuggerCliSpawn, command, firstError, null);
     if (spawn !== null) emitBlock('debugger-cli-spawn', tool, spawn);
     allow(undefined);
   } catch {
