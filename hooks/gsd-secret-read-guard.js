@@ -513,21 +513,33 @@ function readHeredocTag(str, i) {
 // (the caller emits a token per body and recurses substitutions only for
 // unquoted ones) and the index just past the last terminator line. An
 // unterminated body consumes to end of input.
-function consumeHeredocBodies(str, i, tags) {
+// With `eof`, the body is in a function substitution, where bash 5.3 also
+// ends it at a line that starts with the tag when the rest of that line holds
+// `eof` (the substitution's `}`) anywhere, and reads that rest as commands:
+// `end` is then just past the tag, `split` is set, and the line's later tags
+// go unread.
+function consumeHeredocBodies(str, i, tags, eof) {
   const bodies = [];
   for (const t of tags) {
     let body = '';
     let terminated = false;
+    let rest = -1;
     while (i < str.length) {
       const nl = str.indexOf('\n', i);
       const lineEnd = nl === -1 ? str.length : nl;
       const line = str.slice(i, lineEnd);
+      const lineStart = i;
       i = nl === -1 ? str.length : nl + 1;
       const probe = t.stripTabs ? line.replace(/^\t+/, '') : line;
       if (probe === t.tag) { terminated = true; break; }
+      if (eof && probe.startsWith(t.tag) && probe.includes(eof, t.tag.length)) {
+        rest = lineStart + line.length - probe.length + t.tag.length;
+        break;
+      }
       body += line + '\n';
     }
     bodies.push({ body, quoted: t.quoted, seg: t.seg, tag: t.tag, into: t.into });
+    if (rest !== -1) return { bodies, end: rest, split: true };
     if (!terminated) break;
   }
   return { bodies, end: i };
@@ -540,7 +552,7 @@ function consumeHeredocBodies(str, i, tags) {
 // `${#x}`, `${x:-a b}`) starts with a name or a special character instead and
 // stays text. Earlier bash reads the same `${ …` as a parameter expansion,
 // which fails only when expanded, so the commands around it still run;
-// scanBothBashReadings scans under that reading too. funsubSeen records that
+// secondBashReading scans under that reading too. funsubSeen records that
 // an opener was met in any text the scan read, a derived `bash -c` or `eval`
 // script included, since only then can the two readings differ.
 let readFunsubs = true;
@@ -580,18 +592,32 @@ function takeFunsubTags() {
   return t;
 }
 
+// Where the last top-level findFunsubClose ended a heredoc at a line that
+// only starts with its tag (consumeHeredocBodies): funsubBody breaks the line
+// there, so tokenize, which reads the body as a command of its own and knows
+// only whole-line tags, runs the rest of that line too.
+let funsubSplits = [];
+
 // The command text of the function substitution opened at `i` and closed at
 // `e`; the `|` of `${|` is not part of it.
 function funsubBody(str, i, e) {
   const s = skipContinuations(str, funsubStart(str, i));
-  return str.slice(str[s] === '|' ? s + 1 : s, e);
+  let at = str[s] === '|' ? s + 1 : s;
+  let body = '';
+  for (const split of funsubSplits) {
+    body += str.slice(at, split) + '\n';
+    at = split;
+  }
+  return body + str.slice(at, e);
 }
 
-// The tag after `<<` / `<<-` at `i` as bash reads it: the quotes in any part
-// of the word are removed, and any quote makes the body quoted. The close
-// finder hands its tags on (funsubTags), so a tag that does not match the
-// terminator would carry the lines after it into the substitution;
-// readHeredocTag keeps the quotes of `E'x'` and stays as findParenClose's.
+// The tag after `<<` / `<<-` at `i` as bash reads it: quote removal as in
+// tokenize's word buffer (a `\` in double quotes escapes only `"`, `\`, `$`,
+// a backtick or a newline), a line continuation dropped, a `$( )` kept as
+// text, and any quote makes the body quoted. The close finder hands its tags
+// on (funsubTags), so a tag that does not match the terminator would carry
+// the lines after it into the substitution; readHeredocTag keeps the quotes
+// of `E'x'` and stays as findParenClose's.
 function readFunsubHeredocTag(str, i) {
   let stripTabs = false;
   if (str[i] === '-') { stripTabs = true; i++; }
@@ -600,18 +626,40 @@ function readFunsubHeredocTag(str, i) {
   let quoted = false;
   while (i < str.length && !/[\s;&|<>()]/.test(str[i])) {
     const ch = str[i];
-    if (ch === "'" || ch === '"') {
-      const j = str.indexOf(ch, i + 1);
+    if (ch === "'") {
+      const j = str.indexOf("'", i + 1);
       const e = j === -1 ? str.length : j;
       tag += str.slice(i + 1, e);
       quoted = true;
       i = e + 1;
       continue;
     }
+    if (ch === '"') {
+      quoted = true;
+      i++;
+      while (i < str.length && str[i] !== '"') {
+        if (str[i] === '\\' && i + 1 < str.length && '"\\$`\n'.includes(str[i + 1])) {
+          if (str[i + 1] !== '\n') tag += str[i + 1];
+          i += 2;
+          continue;
+        }
+        tag += str[i];
+        i++;
+      }
+      i++;
+      continue;
+    }
     if (ch === '\\') {
+      if (str[i + 1] === '\n') { i += 2; continue; } // line continuation
       quoted = true;
       if (i + 1 < str.length) tag += str[i + 1];
       i += 2;
+      continue;
+    }
+    if (ch === '$' && str[i + 1] === '(') {
+      const e = findParenClose(str, i + 2);
+      tag += str.slice(i, e + 1);
+      i = e + 1;
       continue;
     }
     tag += ch;
@@ -630,6 +678,34 @@ const COMMAND_POSITION_WORDS = new Set(['!', 'coproc', 'do', 'done', 'elif', 'el
 // and a long `${ ${ …` or `${ "${ "${ …` chain would otherwise reach one.
 const MAX_FUNSUB_DEPTH = 32;
 let funsubDepth = 0;
+
+// The spans the close finders measured during one top-level findFunsubClose
+// call, by finder, start and depth, each with the heredoc tags it left in
+// funsubTags. A `((` that does not end in `))` is read again as two
+// subshells, so without the record each span nested in it would be scanned
+// once more per enclosing `((`, doubling the work at every level.
+let spanCache = null;
+const FUNSUB_SPAN = 0;
+const PARAM_SPAN = 1;
+const ARITH_STATE = 2;
+function spanKey(kind, i) {
+  return (i * (MAX_FUNSUB_DEPTH + 2) + funsubDepth) * 3 + kind;
+}
+// A failed arithmetic attempt's state: its index and open parens.
+function arithKey(i, depth) {
+  return spanKey(ARITH_STATE, i) * (MAX_FUNSUB_DEPTH + 2) + depth;
+}
+// The recorded end of the span at `i`, its tags pushed again, or -1.
+function knownSpan(kind, i) {
+  const hit = spanCache === null ? undefined : spanCache.get(spanKey(kind, i));
+  if (hit === undefined) return -1;
+  for (const t of hit.tags) funsubTags.push(t);
+  return hit.end;
+}
+// `mark` is funsubTags' length when the span's scan started.
+function recordSpan(kind, i, end, mark) {
+  if (spanCache !== null) spanCache.set(spanKey(kind, i), { end, tags: funsubTags.slice(mark) });
+}
 
 // Index just past the `"` closing a double-quoted string whose text starts at
 // `i`. A `$( )`, backtick or function substitution inside keeps its own
@@ -653,8 +729,10 @@ function skipDoubleQuoted(str, i) {
 // `i`, or str.length. Quote-aware, and a nested expansion, `$( )`, backtick or
 // function substitution in the word is skipped whole, so `${x:-a; }` holds
 // `a; ` rather than ending a function substitution around it.
+// Each `${` met, the first included, is recorded as it closes, so the
+// finder met again at a recorded one steps over it.
 function findParamClose(str, i) {
-  let depth = 1;
+  const open = [[i, funsubTags.length]]; // [start, funsubTags mark] of each `${` still open
   while (i < str.length) {
     const ch = str[i];
     if (ch === '\\') { i += 2; continue; }
@@ -671,10 +749,21 @@ function findParamClose(str, i) {
     }
     if (ch === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2) + 1; continue; }
     if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, funsubStart(str, i)) + 1; continue; }
-    if (ch === '$' && str[i + 1] === '{') { depth++; i += 2; continue; }
-    if (ch === '}' && --depth === 0) return i;
+    if (ch === '$' && str[i + 1] === '{') {
+      const known = knownSpan(PARAM_SPAN, i + 2);
+      if (known !== -1) { i = known + 1; continue; }
+      open.push([i + 2, funsubTags.length]);
+      i += 2;
+      continue;
+    }
+    if (ch === '}') {
+      const [start, mark] = open.pop();
+      recordSpan(PARAM_SPAN, start, i, mark);
+      if (open.length === 0) return i;
+    }
     i++;
   }
+  for (const [start, mark] of open) recordSpan(PARAM_SPAN, start, str.length, mark);
   return str.length;
 }
 
@@ -700,20 +789,32 @@ function skipWordPart(str, i) {
 // the rest from each later `((`. -1 when the parens do not end in `))`, which
 // bash reads as a subshell in a subshell (`((cmd) )`), or nest past the cap,
 // which bounds that rescan.
+// Where an attempt is and how many parens it holds open fix its result, so a
+// failed one records the states it reached past a skipped word part, and a
+// later `((` that reaches one fails there: a parameter expansion spanning the
+// next lines' attempts would otherwise have each read the rest after it.
 function findArithClose(str, i) {
+  const reached = [];
   let depth = 0;
+  let end = str.length;
   while (i < str.length) {
+    if (spanCache !== null && spanCache.has(arithKey(i, depth))) { end = -1; break; }
     const e = skipWordPart(str, i);
-    if (e !== -1) { i = e; continue; }
+    if (e !== -1) {
+      i = e;
+      reached.push(arithKey(i, depth));
+      continue;
+    }
     if (str[i] === '(') {
-      if (++depth > MAX_FUNSUB_DEPTH) return -1;
+      if (++depth > MAX_FUNSUB_DEPTH) { end = -1; break; }
     } else if (str[i] === ')') {
-      if (depth === 0) return str[i + 1] === ')' ? i + 1 : -1;
+      if (depth === 0) { end = str[i + 1] === ')' ? i + 1 : -1; break; }
       depth--;
     }
     i++;
   }
-  return str.length;
+  if (end === -1 && spanCache !== null) for (const k of reached) spanCache.set(k, null);
+  return end;
 }
 
 // Index of the `)` ending an array's elements (`name=( … )`) whose text starts
@@ -743,10 +844,27 @@ function findArrayClose(str, i) {
 // a `{ …; }` group, a parameter expansion or a nested substitution in the body
 // is skipped whole. A `{` also opens a group after `function NAME` and
 // `coproc NAME`, `time -p` keeps the command position, `]]` ending a `[[ … ]]`
-// starts one, and a `}` inside `[[ … ]]`, a case pattern, an arithmetic
-// command or an array's elements is a word.
+// and `))` ending an arithmetic command start one, and a `}` inside `[[ … ]]`,
+// a case pattern, an arithmetic command or an array's elements is a word.
 // Heredoc tags still pending at the close are left in funsubTags.
 function findFunsubClose(str, i) {
+  const top = spanCache === null;
+  if (top) {
+    spanCache = new Map();
+    funsubSplits = [];
+  }
+  try {
+    const known = knownSpan(FUNSUB_SPAN, i);
+    if (known !== -1) return known;
+    const mark = funsubTags.length;
+    const end = scanFunsubClose(str, i);
+    recordSpan(FUNSUB_SPAN, i, end, mark);
+    return end;
+  } finally {
+    if (top) spanCache = null;
+  }
+}
+function scanFunsubClose(str, i) {
   funsubDepth++;
   try {
     let groups = 0;
@@ -758,7 +876,6 @@ function findFunsubClose(str, i) {
     let lead = ''; // `function`, `coproc`, `time` or `for` when the last word was one at command position
     let inCond = false; // inside `[[ … ]]`
     let caseWords = 0; // words left in `case WORD in`
-    let caseDepth = 0;
     let casePattern = false; // reading a case pattern list, up to its `)`
     let patternStart = false; // at the first word of a pattern list, where `esac` ends the case
     let heredocTags = [];
@@ -773,12 +890,12 @@ function findFunsubClose(str, i) {
         return;
       }
       if (casePattern) {
-        if (word === 'esac' && patternStart) { caseDepth--; casePattern = false; atCommand = true; }
+        if (word === 'esac' && patternStart) { casePattern = false; atCommand = true; }
         patternStart = false;
         return;
       }
       if (caseWords > 0) {
-        if (--caseWords === 0 && word === 'in') { caseDepth++; casePattern = true; patternStart = true; }
+        if (--caseWords === 0 && word === 'in') { casePattern = true; patternStart = true; }
         atCommand = false;
         return;
       }
@@ -787,7 +904,6 @@ function findFunsubClose(str, i) {
       if (prev === 'time' && (word === '-p' || word === '--')) { lead = 'time'; atCommand = true; return; }
       if (word === '[[') { inCond = true; atCommand = false; return; }
       if (word === 'case') { caseWords = 2; atCommand = false; return; }
-      if (word === 'esac' && caseDepth > 0) caseDepth--;
       if (prev === 'coproc') { atCommand = true; return; } // `coproc NAME` may take a compound command
       if (word === 'function' || word === 'coproc' || word === 'time' || word === 'for') lead = word;
       atCommand = COMMAND_POSITION_WORDS.has(word);
@@ -801,7 +917,9 @@ function findFunsubClose(str, i) {
         atCommand = true;
         i++;
         if (heredocTags.length) {
-          i = consumeHeredocBodies(str, i, heredocTags).end;
+          const r = consumeHeredocBodies(str, i, heredocTags, '}');
+          if (r.split && funsubDepth === 1) funsubSplits.push(r.end);
+          i = r.end;
           heredocTags = [];
         }
         continue;
@@ -849,12 +967,15 @@ function findFunsubClose(str, i) {
       }
       if (ch === '(' && str[i + 1] === '(') {
         endWord();
-        // an arithmetic command, where `<<` is a shift; `((cmd) )` is two subshells
+        // an arithmetic command, where `<<` is a shift; `((cmd) )` is two subshells.
+        // A failed attempt leaves a nested substitution's pending tags, which
+        // the reading below adds again; bash 5.3 runs nothing after a nested
+        // pending heredoc, so no verdict depends on the copies.
         const e = atCommand || lead === 'for' ? findArithClose(str, i + 2) : -1;
         if (e !== -1) {
           lead = '';
           braceOk = false;
-          atCommand = false;
+          atCommand = true; // `(( 1 )) }` closes; `for ((…)) { …; }` opens a group
           i = e + 1;
           continue;
         }
@@ -864,9 +985,9 @@ function findFunsubClose(str, i) {
         braceOk = false;
         atCommand = true;
         if (ch === ')' && casePattern) casePattern = false; // the clause's commands follow
-        if ((ch === '(' || ch === '|') && casePattern) patternStart = false;
+        if (ch === '(' && casePattern) patternStart = false;
         // `;;`, `;&` and `;;&` end a clause; a pattern list follows
-        if (ch === ';' && caseDepth > 0 && !inCond && (str[i + 1] === ';' || str[i + 1] === '&')) {
+        if (ch === ';' && !inCond && (str[i + 1] === ';' || str[i + 1] === '&')) {
           casePattern = true;
           patternStart = true;
           i += str[i + 1] === ';' && str[i + 2] === '&' ? 3 : 2;
@@ -1552,23 +1673,19 @@ function findSecretRead(command, depth) {
 // first met no opener the two are the same scan. That holds when the first
 // reading throws after meeting one, too (a stack overflow on a deep chain):
 // the second still runs, and the error is rethrown only when it finds nothing.
-function scanBothBashReadings(scan, command) {
+// The handler calls the first scan itself, after beginBashReadings, so it
+// starts at the stack depth it did before #5518 and overflows where it did.
+function beginBashReadings() {
   readFunsubs = true;
   funsubSeen = false;
   funsubTags = [];
-  let firstError = null;
-  try {
-    const hit = scan(command, 0);
-    if (hit !== null) return hit;
-  } catch (e) {
-    firstError = e;
-  }
+}
+function secondBashReading(scan, command, firstError) {
   if (!funsubSeen) {
     if (firstError !== null) throw firstError;
     return null;
   }
   readFunsubs = false;
-  funsubTags = [];
   try {
     const hit = scan(command, 0);
     if (hit !== null || firstError === null) return hit;
@@ -1909,9 +2026,17 @@ process.stdin.on('end', () => {
     const command = typeof data.tool_input.command === 'string' ? data.tool_input.command : '';
     if (command === '') allow(undefined);
     if (command.length > MAX_COMMAND_LENGTH) emitBlock('command-too-large', tool, '');
-    const hit = scanBothBashReadings(findSecretRead, command);
+    let firstError = null;
+    let hit = null;
+    beginBashReadings();
+    try { hit = findSecretRead(command, 0); } catch (e) { firstError = e; }
+    if (hit === null) hit = secondBashReading(findSecretRead, command, firstError);
     if (hit !== null) emitBlock('secret-read', tool, hit);
-    const spawn = scanBothBashReadings(findDebuggerCliSpawn, command);
+    firstError = null;
+    let spawn = null;
+    beginBashReadings();
+    try { spawn = findDebuggerCliSpawn(command, 0); } catch (e) { firstError = e; }
+    if (spawn === null) spawn = secondBashReading(findDebuggerCliSpawn, command, firstError);
     if (spawn !== null) emitBlock('debugger-cli-spawn', tool, spawn);
     allow(undefined);
   } catch {
