@@ -545,10 +545,22 @@ function consumeHeredocBodies(str, i, tags) {
 // script included, since only then can the two readings differ.
 let readFunsubs = true;
 let funsubSeen = false;
+// bash removes a line continuation (`\` newline) before it reads anything,
+// so one can split an opener: `${\⏎ cmd; }`, `$\⏎{ cmd; }`.
+function skipContinuations(str, i) {
+  while (str[i] === '\\' && str[i + 1] === '\n') i += 2;
+  return i;
+}
+// Index just past the `{` of a function substitution opened at `i`, or -1.
+function funsubStart(str, i) {
+  if (str[i] !== '$') return -1;
+  const b = skipContinuations(str, i + 1);
+  if (str[b] !== '{') return -1;
+  const c = str[skipContinuations(str, b + 1)];
+  return c === ' ' || c === '\t' || c === '\n' || c === '|' ? b + 1 : -1;
+}
 function funsubOpenerAt(str, i) {
-  if (str[i] !== '$' || str[i + 1] !== '{') return false;
-  const c = str[i + 2];
-  return c === ' ' || c === '\t' || c === '\n' || c === '|';
+  return funsubStart(str, i) !== -1;
 }
 function isFunsubOpen(str, i) {
   if (!funsubOpenerAt(str, i)) return false;
@@ -571,7 +583,41 @@ function takeFunsubTags() {
 // The command text of the function substitution opened at `i` and closed at
 // `e`; the `|` of `${|` is not part of it.
 function funsubBody(str, i, e) {
-  return str.slice(str[i + 2] === '|' ? i + 3 : i + 2, e);
+  const s = skipContinuations(str, funsubStart(str, i));
+  return str.slice(str[s] === '|' ? s + 1 : s, e);
+}
+
+// The tag after `<<` / `<<-` at `i` as bash reads it: the quotes in any part
+// of the word are removed, and any quote makes the body quoted. The close
+// finder hands its tags on (funsubTags), so a tag that does not match the
+// terminator would carry the lines after it into the substitution;
+// readHeredocTag keeps the quotes of `E'x'` and stays as findParenClose's.
+function readFunsubHeredocTag(str, i) {
+  let stripTabs = false;
+  if (str[i] === '-') { stripTabs = true; i++; }
+  while (str[i] === ' ' || str[i] === '\t') i++;
+  let tag = '';
+  let quoted = false;
+  while (i < str.length && !/[\s;&|<>()]/.test(str[i])) {
+    const ch = str[i];
+    if (ch === "'" || ch === '"') {
+      const j = str.indexOf(ch, i + 1);
+      const e = j === -1 ? str.length : j;
+      tag += str.slice(i + 1, e);
+      quoted = true;
+      i = e + 1;
+      continue;
+    }
+    if (ch === '\\') {
+      quoted = true;
+      if (i + 1 < str.length) tag += str[i + 1];
+      i += 2;
+      continue;
+    }
+    tag += ch;
+    i++;
+  }
+  return { tag, quoted, stripTabs, end: i };
 }
 
 // `{` and `}` are reserved words only where a command starts, which includes
@@ -592,7 +638,7 @@ function skipDoubleQuoted(str, i) {
   while (i < str.length && str[i] !== '"') {
     if (str[i] === '\\') { i += 2; continue; }
     if (str[i] === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2) + 1; continue; }
-    if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, i + 2) + 1; continue; }
+    if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, funsubStart(str, i)) + 1; continue; }
     if (str[i] === '`') {
       const j = str.indexOf('`', i + 1);
       i = j === -1 ? str.length : j + 1;
@@ -624,7 +670,7 @@ function findParamClose(str, i) {
       continue;
     }
     if (ch === '$' && str[i + 1] === '(') { i = findParenClose(str, i + 2) + 1; continue; }
-    if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, i + 2) + 1; continue; }
+    if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { i = findFunsubClose(str, funsubStart(str, i)) + 1; continue; }
     if (ch === '$' && str[i + 1] === '{') { depth++; i += 2; continue; }
     if (ch === '}' && --depth === 0) return i;
     i++;
@@ -655,6 +701,7 @@ function findFunsubClose(str, i) {
     let caseWords = 0; // words left in `case WORD in`
     let caseDepth = 0;
     let casePattern = false; // reading a case pattern list, up to its `)`
+    let patternStart = false; // at the first word of a pattern list, where `esac` ends the case
     let heredocTags = [];
     const endWord = () => {
       if (!inWord) return;
@@ -667,11 +714,12 @@ function findFunsubClose(str, i) {
         return;
       }
       if (casePattern) {
-        if (word === 'esac') { caseDepth--; casePattern = false; atCommand = true; }
+        if (word === 'esac' && patternStart) { caseDepth--; casePattern = false; atCommand = true; }
+        patternStart = false;
         return;
       }
       if (caseWords > 0) {
-        if (--caseWords === 0 && word === 'in') { caseDepth++; casePattern = true; }
+        if (--caseWords === 0 && word === 'in') { caseDepth++; casePattern = true; patternStart = true; }
         atCommand = false;
         return;
       }
@@ -681,12 +729,13 @@ function findFunsubClose(str, i) {
       if (word === '[[') { inCond = true; atCommand = false; return; }
       if (word === 'case') { caseWords = 2; atCommand = false; return; }
       if (word === 'esac' && caseDepth > 0) caseDepth--;
-      if (prev === 'coproc') braceOk = true;
+      if (prev === 'coproc') { atCommand = true; return; } // `coproc NAME` may take a compound command
       if (word === 'function' || word === 'coproc' || word === 'time') lead = word;
       atCommand = COMMAND_POSITION_WORDS.has(word);
     };
     while (i < str.length) {
       const ch = str[i];
+      if (ch === '\\' && str[i + 1] === '\n') { i += 2; continue; } // a continuation joins the lines
       if (ch === ' ' || ch === '\t') { endWord(); i++; continue; }
       if (ch === '\n') {
         endWord();
@@ -720,9 +769,10 @@ function findFunsubClose(str, i) {
           continue;
         }
       }
-      if (ch === '<' && str[i + 1] === '<' && str[i + 2] !== '<') {
+      if (ch === '<' && str[i + 1] === '<' && str[i + 2] === '<') { endWord(); i += 3; continue; } // a here-string
+      if (ch === '<' && str[i + 1] === '<') {
         endWord();
-        const tag = readHeredocTag(str, i + 2);
+        const tag = readFunsubHeredocTag(str, i + 2);
         heredocTags.push(tag);
         i = tag.end;
         continue;
@@ -737,9 +787,11 @@ function findFunsubClose(str, i) {
         braceOk = false;
         atCommand = true;
         if (ch === ')' && casePattern) casePattern = false; // the clause's commands follow
+        if ((ch === '(' || ch === '|') && casePattern) patternStart = false;
         // `;;`, `;&` and `;;&` end a clause; a pattern list follows
         if (ch === ';' && caseDepth > 0 && !inCond && (str[i + 1] === ';' || str[i + 1] === '&')) {
           casePattern = true;
+          patternStart = true;
           i += str[i + 1] === ';' && str[i + 2] === '&' ? 3 : 2;
           continue;
         }
@@ -763,7 +815,7 @@ function findFunsubClose(str, i) {
         continue;
       }
       if (ch === '$' && str[i + 1] === '(') { word += '\0'; i = findParenClose(str, i + 2) + 1; continue; }
-      if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { word += '\0'; i = findFunsubClose(str, i + 2) + 1; continue; }
+      if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) { word += '\0'; i = findFunsubClose(str, funsubStart(str, i)) + 1; continue; }
       if (ch === '$' && str[i + 1] === '{') { word += '\0'; i = findParamClose(str, i + 2) + 1; continue; }
       word += ch;
       i++;
@@ -788,7 +840,7 @@ function collectSubstitutions(body, nested) {
       continue;
     }
     if (isFunsubOpen(body, i)) {
-      const e = findFunsubClose(body, i + 2);
+      const e = findFunsubClose(body, funsubStart(body, i));
       nested.push(funsubBody(body, i, e));
       takeFunsubTags(); // bash expands the word alone; the next lines stay this body
       i = e + 1;
@@ -845,7 +897,7 @@ function tokenize(str) {
   // A function substitution opened at `j`: its body is a nested command, and a
   // heredoc it left pending is read from the next line into that body.
   const funsub = (j) => {
-    const e = findFunsubClose(str, j + 2);
+    const e = findFunsubClose(str, funsubStart(str, j));
     nested.push(funsubBody(str, j, e));
     for (const t of takeFunsubTags()) heredocs.push({ ...t, seg, into: nested.length - 1 });
     return e + 1;

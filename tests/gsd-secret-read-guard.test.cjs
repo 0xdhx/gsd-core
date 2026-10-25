@@ -1253,7 +1253,18 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['closed by the `}` after `]]`', "echo $(echo $(echo $(echo ${ echo '}'; [[ a ]] }; cat .env)))"],
     // bash 5.3 reads a heredoc still open at the `}` from the next line, then runs the line after it.
     ['after a heredoc still open at its `}`', "echo ${ cat <<'E'; }\nit's\nE\ncat .env"],
-    ['after a quoted `}` in one', "echo ${ printf '%s' '}'; }; cat .env"],
+    // A wrong pending tag would carry the lines after the `}` one nesting level deeper, where depth 4 is not scanned.
+    ['after a here-string in one', "echo ${ echo '}' <<< hi; }\necho $(echo $(echo $(cat .env)))\nhi"],
+    ['after a heredoc tag with a quoted part', "echo ${ cat <<E'x' '}'; }\nbody\nEx\necho $(echo $(echo $(cat .env)))"],
+    // Each of these is skipped whole; reading into it would close early.
+    ['a quoted `; }` in one', `echo "\${ printf '%s' '; }'${dqTail}`],
+    ['a nested one whose body holds a `}`', `echo "\${ echo \${ echo }; }${dqTail}`],
+    ['a `}` line in a heredoc body in one', `echo "\${ cat <<'E'\n}\nE\necho "'"; }"; cat .env`],
+    ['a line continuation before its `}`', 'echo "${ echo \'"\';\\\n}"; cat .env'],
+    ['a `}` after `coproc NAME`', 'echo "${ coproc \'"\' }"; cat .env'],
+    ['an `esac` pattern after `|`', `echo "\${ case x in a|esac) :;; }) :;; esac${dqTail}`],
+    ['opened across a line continuation after `${`', 'echo ${\\\n cat .env; }'],
+    ['opened across a line continuation before `{`', 'echo $\\\n{ cat .env; }'],
     ['after an escaped backslash in an unquoted heredoc body', 'cat > /dev/null <<EOF\nexport X=\\\\${ cat .env; }\nEOF'],
     // Past the depth cap the scan reads them as text rather than recursing into a stack overflow.
     ['a read after 20000 nested ones', closedChainThenRead(20000)],
@@ -1276,6 +1287,7 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['a length in double quotes', 'echo "${#x}"'],
     ['a quoted heredoc body', "cat <<'E'\n${ cat .env; }\nE"],
     ['an escaped opener in an unquoted heredoc body', 'cat > /dev/null <<EOF\nexport X=\\${ cat .env; }\nEOF'],
+    ['a simple command after `coproc` in one', 'echo ${ coproc cat x; }'],
     ['a commit message from a heredoc in one', "git commit -m \"${ cat <<'EOF'\nfix: stop reading .env twice\nEOF\n}\""],
   ];
   for (const [label, command] of ALLOWS) {
