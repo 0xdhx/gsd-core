@@ -1215,12 +1215,13 @@ describe('gsd-secret-read-guard: nested shell behind a wrapper with flags (#5627
 // #5518: bash 5.3's function substitution `${ cmd; }` / `${| cmd; }` runs its
 // body as commands, where earlier bash reads the same text as a parameter
 // expansion that fails only when expanded. Oracle: each block row runs the
-// read under bash 5.3.20 (the official bash:5.3 image), except the pre-5.3 row,
-// which runs it under bash 5.2.21 and 3.2.57; no allow row runs it anywhere.
+// read under bash 5.3.20 (the official bash:5.3 image), except the pre-5.3
+// rows, which run it under bash 5.2.21 and 3.2.57; no allow row runs it anywhere.
 describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => {
-  // MAX_FUNSUB_DEPTH in the hook.
-  const MAX_FUNSUB_DEPTH = 32;
   const closedChainThenRead = (n) => '${ '.repeat(n) + ':' + '; }'.repeat(n) + '; echo ${ cat .env; }';
+  // Closing the substitution early resumes the double-quoted scan inside its
+  // body, where the `"` before `'` ends the string and the `'` hides the read.
+  const dqTail = `; echo "'"; }"; cat .env`;
 
   const BLOCKS = [
     ['unquoted', 'echo ${ cat .env; }'],
@@ -1236,9 +1237,24 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['closed by the `}` after `;`, not one past it', 'echo $(echo $(echo ${ :; }; echo ${ cat .env; }))'],
     // bash 5.2 / 3.2: `${…}` up to the first `}` is one bad word; `&` runs the read anyway.
     ['read as a pre-5.3 parameter expansion too', "echo ${\n<<'E'\n} & cat .env\n"],
-    [`a read after ${MAX_FUNSUB_DEPTH - 1} nested ones`, closedChainThenRead(MAX_FUNSUB_DEPTH - 1)],
-    [`a read after ${MAX_FUNSUB_DEPTH} nested ones`, closedChainThenRead(MAX_FUNSUB_DEPTH)],
-    [`a read after ${MAX_FUNSUB_DEPTH + 1} nested ones`, closedChainThenRead(MAX_FUNSUB_DEPTH + 1)],
+    // Quote removal makes the opener, so only the script that runs holds one.
+    ['read as a pre-5.3 parameter expansion in a bash -c script', "bash -c 'echo $''{\n<<'\"'E'\"'\n} & cat .env\n'"],
+    ['read as a pre-5.3 parameter expansion in an eval script', "eval 'echo $''{' '\n<<E\n} & cat .env\n'"],
+    // Each opens a `{ …; }` group, whose `}` does not close the substitution.
+    ['a group after `function NAME`', `echo "\${ function f { :; }${dqTail}`],
+    ['a group after `coproc`', `echo "\${ coproc { :; }${dqTail}`],
+    ['a group after `coproc NAME`', `echo "\${ coproc C { :; }${dqTail}`],
+    ['a group after `time -p`', `echo "\${ time -p { :; }${dqTail}`],
+    // A `}` inside `[[ … ]]` or in a case pattern is a word.
+    ['a `}` inside `[[ … ]]`', `echo "\${ [[ a && } == } ]]${dqTail}`],
+    ['a `}` case pattern after `;;`', `echo "\${ case x in a) :;; }) :;; esac${dqTail}`],
+    ['a `}` case pattern after a newline', `echo "\${ case x in\n}) :;;\nesac${dqTail}`],
+    // `]]` starts a command, so the `}` after it closes; closing one later would put the read at depth 4, which is not scanned.
+    ['closed by the `}` after `]]`', "echo $(echo $(echo $(echo ${ echo '}'; [[ a ]] }; cat .env)))"],
+    // bash 5.3 reads a heredoc still open at the `}` from the next line, then runs the line after it.
+    ['after a heredoc still open at its `}`', "echo ${ cat <<'E'; }\nit's\nE\ncat .env"],
+    ['after a quoted `}` in one', "echo ${ printf '%s' '}'; }; cat .env"],
+    ['after an escaped backslash in an unquoted heredoc body', 'cat > /dev/null <<EOF\nexport X=\\\\${ cat .env; }\nEOF'],
     // Past the depth cap the scan reads them as text rather than recursing into a stack overflow.
     ['a read after 20000 nested ones', closedChainThenRead(20000)],
     ['a read before 20000 unclosed ones', 'cat .env; ' + '${ '.repeat(20000)],
@@ -1258,8 +1274,8 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['a parameter expansion', 'echo ${HOME}'],
     ['an operator word with a blank', 'echo ${x:-a b}'],
     ['a length in double quotes', 'echo "${#x}"'],
-    ['a quoted `}` in the body', "echo ${ printf '%s' '}'; }"],
     ['a quoted heredoc body', "cat <<'E'\n${ cat .env; }\nE"],
+    ['an escaped opener in an unquoted heredoc body', 'cat > /dev/null <<EOF\nexport X=\\${ cat .env; }\nEOF'],
     ['a commit message from a heredoc in one', "git commit -m \"${ cat <<'EOF'\nfix: stop reading .env twice\nEOF\n}\""],
   ];
   for (const [label, command] of ALLOWS) {

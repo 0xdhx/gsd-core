@@ -49,8 +49,9 @@
 //   pass 1 tokenizes with quote state, comments, redirect operators (with fd
 //   digits and `>&N` dups), separators (recording the operator text), `$( )` /
 //   backtick / `<( )` / `>( )` / bash 5.3 `${ …; }` and `${| …; }` spans
-//   (recursed as nested commands, depth ≤ 3; a command holding a `${ …` is
-//   scanned a second time reading it as a pre-5.3 parameter expansion),
+//   (recursed as nested commands, depth ≤ 3; a command whose scan meets a
+//   `${ …` is scanned a second time reading it as a pre-5.3 parameter
+//   expansion),
 //   and heredocs (one token per body, carrying its `<<` segment). A heredoc
 //   body is only ever run as a script when its segment's command is a shell
 //   interpreter (below); a DATA heredoc — `cat <<EOF … EOF`, the agent-
@@ -526,7 +527,7 @@ function consumeHeredocBodies(str, i, tags) {
       if (probe === t.tag) { terminated = true; break; }
       body += line + '\n';
     }
-    bodies.push({ body, quoted: t.quoted, seg: t.seg });
+    bodies.push({ body, quoted: t.quoted, seg: t.seg, tag: t.tag, into: t.into });
     if (!terminated) break;
   }
   return { bodies, end: i };
@@ -537,15 +538,34 @@ function consumeHeredocBodies(str, i, tags) {
 // output) and `${| cmd; }` (its value is $REPLY) — so its body is a nested
 // command, like a `$( )` body (#5518). A parameter expansion (`${VAR}`,
 // `${#x}`, `${x:-a b}`) starts with a name or a special character instead and
-// stays text. Earlier bash reads the same `${ …` as a parameter expansion
-// ending at the first `}`, which fails only when expanded, so the commands
-// around it still run; scanBothBashReadings scans under that reading too.
+// stays text. Earlier bash reads the same `${ …` as a parameter expansion,
+// which fails only when expanded, so the commands around it still run;
+// scanBothBashReadings scans under that reading too. funsubSeen records that
+// an opener was met in any text the scan read, a derived `bash -c` or `eval`
+// script included, since only then can the two readings differ.
 let readFunsubs = true;
-const FUNSUB_OPEN_RE = /\$\{[ \t\n|]/;
-function isFunsubOpen(str, i) {
-  if (!readFunsubs || str[i] !== '$' || str[i + 1] !== '{') return false;
+let funsubSeen = false;
+function funsubOpenerAt(str, i) {
+  if (str[i] !== '$' || str[i + 1] !== '{') return false;
   const c = str[i + 2];
   return c === ' ' || c === '\t' || c === '\n' || c === '|';
+}
+function isFunsubOpen(str, i) {
+  if (!funsubOpenerAt(str, i)) return false;
+  funsubSeen = true;
+  return readFunsubs;
+}
+
+// Heredoc tags still pending when findFunsubClose returns, a nested one's
+// included: bash 5.3 reads their bodies from the line after the `}`
+// (`${ cat <<E; }` ⏎ body ⏎ `E`) and then runs the next line. tokenize, which
+// owns that line, takes them (takeFunsubTags) and appends each body to the
+// substitution's command.
+let funsubTags = [];
+function takeFunsubTags() {
+  const t = funsubTags;
+  funsubTags = [];
+  return t;
 }
 
 // The command text of the function substitution opened at `i` and closed at
@@ -555,8 +575,8 @@ function funsubBody(str, i, e) {
 }
 
 // `{` and `}` are reserved words only where a command starts, which includes
-// the word after one of these (`then { …; }`, `fi }`).
-const COMMAND_POSITION_WORDS = new Set(['!', 'do', 'done', 'elif', 'else', 'esac', 'fi', 'if', 'then', 'time', 'until', 'while']);
+// the word after one of these (`then { …; }`, `fi }`, `coproc { …; }`).
+const COMMAND_POSITION_WORDS = new Set(['!', 'coproc', 'do', 'done', 'elif', 'else', 'esac', 'fi', 'if', 'then', 'time', 'until', 'while']);
 
 // Function substitutions the close finders follow inside one another before
 // they read a deeper `${ ` as text, the way the guard read every `${ ` before
@@ -617,19 +637,53 @@ function findParamClose(str, i) {
 // it closes only where a command starts: `${ echo }; }` prints `}`, and
 // `${ echo a; }x` closes before the `x`. Quote-, comment- and heredoc-aware;
 // a `{ …; }` group, a parameter expansion or a nested substitution in the body
-// is skipped whole.
+// is skipped whole. A `{` also opens a group after `function NAME` and
+// `coproc NAME`, `time -p` keeps the command position, `]]` ending a `[[ … ]]`
+// starts one, and a `}` inside `[[ … ]]` or in a case pattern is a word.
+// Heredoc tags still pending at the close are left in funsubTags.
 function findFunsubClose(str, i) {
   funsubDepth++;
   try {
     let groups = 0;
     let atCommand = true; // the next word starts a command
+    let braceOk = false; // a `{` here opens a group though no command starts
     let inWord = false;
     let wordAtCommand = false;
     let word = ''; // the current word's plain text; a quote or expansion in it marks it with \0
+    let lead = ''; // `function`, `coproc` or `time` when the last word was one at command position
+    let inCond = false; // inside `[[ … ]]`
+    let caseWords = 0; // words left in `case WORD in`
+    let caseDepth = 0;
+    let casePattern = false; // reading a case pattern list, up to its `)`
     let heredocTags = [];
     const endWord = () => {
-      if (inWord) atCommand = wordAtCommand && COMMAND_POSITION_WORDS.has(word);
+      if (!inWord) return;
       inWord = false;
+      const prev = lead;
+      lead = '';
+      braceOk = false;
+      if (inCond) {
+        if (word === ']]') { inCond = false; atCommand = true; }
+        return;
+      }
+      if (casePattern) {
+        if (word === 'esac') { caseDepth--; casePattern = false; atCommand = true; }
+        return;
+      }
+      if (caseWords > 0) {
+        if (--caseWords === 0 && word === 'in') { caseDepth++; casePattern = true; }
+        atCommand = false;
+        return;
+      }
+      if (prev === 'function') { braceOk = true; atCommand = false; return; }
+      if (!wordAtCommand) { atCommand = false; return; }
+      if (prev === 'time' && (word === '-p' || word === '--')) { lead = 'time'; atCommand = true; return; }
+      if (word === '[[') { inCond = true; atCommand = false; return; }
+      if (word === 'case') { caseWords = 2; atCommand = false; return; }
+      if (word === 'esac' && caseDepth > 0) caseDepth--;
+      if (prev === 'coproc') braceOk = true;
+      if (word === 'function' || word === 'coproc' || word === 'time') lead = word;
+      atCommand = COMMAND_POSITION_WORDS.has(word);
     };
     while (i < str.length) {
       const ch = str[i];
@@ -650,13 +704,21 @@ function findFunsubClose(str, i) {
           i = j === -1 ? str.length : j;
           continue;
         }
-        if (ch === '}' && atCommand) {
-          if (groups === 0) return i;
+        if (ch === '}' && atCommand && !inCond && !casePattern) {
+          if (groups === 0) {
+            funsubTags = funsubTags.concat(heredocTags);
+            return i;
+          }
           groups--;
           i++;
           continue;
         }
-        if (ch === '{' && atCommand && /[ \t\n]/.test(str[i + 1] || '')) { groups++; i++; continue; }
+        if (ch === '{' && (atCommand || braceOk) && !inCond && !casePattern && /[ \t\n]/.test(str[i + 1] || '')) {
+          braceOk = false;
+          groups++;
+          i++;
+          continue;
+        }
       }
       if (ch === '<' && str[i + 1] === '<' && str[i + 2] !== '<') {
         endWord();
@@ -672,7 +734,15 @@ function findFunsubClose(str, i) {
       }
       if (ch === ';' || ch === '&' || ch === '|' || ch === '(' || ch === ')') {
         endWord();
+        braceOk = false;
         atCommand = true;
+        if (ch === ')' && casePattern) casePattern = false; // the clause's commands follow
+        // `;;`, `;&` and `;;&` end a clause; a pattern list follows
+        if (ch === ';' && caseDepth > 0 && !inCond && (str[i + 1] === ';' || str[i + 1] === '&')) {
+          casePattern = true;
+          i += str[i + 1] === ';' && str[i + 2] === '&' ? 3 : 2;
+          continue;
+        }
         i++;
         continue;
       }
@@ -709,6 +779,8 @@ function findFunsubClose(str, i) {
 function collectSubstitutions(body, nested) {
   let i = 0;
   while (i < body.length) {
+    // `\${ ` is text; `\\` is one escaped backslash, so a `${ ` after it opens one.
+    if (body[i] === '\\' && (body[i + 1] === '\\' || funsubOpenerAt(body, i + 1))) { i += 2; continue; }
     if (body[i] === '$' && body[i + 1] === '(') {
       const e = findParenClose(body, i + 2);
       nested.push(body.slice(i + 2, e));
@@ -718,6 +790,7 @@ function collectSubstitutions(body, nested) {
     if (isFunsubOpen(body, i)) {
       const e = findFunsubClose(body, i + 2);
       nested.push(funsubBody(body, i, e));
+      takeFunsubTags(); // bash expands the word alone; the next lines stay this body
       i = e + 1;
       continue;
     }
@@ -769,6 +842,14 @@ function tokenize(str) {
   const op = (text, read, dup) => {
     tokens.push({ kind: 'op', text, quoted: 'none', seg, read, dup });
   };
+  // A function substitution opened at `j`: its body is a nested command, and a
+  // heredoc it left pending is read from the next line into that body.
+  const funsub = (j) => {
+    const e = findFunsubClose(str, j + 2);
+    nested.push(funsubBody(str, j, e));
+    for (const t of takeFunsubTags()) heredocs.push({ ...t, seg, into: nested.length - 1 });
+    return e + 1;
+  };
 
   let i = 0;
   while (i < str.length) {
@@ -802,9 +883,7 @@ function tokenize(str) {
           continue;
         }
         if (isFunsubOpen(str, i)) {
-          const e = findFunsubClose(str, i + 2);
-          nested.push(funsubBody(str, i, e));
-          i = e + 1;
+          i = funsub(i);
           continue;
         }
         if (c === '`') {
@@ -839,9 +918,7 @@ function tokenize(str) {
 
     if (isFunsubOpen(str, i)) {
       hasWord = true;
-      const e = findFunsubClose(str, i + 2);
-      nested.push(funsubBody(str, i, e));
-      i = e + 1;
+      i = funsub(i);
       continue;
     }
 
@@ -882,6 +959,7 @@ function tokenize(str) {
       if (heredocs.length) {
         const r = consumeHeredocBodies(str, i, heredocs);
         for (const b of r.bodies) {
+          if (b.into !== undefined) { nested[b.into] += '\n' + b.body + b.tag + '\n'; continue; }
           // Emit a heredoc token per body (quoted included) — the body is the
           // stdin script only a shell interpreter runs. Kept out of `words`.
           tokens.push({ kind: 'heredoc', text: b.body, quoted: b.quoted, seg: b.seg });
@@ -1335,14 +1413,18 @@ function findSecretRead(command, depth) {
 
 // The hook cannot know which bash runs the command, and bash 5.3 reads a
 // `${ …` opener as a function substitution where every earlier bash reads a
-// parameter expansion (isFunsubOpen). A command holding one is scanned under
-// both readings, and either one's hit is returned; the second reading is the
-// scan as it was before #5518, so nothing it blocked is allowed. That holds
-// when the first reading throws, too (a stack overflow on a deep chain): the
-// second still runs, and the error is rethrown only when it finds nothing.
+// parameter expansion (isFunsubOpen). When the first scan met one anywhere —
+// in the command or in a script it derived, such as a `bash -c` operand whose
+// quotes hid the opener from the raw text — the command is scanned again under
+// the second reading, and either one's hit is returned. The second reading is
+// the scan as it was before #5518, so nothing it blocked is allowed; when the
+// first met no opener the two are the same scan. That holds when the first
+// reading throws after meeting one, too (a stack overflow on a deep chain):
+// the second still runs, and the error is rethrown only when it finds nothing.
 function scanBothBashReadings(scan, command) {
   readFunsubs = true;
-  if (!FUNSUB_OPEN_RE.test(command)) return scan(command, 0);
+  funsubSeen = false;
+  funsubTags = [];
   let firstError = null;
   try {
     const hit = scan(command, 0);
@@ -1350,7 +1432,12 @@ function scanBothBashReadings(scan, command) {
   } catch (e) {
     firstError = e;
   }
+  if (!funsubSeen) {
+    if (firstError !== null) throw firstError;
+    return null;
+  }
   readFunsubs = false;
+  funsubTags = [];
   try {
     const hit = scan(command, 0);
     if (hit !== null || firstError === null) return hit;
