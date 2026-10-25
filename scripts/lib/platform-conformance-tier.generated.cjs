@@ -198,6 +198,7 @@ module.exports = {
   "tests/milestone-archive.test.cjs",
   "tests/milestone-lock.test.cjs",
   "tests/milestone-release-map-archive.test.cjs",
+  "tests/milestone-release-tags.test.cjs",
   "tests/milestone-window-single-owner.test.cjs",
   "tests/milestone.test.cjs",
   "tests/model-resolver.test.cjs",

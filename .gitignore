@@ -341,6 +341,7 @@ build/
 /gsd-core/bin/lib/commands.cjs
 /gsd-core/bin/lib/state.cjs
 /gsd-core/bin/lib/milestone.cjs
+/gsd-core/bin/lib/milestone-release-tags.cjs
 # #5706: new module (milestone release map) — emitted artifact, never edited.
 /gsd-core/bin/lib/milestone-release-map.cjs
 /gsd-core/bin/lib/phase.cjs

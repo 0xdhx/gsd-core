@@ -509,6 +509,7 @@
       "mcp-server.cjs",
       "milestone-lock.cjs",
       "milestone-release-map.cjs",
+      "milestone-release-tags.cjs",
       "milestone.cjs",
       "model-adapter.cjs",
       "model-catalog.cjs",
