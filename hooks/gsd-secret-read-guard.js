@@ -2126,16 +2126,23 @@ process.stdin.on('end', () => {
     if (command.length > MAX_COMMAND_LENGTH) emitBlock('command-too-large', tool, '');
     let firstError = null;
     let hit = null;
+    let secretError = null;
     beginBashReadings();
     try { hit = findSecretRead(command, 0); } catch (e) { firstError = e; }
-    if (hit === null) hit = secondBashReading(findSecretRead, command, firstError, findSecretReadUnderOtherReadings);
+    if (hit === null) {
+      try { hit = secondBashReading(findSecretRead, command, firstError, findSecretReadUnderOtherReadings); } catch (e) { secretError = e; }
+    }
     if (hit !== null) emitBlock('secret-read', tool, hit);
+    // A secret-read scan that threw still lets the debugger-spawn scan run: on a
+    // deep chain only the bash 5.3 reading can throw, and the base reading of the
+    // same command may find a spawn there.
     firstError = null;
     let spawn = null;
     beginBashReadings();
     try { spawn = findDebuggerCliSpawn(command, 0); } catch (e) { firstError = e; }
     if (spawn === null) spawn = secondBashReading(findDebuggerCliSpawn, command, firstError, null);
     if (spawn !== null) emitBlock('debugger-cli-spawn', tool, spawn);
+    if (secretError !== null) throw secretError;
     allow(undefined);
   } catch {
     // Fail open — never block valid tool calls due to hook errors.

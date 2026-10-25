@@ -1368,6 +1368,13 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     assertBlocked(runHook(bash('echo ${ claude --agent gsd-debugger -p x; }')), 'debugger', { code: 'debugger-cli-spawn', tool: 'Bash' });
   });
 
+  // The bash 5.3 reading overflows the stack on the chain; reading it as text, the
+  // base reading does not, and finds the spawn on the line before it.
+  test('blocks: a debugger spawn before one holding a 20000-deep `$("` chain', () => {
+    const chain = '$("'.repeat(20000) + 'echo' + '")'.repeat(20000);
+    assertBlocked(runHook(bash('claude --agent gsd-debugger -p x\necho ${ ' + chain + ' ; }')), 'debugger before a chain', { code: 'debugger-cli-spawn', tool: 'Bash' });
+  });
+
   // The first three hold the name where reading their opener as a function substitution would deny it.
   const ALLOWS = [
     ['a parameter expansion whose word holds a read', 'echo ${x:-; cat .env; }'],
