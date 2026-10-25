@@ -1304,7 +1304,7 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     assertBlocked(runHook(bash('echo ${ claude --agent gsd-debugger -p x; }')), 'debugger', { code: 'debugger-cli-spawn', tool: 'Bash' });
   });
 
-  // Each holds the name where reading the opener as a function substitution would deny it.
+  // The first three hold the name where reading their opener as a function substitution would deny it.
   const ALLOWS = [
     ['a parameter expansion whose word holds a read', 'echo ${x:-; cat .env; }'],
     ['a pattern removal whose pattern holds a read', 'echo ${x# ; cat .env; }'],
