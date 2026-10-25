@@ -1253,6 +1253,9 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['closed by the `}` after `]]`', "echo $(echo $(echo $(echo ${ echo '}'; [[ a ]] }; cat .env)))"],
     // bash 5.3 reads a heredoc still open at the `}` from the next line, then runs the line after it.
     ['after a heredoc still open at its `}`', "echo ${ cat <<'E'; }\nit's\nE\ncat .env"],
+    // bash reads a substitution's heredocs before the line's own.
+    ['after a heredoc still open at its `}`, behind the line\'s own heredoc', "cat <<A; echo ${ echo \"}it's\"; cat <<B; }\nB\nA\ncat .env #'\n"],
+    ['after a heredoc still open at its `}`, behind a heredoc in the same command', "cat <<A ${ echo \"}it's\"; cat <<B; }\nB\nA\ncat .env #'\n"],
     // A wrong pending tag would carry the lines after the `}` one nesting level deeper, where depth 4 is not scanned.
     ['after a here-string in one', "echo ${ echo '}' <<< hi; }\necho $(echo $(echo $(cat .env)))\nhi"],
     ['after a heredoc tag with a quoted part', "echo ${ cat <<E'x' '}'; }\nbody\nEx\necho $(echo $(echo $(cat .env)))"],
@@ -1263,6 +1266,21 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['a line continuation before its `}`', 'echo "${ echo \'"\';\\\n}"; cat .env'],
     ['a `}` after `coproc NAME`', 'echo "${ coproc \'"\' }"; cat .env'],
     ['an `esac` pattern after `|`', `echo "\${ case x in a|esac) :;; }) :;; esac${dqTail}`],
+    ['an `esac` pattern after `(`', `echo "\${ case x in (esac) :;; }) :;; esac${dqTail}`],
+    ['a comment holding `; }` in one', `echo "\${ : # ; }\necho "'"; }"; cat .env`],
+    ['a parameter expansion holding `; }` in one', `echo "\${ : \${x:-; }${dqTail}`],
+    ['a double-quoted one holding a quoted `"` in one', `echo "\${ x="\${ echo '"'; }"${dqTail}`],
+    // In an arithmetic command `<<` is a shift, not a heredoc; `((cmd) )` is a subshell in a subshell.
+    ['after a shift in an arithmetic command in one', "echo ${ (( x = 1 << 2 )); echo \"}it's\"; }\ncat .env # '\n"],
+    ['after a shift in a `for ((` in one', "echo ${ for (( i = 1 << 2; i < 0; i++ )); do :; done; echo \"}it's\"; }\ncat .env # '\n"],
+    ['in a subshell in a subshell spelled `((` in one', 'echo ${ ((cat .env) ); }'],
+    ['a `}` line in a heredoc body in a subshell spelled `((` in one', `echo "\${ ((cat <<'E') )\n}\nE\necho "'"; }"; cat .env`],
+    // An array's elements are words, so a `}` among them does not close.
+    ['a `}` array element in one', `echo "\${ x=( } )${dqTail}`],
+    ['a `}` array element after `declare -a`', `echo "\${ declare -a a=(})${dqTail}`],
+    ['a `}` array element appended with `+=`', `echo "\${ a+=(})${dqTail}`],
+    ['a `}` array element on its own line', `echo "\${ a=(\n}\n)${dqTail}`],
+    ['a `)` in a comment among array elements', `echo "\${ a=( # )\n} )${dqTail}`],
     ['opened across a line continuation after `${`', 'echo ${\\\n cat .env; }'],
     ['opened across a line continuation before `{`', 'echo $\\\n{ cat .env; }'],
     ['after an escaped backslash in an unquoted heredoc body', 'cat > /dev/null <<EOF\nexport X=\\\\${ cat .env; }\nEOF'],
@@ -1270,6 +1288,11 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['a read after 20000 nested ones', closedChainThenRead(20000)],
     ['a read before 20000 unclosed ones', 'cat .env; ' + '${ '.repeat(20000)],
     ['a read before 20000 unclosed ones in double quotes', 'cat .env; ' + '${ "'.repeat(20000)],
+    // Each stays linear, inside the 8 s hook timeout an adapter fails open past.
+    ['a read before 95000 nested ones each holding a pending heredoc', 'cat .env\necho ${ ' + '${ :<<E; } '.repeat(95000) + '; }'],
+    ['a read before an unclosed `((` with 1000000 opening parens in one', 'cat .env\necho ${ (( ' + '('.repeat(1000000) + '}'],
+    ['a read before 340000 nested subshells in one', 'cat .env\necho ${ ' + '('.repeat(340000) + 'a' + ') '.repeat(340000) + '}'],
+    ['a read before 170000 unclosed arithmetic commands each opening one', 'cat .env\necho ${ ' + '(( ${ '.repeat(170000) + '}'],
   ];
   for (const [label, command] of BLOCKS) {
     test(`blocks: ${label}`, () => {
@@ -1281,18 +1304,25 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     assertBlocked(runHook(bash('echo ${ claude --agent gsd-debugger -p x; }')), 'debugger', { code: 'debugger-cli-spawn', tool: 'Bash' });
   });
 
+  // Each holds the name where reading the opener as a function substitution would deny it.
   const ALLOWS = [
-    ['a parameter expansion', 'echo ${HOME}'],
-    ['an operator word with a blank', 'echo ${x:-a b}'],
-    ['a length in double quotes', 'echo "${#x}"'],
+    ['a parameter expansion whose word holds a read', 'echo ${x:-; cat .env; }'],
+    ['a pattern removal whose pattern holds a read', 'echo ${x# ; cat .env; }'],
+    ['an indirect expansion in double quotes', 'echo "${!x}; cat .env; }"'],
     ['a quoted heredoc body', "cat <<'E'\n${ cat .env; }\nE"],
     ['an escaped opener in an unquoted heredoc body', 'cat > /dev/null <<EOF\nexport X=\\${ cat .env; }\nEOF'],
     ['a simple command after `coproc` in one', 'echo ${ coproc cat x; }'],
     ['a commit message from a heredoc in one', "git commit -m \"${ cat <<'EOF'\nfix: stop reading .env twice\nEOF\n}\""],
+    ['a shift in an arithmetic command in one', 'echo ${ (( x = 1 << 2 )); echo ".env"; }'],
+    ['array elements naming the file in one', 'echo ${ files=( .env } ); echo "${files[@]}"; }'],
   ];
   for (const [label, command] of ALLOWS) {
     test(`allows: ${label}`, () => {
       assertAllowed(runHook(bash(command)), label);
+    });
+    // A scan that throws allows too (the crash policy), so each also proves the scan read past it.
+    test(`blocks: a read on the line after ${label}`, () => {
+      assertBlocked(runHook(bash(command + '\ncat .env')), label, { tool: 'Bash', path: '.env' });
     });
   }
 });

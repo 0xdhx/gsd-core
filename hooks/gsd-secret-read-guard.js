@@ -678,6 +678,64 @@ function findParamClose(str, i) {
   return str.length;
 }
 
+// Index just past a quoted string, escape, substitution or parameter
+// expansion starting at `i`, or -1 when none starts there.
+function skipWordPart(str, i) {
+  const ch = str[i];
+  if (ch === '\\') return i + 2;
+  if (ch === "'" || ch === '`') {
+    const j = str.indexOf(ch, i + 1);
+    return j === -1 ? str.length : j + 1;
+  }
+  if (ch === '"') return skipDoubleQuoted(str, i + 1);
+  if (ch === '$' && str[i + 1] === '(') return findParenClose(str, i + 2) + 1;
+  if (isFunsubOpen(str, i) && funsubDepth < MAX_FUNSUB_DEPTH) return findFunsubClose(str, funsubStart(str, i)) + 1;
+  if (ch === '$' && str[i + 1] === '{') return findParamClose(str, i + 2) + 1;
+  return -1;
+}
+
+// Index of the second `)` ending an arithmetic command `(( … ))` whose text
+// starts at `i`, or str.length when unterminated: bash reads to the end of
+// the input looking for it, and so does the finder, rather than rescanning
+// the rest from each later `((`. -1 when the parens do not end in `))`, which
+// bash reads as a subshell in a subshell (`((cmd) )`), or nest past the cap,
+// which bounds that rescan.
+function findArithClose(str, i) {
+  let depth = 0;
+  while (i < str.length) {
+    const e = skipWordPart(str, i);
+    if (e !== -1) { i = e; continue; }
+    if (str[i] === '(') {
+      if (++depth > MAX_FUNSUB_DEPTH) return -1;
+    } else if (str[i] === ')') {
+      if (depth === 0) return str[i + 1] === ')' ? i + 1 : -1;
+      depth--;
+    }
+    i++;
+  }
+  return str.length;
+}
+
+// Index of the `)` ending an array's elements (`name=( … )`) whose text starts
+// at `i`, or str.length. A `#` starting a word comments out the rest of its line.
+function findArrayClose(str, i) {
+  let atWord = true;
+  while (i < str.length) {
+    const ch = str[i];
+    if (ch === ')') return i;
+    if (ch === ' ' || ch === '\t' || ch === '\n') { atWord = true; i++; continue; }
+    if (ch === '#' && atWord) {
+      const j = str.indexOf('\n', i);
+      i = j === -1 ? str.length : j;
+      continue;
+    }
+    atWord = false;
+    const e = skipWordPart(str, i);
+    i = e === -1 ? i + 1 : e;
+  }
+  return str.length;
+}
+
 // Index of the `}` closing a function substitution whose body starts at `i`,
 // or str.length when unterminated. bash reads that `}` as a reserved word, so
 // it closes only where a command starts: `${ echo }; }` prints `}`, and
@@ -685,7 +743,8 @@ function findParamClose(str, i) {
 // a `{ …; }` group, a parameter expansion or a nested substitution in the body
 // is skipped whole. A `{` also opens a group after `function NAME` and
 // `coproc NAME`, `time -p` keeps the command position, `]]` ending a `[[ … ]]`
-// starts one, and a `}` inside `[[ … ]]` or in a case pattern is a word.
+// starts one, and a `}` inside `[[ … ]]`, a case pattern, an arithmetic
+// command or an array's elements is a word.
 // Heredoc tags still pending at the close are left in funsubTags.
 function findFunsubClose(str, i) {
   funsubDepth++;
@@ -696,7 +755,7 @@ function findFunsubClose(str, i) {
     let inWord = false;
     let wordAtCommand = false;
     let word = ''; // the current word's plain text; a quote or expansion in it marks it with \0
-    let lead = ''; // `function`, `coproc` or `time` when the last word was one at command position
+    let lead = ''; // `function`, `coproc`, `time` or `for` when the last word was one at command position
     let inCond = false; // inside `[[ … ]]`
     let caseWords = 0; // words left in `case WORD in`
     let caseDepth = 0;
@@ -730,7 +789,7 @@ function findFunsubClose(str, i) {
       if (word === 'case') { caseWords = 2; atCommand = false; return; }
       if (word === 'esac' && caseDepth > 0) caseDepth--;
       if (prev === 'coproc') { atCommand = true; return; } // `coproc NAME` may take a compound command
-      if (word === 'function' || word === 'coproc' || word === 'time') lead = word;
+      if (word === 'function' || word === 'coproc' || word === 'time' || word === 'for') lead = word;
       atCommand = COMMAND_POSITION_WORDS.has(word);
     };
     while (i < str.length) {
@@ -755,7 +814,7 @@ function findFunsubClose(str, i) {
         }
         if (ch === '}' && atCommand && !inCond && !casePattern) {
           if (groups === 0) {
-            funsubTags = funsubTags.concat(heredocTags);
+            for (const t of heredocTags) funsubTags.push(t);
             return i;
           }
           groups--;
@@ -781,6 +840,24 @@ function findFunsubClose(str, i) {
         endWord();
         i = findParenClose(str, i + 2) + 1;
         continue;
+      }
+      // `name=(` opens an array's elements, where `}` and `(` are words.
+      if (ch === '(' && inWord && /^[A-Za-z_][A-Za-z0-9_]*\+?=$/.test(word)) {
+        word += '\0';
+        i = findArrayClose(str, i + 1) + 1;
+        continue;
+      }
+      if (ch === '(' && str[i + 1] === '(') {
+        endWord();
+        // an arithmetic command, where `<<` is a shift; `((cmd) )` is two subshells
+        const e = atCommand || lead === 'for' ? findArithClose(str, i + 2) : -1;
+        if (e !== -1) {
+          lead = '';
+          braceOk = false;
+          atCommand = false;
+          i = e + 1;
+          continue;
+        }
       }
       if (ch === ';' || ch === '&' || ch === '|' || ch === '(' || ch === ')') {
         endWord();
@@ -868,6 +945,7 @@ function tokenize(str) {
   let hasWord = false;
   let seg = 0;
   let heredocs = [];
+  let funsubHeredocs = []; // bash reads these before the line's own heredocs
   let expectTag = null;
 
   const flush = () => {
@@ -899,7 +977,7 @@ function tokenize(str) {
   const funsub = (j) => {
     const e = findFunsubClose(str, funsubStart(str, j));
     nested.push(funsubBody(str, j, e));
-    for (const t of takeFunsubTags()) heredocs.push({ ...t, seg, into: nested.length - 1 });
+    for (const t of takeFunsubTags()) funsubHeredocs.push({ ...t, seg, into: nested.length - 1 });
     return e + 1;
   };
 
@@ -1008,8 +1086,8 @@ function tokenize(str) {
     if (ch === '\n') {
       sep('\n');
       i++;
-      if (heredocs.length) {
-        const r = consumeHeredocBodies(str, i, heredocs);
+      if (heredocs.length || funsubHeredocs.length) {
+        const r = consumeHeredocBodies(str, i, funsubHeredocs.concat(heredocs));
         for (const b of r.bodies) {
           if (b.into !== undefined) { nested[b.into] += '\n' + b.body + b.tag + '\n'; continue; }
           // Emit a heredoc token per body (quoted included) — the body is the
@@ -1018,6 +1096,7 @@ function tokenize(str) {
           if (!b.quoted) collectSubstitutions(b.body, nested); // bash expands $( ) here
         }
         heredocs = [];
+        funsubHeredocs = [];
         i = r.end;
       }
       continue;
