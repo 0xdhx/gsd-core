@@ -1338,18 +1338,22 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     });
   }
 
-  // Each runs under a kill bound, not an elapsed-time assertion: runHook's own
-  // 10 s bound would pass a scan past the 8 s at which OpenCode/Kilo kill a
-  // hook and fail open. These finish in ~0.02-0.5 s alone and up to ~1 s
-  // inside the suite; before the scan reused what it had measured, a `((` that
-  // does not end in `))`, read again as subshells, took 19 s at 333 bytes and
-  // 356 s at 1 MiB.
+  // Long inputs the scan must finish and deny; each takes ~0.02-0.6 s alone.
+  // A `((` that does not end in `))` is read again as subshells, and before the
+  // scan recorded what it had measured (the spans, and the states a failed
+  // attempt reached) that took 19 s at 333 bytes and 356 s at 1 MiB. Without
+  // the records, the two 31-level rows and the 130000-line row run past 45 s;
+  // so does the 340000-subshell row without findArithClose's depth cap, and the
+  // 170000-attempt row without the records and with an unclosed `((` failing
+  // instead of reading to the end. The 95000-heredoc and million-paren
+  // rows pin only that a long input finishes and denies. The spawn's timeout is
+  // a hang backstop, not an assertion (RULESET.TESTS.no-timing-assertion): it
+  // turns a runaway into a failure instead of a suite that never returns.
   // The spawn sets NODE_V8_COVERAGE to '' so the hook runs uninstrumented in
-  // the c8 unit shards: under coverage the scan is up to ~10x slower (the
-  // million-paren row: 0.40 s plain, 4.6 s covered), and the bound would time
-  // the instrumentation. Deleting the key is not enough, because Node puts an
-  // inherited NODE_V8_COVERAGE back into a child env that lacks it.
-  const LINEAR_SCAN_KILL_BOUND_MS = 4000;
+  // the c8 unit shards, where coverage slows the scan up to ~10x (the
+  // million-paren row: 0.40 s plain, 4.6 s covered). Deleting the key is not
+  // enough: Node puts an inherited NODE_V8_COVERAGE back into a child env that
+  // lacks it.
   const TIMED = [
     ['a read before 95000 nested ones each holding a pending heredoc', 'cat .env\necho ${ ' + '${ :<<E; } '.repeat(95000) + '; }'],
     ['a read before an unclosed `((` with 1000000 opening parens in one', 'cat .env\necho ${ (( ' + '('.repeat(1000000) + '}'],
@@ -1360,11 +1364,11 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['a read before 130000 `((` lines each opening a parameter expansion', 'cat .env\necho ${ \n' + '((#${x\n'.repeat(130000) + '}'.repeat(130000) + ') }'],
   ];
   for (const [label, command] of TIMED) {
-    test(`blocks inside the hook budget: ${label}`, () => {
+    test(`blocks a long input: ${label}`, () => {
       const r = runHookSeam(HOOK_PATH, [], {
         input: JSON.stringify(bash(command)),
         env: { ...process.env, NODE_V8_COVERAGE: '' },
-        timeoutMs: LINEAR_SCAN_KILL_BOUND_MS,
+        timeoutMs: QUICK_SPAWN_TIMEOUT_MS,
       });
       assertBlocked({ status: r.exitCode, stdout: r.stdout, stderr: r.stderr }, label, { tool: 'Bash', path: '.env' });
     });
