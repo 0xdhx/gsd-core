@@ -1374,6 +1374,23 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     });
   }
 
+  // A `((` that does not end in `))` is read again as subshells, and the
+  // heredoc tags its nested substitution left were once pushed again with
+  // them, doubling at every level: 31 levels aborted a 1 GB heap. Each row
+  // runs in a 256 MB heap, around MAX_FUNSUB_DEPTH (32); the heap, not the
+  // backstop, is what fails a regression: the hook aborts well before it.
+  for (const depth of [31, 32, 33]) {
+    test(`blocks inside a 256 MB heap: a read after ${depth} nested \`(( \${ <<E\` that each end in \`) \``, () => {
+      const command = 'echo ${ ' + '(( ${ <<E '.repeat(depth) + '; } ) '.repeat(depth) + '}\ncat .env';
+      const r = runHookSeam(HOOK_PATH, [], {
+        input: JSON.stringify(bash(command)),
+        env: { ...process.env, NODE_V8_COVERAGE: '', NODE_OPTIONS: '--max-old-space-size=256' },
+        timeoutMs: QUICK_SPAWN_TIMEOUT_MS,
+      });
+      assertBlocked({ status: r.exitCode, stdout: r.stdout, stderr: r.stderr }, `${depth} levels`, { tool: 'Bash', path: '.env' });
+    });
+  }
+
   test('blocks: a debugger spawn inside one', () => {
     assertBlocked(runHook(bash('echo ${ claude --agent gsd-debugger -p x; }')), 'debugger', { code: 'debugger-cli-spawn', tool: 'Bash' });
   });

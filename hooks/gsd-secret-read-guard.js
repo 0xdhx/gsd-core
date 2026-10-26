@@ -622,10 +622,18 @@ function isFunsubOpen(str, i) {
 }
 
 // Heredoc tags still pending when findFunsubClose returns, a nested one's
-// included: bash 5.3 reads their bodies from the line after the `}`
-// (`${ cat <<E; }` ⏎ body ⏎ `E`) and then runs the next line. tokenize, which
-// owns that line, takes them (takeFunsubTags) and appends each body to the
-// substitution's command.
+// included. bash 5.3 reads such a body from the lines after the `}`
+// (`${ cat <<E; }` ⏎ body ⏎ `E`), so they are not commands, and runs the line
+// after the terminator; the substitution then fails when it is expanded, so
+// its command does not run. A nested one's body starts after the inner `}`
+// instead; bash runs nothing more once it expands that substitution in the
+// shell itself, but when it never does (`false && …`, a function body) or
+// does so in a `&` job, a pipeline or a `( … )` subshell, the lines after the
+// outermost `}` run. tokenize, which owns that line, takes the tags
+// (takeFunsubTags) and appends what follows to the substitution's command.
+// For a tag k substitutions deep, each rescan of a body ends it early and
+// appends the rest again, so those lines are read k - 1 levels deeper than
+// bash runs them, and past MAX_NESTING_DEPTH not at all.
 let funsubTags = [];
 function takeFunsubTags() {
   const t = funsubTags;
@@ -1017,10 +1025,12 @@ function scanFunsubClose(str, i) {
       if (ch === '(' && str[i + 1] === '(') {
         endWord();
         // an arithmetic command, where `<<` is a shift; `((cmd) )` is two subshells.
-        // A failed attempt leaves a nested substitution's pending tags, which
-        // the reading below adds again; bash 5.3 runs nothing after a nested
-        // pending heredoc, so no verdict depends on the copies.
+        // A failed attempt drops the pending tags its nested substitutions
+        // left: the reading below meets them again and adds them once. Kept,
+        // each enclosing failed `((` would double them, and memory with them.
+        const tagMark = funsubTags.length;
         const e = atCommand || lead === 'for' ? findArithClose(str, i + 2) : -1;
+        if (e === -1) funsubTags.length = tagMark;
         if (e !== -1) {
           lead = '';
           braceOk = false;
