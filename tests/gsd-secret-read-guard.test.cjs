@@ -1241,9 +1241,13 @@ describe('gsd-secret-read-guard: nested shell behind a wrapper with flags (#5627
 // body as commands, where earlier bash reads the same text as a parameter
 // expansion that fails only when expanded. Oracle: each block row runs the
 // read under bash 5.3.20 (the official bash:5.3 image), except the pre-5.3
-// rows, which run it under bash 5.2.21 and 3.2.57; no allow row runs it anywhere.
+// rows, which run it under bash 5.2.21 and 3.2.57; no allow row runs it anywhere,
+// except the scan-depth and reach rows, which pin where the scan stops while bash
+// still runs it.
 describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => {
   const closedChainThenRead = (n) => '${ '.repeat(n) + ':' + '; }'.repeat(n) + '; echo ${ cat .env; }';
+  const funsubChainThenRead = (n) => "echo ${ echo '}' " + '${ : '.repeat(n - 2) + '${ # it"s\n}' + ' ; }'.repeat(n - 1) + '\ncat .env';
+  const pendingChainThenRead = (k) => "false && echo ${ echo '}' " + '${ echo '.repeat(k - 2) + '${ :<<F; }\nF\n: ; }' + '\n: ; }'.repeat(k - 2) + '\ncat .env';
   // Closing the substitution early resumes the double-quoted scan inside its
   // body, where the `"` before `'` ends the string and the `'` hides the read.
   const dqTail = `; echo "'"; }"; cat .env`;
@@ -1257,7 +1261,6 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     ['opened by a newline', 'x=${\ncat .env\n}; echo "$x"'],
     ['a quote inside a double-quoted one keeps its own quoting', `echo "\${ printf '%s' "'"; cat .env; }"`],
     ['in an unquoted heredoc body', 'cat <<E\n${ cat .env; }\nE'],
-    ['nested', 'echo ${ echo ${ cat .env; }; }'],
     // A `}` after `;` closes the first one, so the second sits at depth 3, which is scanned.
     ['closed by the `}` after `;`, not one past it', 'echo $(echo $(echo ${ :; }; echo ${ cat .env; }))'],
     // bash 5.2 / 3.2: `${…}` up to the first `}` is one bad word; `&` runs the read anyway.
@@ -1338,6 +1341,37 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     });
   }
 
+  // The scan's reach, pinned as #5478's git config rows pin it: a deny at
+  // the limit and an allow one past it, where bash still runs the read, so
+  // closing a gap flips its allow row. MAX_NESTING_DEPTH (3) bounds every
+  // nested command the scan reads, `$( )` included: `$( $( $( $( cat .env ) ) ) )`
+  // is allowed on next.
+  const reach = (name, rows, build) => {
+    for (const [n, shouldBlock] of rows) {
+      test(`${name}: ${n}`, () => {
+        const command = build(n);
+        const result = runHook(bash(command));
+        if (shouldBlock) assertBlocked(result, command, { tool: 'Bash', path: '.env' });
+        else assertAllowed(result, command);
+      });
+    }
+  };
+  reach('a read n function substitutions deep respects the scan-depth boundary', [[2, true], [3, true], [4, false]],
+    (n) => 'echo ${ '.repeat(n) + 'cat .env; }' + '; }'.repeat(n - 1));
+  // Past MAX_FUNSUB_DEPTH (32) the close finders read a deeper `${ ` as a
+  // parameter expansion. In a chain whose first level holds `'}'`, which keeps
+  // the pre-5.3 reading off the read, and whose innermost holds a comment with
+  // a `"`, that expansion runs to the end of the input and each rescan of a
+  // body goes one level deeper, so a read on the next line is denied up to
+  // MAX_FUNSUB_DEPTH + MAX_NESTING_DEPTH (35) levels; with the cap one lower
+  // the 35 row fails. bash 5.3 runs the read at every depth.
+  reach("the scan's reach, denied to MAX_FUNSUB_DEPTH + MAX_NESTING_DEPTH levels, over a read after a chain n deep", [[34, true], [35, true], [36, false]], funsubChainThenRead);
+  // A heredoc left pending by a substitution k deep, in a chain the shell
+  // never expands (`false &&`): bash runs the lines after the outermost `}`,
+  // and the scan reads them k - 1 levels deeper (funsubTags), so a read there
+  // is denied up to k = MAX_NESTING_DEPTH + 1. bash 5.3, 5.2 and 3.2 run it.
+  reach("the scan's reach over a read after a heredoc left pending k deep", [[3, true], [4, true], [5, false]], pendingChainThenRead);
+
   // Long inputs the scan must finish and deny; each takes ~0.02-0.6 s alone.
   // A `((` that does not end in `))` is read again as subshells, and before the
   // scan recorded what it had measured (the spans, and the states a failed
@@ -1390,6 +1424,31 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
       assertBlocked({ status: r.exitCode, stdout: r.stdout, stderr: r.stderr }, `${depth} levels`, { tool: 'Bash', path: '.env' });
     });
   }
+
+  test('property: a read inside one to three function substitutions is denied, whatever opens them', () => {
+    const OPENER = fc.constantFrom('${ ', '${\t', '${\n', '${| ');
+    const PREFIX = fc.constantFrom('', ': ; ', 'echo a | ', 'true && ', 'x=1 ');
+    const LEVEL = fc.record({ opener: OPENER, prefix: PREFIX, quoted: fc.boolean() });
+    fc.assert(fc.property(fc.array(LEVEL, { minLength: 1, maxLength: 3 }), SECRET, (levels, secret) => {
+      let command = `cat ${secret}`;
+      for (const { opener, prefix, quoted } of levels) {
+        const q = quoted ? '"' : '';
+        command = `echo ${q}${opener}${prefix}${command}; }${q}`;
+      }
+      assertBlocked(runHook(bash(command)), command, { tool: 'Bash', path: secret });
+    }), PROPERTY_RUNS);
+  });
+
+  test('property: a parameter expansion stays allowed whatever its word holds, and a read on the next line is still denied', () => {
+    const OPERATOR = fc.constantFrom(':-', '-', ':=', ':+', ':?', '#', '##', '%', '%%', '/', '//', '^', ',');
+    const WORD_PART = fc.constantFrom('a', 'b1', ' ', ';', ' ; ', '|', '&', 'x y', '*', '.txt');
+    fc.assert(fc.property(OPERATOR, fc.array(WORD_PART, { maxLength: 6 }), fc.boolean(), SECRET, (op, parts, hold, secret) => {
+      const word = parts.join('') + (hold ? `; cat ${secret}; ` : '');
+      const command = `echo \${x${op}${word}}`;
+      assertAllowed(runHook(bash(command)), command);
+      assertBlocked(runHook(bash(`${command}\ncat ${secret}`)), command, { tool: 'Bash', path: secret });
+    }), PROPERTY_RUNS);
+  });
 
   test('blocks: a debugger spawn inside one', () => {
     assertBlocked(runHook(bash('echo ${ claude --agent gsd-debugger -p x; }')), 'debugger', { code: 'debugger-cli-spawn', tool: 'Bash' });
