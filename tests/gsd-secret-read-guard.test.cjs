@@ -1340,9 +1340,15 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
 
   // Each runs under a kill bound, not an elapsed-time assertion: runHook's own
   // 10 s bound would pass a scan past the 8 s at which OpenCode/Kilo kill a
-  // hook and fail open. These finish in ~0.02-0.45 s; before the scan reused
-  // what it had measured, a `((` that does not end in `))`, read again as
-  // subshells, took 19 s at 333 bytes and 356 s at 1 MiB.
+  // hook and fail open. These finish in ~0.02-0.5 s alone and up to ~1 s
+  // inside the suite; before the scan reused what it had measured, a `((` that
+  // does not end in `))`, read again as subshells, took 19 s at 333 bytes and
+  // 356 s at 1 MiB.
+  // The spawn sets NODE_V8_COVERAGE to '' so the hook runs uninstrumented in
+  // the c8 unit shards: under coverage the scan is up to ~10x slower (the
+  // million-paren row: 0.40 s plain, 4.6 s covered), and the bound would time
+  // the instrumentation. Deleting the key is not enough, because Node puts an
+  // inherited NODE_V8_COVERAGE back into a child env that lacks it.
   const LINEAR_SCAN_KILL_BOUND_MS = 4000;
   const TIMED = [
     ['a read before 95000 nested ones each holding a pending heredoc', 'cat .env\necho ${ ' + '${ :<<E; } '.repeat(95000) + '; }'],
@@ -1357,7 +1363,7 @@ describe('gsd-secret-read-guard: bash 5.3 function substitution (#5518)', () => 
     test(`blocks inside the hook budget: ${label}`, () => {
       const r = runHookSeam(HOOK_PATH, [], {
         input: JSON.stringify(bash(command)),
-        env: { ...process.env },
+        env: { ...process.env, NODE_V8_COVERAGE: '' },
         timeoutMs: LINEAR_SCAN_KILL_BOUND_MS,
       });
       assertBlocked({ status: r.exitCode, stdout: r.stdout, stderr: r.stderr }, label, { tool: 'Bash', path: '.env' });
